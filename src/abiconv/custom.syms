@@ -18,3 +18,8 @@ _waitid
 _execvp
 
 __sprintf_chk
+
+_NSNextMapEnumeratorPair
+_NSEndMapTableEnumeration
+_NSNextHashEnumeratorItem
+_NSEndHashTableEnumeration
