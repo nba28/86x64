@@ -14,6 +14,54 @@ SIDE = os.path.expanduser("~/Downloads/iLife11/iPhoto_baks")
 def run(*cmd):
     return subprocess.run(cmd, capture_output=True, text=True)
 
+MIN_PLIST = """<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+\t<key>CFBundleDevelopmentRegion</key><string>en</string>
+\t<key>CFBundleExecutable</key><string>{name}</string>
+\t<key>CFBundleIdentifier</key><string>com.apple.{name}</string>
+\t<key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+\t<key>CFBundleName</key><string>{name}</string>
+\t<key>CFBundlePackageType</key><string>FMWK</string>
+\t<key>CFBundleShortVersionString</key><string>1.0</string>
+\t<key>CFBundleVersion</key><string>1.0</string>
+</dict>
+</plist>
+"""
+
+def ensure_min_plist(target, name):
+    """codesign rejects a versioned framework whose version dir has no
+    Resources/Info.plist ('bundle format unrecognized'). Synthesize a minimal
+    one for the compat/shim frameworks (VideoToolbox, CoreMedia, CarbonSound,
+    ...) that ship without it. Idempotent."""
+    res = os.path.join(target, "Resources")
+    ip = os.path.join(res, "Info.plist")
+    if os.path.exists(ip):
+        return False
+    os.makedirs(res, exist_ok=True)
+    with open(ip, "w") as f:
+        f.write(MIN_PLIST.format(name=name))
+    return True
+
+def ensure_top_symlinks(fw, target):
+    """A framework root must symlink each DIRECT child of Versions/Current.
+    Compat shims sometimes ship the binary only under Versions/A with no
+    top-level <name> / Resources symlink, which codesign also rejects."""
+    made = []
+    for entry in os.listdir(target):
+        # _CodeSignature is signed per-version (lives in Versions/A), never
+        # symlinked at the root; skip junk/backup files too.
+        if entry == "_CodeSignature" or entry.startswith(".") \
+           or entry.endswith(".bak"):
+            continue
+        top = os.path.join(fw, entry)
+        if os.path.lexists(top):
+            continue
+        os.symlink(os.path.join("Versions", "Current", entry), top)
+        made.append(("mk-topsym", top))
+    return made
+
 frameworks = []
 apps = []
 for dirpath, dirnames, filenames in os.walk(APP):
@@ -40,6 +88,9 @@ for fw in frameworks:
         if not os.path.lexists(cur):
             os.symlink(os.path.basename(target), cur)
             fixed.append(("mk-Current", fw))
+    fwname = os.path.basename(fw)[:-len(".framework")]
+    if ensure_min_plist(target, fwname):
+        fixed.append(("mk-Info.plist", fw))
     for entry in os.listdir(fw):
         if entry == "Versions":
             continue
@@ -77,6 +128,7 @@ for fw in frameworks:
                 os.rename(p, dest)
                 fixed.append(("move-in", p))
             os.symlink(os.path.join("Versions", "Current", entry), p)
+    fixed.extend(ensure_top_symlinks(fw, target))
 
 for f in fixed:
     print("FIX", *f)
@@ -87,9 +139,11 @@ for fw in frameworks:
     vers = os.path.join(fw, "Versions")
     if os.path.isdir(vers):
         for v in os.listdir(vers):
-            if v == "Current":
+            vp = os.path.join(vers, v)
+            # skip the Current symlink and stray non-dir junk (.DS_Store)
+            if v == "Current" or not os.path.isdir(vp) or os.path.islink(vp):
                 continue
-            items.append(os.path.join(vers, v))
+            items.append(vp)
     else:
         items.append(fw)
 items += apps

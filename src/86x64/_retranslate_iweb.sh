@@ -54,7 +54,12 @@ RELS=(
 "Contents/Frameworks/SFProofReader.framework/Versions/A/SFProofReader"
 "Contents/Frameworks/SFWordProcessing.framework/Versions/A/SFWordProcessing"
 "Contents/Frameworks/FTPKit.framework/Versions/A/FTPKit"
-"Contents/Frameworks/MobileMe.framework/Versions/A/MobileMe"
+# NOTE: MobileMe is deliberately NOT here. The ~/.86x64-backups seed is the
+# iLife ppc/i386 original, but iWeb runs the NATIVE x86_64 MobileMe (extracted
+# from the Snow Leopard system framework via Pacifist) so it can export its
+# ObjC classes to native AppKit. Translating it from the i386 backup produces a
+# libabiconv-linked binary that exports ZERO ObjC classes -> breaks consumers.
+# Keep the native x86_64 MobileMe in place; never retranslate it.
 )
 
 for rel in "${RELS[@]}"; do

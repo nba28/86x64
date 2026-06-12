@@ -12,4 +12,3 @@ Contents/Frameworks/SFAnimation.framework/Versions/A/SFAnimation.dylib
 Contents/Frameworks/SFProofReader.framework/Versions/A/SFProofReader.dylib
 Contents/Frameworks/SFWordProcessing.framework/Versions/A/SFWordProcessing.dylib
 Contents/Frameworks/FTPKit.framework/Versions/A/FTPKit.dylib
-Contents/Frameworks/MobileMe.framework/Versions/A/MobileMe.dylib
