@@ -185,13 +185,51 @@ namespace MachO {
       template <Bits b> friend class SourceVersion;
    };
 
+   /*
+    * LC_VERSION_MIN_MACOSX / LC_VERSION_MIN_IPHONEOS / LC_VERSION_MIN_WATCHOS
+    * / LC_VERSION_MIN_TVOS — all share `version_min_command` (cmd, cmdsize,
+    * version, sdk). Pre-LC_BUILD_VERSION (macOS 10.13) toolchains emit these
+    * on i386 binaries. They carry no vmaddr references so the M32->M64
+    * transform is a verbatim copy; the stored cmd round-trips.
+    */
+   template <Bits bits>
+   class VersionMin: public LoadCommand<bits> {
+   public:
+      version_min_command version_min;
+
+      virtual uint32_t cmd() const override { return version_min.cmd; }
+      virtual std::size_t size() const override { return sizeof(version_min); }
+      virtual void Build(BuildEnv<bits>& env) override {
+         version_min.cmdsize = size();
+      }
+      virtual void Emit(Image& img, std::size_t offset) const override {
+         img.template at<version_min_command>(offset) = version_min;
+      }
+
+      static VersionMin<bits> *Parse(const Image& img, std::size_t offset, ParseEnv<bits>& env)
+      { return new VersionMin(img, offset, env); }
+
+      virtual VersionMin<opposite<bits>> *Transform(TransformEnv<bits>& env) const override {
+         return new VersionMin<opposite<bits>>(*this, env);
+      }
+
+   private:
+      VersionMin(const Image& img, std::size_t offset, ParseEnv<bits>& env):
+         LoadCommand<bits>(img, offset, env),
+         version_min(img.template at<version_min_command>(offset)) {}
+      VersionMin(const VersionMin<opposite<bits>>& other, TransformEnv<opposite<bits>>& env):
+         LoadCommand<bits>(other, env), version_min(other.version_min) {}
+
+      template <Bits b> friend class VersionMin;
+   };
+
    template <Bits bits>
    class EntryPoint: public LoadCommand<bits> {
    public:
       entry_point_command entry_point;
       const Placeholder<bits> *entry = nullptr;
 
-      virtual uint32_t cmd() const override { return entry_point.cmd; }            
+      virtual uint32_t cmd() const override { return entry_point.cmd; }
       virtual std::size_t size() const override { return sizeof(entry_point); }
       virtual void Build(BuildEnv<bits>& env) override;
       virtual void Emit(Image& img, std::size_t offset) const override;
@@ -204,12 +242,66 @@ namespace MachO {
       virtual EntryPoint<opposite<bits>> *Transform(TransformEnv<bits>& env) const override {
          return new EntryPoint<opposite<bits>>(*this, env);
       }
-      
+
    private:
       EntryPoint(const EntryPoint<opposite<bits>>& other, TransformEnv<opposite<bits>>& env);
       EntryPoint(const Image& img, std::size_t offset, ParseEnv<bits>& env);
 
       template <Bits b> friend class EntryPoint;
+   };
+
+   /*
+    * LC_UNIXTHREAD — the pre-LC_MAIN form of "where do I start". The on-disk
+    * layout is:
+    *
+    *     struct thread_command { uint32_t cmd; uint32_t cmdsize; };
+    *     uint32_t flavor;       // x86_THREAD_STATE32 = 1 / x86_THREAD_STATE64 = 4
+    *     uint32_t count;        // number of 32-bit words of state that follow
+    *     uint32_t state[count]; // register state; eip/rip is the entry point
+    *
+    * We model the state as an array of 32-bit words and pull the entry point
+    * (eip on i386, low half of rip on x86_64) out as a Placeholder so it
+    * participates in the rebase / transform passes the same way LC_MAIN's
+    * entryoff does.
+    */
+   template <Bits bits>
+   class UnixThread: public LoadCommand<bits> {
+   public:
+      thread_command thread_cmd;
+      uint32_t flavor;
+      uint32_t count;            /* in 32-bit words */
+      std::vector<uint32_t> state;
+      const Placeholder<bits> *entry = nullptr;
+
+      virtual uint32_t cmd() const override { return thread_cmd.cmd; }
+      virtual std::size_t size() const override {
+         return sizeof(thread_command) + 2 * sizeof(uint32_t) + state.size() * sizeof(uint32_t);
+      }
+      virtual void Build(BuildEnv<bits>& env) override;
+      virtual void Emit(Image& img, std::size_t offset) const override;
+
+      static UnixThread<bits> *Parse(const Image& img, std::size_t offset, ParseEnv<bits>& env) {
+         return new UnixThread(img, offset, env);
+      }
+      virtual void Parse1(const Image& img, ParseEnv<bits>& env) override;
+
+      virtual UnixThread<opposite<bits>> *Transform(TransformEnv<bits>& env) const override {
+         return new UnixThread<opposite<bits>>(*this, env);
+      }
+
+      /* Indices into the state[] array where the program counter lives.
+       *   i386 x86_THREAD_STATE32: eip is the 11th uint32 (index 10).
+       *   x86_64 x86_THREAD_STATE64: rip is the 17th uint64 -> dwords 32..33.
+       */
+      static constexpr std::size_t pc_word_index() {
+         return (bits == Bits::M32) ? 10 : 32;
+      }
+
+   private:
+      UnixThread(const Image& img, std::size_t offset, ParseEnv<bits>& env);
+      UnixThread(const UnixThread<opposite<bits>>& other, TransformEnv<opposite<bits>>& env);
+
+      template <Bits b> friend class UnixThread;
    };
 
    template <Bits bits>

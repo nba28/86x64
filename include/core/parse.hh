@@ -50,6 +50,16 @@ namespace MachO {
 
       Placeholder<bits> *add_placeholder(std::size_t vmaddr);
       void do_resolve();
+
+      /* True iff `vmaddr` lands in a program-writable data segment (the
+       * `__DATA` segment family: VM_PROT_WRITE set, not the ObjC fragile-ABI
+       * `__OBJC` metadata segment which is also writable but whose blobs are
+       * parsed structurally). Gates the mid-blob containing-fallback on the
+       * LOAD/pointer paths: in opaque `__DATA`, a mid-blob offset into the
+       * nearest containing DataBlob is meaningful; in `__OBJC` the "nearest
+       * containing blob" guess corrupts category/method metadata (regressed
+       * +[NSObject isLogEnabled] legacy category lookup). */
+      bool vmaddr_in_writable_data(std::size_t vmaddr) const;
       
       
       ParseEnv(Archive<bits>& archive):

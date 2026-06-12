@@ -1,0 +1,11 @@
+-3
+0
+7
+7
+18
+42
+64
+99
+comparator called
+atexit callback ran
+exit_code: 0

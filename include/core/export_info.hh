@@ -38,10 +38,18 @@ namespace MachO {
                                             std::size_t flags, ParseEnv<bits>& env) {
          return new RegularExportNode(img, offset, flags, env);
       }
+      /* Synthesize a regular export pointing at an already-parsed blob (used
+       * by convert.cc when manufacturing an `_main` export on EXEC→DYLIB
+       * conversion). */
+      static RegularExportNode<bits> *Create(std::size_t flags, const SectionBlob<bits> *value) {
+         return new RegularExportNode(flags, value);
+      }
       virtual RegularExportNode<opposite<bits>> *Transform(TransformEnv<bits>& env) const override
       { return new RegularExportNode<opposite<bits>>(*this, env); }
 
    private:
+      RegularExportNode(std::size_t flags, const SectionBlob<bits> *value)
+         : ExportNode<bits>(flags), value(value) {}
       RegularExportNode(const Image& img, std::size_t offset, std::size_t flags,
                         ParseEnv<bits>& env);
       RegularExportNode(const RegularExportNode<opposite<bits>>& other,

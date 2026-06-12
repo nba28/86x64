@@ -1,3 +1,4 @@
+#include <cassert>
 #include "opcodes.hh"
 #include "section_blob.hh"
 
@@ -94,6 +95,32 @@ namespace MachO::opcode {
       assert(r32 >= XED_REG_EAX && r32 <= XED_REG_EDI);
       const uint8_t byte = 0x5 | ((r32 - XED_REG_EAX) << 3);
       return {0x8d, byte, 0x00, 0x00, 0x00, 0x00};
+   }
+
+   /* mov r32, [rip+disp32] — encoded with ModR/M mod=00, reg=r32, r/m=101.
+    * Used as the x86_64 replacement for i386 `mov eax, [abs32]` (and the
+    * general-form `mov r32, [abs32]` once relocations have given us a
+    * disp32 from rip). disp bytes are placeholder zeros; xed_patch_disp
+    * fixes them up at emit time. */
+   opcode_t mov_r32_mem_rip_disp32(xed_reg_enum_t r32) {
+      assert(r32 >= XED_REG_EAX && r32 <= XED_REG_R15D);
+      const uint8_t byte = 0x05 | (((r32 - XED_REG_EAX) % 8) << 3);
+      opcode_t opcode = {0x8b, byte, 0x00, 0x00, 0x00, 0x00};
+      if (r32 >= XED_REG_R8D && r32 <= XED_REG_R15D) {
+         opcode.insert(opcode.begin(), 0x44);   /* REX.R */
+      }
+      return opcode;
+   }
+
+   /* mov [rip+disp32], r32 — inverse of the above; for `mov [abs32], r32`. */
+   opcode_t mov_mem_rip_disp32_r32(xed_reg_enum_t r32) {
+      assert(r32 >= XED_REG_EAX && r32 <= XED_REG_R15D);
+      const uint8_t byte = 0x05 | (((r32 - XED_REG_EAX) % 8) << 3);
+      opcode_t opcode = {0x89, byte, 0x00, 0x00, 0x00, 0x00};
+      if (r32 >= XED_REG_R8D && r32 <= XED_REG_R15D) {
+         opcode.insert(opcode.begin(), 0x44);   /* REX.R */
+      }
+      return opcode;
    }
 
    opcode_t mov_r32_imm32(xed_reg_enum_t r32) {

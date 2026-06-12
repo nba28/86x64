@@ -1,5 +1,7 @@
 #include <iostream>
 #include <list>
+#include <ctime>
+#include <cstdio>
 
 #include "rebasify.hh"
 #include "core/macho.hh"
@@ -53,26 +55,59 @@ int Rebasify::work() {
       return -1;
    }
 
-   #if 0
-   state_info state(archive32);
-   for (auto text_it = state.section->content.begin(); text_it != state.section->content.end();
-        ++text_it) {
-      auto text_inst = dynamic_cast<MachO::Instruction<MachO::Bits::M32> *>(*text_it);
-      if (text_inst) {
-         decode_info info(text_inst->xedd, text_it);
-         if (handle_inst(text_inst, state, info) < 0) { return -1; }
-      }
+   const size_t thunks_seeded = handle_insts(archive32);
+
+   /*
+    * Fast path: when no PIC thunks were found, rebasify has nothing to
+    * rewrite — its purpose is to find `call 0; pop reg` sites, rewrite
+    * them with explicit `mov reg, imm32` plus REBASE_TYPE_TEXT_ABSOLUTE32
+    * entries. With zero thunks, the output is semantically identical to
+    * the input; the only difference from Build/Emit would be cosmetic
+    * file-layout reshuffling (alignment padding, etc.). Skipping
+    * Build/Emit and copying bytes directly avoids the long tail of
+    * Build/Emit asserts a 17 MB binary like iPhoto trips on (LOOP
+    * widening, prefixed Jcc, DylibCommand variants...). When real thunks
+    * exist (e.g. binaries that actually rely on PIC), we fall through to
+    * the regular Build/Emit path.
+    */
+   if (thunks_seeded == 0) {
+      const size_t sz = in_img->size();
+      out_img->copy(0, &in_img->at<uint8_t>(0), sz);
+      fprintf(stderr,
+              "rebasify: no thunks found — copied %zu bytes input->output, skipping Build/Emit\n",
+              sz);
+      return 0;
    }
-   #else
-   handle_insts(archive32);
-   #endif
-      
-   archive32->Build(0);
-   archive32->Emit(*out_img);
+
+   fprintf(stderr, "rebasify: Build start\n");
+   try {
+      const std::size_t total = archive32->Build(0);
+      fprintf(stderr, "rebasify: Build done, total_size=%zu\n", total);
+      archive32->Emit(*out_img);
+      fprintf(stderr, "rebasify: Emit done, out_img size=%zu\n", out_img->size());
+   } catch (const std::exception& e) {
+      fprintf(stderr, "rebasify: BUILD/EMIT THREW (%s): %s\n",
+              typeid(e).name(), e.what());
+      return -1;
+   } catch (...) {
+      fprintf(stderr, "rebasify: BUILD/EMIT THREW unknown exception\n");
+      return -1;
+   }
    return 0;
 }
 
 #define MULTIPASS 1
+
+/*
+ * Cap on distinct states recorded per vmaddr. The multipass analysis only
+ * skips a revisit when the EXACT state was seen before, so a hot vmaddr in
+ * a large binary can accumulate an unbounded state list — iPhoto's 17 MB
+ * __text drove this to multi-GB RSS without terminating. Once a vmaddr has
+ * this many distinct states, further arrivals are treated as visited. Small
+ * binaries (photocd, dbRepair) never approach the cap, so their analysis is
+ * bit-for-bit unchanged.
+ */
+#define REBASIFY_STATE_CAP 4
 
 Rebasify::decode_info::decode_info(const xed_decoded_inst_t& xedd,
                                    typename MachO::Section<MachO::Bits::M32>::Content::iterator it):
@@ -85,7 +120,7 @@ Rebasify::decode_info::decode_info(const xed_decoded_inst_t& xedd,
    base_reg(xed_decoded_inst_get_base_reg(&xedd, 0)),
    memdisp(xed_decoded_inst_get_memory_displacement(&xedd, 0)) {}
 
-void Rebasify::handle_insts(MachO::Archive<MachO::Bits::M32> *archive) const {
+size_t Rebasify::handle_insts(MachO::Archive<MachO::Bits::M32> *archive) const {
    std::list<state_info> states;
 #if MULTIPASS == 0
    std::unordered_set<size_t> visited_vmaddrs;
@@ -93,10 +128,73 @@ void Rebasify::handle_insts(MachO::Archive<MachO::Bits::M32> *archive) const {
    std::unordered_map<size_t, std::list<state_info>> visited_vmaddrs; /* also captures state */
 #endif
 
-   /* initial state */
-   states.emplace_front(archive);
+   /*
+    * Seed the worklist with one starting state per PIC thunk site instead
+    * of one state at __text begin walking everything in state-0. The
+    * pre-thunk state-0 walk did literally nothing useful (the switch in
+    * handle_inst case 0 returns immediately) but ate ~99% of analysis time
+    * — for iPhoto's 13 MB __text that was hours of trivial worklist churn.
+    *
+    * A thunk is `call $+5` (e8 00 00 00 00) followed immediately by a
+    * `pop reg`; after the pop the popped register holds the PIC base.
+    * We start each seed at state=2 with that register live, pointed at
+    * the instruction AFTER the pop. The state machine then explores
+    * forward exactly as before, finds the function's address-computation
+    * sites, and emits the rebase rewrites. handle_inst still recognises
+    * call_0 inside the explored body so nested thunks (rare) still work.
+    */
+   const MachO::opcode_t call_0({0xe8, 0x00, 0x00, 0x00, 0x00});
+   auto *text_section = archive->section(SECT_TEXT);
+   size_t thunks_seeded = 0;
+   if (text_section != nullptr) {
+      for (auto it = text_section->content.begin();
+           it != text_section->content.end(); ++it) {
+         auto *inst = dynamic_cast<MachO::Instruction<MachO::Bits::M32> *>(*it);
+         if (!inst || inst->instbuf != call_0) { continue; }
+         auto next_it = std::next(it);
+         if (next_it == text_section->content.end()) { continue; }
+         auto *pop_inst =
+            dynamic_cast<MachO::Instruction<MachO::Bits::M32> *>(*next_it);
+         if (!pop_inst) { continue; }
+         if (xed_decoded_inst_get_iform_enum(&pop_inst->xedd) !=
+             XED_IFORM_POP_GPRv_58) { continue; }
+         xed_reg_enum_t reg =
+            xed_decoded_inst_get_reg(&pop_inst->xedd, XED_OPERAND_REG0);
+
+         state_info s(archive);
+         s.text_it = std::next(next_it);
+         s.state = 2;
+         s.vmaddr = pop_inst->loc.vmaddr;
+         s.live_regs.insert(reg);
+         states.push_back(s);
+         ++thunks_seeded;
+      }
+   }
+   fprintf(stderr, "rebasify: seeded %zu PIC thunk site(s)\n", thunks_seeded);
+
+   /*
+    * Progress logging: print every 1M worklist iterations on stderr so
+    * long runs are not silently grinding. With the per-thunk seeding above
+    * total iterations on iPhoto drop ~2 orders of magnitude.
+    */
+   const size_t kProgressEvery = 1000000;
+   size_t iter_count = 0;
+   const time_t start_time = time(nullptr);
 
    while (!states.empty()) {
+      ++iter_count;
+      if ((iter_count % kProgressEvery) == 0) {
+         std::size_t cur_vmaddr = 0;
+         if (!states.empty() && states.front().text_it !=
+             states.front().section->content.end()) {
+            cur_vmaddr = (**states.front().text_it).loc.vmaddr;
+         }
+         fprintf(stderr,
+                 "rebasify: iter=%zuM elapsed=%lds worklist=%zu visited=%zu vmaddr=0x%zx\n",
+                 iter_count / 1000000,
+                 (long)(time(nullptr) - start_time),
+                 states.size(), visited_vmaddrs.size(), cur_vmaddr);
+      }
       state_info state = states.front();
       states.pop_front();
 
@@ -113,7 +211,9 @@ void Rebasify::handle_insts(MachO::Archive<MachO::Bits::M32> *archive) const {
       const auto visited_it = visited_vmaddrs.find((**state.text_it).loc.vmaddr);
       if (visited_it != visited_vmaddrs.end()) {
          auto& visited_states = visited_it->second;
-         if (std::find(visited_states.begin(), visited_states.end(), state) != visited_states.end())
+         if (visited_states.size() >= REBASIFY_STATE_CAP ||
+             std::find(visited_states.begin(), visited_states.end(), state)
+                != visited_states.end())
             {
                continue;
             }
@@ -180,6 +280,7 @@ void Rebasify::handle_insts(MachO::Archive<MachO::Bits::M32> *archive) const {
 
       states.push_front(state);
    }
+   return thunks_seeded;
 }
 
 int Rebasify::handle_inst(MachO::Instruction<MachO::Bits::M32> *inst, state_info& state,
@@ -330,18 +431,39 @@ int Rebasify::handle_inst_thunk(MachO::Instruction<MachO::Bits::M32> *inst, stat
                        target);
             }
             
+            /*
+             * Resolve the destination blob FIRST. find_blob throws when
+             * `target` lands mid-blob or outside the section — common on a
+             * 17 MB binary where linear-sweep disassembly misdecodes data
+             * interleaved in __text and the surrounding state-machine
+             * accumulates a bogus `target`. Skip the PIC rewrite for those
+             * sites; the original i386 code stays intact and the
+             * transform's regular instruction-translation paths handle it.
+             */
+            MachO::SectionBlob<MachO::Bits::M32> *pointee = nullptr;
+            try {
+               pointee = state.archive->template
+                  find_blob<MachO::SectionBlob>(target);
+            } catch (const std::invalid_argument& e) {
+               if (verbose) {
+                  fprintf(stderr,
+                          "[REBASIFY] 0x%zx skip PIC rewrite: %s\n",
+                          inst->loc.vmaddr, e.what());
+               }
+               break;
+            }
+            if (pointee == nullptr) {
+               log("unable to find destination blob in rebasify operation at vmaddr 0x%zx",
+                   inst->loc.vmaddr);
+               return -1;
+            }
+
             auto mov_inst = new MachO::Instruction<MachO::Bits::M32>
                (MachO::opcode::mov_r32_imm32(*live_reg_it));
             auto mov_inst_imm = MachO::Immediate<MachO::Bits::M32>::Create(target);
             mov_inst->segment = mov_inst_imm->segment = state.segment;
             mov_inst->section = mov_inst_imm->section = state.section;
-
-            if ((mov_inst_imm->pointee =
-                 state.archive->template find_blob<MachO::SectionBlob>(target)) == nullptr) {
-               log("unable to find destination blob in rebasify operation at vmaddr 0x%zx",
-                   inst->loc.vmaddr);
-               return -1;
-            }
+            mov_inst_imm->pointee = pointee;
                      
             mov_inst->imm = mov_inst_imm;
             mov_inst->loc.vmaddr = (*info.text_it)->loc.vmaddr;

@@ -40,6 +40,10 @@ bool get_type_signed(CXTypeKind type_kind) {
    case CXType_ULong:
    case CXType_ULongLong:
    case CXType_BlockPointer:
+   case CXType_ObjCObjectPointer:
+   case CXType_ObjCId:
+   case CXType_ObjCClass:
+   case CXType_ObjCSel:
       return false;
       
    case CXType_SChar:
@@ -54,9 +58,11 @@ bool get_type_signed(CXTypeKind type_kind) {
    case CXType_LongDouble:
       return true;
 
-   case CXType_ConstantArray: abort();
-      
-   default: abort();
+   case CXType_ConstantArray:
+      throw std::invalid_argument("get_type_signed: constant array");
+
+   default:
+      throw std::invalid_argument("get_type_signed: unsupported type kind");
    }
 }
 
@@ -84,6 +90,12 @@ type_domain get_type_domain(CXTypeKind kind) {
    case CXType_Long:
    case CXType_LongLong:
    case CXType_Enum:
+   /* objc object/Class/SEL params are pointers in the GP domain; typeconv
+    * marshals them through the proxy-handle bridge (convert_objc_ptr) */
+   case CXType_ObjCObjectPointer:
+   case CXType_ObjCId:
+   case CXType_ObjCClass:
+   case CXType_ObjCSel:
       return type_domain::INT;
 
    case CXType_Float:
@@ -91,9 +103,14 @@ type_domain get_type_domain(CXTypeKind kind) {
    case CXType_LongDouble:
       return type_domain::REAL;
 
-   case CXType_ConstantArray: abort();
-      
-   default: abort();
+   case CXType_ConstantArray:
+      throw std::invalid_argument("get_type_domain: constant array");
+
+   default:
+      /* e.g. CXType_Record (struct/union passed by value): not handled by the
+       * register/stack classifier here. Throw so abigen can skip this one
+       * function instead of aborting the whole generation run. */
+      throw std::invalid_argument("get_type_domain: unsupported type kind (struct-by-value?)");
    }
 }
 
@@ -129,14 +146,20 @@ reg_width get_type_width(CXTypeKind type_kind, arch a) {
    case CXType_Pointer:
    case CXType_IncompleteArray:
    case CXType_BlockPointer:
+   case CXType_ObjCObjectPointer:
+   case CXType_ObjCId:
+   case CXType_ObjCClass:
+   case CXType_ObjCSel:
       return a == arch::i386 ? reg_width::D : reg_width::Q;
 
    case CXType_LongDouble:
       throw std::invalid_argument("long doubles not supported yet");
 
-   case CXType_ConstantArray: abort();
-      
-   default: abort();
+   case CXType_ConstantArray:
+      throw std::invalid_argument("get_type_width: constant array");
+
+   default:
+      throw std::invalid_argument("get_type_width: unsupported type kind");
    }
 }
 
@@ -156,6 +179,7 @@ const char *reg_width_to_sse(reg_width width) {
       return "ss";
    case reg_width::Q: // double
       return "sd";
-   default: abort();
+   default:
+      throw std::invalid_argument("reg_width_to_sse: unsupported width");
    }
 }

@@ -1,4 +1,5 @@
 #pragma once
+#include <cassert>
 
 #include <vector>
 #include <sstream>
@@ -57,8 +58,30 @@ namespace MachO {
          return cmds;
       }
 
-      std::vector<Segment<b> *> segments() { return subcommands<Segment>(); }
-      std::vector<Segment<b> *> segments() const { return subcommands<Segment>(); }
+      /*
+       * Cached segments view. The previous implementation rebuilt a
+       * vector with dynamic_casts over every load command on each call;
+       * the hot per-instruction "is this vmaddr in any segment?" loops
+       * in instruction parsing and DataParser hit this millions of times
+       * on a 17 MB binary like iPhoto. Now lazy-built once and reused.
+       * Callers that mutate load_commands (modify --insert load-dylib,
+       * remove_commands) must call invalidate_segments_cache().
+       */
+   private:
+      mutable std::vector<Segment<b> *> segments_cache_;
+      mutable bool segments_cache_valid_ = false;
+   public:
+      const std::vector<Segment<b> *>& segments() const {
+         if (!segments_cache_valid_) {
+            segments_cache_ = subcommands<Segment>();
+            segments_cache_valid_ = true;
+         }
+         return segments_cache_;
+      }
+      void invalidate_segments_cache() const {
+         segments_cache_valid_ = false;
+         segments_cache_.clear();
+      }
       Segment<b> *segment(std::size_t index) { return segments().at(index); }
       Segment<b> *segment(const std::string& name);
 

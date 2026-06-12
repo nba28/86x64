@@ -1,0 +1,244 @@
+#!/bin/bash
+# translate-bundle — translate a binary inside an app/framework bundle and
+# install it in place. Replaces the multi-step manual recipe with one call.
+#
+# usage: translate-bundle [-h] [-n] [-k] <bundle.app> <relative/binary/path>
+#
+# Steps performed:
+#   1. Detect input arch (must include i386). If fat, lipo -thin i386 to temp.
+#   2. Stash the original under ~/.86x64-backups/<bundle-hash>/<rel-path>.
+#   3. Run 86x64.sh in a tempdir (no intermediates left next to the bundle).
+#   4. Patch the translated dylib's install_name back to whatever the original
+#      had (so consumers in the bundle find it without further rewrites).
+#   5. Drop wrapper exec + dylib at the original location.
+#   6. Co-locate libabiconv.dylib next to the new binary (needed because the
+#      translator inserts @loader_path/libabiconv.dylib as a load command).
+#   7. ad-hoc codesign the new files.
+#
+# Options:
+#   -n   dry run (print steps without modifying the bundle)
+#   -k   keep intermediate tempdir for inspection
+#
+# Examples:
+#   translate-bundle iPhoto.app Contents/MacOS/iPhoto
+#   translate-bundle iPhoto.app Contents/Frameworks/Tessera.framework/Versions/A/Tessera
+#   translate-bundle iWeb.app Contents/Frameworks/MobileMe.framework/Versions/A/MobileMe
+
+set -e
+
+DRYRUN=""
+KEEP=""
+while getopts "hnk" OPT; do
+    case "$OPT" in
+        h)
+            sed -n '2,/^set -e/p' "$0" | sed 's/^# \{0,1\}//; /^set -e/d'
+            exit 0 ;;
+        n) DRYRUN="echo dry-run:" ;;
+        k) KEEP="-k" ;;
+        ?) exit 2 ;;
+    esac
+done
+shift $((OPTIND-1))
+
+BUNDLE="$1"
+RELPATH="$2"
+[ -n "$BUNDLE" ] && [ -n "$RELPATH" ] || {
+    echo "usage: $0 [-n] [-k] <bundle> <relative/binary/path>" >&2
+    exit 2
+}
+[ -d "$BUNDLE" ] || { echo "no such bundle: $BUNDLE" >&2; exit 1; }
+
+# Resolve fully and compute backup root.
+BUNDLE_ABS="$(cd "$BUNDLE" && pwd -P)"
+TARGET="$BUNDLE_ABS/$RELPATH"
+[ -f "$TARGET" ] || { echo "no such binary: $TARGET" >&2; exit 1; }
+
+# Backup root: hash the bundle path so multiple bundles don't collide and a
+# repeat translation of the same bundle reuses the same backup tree.
+BACKUP_ROOT="$HOME/.86x64-backups/$(echo "$BUNDLE_ABS" | shasum -a 256 | cut -c1-16)"
+BACKUP_DST="$BACKUP_ROOT/$RELPATH"
+BACKUP_DIR="$(dirname "$BACKUP_DST")"
+
+# Locate built pipeline artifacts. Resolves whether called from project tree
+# or via symlink/PATH install.
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd -P)"
+PROJ_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd -P)"
+PIPELINE="$SCRIPT_DIR/86x64.sh"
+MACHO_TOOL="$PROJ_ROOT/build/src/macho-tool/macho-tool"
+LIBABICONV="$PROJ_ROOT/build/src/abiconv/libabiconv.dylib"
+LIBWRAPPER="$PROJ_ROOT/build/src/86x64/libwrapper.a"
+LIBINTERPOSE="$PROJ_ROOT/build/src/86x64/libinterpose.dylib"
+[ -x "$MACHO_TOOL" ] || { echo "macho-tool not built at $MACHO_TOOL" >&2; exit 1; }
+[ -f "$LIBABICONV" ] || { echo "libabiconv not built at $LIBABICONV" >&2; exit 1; }
+
+# Prefer LLVM's install-name-tool: the cctools one rejects translated dylibs
+# whose __LINKEDIT has slack (leftover after stripping ld's ad-hoc signature)
+# with "link edit information does not fill the __LINKEDIT segment". The LLVM
+# tool rewrites them fine. Fall back to the system tool if LLVM isn't present.
+INT="install_name_tool"
+for cand in /usr/local/opt/llvm/bin/llvm-install-name-tool \
+            /opt/homebrew/opt/llvm/bin/llvm-install-name-tool \
+            "$(command -v llvm-install-name-tool 2>/dev/null)"; do
+    if [ -x "$cand" ]; then INT="$cand"; break; fi
+done
+
+# Detect input arch. If the deployed target is already x86_64 (i.e. we're
+# re-translating after a prior run), fall back to the backup as the i386
+# source so we can pick up newer translator fixes without manual restore.
+# SOURCE is what we read i386 bytes from; TARGET stays as the install
+# destination + install_name reference.
+SOURCE="$TARGET"
+FILEDESC="$(file -b "$TARGET")"
+case "$FILEDESC" in
+    *i386*) ;;
+    *)
+        if [ -f "$BACKUP_DST" ]; then
+            BFD="$(file -b "$BACKUP_DST")"
+            case "$BFD" in
+                *i386*)
+                    echo "    target is post-translation; using backup as i386 source"
+                    SOURCE="$BACKUP_DST"
+                    FILEDESC="$BFD"
+                    ;;
+                *) echo "no i386 arch in $TARGET ($FILEDESC) and backup also lacks i386 ($BFD)" >&2; exit 1 ;;
+            esac
+        else
+            echo "no i386 arch in $TARGET ($FILEDESC)" >&2; exit 1
+        fi
+        ;;
+esac
+
+# Detect file type so we know whether to build a wrapper exec.
+case "$FILEDESC" in
+    *executable*)   IS_EXEC=1 ;;
+    *)              IS_EXEC=0 ;;  # dylib / framework binary
+esac
+
+# Capture the original install_name (only meaningful for dylibs). Pull
+# from the i386 SOURCE so we never end up with the placeholder
+# @rpath/<tempname>.dylib id baked in by a prior pipeline run.
+ORIG_ID=""
+if [ "$IS_EXEC" = "0" ]; then
+    ORIG_ID="$(otool -D "$SOURCE" | tail -n +2 | head -1 | tr -d '[:space:]')"
+fi
+
+WORK="$(mktemp -d -t translate-bundle.XXXXXX)"
+[ -z "$KEEP" ] && trap 'rm -rf "$WORK"' EXIT
+
+echo "==> $RELPATH"
+echo "    bundle: $BUNDLE_ABS"
+echo "    backup: $BACKUP_DST"
+[ -n "$ORIG_ID" ] && echo "    install_name: $ORIG_ID"
+
+if [ -n "$DRYRUN" ]; then
+    echo "    [dry-run] would lipo / translate / install_name_tool / codesign"
+    exit 0
+fi
+
+# 1. Thin to i386 in tempdir (reads from SOURCE, which is either the
+#    deployed TARGET or its backup if TARGET is post-translation).
+#    Bypass lipo entirely for already-i386-only files — lipo -thin would
+#    fail with "must be a fat file" and the failure was previously hidden
+#    by the sed pipe.
+I386="$WORK/$(basename "$TARGET").i386"
+case "$FILEDESC" in
+    *universal*|*"Mach-O fat"*)
+        lipo -thin i386 "$SOURCE" -output "$I386" 2>&1 | sed 's/^/    lipo: /'
+        ;;
+    *)
+        cp "$SOURCE" "$I386"
+        ;;
+esac
+[ -f "$I386" ] || { echo "    failed to materialize i386 input at $I386" >&2; exit 1; }
+
+# 2. Stash the ORIGINAL file (whatever its arch) outside the bundle so a
+#    later restore can put it back exactly. Skip if SOURCE is already the
+#    backup — re-translation case, no need to round-trip.
+mkdir -p "$BACKUP_DIR"
+if [ ! -f "$BACKUP_DST" ]; then
+    cp -p "$SOURCE" "$BACKUP_DST"
+    echo "    backed up original ($(file -b "$BACKUP_DST" | head -c 40)...)"
+else
+    echo "    backup already exists, leaving in place"
+fi
+
+# 3. Run pipeline. Wrapper exec produced only for top-level executables.
+OUT="$WORK/$(basename "$TARGET").out"
+if [ "$IS_EXEC" = "1" ]; then
+    bash "$PIPELINE" $KEEP \
+        -m "$MACHO_TOOL" -l "$LIBABICONV" \
+        -w "$LIBWRAPPER" -i "$LIBINTERPOSE" \
+        -o "$OUT" "$I386"
+    DYLIB="$OUT.dylib"
+else
+    # Dylib-only mode: pipeline skips wrapper link when -w points nowhere.
+    bash "$PIPELINE" $KEEP \
+        -m "$MACHO_TOOL" -l "$LIBABICONV" \
+        -w /nonexistent \
+        -o "$OUT" "$I386"
+    DYLIB="$OUT.dylib"
+fi
+
+# 3b. Strip the ad-hoc code signature that ld auto-adds on Apple Silicon.
+#     install_name_tool refuses to edit a signed binary ("code signature data
+#     out of place"); we re-sign in step 7 after all load-command edits.
+codesign --remove-signature "$DYLIB" 2>/dev/null || true
+[ "$IS_EXEC" = "1" ] && codesign --remove-signature "$OUT" 2>/dev/null || true
+
+# 4. Restore install_name on the dylib so in-bundle consumers find it.
+if [ "$IS_EXEC" = "0" ] && [ -n "$ORIG_ID" ]; then
+    "$INT" -id "$ORIG_ID" "$DYLIB" 2>&1 \
+        | sed 's/^/    install_name_tool: /' || true
+fi
+
+# 5. Install. For dylibs the new file replaces the original at $TARGET;
+#    for execs we drop both the wrapper at $TARGET and a co-located
+#    <basename>.dylib alongside.
+TARGET_DIR="$(dirname "$TARGET")"
+if [ "$IS_EXEC" = "1" ]; then
+    # Wrapper exec → $TARGET. Translated dylib → $TARGET_DIR/<basename>.dylib.
+    BASE_NOEXT="$(basename "$TARGET")"
+    cp "$OUT" "$TARGET"
+    cp "$DYLIB" "$TARGET_DIR/${BASE_NOEXT}.dylib"
+    # Rewrite the wrapper's @rpath/<input>.out.dylib reference to point at
+    # the deployed name. Pipeline emits the wrapper with the tempdir name
+    # baked in as @rpath/<stem>.out.dylib.
+    "$INT" -change \
+        "@rpath/$(basename "$DYLIB")" \
+        "@rpath/${BASE_NOEXT}.dylib" \
+        "$TARGET" 2>&1 | sed 's/^/    install_name_tool: /' || true
+    DEPLOYED_DYLIB="$TARGET_DIR/${BASE_NOEXT}.dylib"
+else
+    cp "$DYLIB" "$TARGET"
+    DEPLOYED_DYLIB="$TARGET"
+fi
+
+# 6. Co-locate libabiconv. Idempotent — overwrite if present (this is what
+#    the pipeline expects via @loader_path/libabiconv.dylib).
+cp "$LIBABICONV" "$TARGET_DIR/libabiconv.dylib"
+
+# 7. Ad-hoc codesign the new files — FLAT, not as a bundle. The targets sit
+#    inside .framework / .app bundles; signing them in place makes codesign
+#    walk the bundle (Info.plist + nested-code manifest), which fails on the
+#    accumulated stray *.bak Mach-Os and stale _CodeSignature, and for the
+#    main executable would try to sign the entire .app. Sign a copy in the
+#    temp dir (no bundle around it → flat _thinsign_ ad-hoc sig, matching the
+#    app's other thin-signed frameworks) and move it back into place.
+flat_sign() {
+    local f="$1"
+    [ -f "$f" ] || return 0
+    local t="$WORK/$(basename "$f").signtmp.$$"
+    cp "$f" "$t"
+    codesign --remove-signature "$t" 2>/dev/null || true
+    codesign --force --sign - --identifier "$(basename "$f")" "$t" 2>/dev/null || true
+    cp "$t" "$f"
+    rm -f "$t"
+}
+flat_sign "$TARGET_DIR/libabiconv.dylib"
+flat_sign "$DEPLOYED_DYLIB"
+[ "$IS_EXEC" = "1" ] && flat_sign "$TARGET"
+
+echo "    installed:"
+echo "      $TARGET ($(file -b "$TARGET" | head -c 60))"
+[ "$IS_EXEC" = "1" ] && echo "      $DEPLOYED_DYLIB"
+echo "      $TARGET_DIR/libabiconv.dylib"

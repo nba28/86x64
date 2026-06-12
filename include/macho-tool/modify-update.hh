@@ -38,7 +38,12 @@ struct ModifyCommand::Update::LoadDylib: Operation {
 struct ModifyCommand::Update::BindNode: Operation {
    std::optional<std::string> old_sym;
    bool lazy = false;
-   
+   bool optional = false;   /* if set, silently skip when old_sym is absent
+                             * from the selected (lazy/non-lazy) bind table,
+                             * instead of throwing. Lets a caller redirect a
+                             * symbol that lives in only one of the two tables
+                             * by issuing both updates. */
+
    std::optional<uint8_t> new_type;
    std::optional<ssize_t> new_addend;
    std::optional<unsigned> new_dylib_ord;
@@ -53,6 +58,7 @@ struct ModifyCommand::Update::BindNode: Operation {
               "new_sym", "new-sym",
               "new_flags", "new-flags",
               "lazy",
+              "optional",
               nullptr};
    }
    virtual int subopthandler(int index, char *value) override;

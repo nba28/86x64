@@ -45,9 +45,22 @@ namespace MachO {
          throw error("nlist offset 0x%x does not point to beginning of string", nlist.n_un.n_strx);
       }
       string = off2str.at(nlist.n_un.n_strx);
-      if (string->str == MH_EXECUTE_HEADER) {
-         // do nothing
-      } else {
+
+      /*
+       * n_value is a virtual address only when the symbol is defined in a
+       * section (N_SECT) and not a stab/debug entry. For undefined symbols
+       * (N_UNDF) it carries flags / common-block size; for absolute symbols
+       * (N_ABS) it's an arbitrary constant; for stabs (N_STAB set) it's
+       * debug-info specific. Adding a placeholder for any of these strands
+       * a fake "address" in env.placeholders that never lines up with a
+       * real blob and later fails archive-build.
+       */
+      const bool is_stab = (nlist.n_type & N_STAB) != 0;
+      const bool is_sect = !is_stab && (nlist.n_type & N_TYPE) == N_SECT;
+      if (Nlist<bits>::is_header_symbol(string->str)) {
+         // __mh_{execute,dylib,bundle}_header: address points at the mach_header,
+         // which has no corresponding parsed blob. Don't placeholder it.
+      } else if (is_sect) {
          value = env.add_placeholder(nlist.n_value);
       }
 
@@ -125,6 +138,25 @@ namespace MachO {
       
       dysymtab.indirectsymoff = env.allocate(align<bits>(sizeof(uint32_t) * indirectsyms.size()));
       dysymtab.nindirectsyms = indirectsyms.size();
+
+      /* Zero the five classic-linker dysymtab tables (toc, modtab, extrefsyms,
+       * extrel, locrel). The parser preserves their *off/n* fields from the
+       * i386 input, but the translator doesn't relocate the actual data into
+       * the new LINKEDIT layout — so the original offsets point into garbage
+       * after transform, and install_name_tool's validator reports them as
+       * "table of contents at offset X overlaps section contents at Y".
+       *
+       * Safe to drop: dyld doesn't use any of these for image loading. toc/
+       * modtab/extrefsyms are static-linker / nm metadata. extrel/locrel are
+       * legacy relocation tables — superseded by LC_DYLD_INFO_ONLY's compact
+       * bind/rebase opcodes, which every modern dylib (including everything
+       * iPhoto ships) has. Setting count=0 + off=0 declares "no table" and
+       * stops install_name_tool / dyld_info from probing stale ranges. */
+      dysymtab.tocoff = 0;          dysymtab.ntoc = 0;
+      dysymtab.modtaboff = 0;       dysymtab.nmodtab = 0;
+      dysymtab.extrefsymoff = 0;    dysymtab.nextrefsyms = 0;
+      dysymtab.extreloff = 0;       dysymtab.nextrel = 0;
+      dysymtab.locreloff = 0;       dysymtab.nlocrel = 0;
    }
 
    template <Bits bits>
@@ -152,7 +184,7 @@ namespace MachO {
    template <Bits bits>
    void Nlist<bits>::Build(BuildEnv<bits>& env) {
       /* get text address */
-      if (string->str == MH_EXECUTE_HEADER) {
+      if (Nlist<bits>::is_header_symbol(string->str)) {
          nlist.n_value = env.archive->segment(SEG_TEXT)->loc().vmaddr;
       }
 
@@ -163,7 +195,28 @@ namespace MachO {
    template <Bits bits>
    void Nlist<bits>::Emit(Image& img, std::size_t offset) const {
       nlist_t<bits> nlist = this->nlist;
-      nlist.n_un.n_strx = string->offset;
+      /*
+       * Guard against a null `string` pointer. The Nlist M32→M64 copy
+       * ctor uses `env.resolve(other.string, &string)` async; if the
+       * M32 String wasn't itself transformed (which can happen if the
+       * Symtab transform skipped some strs, or env.resolve missed the
+       * callback), `string` stays null and the deref below SIGSEGVs.
+       * Mid-Emit SIGSEGV truncates the output file and leaves every
+       * later LC header zeroed. Emit n_strx=0 (the empty string in
+       * the string table) as a defensive fallback with a warning.
+       */
+      if (string) {
+         nlist.n_un.n_strx = string->offset;
+      } else {
+         static int null_string_count = 0;
+         if (null_string_count++ < 10) {
+            fprintf(stderr,
+                    "warning: Nlist::Emit: null string pointer, "
+                    "n_type=0x%x n_sect=%u — using strx=0\n",
+                    (unsigned)nlist.n_type, (unsigned)nlist.n_sect);
+         }
+         nlist.n_un.n_strx = 0;
+      }
 
       if (value) {
          nlist.n_value = value->loc.vmaddr;
@@ -217,7 +270,7 @@ namespace MachO {
       env(other.nlist, nlist);
       env.resolve(other.string, &string);
 
-      if (other.string->str == MH_EXECUTE_HEADER) {
+      if (Nlist<bits>::is_header_symbol(other.string->str)) {
          // value remains null
       } else {
          env.resolve(other.value, &value);
@@ -235,11 +288,31 @@ namespace MachO {
    }
 
    template <Bits bits>
+   Nlist<bits> *Nlist<bits>::CreateDefinedExt(String<bits> *name,
+                                              const Placeholder<bits> *value,
+                                              const Section<bits> *section) {
+      auto *self = new Nlist();
+      self->string = name;
+      self->value = value;
+      self->section = section;             /* Build reads section->id at emit */
+      self->nlist.n_un.n_strx = 0;         /* set at Build time */
+      self->nlist.n_type = N_SECT | N_EXT;
+      self->nlist.n_sect = 0;              /* overwritten by Build from section->id */
+      self->nlist.n_desc = 0;
+      self->nlist.n_value = value ? value->loc.vmaddr : 0;
+      return self;
+   }
+
+   template <Bits bits>
    void Symtab<bits>::remove(const std::string& name) {
-      /* find symbol to be removed */
-      for (auto it = syms.begin(); it != syms.end(); ++it) {
+      /* The old loop did `++it` after `erase(it)`, which is UB once erase
+       * has invalidated `it` (it crashes immediately on libc++ sets).
+       * Use erase's return value to advance instead. */
+      for (auto it = syms.begin(); it != syms.end(); /* see body */) {
          if ((*it)->string->str == name) {
-            syms.erase(it);
+            it = syms.erase(it);
+         } else {
+            ++it;
          }
       }
       strs.remove_if([&] (auto str) { return name == str->str; });

@@ -25,8 +25,11 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <objc/runtime.h>
+#include <objc/message.h>
+extern id objc_retain(id);   /* libobjc ARC entrypoint; not in runtime.h */
 #include <CoreFoundation/CoreFoundation.h>
 #include <dlfcn.h>
+#include <mach-o/dyld.h>
 #include <pthread.h>
 
 /* Low-4GB search window — same range the wrapper/malloc shim use. */
@@ -82,10 +85,18 @@ struct objc_shared_ctrl {
     * consume so a hash collision from another thread is a safe miss. */
    struct { uint64_t tid; uint64_t recv; uint64_t sel; uint64_t lookup;
             int valid; } super_hints[64];
+   /* legacy i386 object -> real modern object pair table (14th iPhoto blocker).
+    * Shared so every libabiconv copy agrees on which modern R' stands for a
+    * given raw i386 instance. Allocated by the first copy (see arena_init). */
+   uint64_t        lpair;        /* struct lpair_ent * (open-addressed) */
 };
 #define SUPER_HINT_SLOTS 64
 #define OBJC_CTRL_MAGIC 0x3836583634415243ULL  /* "86X64ARC" */
 #define OBJC_CTRL_ENV   "ABICONV_OBJC_CTRL"
+
+/* legacy i386 object pointer -> real modern id (paired proxy). */
+struct lpair_ent { uint32_t p; uint64_t real; };
+#define LPAIR_CAP (1u << 16)
 
 static struct objc_shared_ctrl *g_ctrl = NULL;
 /* hot-path caches; identical across copies once attached to the shared ctrl */
@@ -158,6 +169,8 @@ static void arena_init(void) {
    c->arena_end  = (uint64_t)(uintptr_t)region + bytes;
    c->arena_used = 0;
    c->map        = map;
+   c->lpair      = (uint64_t)(uintptr_t)
+      calloc(LPAIR_CAP, sizeof(struct lpair_ent));
    __sync_synchronize();
    c->magic      = OBJC_CTRL_MAGIC;
 
@@ -173,6 +186,35 @@ static uint32_t hash64(uint64_t x) {
    x *= 0xff51afd7ed558ccdULL;
    x ^= x >> 33;
    return (uint32_t)x;
+}
+
+/* ---- per-thread rsp/rbp stash for the native->i386 trampolines ----
+ * Translated i386 code preserves only the LOW 32 BITS of the registers the
+ * trampoline would like to trust across the call (its 4-byte push/pop frame
+ * slots zero-extend on the way back). On a low (<4GB) native stack that
+ * truncation is the identity, so the main thread never noticed — but a
+ * thread with a >4GB native stack (FileCoordination queues) got rsp/rbp
+ * back with the top bits gone: the ASCII-stack / wild-pc crash family.
+ * The trampolines park rsp+rbp here before `jmp`ing into translated code
+ * and recover the pair after its i386 `ret`. LIFO per thread (reverse
+ * calls nest). */
+struct rsp_stash_pair { uint64_t rsp, rbp; };
+#define RSTASH_MAX 1024
+static __thread struct rsp_stash_pair g_rstash[RSTASH_MAX];
+static __thread uint32_t g_rstash_n;
+
+void _86x64_rsp_stash(uint64_t rsp, uint64_t rbp) {
+   if (g_rstash_n >= RSTASH_MAX) {
+      fprintf(stderr, "objc_shim: reverse rsp stash overflow\n");
+      abort();
+   }
+   g_rstash[g_rstash_n].rsp = rsp;
+   g_rstash[g_rstash_n].rbp = rbp;
+   ++g_rstash_n;
+}
+
+struct rsp_stash_pair _86x64_rsp_unstash(void) {
+   return g_rstash[--g_rstash_n];     /* 16-byte POD: returned in rax:rdx */
 }
 
 /* real 64-bit object -> 32-bit handle the translated code can store. */
@@ -196,8 +238,31 @@ uint32_t x64_objc_wrap(uint64_t real) {
 
    g_map[i].real   = real;
    g_map[i].handle = handle;
+   /* Diagnostic: a "real" that is neither a tagged pointer (high bit / low
+    * bit per platform) nor a plausible mapped address (0x6000…/0x7ff8…/low)
+    * is almost certainly a clobbered register being wrapped — the source of
+    * garbage-backed handles that later crash as msgSend receivers. */
+   if (getenv("OBJC_WRAP_TRACE")) {
+      /* Log EVERY fresh mint: a garbage real can look tagged (odd low byte),
+       * so a validity heuristic can't catch it — instead we grep the log for
+       * the crashing handle afterwards. ra discriminates the libabiconv call
+       * site (which bridge path minted it), symbolizable via copy slide. */
+      fprintf(stderr, "[wrap] slot=%u handle=0x%x real=0x%llx t=%x ra=%p\n",
+              slot, handle, (unsigned long long)real,
+              pthread_mach_thread_np(pthread_self()),
+              __builtin_return_address(0));
+      fflush(stderr);
+   }
    return handle;
 }
+
+/* C-function ObjC-object returns are wrapped via x64_objc_wrap (same as the
+ * objc_msgSend bridge). NB the value may be an obfuscated tagged pointer (short
+ * NSString/NSNumber), which is NOT a dereferenceable address and whose high bit
+ * is randomized per process — wrap/unwrap store and return the 64-bit value
+ * verbatim, so tagged pointers round-trip to Foundation correctly. Do NOT add a
+ * "looks like a real object" validity gate here: it would wrongly drop valid
+ * tagged pointers. See abigen.cc emit_body's return-wrap. */
 
 /*
  * Bounce a 64-bit C-string return (UTF8String etc.) into a low-4GB buffer so
@@ -275,16 +340,29 @@ struct objc_super_x64 { id receiver; Class super_class; };
  * in stack[0]. The asm trampoline copies plan.stack[0..nstack) onto the real
  * stack before the call (see objc_msgSend.asm). */
 #define PLAN_STACK_MAX 32
+#define PLAN_STRET_MAX 184       /* native bounce buffer for stret narrows */
 struct objc_call_plan {
    uint64_t reg[6];               /* +0  rdi,rsi,rdx,rcx,r8,r9            */
    int32_t  nreg;                 /* +48                                 */
-   int32_t  ret_is_obj;           /* +52                                 */
+   int32_t  ret_is_obj;           /* +52  return KIND, see fill_args_and_return */
    struct objc_super_x64 super;   /* +56 (16 bytes)                      */
    uint64_t legacy_imp;           /* +72                                 */
    uint32_t nstack;               /* +80 number of valid stack[] entries */
    uint32_t _pad;                 /* +84                                 */
    uint64_t stack[PLAN_STACK_MAX];/* +88 overflow args (7th onward)      */
-};
+   /* ---- FP / struct-by-value support (28th blocker). Append-only: the
+    * offsets above are baked into objc_msgSend.asm. ---- */
+   uint64_t xmm[8];               /* +344 xmm0..7 (doubles or float bits) */
+   uint32_t nxmm;                 /* +408 count of valid xmm slots (-> al) */
+   uint32_t sret_conv;            /* +412 encoding convention of sret_enc */
+   uint32_t sret_dst32;           /* +416 i386 caller's struct-return buf */
+   uint32_t _pad3;                /* +420                                */
+   const char *sret_enc;          /* +424 return-type encoding            */
+   uint64_t target;               /* +432 override for the real msgSend
+                                   *      variant (kind-6 reg-return form) */
+   uint64_t fp_out[2];            /* +440 asm scratch: fld src / xmm0,1 out */
+   uint8_t  stret_buf[PLAN_STRET_MAX]; /* +456 native struct bounce buffer */
+};                                /* sizeof == 640; asm reserves 640      */
 
 /* Write SysV integer-arg position `pos` (0=rdi..5=r9, 6+=stack) into the plan. */
 static inline void plan_put(struct objc_call_plan *plan, unsigned pos, uint64_t v) {
@@ -307,6 +385,10 @@ static uint64_t legacy_class_method_imp_byname(const char *clsname,
  * registered legacy-class instance, return the real modern object it stands
  * for, else 0. Lets a legacy IMP's `[self ...]` re-dispatch on the real obj. */
 static id shadow_real(uint32_t s);
+/* legacy i386 object/class bridging (defined after the legacy __OBJC structs). */
+static id       legacy_obj_to_real(uint32_t p);
+static id       lpair_lookup(uint32_t p);
+static uint64_t unwrap_obj_arg(uint32_t a);
 
 /* i386 layout of struct objc_super: two 4-byte pointers. The translated
  * code passes a pointer to this struct as the first arg of msgSendSuper. */
@@ -335,6 +417,27 @@ static int mem_readable(uintptr_t p, size_t len) {
    return 1;
 }
 
+/* Validate a legacy metadata C-string: readable AND NUL-terminated without
+ * running off the mapping. ptr_ok/mem_readable(p,1) only prove the FIRST
+ * byte; a name string ending flush against the end of a mapped segment makes
+ * strlen (inside objc_getClass / sel_registerName) fault on the next page —
+ * the intermittent registration-time SIGBUS (reverse_register_one+202,
+ * KERN_MEMORY_ERROR at 0x...003). Scan page-by-page, probing each page once. */
+#define PAGE_SZ_4K 0x1000u
+static int legacy_cstr_ok(uint32_t p32) {
+   uintptr_t p = p32;
+   if (!p) { return 0; }
+   for (unsigned pages = 0; pages < 4; ++pages) {     /* names are short */
+      uintptr_t page_end = (p & ~(uintptr_t)(PAGE_SZ_4K - 1)) + PAGE_SZ_4K;
+      if (!mem_readable(p, 1)) { return 0; }
+      for (; p < page_end; ++p) {
+         if (*(const char *)p == '\0') { return 1; }
+      }
+      /* string continues onto the next page; probe it before reading */
+   }
+   return 0;
+}
+
 /* Resolve an i386 self32 to a real x86_64 id. Handles the three forms a
  * translated binary can pass: arena proxy handle, class-name cstring
  * pointer (for class messages), or nil. An unmapped value is none of these:
@@ -349,6 +452,15 @@ static id resolve_self(uint32_t self32) {
    if (sreal) { return sreal; }
    if (sp >= g_arena_base && sp < g_arena_end) {
       return (id)(uintptr_t)*(uint64_t *)sp;
+   }
+   /* A raw legacy i386 object/class used as a receiver (e.g. a static class
+    * object, or an instance handed back to us): map to its real modern peer.
+    * For a class-name cstring (the usual class-message receiver) this returns
+    * 0 — its first 4 bytes don't form a valid legacy isa — so we fall through
+    * to the objc_getClass(name) path below. */
+   {
+      id lr = legacy_obj_to_real(self32);
+      if (lr) { return lr; }
    }
    if (self32 != 0) {
       if (!mem_readable(sp, 1)) {
@@ -384,6 +496,58 @@ static SEL resolve_sel(uint32_t cmd32) {
    return sel_registerName((const char *)(uintptr_t)cmd32);
 }
 
+/* Convert an i386 `:`-typed SEL argument (a selector-name pointer) to a real
+ * x86_64 SEL. Mirrors resolve_sel but for an explicit method argument. An
+ * already-registered SEL from elsewhere in the bridge round-trips fine
+ * (sel_registerName is idempotent on its own name). */
+static SEL conv_sel_arg(uint32_t a) {
+   if (!a) { return (SEL)0; }
+   if (!mem_readable((uintptr_t)a, 1)) {
+      if (getenv("OBJC_BRIDGE_TRACE")) {
+         fprintf(stderr, "[bp] conv_sel_arg: unmapped SEL 0x%08x -> NULL\n", a);
+         fflush(stderr);
+      }
+      return (SEL)0;
+   }
+   return sel_registerName((const char *)(uintptr_t)a);
+}
+
+/* C-function shim path (typeconv convert_objc_sel): an i386 SEL argument to a
+ * shimmed C function (NSStringFromSelector etc.) -> real x86_64 SEL. */
+uint64_t x64_objc_sel_unwrap(uint32_t a) {
+   return (uint64_t)(uintptr_t)conv_sel_arg(a);
+}
+
+/* Real SEL -> stable low-4GB selector-name pointer the i386 caller can store
+ * indefinitely and later message with (the forward bridge re-registers it by
+ * name). Interned: SELs are few and runtime-interned, so a small dedupe table
+ * with strdup'd (shim-malloc, low-4GB) names is bounded. */
+#define SEL_INTERN_CAP 512
+static struct { uint64_t sel; uint32_t low; } g_sel_intern[SEL_INTERN_CAP];
+static unsigned g_sel_intern_n;
+
+uint32_t x64_objc_sel_wrap(uint64_t s) {
+   if (!s) { return 0; }
+   if (s < 0x100000000ULL) { return (uint32_t)s; }  /* already a low name ptr */
+   for (unsigned i = 0; i < g_sel_intern_n; ++i) {
+      if (g_sel_intern[i].sel == s) { return g_sel_intern[i].low; }
+   }
+   /* explicit malloc, not strdup: strdup allocates via libc's internal
+    * (high) heap, bypassing the low-4GB shim malloc */
+   const char *name = sel_getName((SEL)(uintptr_t)s);
+   if (!name) { name = ""; }
+   const size_t n = strlen(name) + 1;
+   char *low = (char *)malloc(n);
+   if (!low || (uintptr_t)low >= 0x100000000UL) { return 0; }
+   memcpy(low, name, n);
+   if (g_sel_intern_n < SEL_INTERN_CAP) {
+      g_sel_intern[g_sel_intern_n].sel = s;
+      g_sel_intern[g_sel_intern_n].low = (uint32_t)(uintptr_t)low;
+      ++g_sel_intern_n;
+   }
+   return (uint32_t)(uintptr_t)low;
+}
+
 /* Per-method arg unwrap loop: iterates from method-arg index `arg_start`
  * (==2 for self+cmd already-placed methods) up through `cap_regs`,
  * pulling 4-byte slots out of args32 and writing 8-byte slots into plan.
@@ -396,43 +560,600 @@ static char encoding_base_type(const char *t) {
    return *t;
 }
 
-static unsigned fill_method_args(struct objc_call_plan *plan,
-                                 const uint32_t *args32,
-                                 unsigned arg_base_idx,
-                                 unsigned reg_base,
-                                 Method m,
-                                 unsigned cap_regs) {
-   unsigned nargs = m ? method_getNumberOfArguments(m) : 2;
-   if (m && method_getNumberOfArguments(m) > cap_regs
-       && getenv("OBJC_BRIDGE_TRACE")) {
-      fprintf(stderr, "[bp] WARN: method takes %u args but only %u fit in the "
-              "register plan; extra args dropped (stack spill not implemented)\n",
-              method_getNumberOfArguments(m) - 2, cap_regs - 2);
-      fflush(stderr);
+/* Old GCC (i386 ObjC-1 era, and the 64-bit gcc that built RedRock) encodes
+ * class-typed parameters/returns — `NSObject *foo` — as a pointer-to-struct
+ * `^{NSObject=#...}` instead of `@`. The `#` (isa) first member marks it
+ * unambiguously as an ObjC object reference; it must be marshalled like `@`
+ * everywhere, or a raw i386 pointer reaches native code which retains it and
+ * crashes on the 4-byte isa (iPhoto 18th blocker:
+ * -[RKTerminateQueue addTerminationDelegate:] types "v24@0:8^{NSObject=#}16").
+ * Deliberately requires the `=#` shape: opaque `^{__CFString=}` and genuine
+ * struct pointers keep their raw-pointer behavior. */
+static int enc_is_objptr_struct(const char *t) {
+   if (!t) { return 0; }
+   while (*t && strchr("rnNoORV", *t)) { ++t; }   /* qualifiers */
+   if (*t != '^') { return 0; }
+   ++t;
+   while (*t && strchr("rnNoORV", *t)) { ++t; }
+   if (*t != '{') { return 0; }
+   ++t;
+   while (*t && *t != '=' && *t != '}') { ++t; }  /* struct tag */
+   return *t == '=' && t[1] == '#';
+}
+
+/* ---- struct layout walk over an ObjC type encoding ----
+ * The legacy method's encoding carries i386 widths (notably CGFloat == 'f',
+ * a 4-byte float). We need both the i386 layout (to read the struct the legacy
+ * stret IMP wrote on the low stack) and the x86_64 layout (the native caller's
+ * buffer). One walker computes both in lockstep and, when dst != NULL, copies
+ * each scalar, widening i386 -> native: 'f' CGFloat -> double, 'l'/'L' long and
+ * pointers 4 -> 8 bytes. (DOMAIN NOTE: 'f' is assumed CGFloat; struct returns
+ * in this surface are NSRect/NSPoint/NSSize/NSRange, all CGFloat- or
+ * NSInteger-based — a genuine C float member would be wrongly widened, but
+ * none occurs among reverse-bridged AppKit override returns.) */
+static const char *enc_walk(const char *t, const uint8_t *src, uint8_t *dst,
+                            size_t *i_off, size_t *n_off);
+
+static size_t align_up_sz(size_t off, size_t a) {
+   return a ? ((off + a - 1) & ~(a - 1)) : off;
+}
+
+/* scalar widths/aligns: returns 0 if not a scalar this walker handles. */
+static int enc_scalar(char c, size_t *isz, size_t *ial,
+                      size_t *nsz, size_t *nal) {
+   switch (c) {
+   case 'c': case 'C': case 'B': *isz=*nsz=1; *ial=*nal=1; return 1;
+   case 's': case 'S':           *isz=*nsz=2; *ial=*nal=2; return 1;
+   case 'i': case 'I':           *isz=*nsz=4; *ial=*nal=4; return 1;
+   case 'l': case 'L':           *isz=4; *ial=4; *nsz=8; *nal=8; return 1;
+   case 'q': case 'Q':           *isz=8; *ial=4; *nsz=8; *nal=8; return 1;
+   case 'f':                     *isz=4; *ial=4; *nsz=8; *nal=8; return 1; /* CGFloat */
+   case 'd':                     *isz=8; *ial=4; *nsz=8; *nal=8; return 1;
+   case '*': case '^': case '@': case '#': case ':':
+                                 *isz=4; *ial=4; *nsz=8; *nal=8; return 1;
+   default: return 0;
    }
-   if (nargs > cap_regs) { nargs = cap_regs; }
-   const int trace = getenv("OBJC_BRIDGE_TRACE") != NULL;
-   for (unsigned i = 2; i < nargs; ++i) {
-      char *t = m ? method_copyArgumentType(m, i) : NULL;
-      char bt = encoding_base_type(t);
-      uint32_t a = args32[arg_base_idx + (i - 2)];
-      if (bt == '@' || bt == '#') {
-         plan->reg[reg_base + (i - 2)] = x64_objc_unwrap(a);
-      } else {
-         plan->reg[reg_base + (i - 2)] = (uint64_t)a;
-         /* float/double/long-double/struct/union args use the XMM/MEMORY
-          * SysV classes and/or differ in width and CGFloat (i386 float vs
-          * x86_64 double) representation; the GP-only marshaller below does
-          * not yet handle them. Surface it instead of corrupting silently —
-          * see the "remaining ABI gap" note above the msgSend entry points. */
-         if (trace && bt && strchr("fdD{(", bt)) {
-            fprintf(stderr, "[bp] WARN: arg %u type '%c' (float/double/struct) "
-                    "marshalled as integer GP reg — call may be incorrect\n",
-                    i - 2, bt);
-            fflush(stderr);
+}
+
+static void enc_copy_scalar(char c, const uint8_t *s, uint8_t *d) {
+   switch (c) {
+   case 'f': { float f; memcpy(&f, s, 4); double dv = f; memcpy(d, &dv, 8); break; }
+   case 'l': { int32_t v; memcpy(&v,s,4); int64_t w=v; memcpy(d,&w,8); break; }
+   case 'L': case '*': case '^': case '@': case '#': case ':': {
+      uint32_t v; memcpy(&v,s,4); uint64_t w=v; memcpy(d,&w,8); break; }
+   case 'c': case 'C': case 'B': *d=*s; break;
+   case 's': case 'S': memcpy(d,s,2); break;
+   case 'i': case 'I': memcpy(d,s,4); break;
+   case 'q': case 'Q': case 'd': memcpy(d,s,8); break;
+   default: break;
+   }
+}
+
+/* Walk one type. Advances both offset cursors past it; copies if dst != NULL.
+ * Returns the encoding cursor just past the type (not trailing digits). */
+static const char *enc_walk(const char *t, const uint8_t *src, uint8_t *dst,
+                            size_t *i_off, size_t *n_off) {
+   while (*t && strchr("rnNoORV", *t)) { ++t; }   /* qualifiers */
+   char c = *t;
+   size_t isz, ial, nsz, nal;
+   if (enc_scalar(c, &isz, &ial, &nsz, &nal)) {
+      *i_off = align_up_sz(*i_off, ial);
+      *n_off = align_up_sz(*n_off, nal);
+      if (dst) { enc_copy_scalar(c, src + *i_off, dst + *n_off); }
+      *i_off += isz; *n_off += nsz;
+      return t + 1;
+   }
+   if (c == '{' || c == '(') {                    /* struct / union */
+      char close = (c == '{') ? '}' : ')';
+      const char *p = t + 1;
+      while (*p && *p != '=' && *p != close) { ++p; }   /* skip tag */
+      size_t imax_al = 1, nmax_al = 1;
+      size_t istart = *i_off, nstart = *n_off;     /* union: all from base */
+      if (*p == '=') {
+         ++p;
+         while (*p && *p != close) {
+            size_t ib = (c == '(') ? istart : *i_off;
+            size_t nb = (c == '(') ? nstart : *n_off;
+            *i_off = ib; *n_off = nb;
+            /* track member alignment via a dry sub-walk start */
+            size_t before_i = *i_off, before_n = *n_off;
+            p = enc_walk(p, src, dst, i_off, n_off);
+            while (*p >= '0' && *p <= '9') { ++p; }  /* bitfield/array digits */
+            (void)before_i; (void)before_n;
+            if (c == '(') {  /* union size = max member size */
+               if (*i_off - istart > imax_al) { imax_al = *i_off - istart; }
+            }
          }
       }
-      free(t);
+      if (*p == close) { ++p; }
+      /* pad struct to its own alignment is approximate; callers only need the
+       * scalar copies to land at correct native offsets, which they do. */
+      return p;
+   }
+   if (c == '[') {                                /* array [N type] */
+      const char *p = t + 1;
+      unsigned n = 0;
+      while (*p >= '0' && *p <= '9') { n = n*10 + (unsigned)(*p-'0'); ++p; }
+      const char *elem = p;
+      for (unsigned k = 0; k < n; ++k) { p = enc_walk(elem, src, dst, i_off, n_off); }
+      if (*p == ']') { ++p; }
+      return p;
+   }
+   if (c == 'b') {                                /* bitfield: skip width */
+      ++t; while (*t >= '0' && *t <= '9') { ++t; }
+      return t;
+   }
+   return t + (*t ? 1 : 0);
+}
+
+/* Native size of a (struct) return type, for the stret decision. */
+static size_t enc_native_size(const char *t) {
+   size_t i_off = 0, n_off = 0;
+   enc_walk(t, NULL, NULL, &i_off, &n_off);
+   return n_off;
+}
+
+/* Does this return encoding use the x86_64 stret (hidden-pointer) convention?
+ * Memory-class aggregates (> 16 bytes) do; <=16-byte structs are returned in
+ * registers (INTEGER or SSE) and are a separate, currently-unhandled path. */
+static int enc_ret_is_stret(const char *types) {
+   if (!types) { return 0; }
+   const char *t = types;
+   while (*t && strchr("rnNoORV", *t)) { ++t; }
+   if (*t != '{' && *t != '(' && *t != '[') { return 0; }
+   return enc_native_size(t) > 16;
+}
+
+/* =========================================================================
+ * Conv-aware dual-layout encoding walker (28th blocker: FP/struct ABI).
+ *
+ * Two encoding CONVENTIONS reach the bridge:
+ *   CONV_I386:   strings from the translated binary's legacy __OBJC metadata
+ *                (and from methods we registered with them): 'f' is CGFloat
+ *                (i386 4-byte float -> native 8-byte double), 'l'/pointers are
+ *                4 -> 8, 'q' is 8 -> 8. This is what enc_scalar above assumes.
+ *   CONV_NATIVE: strings from the modern runtime (method_copyArgumentType on
+ *                a real AppKit/Foundation method): 'd' is double OR CGFloat,
+ *                'q'/'Q' is long long OR NSInteger — the i386 source width is
+ *                ambiguous and resolved by STRUCT-TAG knowledge (CGRect et al
+ *                are CGFloat-based; _NSRange/CFRange are index-based) plus,
+ *                for scalars, by the legacy seltypes registry when the app's
+ *                own metadata declares the selector. 'f' is a genuine float
+ *                (native single precision, NOT widened).
+ *
+ * One recursive walker computes the i386 and native layouts in lockstep,
+ * optionally copying scalars (widening i386->native or narrowing back), and
+ * records the SysV class (SSE vs INTEGER) of every native eightbyte so
+ * aggregates can be classified per the x86_64 ABI.
+ * ========================================================================= */
+#define CONV_I386   0
+#define CONV_NATIVE 1
+/* struct-tag context for CONV_NATIVE ambiguity resolution */
+#define CTX_NONE    0
+#define CTX_CGFLOAT 1   /* 'd' members are CGFloat: i386 4-byte float */
+#define CTX_INDEX   2   /* 'q'/'Q' members are NS/CFIndex: i386 4-byte */
+
+/* defined with the other encoding scanners near reverse_prep */
+static const char *enc_skip_quals(const char *t);
+static const char *enc_skip_type(const char *t);
+static const char *enc_skip_digits(const char *t);
+
+static int enc_tag_ctx(const char *tag, size_t n) {
+   static const char *cg[] = { "CGPoint", "CGSize", "CGRect", "NSPoint",
+      "NSSize", "NSRect", "_NSPoint", "_NSSize", "_NSRect",
+      "CGAffineTransform", "NSAffineTransformStruct", "CGVector" };
+   static const char *ix[] = { "_NSRange", "NSRange", "CFRange" };
+   for (unsigned i = 0; i < sizeof cg / sizeof *cg; ++i) {
+      if (strlen(cg[i]) == n && !strncmp(tag, cg[i], n)) { return CTX_CGFLOAT; }
+   }
+   for (unsigned i = 0; i < sizeof ix / sizeof *ix; ++i) {
+      if (strlen(ix[i]) == n && !strncmp(tag, ix[i], n)) { return CTX_INDEX; }
+   }
+   return CTX_NONE;
+}
+
+/* scalar widths under a convention+context; *fp set for SSE-class scalars.
+ * Returns 0 if c is not a scalar. */
+static int enc_scalar3(char c, int conv, int ctx, size_t *isz, size_t *ial,
+                       size_t *nsz, size_t *nal, int *fp) {
+   *fp = 0;
+   switch (c) {
+   case 'c': case 'C': case 'B': *isz=*nsz=1; *ial=*nal=1; return 1;
+   case 's': case 'S':           *isz=*nsz=2; *ial=*nal=2; return 1;
+   case 'i': case 'I':           *isz=*nsz=4; *ial=*nal=4; return 1;
+   case 'l': case 'L':
+      if (conv == CONV_NATIVE) { *isz=8; *ial=4; *nsz=8; *nal=8; }
+      else                     { *isz=4; *ial=4; *nsz=8; *nal=8; }
+      return 1;
+   case 'q': case 'Q':
+      if (conv == CONV_NATIVE && ctx == CTX_INDEX) { *isz=4; *ial=4; }
+      else                                         { *isz=8; *ial=4; }
+      *nsz=8; *nal=8; return 1;
+   case 'f':
+      *fp = 1;
+      if (conv == CONV_NATIVE) { *isz=4; *ial=4; *nsz=4; *nal=4; } /* float */
+      else                     { *isz=4; *ial=4; *nsz=8; *nal=8; } /* CGFloat */
+      return 1;
+   case 'd':
+      *fp = 1;
+      if (conv == CONV_NATIVE && ctx == CTX_CGFLOAT) { *isz=4; *ial=4; }
+      else                                           { *isz=8; *ial=4; }
+      *nsz=8; *nal=8; return 1;
+   case '*': case '^': case '@': case '#': case ':':
+      *isz=4; *ial=4; *nsz=8; *nal=8; return 1;
+   default: return 0;
+   }
+}
+
+/* copy one scalar between layouts. dir: 1 = widen (i386 src -> native dst),
+ * 2 = narrow (native src -> i386 dst). */
+static void enc_copy3(char c, size_t isz, size_t nsz, int fp, int dir,
+                      const uint8_t *s, uint8_t *d) {
+   if (dir == 1) {                            /* widen */
+      if (fp && isz == 4 && nsz == 8) {       /* CGFloat float -> double */
+         float f; memcpy(&f, s, 4); double dv = f; memcpy(d, &dv, 8);
+      } else if (isz == 4 && nsz == 8) {
+         if (c == 'l' || c == 'q') {          /* signed extend */
+            int32_t v; memcpy(&v, s, 4); int64_t w = v; memcpy(d, &w, 8);
+         } else {
+            uint32_t v; memcpy(&v, s, 4); uint64_t w = v; memcpy(d, &w, 8);
+         }
+      } else {
+         memcpy(d, s, isz < nsz ? isz : nsz);
+      }
+   } else {                                   /* narrow */
+      if (fp && isz == 4 && nsz == 8) {       /* double -> CGFloat float */
+         double dv; memcpy(&dv, s, 8); float f = (float)dv; memcpy(d, &f, 4);
+      } else if (isz == 4 && nsz == 8) {
+         memcpy(d, s, 4);                     /* take the low half */
+      } else {
+         memcpy(d, s, isz < nsz ? isz : nsz);
+      }
+   }
+}
+
+/* walk state: eightbyte SysV class accumulators over the NATIVE layout */
+struct enc_ew {
+   int conv;
+   int dir;            /* 0 dry, 1 widen i386->native, 2 narrow native->i386 */
+   const uint8_t *src; /* dir1: i386 base; dir2: native base */
+   uint8_t *dst;       /* dir1: native base; dir2: i386 base */
+   uint8_t eb_fp[8];   /* native eightbyte k contains FP scalar(s) */
+   uint8_t eb_int[8];  /* native eightbyte k contains integer scalar(s) */
+};
+
+static const char *enc_walk3(struct enc_ew *w, const char *t, int ctx,
+                             size_t *i_off, size_t *n_off) {
+   t = enc_skip_quals(t);
+   char c = *t;
+   size_t isz, ial, nsz, nal; int fp;
+   if (enc_scalar3(c, w->conv, ctx, &isz, &ial, &nsz, &nal, &fp)) {
+      *i_off = align_up_sz(*i_off, ial);
+      *n_off = align_up_sz(*n_off, nal);
+      for (size_t k = *n_off / 8; k <= (*n_off + nsz - 1) / 8 && k < 8; ++k) {
+         if (fp) { w->eb_fp[k] = 1; } else { w->eb_int[k] = 1; }
+      }
+      if (w->dir == 1 && w->src && w->dst) {
+         enc_copy3(c, isz, nsz, fp, 1, w->src + *i_off, w->dst + *n_off);
+      } else if (w->dir == 2 && w->src && w->dst) {
+         enc_copy3(c, isz, nsz, fp, 2, w->src + *n_off, w->dst + *i_off);
+      }
+      *i_off += isz; *n_off += nsz;
+      if (c == '^') { return enc_skip_type(t); }   /* skip the pointee type */
+      return t + 1;
+   }
+   if (c == '{' || c == '(') {
+      char close = (c == '{') ? '}' : ')';
+      const char *p = t + 1;
+      const char *tag = p;
+      while (*p && *p != '=' && *p != close) { ++p; }
+      int sub_ctx = (w->conv == CONV_NATIVE)
+         ? enc_tag_ctx(tag, (size_t)(p - tag)) : CTX_NONE;
+      if (sub_ctx == CTX_NONE && ctx != CTX_NONE) { sub_ctx = ctx; }
+      size_t istart = *i_off, nstart = *n_off;
+      size_t imax = istart, nmax = nstart;
+      if (*p == '=') {
+         ++p;
+         while (*p && *p != close) {
+            if (c == '(') { *i_off = istart; *n_off = nstart; }   /* union */
+            p = enc_walk3(w, p, sub_ctx, i_off, n_off);
+            p = enc_skip_digits(p);
+            if (*i_off > imax) { imax = *i_off; }
+            if (*n_off > nmax) { nmax = *n_off; }
+         }
+         *i_off = imax; *n_off = nmax;
+      }
+      if (*p == close) { ++p; }
+      return p;
+   }
+   if (c == '[') {
+      const char *p = t + 1;
+      unsigned n = 0;
+      while (*p >= '0' && *p <= '9') { n = n*10 + (unsigned)(*p - '0'); ++p; }
+      const char *elem = p;
+      for (unsigned k = 0; k < n; ++k) {
+         p = enc_walk3(w, elem, ctx, i_off, n_off);
+      }
+      if (*p == ']') { ++p; }
+      return p;
+   }
+   if (c == 'b') {
+      ++t; while (*t >= '0' && *t <= '9') { ++t; }
+      return t;
+   }
+   return t + (*t ? 1 : 0);
+}
+
+/* dry-classify one type: i386 size, native size, per-native-eightbyte SSE
+ * class. Returns the number of native eightbytes (0 for empty/unknown). */
+static unsigned enc_classify(const char *t, int conv, size_t *isz_out,
+                             size_t *nsz_out, uint8_t sse[8]) {
+   struct enc_ew w; memset(&w, 0, sizeof w);
+   w.conv = conv; w.dir = 0;
+   size_t i_off = 0, n_off = 0;
+   enc_walk3(&w, t, CTX_NONE, &i_off, &n_off);
+   *isz_out = i_off; *nsz_out = n_off;
+   unsigned nebs = (unsigned)((n_off + 7) / 8);
+   if (nebs > 8) { nebs = 8; }
+   for (unsigned k = 0; k < nebs; ++k) {
+      sse[k] = (w.eb_fp[k] && !w.eb_int[k]) ? 1 : 0;
+   }
+   return nebs;
+}
+
+static void enc_widen(const char *t, int conv, const uint8_t *i386_src,
+                      uint8_t *native_dst) {
+   struct enc_ew w; memset(&w, 0, sizeof w);
+   w.conv = conv; w.dir = 1; w.src = i386_src; w.dst = native_dst;
+   size_t i_off = 0, n_off = 0;
+   enc_walk3(&w, t, CTX_NONE, &i_off, &n_off);
+}
+
+static void enc_narrow(const char *t, int conv, const uint8_t *native_src,
+                       uint8_t *i386_dst) {
+   struct enc_ew w; memset(&w, 0, sizeof w);
+   w.conv = conv; w.dir = 2; w.src = native_src; w.dst = i386_dst;
+   size_t i_off = 0, n_off = 0;
+   enc_walk3(&w, t, CTX_NONE, &i_off, &n_off);
+}
+
+/* ---- selector -> legacy i386 types registry ----
+ * Filled during legacy class registration (reverse_add_methods): the app's
+ * own __OBJC metadata records the TRUE i386 encoding of every selector it
+ * declares or overrides, which disambiguates CGFloat-vs-double and
+ * NSInteger-vs-long-long when the native runtime encoding is all we'd have.
+ * Keyed by real SEL (runtime-interned, so pointer compare is exact). */
+#define SELTYPES_CAP 16384u   /* power of two */
+static struct { SEL sel; const char *types; } g_seltypes[SELTYPES_CAP];
+static void seltypes_insert(SEL s, const char *types) {
+   if (!s || !types) { return; }
+   uint32_t i = (uint32_t)(((uintptr_t)s >> 3) * 2654435761u) & (SELTYPES_CAP - 1);
+   for (uint32_t n = 0; n < SELTYPES_CAP; ++n) {
+      if (g_seltypes[i].sel == NULL || g_seltypes[i].sel == s) {
+         g_seltypes[i].sel = s; g_seltypes[i].types = types; return;
+      }
+      i = (i + 1) & (SELTYPES_CAP - 1);
+   }
+}
+static const char *seltypes_lookup(SEL s) {
+   if (!s) { return NULL; }
+   uint32_t i = (uint32_t)(((uintptr_t)s >> 3) * 2654435761u) & (SELTYPES_CAP - 1);
+   for (uint32_t n = 0; n < SELTYPES_CAP; ++n) {
+      if (g_seltypes[i].sel == NULL) { return NULL; }
+      if (g_seltypes[i].sel == s) { return g_seltypes[i].types; }
+      i = (i + 1) & (SELTYPES_CAP - 1);
+   }
+   return NULL;
+}
+
+/* Extract explicit-arg encoding #k (method-arg index k+2) from a full legacy
+ * types string ("v24@0:8{_NSRect=...}16"). Returns NULL past the end. */
+static const char *enc_nth_arg(const char *types, unsigned k) {
+   const char *t = types;
+   t = enc_skip_digits(enc_skip_type(t));   /* return */
+   t = enc_skip_digits(enc_skip_type(t));   /* self  */
+   t = enc_skip_digits(enc_skip_type(t));   /* _cmd  */
+   for (unsigned i = 0; i < k; ++i) {
+      if (!*t) { return NULL; }
+      t = enc_skip_digits(enc_skip_type(t));
+   }
+   return *t ? t : NULL;
+}
+
+/* ---- forward-marshal cursors: SysV positions over the plan ---- */
+struct mcur {
+   unsigned gp;      /* next GP slot: reg[gp] while < 6                  */
+   unsigned xmm;     /* next XMM slot while < 8                          */
+   size_t   stk;     /* bytes used in the plan->stack overflow area      */
+};
+
+static int mcur_put_gp(struct objc_call_plan *plan, struct mcur *c, uint64_t v) {
+   if (c->gp < 6) { plan->reg[c->gp++] = v; return 1; }
+   if (c->stk + 8 <= sizeof plan->stack) {
+      memcpy((uint8_t *)plan->stack + c->stk, &v, 8); c->stk += 8; return 1;
+   }
+   return 0;
+}
+static int mcur_put_xmm(struct objc_call_plan *plan, struct mcur *c, uint64_t bits) {
+   if (c->xmm < 8) { plan->xmm[c->xmm++] = bits; return 1; }
+   if (c->stk + 8 <= sizeof plan->stack) {
+      memcpy((uint8_t *)plan->stack + c->stk, &bits, 8); c->stk += 8; return 1;
+   }
+   return 0;
+}
+
+/* reverse-bridge trampolines (objc_reverse.asm): a Method whose IMP is one of
+ * these carries a LEGACY (CONV_I386) encoding string. */
+extern void _86x64_reverse_imp(void);
+extern void _86x64_reverse_imp_stret(void);
+static int method_is_legacy(Method m) {
+   if (!m) { return 0; }
+   IMP imp = method_getImplementation(m);
+   return imp == (IMP)_86x64_reverse_imp || imp == (IMP)_86x64_reverse_imp_stret;
+}
+
+/* Marshal ONE explicit argument from the i386 frame into the plan.
+ * enc/conv describe it; *ai is the args32 slot cursor (advanced by the i386
+ * width in 4-byte slots). Returns 0 only on overflow (arg dropped). */
+static int marshal_arg_fwd(struct objc_call_plan *plan, struct mcur *c,
+                           const char *enc, int conv,
+                           const uint32_t *args32, unsigned *ai) {
+   const int trace = getenv("OBJC_BRIDGE_TRACE") != NULL;
+   const char *t = enc_skip_quals(enc);
+   char b = *t;
+   if (b == '@' || b == '#' || enc_is_objptr_struct(enc)) {
+      return mcur_put_gp(plan, c, unwrap_obj_arg(args32[(*ai)++]));
+   }
+   if (b == ':') {
+      return mcur_put_gp(plan, c,
+                         (uint64_t)(uintptr_t)conv_sel_arg(args32[(*ai)++]));
+   }
+   if (b == 'f') {
+      uint32_t raw = args32[(*ai)++];
+      if (conv == CONV_NATIVE) {
+         /* genuine float: pass single-precision bits */
+         return mcur_put_xmm(plan, c, (uint64_t)raw);
+      }
+      float f; memcpy(&f, &raw, 4);           /* CGFloat: widen to double */
+      double dv = f; uint64_t bits; memcpy(&bits, &dv, 8);
+      return mcur_put_xmm(plan, c, bits);
+   }
+   if (b == 'd') {
+      /* CONV_NATIVE scalar 'd' is ambiguous (double vs CGFloat); without a
+       * registry hit we assume a true 8-byte double — NSTimeInterval and the
+       * NSNumber family dominate this shape. A CGFloat-typed scalar (e.g.
+       * setAlphaValue:) would need its legacy encoding to be in seltypes. */
+      uint64_t bits = (uint64_t)args32[*ai] | ((uint64_t)args32[*ai + 1] << 32);
+      *ai += 2;
+      if (trace && conv == CONV_NATIVE) {
+         fprintf(stderr, "[fma] 'd' scalar: assuming 8-byte double source\n");
+      }
+      return mcur_put_xmm(plan, c, bits);
+   }
+   if (b == 'q' || b == 'Q') {
+      if (conv == CONV_NATIVE) {
+         /* native NSInteger/NSUInteger (the common case): ONE i386 slot */
+         uint32_t raw = args32[(*ai)++];
+         uint64_t v = (b == 'q') ? (uint64_t)(int64_t)(int32_t)raw
+                                 : (uint64_t)raw;
+         return mcur_put_gp(plan, c, v);
+      }
+      uint64_t v = (uint64_t)args32[*ai] | ((uint64_t)args32[*ai + 1] << 32);
+      *ai += 2;
+      return mcur_put_gp(plan, c, v);
+   }
+   if (b == '{' || b == '(' || b == '[') {
+      size_t isz = 0, nsz = 0;
+      uint8_t sse[8] = {0};
+      unsigned nebs = enc_classify(t, conv, &isz, &nsz, sse);
+      unsigned islots = (unsigned)((isz + 3) / 4);
+      if (nsz == 0 || nebs == 0) { *ai += islots ? islots : 1; return 0; }
+      if (nsz <= 16) {
+         /* register-class aggregate: SSE eightbytes -> xmm, INTEGER -> GP.
+          * SysV: if EITHER eightbyte lacks a register, the whole aggregate
+          * goes to memory. */
+         unsigned need_gp = 0, need_xmm = 0;
+         for (unsigned k = 0; k < nebs; ++k) { if (sse[k]) ++need_xmm; else ++need_gp; }
+         uint8_t tmp[16] = {0};
+         enc_widen(t, conv, (const uint8_t *)&args32[*ai], tmp);
+         *ai += islots;
+         if (6 - c->gp >= need_gp && 8 - c->xmm >= need_xmm) {
+            for (unsigned k = 0; k < nebs; ++k) {
+               uint64_t eb; memcpy(&eb, tmp + 8*k, 8);
+               if (sse[k]) { mcur_put_xmm(plan, c, eb); }
+               else        { mcur_put_gp(plan, c, eb); }
+            }
+            return 1;
+         }
+         if (c->stk + 8*nebs <= sizeof plan->stack) {
+            memcpy((uint8_t *)plan->stack + c->stk, tmp, 8*nebs);
+            c->stk += 8*nebs;
+            return 1;
+         }
+         return 0;
+      }
+      /* MEMORY-class aggregate: widen straight into the stack area */
+      size_t need = align_up_sz(nsz, 8);
+      if (c->stk + need <= sizeof plan->stack) {
+         memset((uint8_t *)plan->stack + c->stk, 0, need);
+         enc_widen(t, conv, (const uint8_t *)&args32[*ai],
+                   (uint8_t *)plan->stack + c->stk);
+         c->stk += need;
+         *ai += islots;
+         return 1;
+      }
+      *ai += islots;
+      if (trace) {
+         fprintf(stderr, "[fma] MEMORY struct arg overflows plan stack (%zu)\n",
+                 nsz);
+      }
+      return 0;
+   }
+   if (b == 'D') {                            /* long double: unsupported */
+      *ai += 3;                               /* i386 x87 ext = 12 bytes */
+      if (trace) { fprintf(stderr, "[fma] long double arg unsupported\n"); }
+      return mcur_put_xmm(plan, c, 0);
+   }
+   /* everything else: int/char/short/BOOL/enum/pointer — one 4-byte slot, GP */
+   return mcur_put_gp(plan, c, (uint64_t)args32[(*ai)++]);
+}
+
+/* Marshal every explicit method arg from the i386 frame into the plan.
+ * `*ai` is the args32 slot cursor (in: first explicit-arg slot; out: one past
+ * the last consumed slot). `cur` carries the SysV gp/xmm/stack cursors (gp
+ * pre-advanced past self/_cmd/retbuf by the caller). Encodings come from the
+ * resolved Method; when that is a NATIVE method but the legacy seltypes
+ * registry knows the selector, the legacy i386 encoding wins (it
+ * disambiguates CGFloat vs double and NSInteger vs long long). Returns the
+ * method-arg count (incl. self+_cmd). */
+static unsigned fill_method_args(struct objc_call_plan *plan,
+                                 const uint32_t *args32,
+                                 unsigned *ai,
+                                 Method m, SEL sel,
+                                 struct mcur *cur) {
+   unsigned nargs = m ? method_getNumberOfArguments(m) : 2;
+   const int trace = getenv("OBJC_BRIDGE_TRACE") != NULL;
+   const int conv = method_is_legacy(m) ? CONV_I386 : CONV_NATIVE;
+   /* legacy-registry override only matters for native methods */
+   const char *lt = (conv == CONV_NATIVE && sel) ? seltypes_lookup(sel) : NULL;
+   if (lt) {
+      /* trust it only if the explicit-arg count matches the method's */
+      if (enc_nth_arg(lt, nargs - 2) != NULL ||
+          (nargs >= 3 && enc_nth_arg(lt, nargs - 3) == NULL)) {
+         lt = NULL;   /* arg-count mismatch: same name, different signature */
+      }
+   }
+   if (trace) {
+      fprintf(stderr, "[fma] m=%p nargs=%u conv=%s%s types=\"%s\"\n", (void *)m,
+              nargs, conv == CONV_I386 ? "i386" : "native",
+              lt ? "+registry" : "",
+              m ? method_getTypeEncoding(m) : "(null)");
+      fflush(stderr);
+   }
+   for (unsigned i = 2; i < nargs; ++i) {
+      char *rt_alloc = m ? method_copyArgumentType(m, i) : NULL;
+      const char *enc = rt_alloc;
+      int aconv = conv;
+      if (lt) {
+         const char *le = enc_nth_arg(lt, i - 2);
+         if (le) { enc = le; aconv = CONV_I386; }
+      }
+      if (!enc || !*enc) {                    /* no type info: raw GP slot */
+         mcur_put_gp(plan, cur, (uint64_t)args32[(*ai)++]);
+         free(rt_alloc);
+         continue;
+      }
+      unsigned ai_before = *ai;
+      marshal_arg_fwd(plan, cur, enc, aconv, args32, ai);
+      if (trace) {
+         fprintf(stderr, "[fma]   arg%u slots[%u..%u) t=\"%s\" conv=%s "
+                 "gp=%u xmm=%u stk=%zu\n",
+                 i - 2, ai_before, *ai, enc,
+                 aconv == CONV_I386 ? "i386" : "native",
+                 cur->gp, cur->xmm, cur->stk);
+         fflush(stderr);
+      }
+      free(rt_alloc);
    }
    return nargs;
 }
@@ -551,22 +1272,48 @@ static int format_cstr(uint64_t obj, char *buf, size_t buflen) {
 static unsigned fill_format_varargs(struct objc_call_plan *plan,
                                     const uint32_t *args32,
                                     unsigned ai, unsigned gp, unsigned gp_cap,
-                                    const char *fmt) {
+                                    const char *fmt, struct mcur *cur) {
    const int trace = getenv("OBJC_BRIDGE_TRACE") != NULL;
+   /* base slot/arg indices, for POSITIONAL specifiers (%N$conv): position N
+    * (1-based) maps to the Nth vararg, independent of textual order. Localized
+    * NSLocalizedString format strings use these heavily so translators can
+    * reorder args (e.g. @"%1$@'s Library"). */
+   const unsigned gp0 = gp, ai0 = ai;
+   unsigned max_gp = gp;            /* highest reg slot written + 1 */
    for (const char *p = fmt; *p; ++p) {
       if (*p != '%') { continue; }
       ++p;
       if (*p == '%' || *p == '\0') { continue; }     /* literal %% */
+      /* positional argument specifier "N$" (must come right after %). */
+      int pos = -1;
+      {
+         const char *q = p;
+         unsigned v = 0;
+         while (*q >= '0' && *q <= '9') { v = v * 10u + (unsigned)(*q - '0'); ++q; }
+         if (q != p && *q == '$') { pos = (int)v; p = q + 1; }
+      }
       /* flags */
       while (*p && strchr("-+ #0'", *p)) { ++p; }
-      /* width: digits or '*' (consumes an int arg) */
-      if (*p == '*') { if (gp < gp_cap) { plan_put(plan, gp++, (uint64_t)args32[ai]); } ai++; ++p; }
-      else { while (*p >= '0' && *p <= '9') { ++p; } }
+      /* width: digits or '*' (a non-positional '*' consumes an int arg) */
+      if (*p == '*') {
+         if (pos < 0) {
+            if (gp < gp_cap) { plan_put(plan, gp, (uint64_t)args32[ai]);
+                               if (gp + 1 > max_gp) { max_gp = gp + 1; } ++gp; }
+            ai++;
+         }
+         ++p;
+      } else { while (*p >= '0' && *p <= '9') { ++p; } }
       /* precision */
       if (*p == '.') {
          ++p;
-         if (*p == '*') { if (gp < gp_cap) { plan_put(plan, gp++, (uint64_t)args32[ai]); } ai++; ++p; }
-         else { while (*p >= '0' && *p <= '9') { ++p; } }
+         if (*p == '*') {
+            if (pos < 0) {
+               if (gp < gp_cap) { plan_put(plan, gp, (uint64_t)args32[ai]);
+                                  if (gp + 1 > max_gp) { max_gp = gp + 1; } ++gp; }
+               ai++;
+            }
+            ++p;
+         } else { while (*p >= '0' && *p <= '9') { ++p; } }
       }
       /* length modifiers; 64-bit only for ll/q/j (i386 long/size_t are 4 bytes) */
       int len64 = 0;
@@ -576,43 +1323,133 @@ static unsigned fill_format_varargs(struct objc_call_plan *plan,
       }
       char c = *p;
       if (c == '\0') { break; }
+      /* Destination reg slot + source arg index: positional uses N-1 from the
+       * base; sequential uses the running cursors. (i386 positional args are
+       * 4-byte slots — objects/ints/strings — so position N == slot N-1; 64-bit
+       * and FP positionals are rare in localized strings and not handled.) */
+      const unsigned tg = (pos > 0) ? (gp0 + (unsigned)(pos - 1)) : gp;
+      const unsigned ta = (pos > 0) ? (ai0 + (unsigned)(pos - 1)) : ai;
       switch (c) {
       case '@':
-         if (gp < gp_cap) { plan_put(plan, gp++, x64_objc_unwrap(args32[ai])); }
-         ai++;
+         if (tg < gp_cap) { plan_put(plan, tg, unwrap_obj_arg(args32[ta]));
+                            if (tg + 1 > max_gp) { max_gp = tg + 1; } }
          break;
       case 'd': case 'i': case 'u': case 'x': case 'X': case 'o': case 'c': case 'C':
-         if (len64) {
-            if (gp < gp_cap) {
-               plan_put(plan, gp++, (uint64_t)args32[ai] | ((uint64_t)args32[ai + 1] << 32));
+         if (len64 && pos < 0) {
+            if (tg < gp_cap) {
+               plan_put(plan, tg, (uint64_t)args32[ta] | ((uint64_t)args32[ta + 1] << 32));
+               if (tg + 1 > max_gp) { max_gp = tg + 1; }
             }
-            ai += 2;
          } else {
-            if (gp < gp_cap) { plan_put(plan, gp++, (uint64_t)args32[ai]); }
-            ai++;
+            if (tg < gp_cap) { plan_put(plan, tg, (uint64_t)args32[ta]);
+                               if (tg + 1 > max_gp) { max_gp = tg + 1; } }
          }
          break;
       case 's': case 'S': case 'p':
-         if (gp < gp_cap) { plan_put(plan, gp++, (uint64_t)args32[ai]); }
-         ai++;
+         if (tg < gp_cap) { plan_put(plan, tg, (uint64_t)args32[ta]);
+                            if (tg + 1 > max_gp) { max_gp = tg + 1; } }
          break;
       case 'f': case 'F': case 'e': case 'E': case 'g': case 'G': case 'a': case 'A':
-         /* default-promoted to double: 8 bytes on the i386 stack, belongs in an
-          * XMM reg on x86_64 — not modelled yet, so the value is dropped. */
-         if (trace) {
+         /* default-promoted to double: 8 bytes on the i386 stack -> next XMM
+          * slot (SysV varargs: GP and SSE sequences are independent; al
+          * carries the SSE count via plan->nxmm). */
+         if (pos >= 0) { break; }              /* positional FP: unsupported */
+         if (cur) {
+            uint64_t bits = (uint64_t)args32[ai] | ((uint64_t)args32[ai + 1] << 32);
+            mcur_put_xmm(plan, cur, bits);
+            plan->nxmm = cur->xmm;
+         } else if (trace) {
             fprintf(stderr, "[bp] WARN: format %%%c (float/double) not bridged to "
-                    "XMM; that conversion will print garbage\n", c);
+                    "XMM here; that conversion will print garbage\n", c);
             fflush(stderr);
          }
          ai += 2;
-         break;
+         continue;                  /* no GP slot consumed */
       default:
-         if (gp < gp_cap) { plan_put(plan, gp++, (uint64_t)args32[ai]); }
-         ai++;
+         if (tg < gp_cap) { plan_put(plan, tg, (uint64_t)args32[ta]);
+                            if (tg + 1 > max_gp) { max_gp = tg + 1; } }
          break;
       }
+      /* advance the running cursors only for sequential (non-positional) args */
+      if (pos < 0) {
+         ai += (len64 && c != '@' && c != 's' && c != 'S' && c != 'p') ? 2u : 1u;
+         ++gp;
+      }
    }
-   return gp;
+   return max_gp;
+}
+
+/* ---- Legacy AppKit alert panels (iPhoto 25th blocker) ----
+ * NSRunAlertPanel & friends are VARIADIC C functions, so abigen skips them
+ * and the translated binds went straight into native AppKit with arena
+ * handles in the NSString slots — native formatting then ran
+ * objc_msgSend(handle, ...) with the handle as receiver (the slot's 64-bit
+ * backing read as an isa). Hand shims: unwrap the five fixed NSString args,
+ * expand format + i386 varargs into a real NSString HERE (fill_format_varargs
+ * resolves %@/%N$@ handles), then call the native panel with an inert "%@".
+ * The natives are dlsym'd so libabiconv keeps not linking AppKit.
+ * i386 arg block: a[0]=title a[1]=msgFormat a[2]=defaultBtn a[3]=altBtn
+ * a[4]=otherBtn a[5...]=varargs (4-byte slots). */
+
+static id alert_format_message(uint32_t fmt32, const uint32_t *va32) {
+   uint64_t fmt = unwrap_obj_arg(fmt32);
+   if (!fmt) { return (id)CFSTR(""); }
+   char fmtbuf[2048];
+   if (!format_cstr(fmt, fmtbuf, sizeof fmtbuf) || !strchr(fmtbuf, '%')) {
+      return (id)(uintptr_t)fmt;          /* literal or unreadable: as-is */
+   }
+   struct objc_call_plan plan;
+   memset(&plan, 0, sizeof plan);
+   /* GP slots 0..2 = cls/sel/format of the stringWithFormat: call below */
+   fill_format_varargs(&plan, va32, /*ai=*/0, /*gp=*/3,
+                       /*gp_cap=*/6 + PLAN_STACK_MAX, fmtbuf, /*cur=*/NULL);
+   /* a true variadic prototype so the compiler zeroes al (no XMM varargs —
+    * fill_format_varargs drops float conversions, a known gap) */
+   id msg = ((id (*)(id, SEL, id, ...))objc_msgSend)(
+      (id)objc_getClass("NSString"), sel_registerName("stringWithFormat:"),
+      (id)(uintptr_t)fmt,
+      plan.reg[3], plan.reg[4], plan.reg[5],
+      plan.stack[0], plan.stack[1], plan.stack[2], plan.stack[3],
+      plan.stack[4], plan.stack[5], plan.stack[6], plan.stack[7]);
+   return msg ? msg : (id)(uintptr_t)fmt;
+}
+
+static uint32_t alert_panel_common(const char *fn_name, const uint32_t *a,
+                                   int returns_obj) {
+   void *fn = dlsym(RTLD_DEFAULT, fn_name);
+   id title = (id)(uintptr_t)unwrap_obj_arg(a[0]);
+   id msg   = alert_format_message(a[1], a + 5);
+   id def   = (id)(uintptr_t)unwrap_obj_arg(a[2]);
+   id alt   = (id)(uintptr_t)unwrap_obj_arg(a[3]);
+   id other = (id)(uintptr_t)unwrap_obj_arg(a[4]);
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[alert] %s%s title=%p def=%p alt=%p other=%p msg=%p\n",
+              fn_name, fn ? "" : " (MISSING)", (void *)title, (void *)def,
+              (void *)alt, (void *)other, (void *)msg);
+      fflush(stderr);
+   }
+   if (!fn) { return 0; }
+   if (returns_obj) {
+      id p = ((id (*)(id, id, id, id, id, ...))fn)(
+         title, (id)CFSTR("%@"), def, alt, other, msg);
+      return x64_objc_wrap((uint64_t)(uintptr_t)p);
+   }
+   long r = ((long (*)(id, id, id, id, id, ...))fn)(
+      title, (id)CFSTR("%@"), def, alt, other, msg);
+   return (uint32_t)r;
+}
+
+uint32_t shim_NSRunAlertPanel(const uint32_t *a) {
+   return alert_panel_common("NSRunAlertPanel", a, 0);
+}
+uint32_t shim_NSRunCriticalAlertPanel(const uint32_t *a) {
+   return alert_panel_common("NSRunCriticalAlertPanel", a, 0);
+}
+uint32_t shim_NSRunInformationalAlertPanel(const uint32_t *a) {
+   return alert_panel_common("NSRunInformationalAlertPanel", a, 0);
+}
+uint32_t shim_NSGetAlertPanel(const uint32_t *a) {
+   return alert_panel_common("NSGetAlertPanel", a, 1);
 }
 
 /*
@@ -631,86 +1468,503 @@ static unsigned fill_format_varargs(struct objc_call_plan *plan,
  *  arg_base_idx is the args32 index of the first explicit arg
  *  (corresponds to method-arg index 2).
  */
-static void fill_args_and_return(struct objc_call_plan *plan,
-                                 const uint32_t *args32,
-                                 unsigned arg_base_idx,
-                                 unsigned reg_base,
-                                 id real_self, SEL sel) {
+/* `lookup` is the class whose method table already holds the selector at the
+ * right level: object_getClass(receiver) for normal sends (instance → class,
+ * class → metaclass), the super class itself for super sends (prep_super has
+ * already metaclass-converted it for class-method super calls — passing it
+ * through object_getClass here would over-step to the metaclass and miss
+ * every instance method, leaving m=NULL → args unmarshalled, ret untyped). */
+static Method fill_args_and_return(struct objc_call_plan *plan,
+                                   const uint32_t *args32,
+                                   unsigned arg_base_idx,
+                                   unsigned reg_base,
+                                   Class lookup, SEL sel) {
    Method m = NULL;
-   if (real_self) {
-      Class lookup = object_getClass(real_self);
+   if (lookup) {
       m = class_getInstanceMethod(lookup, sel);
    }
 
-   const unsigned cap = 6 - reg_base + 2;     /* method-arg index cap */
-   unsigned nargs = fill_method_args(plan, args32, arg_base_idx,
-                                     reg_base, m, cap);
+   struct mcur cur = { reg_base, 0, 0 };
+   unsigned ai = arg_base_idx;
+   unsigned nargs = fill_method_args(plan, args32, &ai, m, sel, &cur);
 
    /* Varargs continuation. Foundation methods like initWithObjects: take
     * a nil-terminated id list past their fixed-arg count. The signature
     * doesn't model varargs so method_getNumberOfArguments stops at
     * firstObj; the next register would stay zero (== nil) and Foundation
     * would terminate the list early. Walk forward through args32 until
-    * nil sentinel or plan-register capacity. */
+    * nil sentinel or plan capacity. */
+   unsigned final_pos = (cur.gp < 6 && cur.stk == 0)
+      ? cur.gp : 6 + (unsigned)(cur.stk / 8);
    if (m && is_varargs_sel((const char *)sel)) {
       char fmtbuf[2048];
-      if (is_format_sel((const char *)sel) && nargs >= 3
-          && format_cstr(plan->reg[reg_base + (nargs - 3)], fmtbuf, sizeof fmtbuf)) {
-         /* Format-typed varargs: the last fixed arg (reg_base + nargs - 3) is
-          * the format NSString, already unwrapped by fill_method_args. Place
-          * the following args by conversion type, resolving %@ handles, spilling
-          * past the 6 GP regs onto the plan stack. */
-         unsigned gp_end = fill_format_varargs(plan, args32,
-                                               arg_base_idx + (nargs - 2),
-                                               reg_base + (nargs - 2),
-                                               /*gp_cap=*/6 + PLAN_STACK_MAX, fmtbuf);
-         nargs = (gp_end - reg_base) + 2;
+      /* the format NSString is the last fixed arg == last GP slot filled */
+      uint64_t fmt_slot = (cur.gp > reg_base && cur.gp <= 6)
+         ? plan->reg[cur.gp - 1] : 0;
+      if (is_format_sel((const char *)sel) && nargs >= 3 && fmt_slot
+          && format_cstr(fmt_slot, fmtbuf, sizeof fmtbuf)) {
+         /* Format-typed varargs: place the following args by conversion type,
+          * resolving %@ handles, spilling past the 6 GP regs onto the plan
+          * stack. FP conversions go to the xmm block (see fill_format_varargs). */
+         unsigned gp_end = fill_format_varargs(plan, args32, ai, final_pos,
+                                               /*gp_cap=*/6 + PLAN_STACK_MAX,
+                                               fmtbuf, &cur);
+         final_pos = gp_end;
       } else {
          /* nil-terminated id list (arrayWithObjects:, dictionaryWith...Keys:).
           * Walk forward placing each object (registers then stack) up to and
           * INCLUDING the nil terminator — when the explicit objects fill all 6
           * GP registers the terminator itself must still go out, in stack[0],
           * or Foundation reads uninitialized stack and retains garbage. */
-         unsigned i = nargs;
          const unsigned pos_cap = 6 + PLAN_STACK_MAX;
+         unsigned i386_i = ai, pos = final_pos;
          for (;;) {
-            unsigned pos = reg_base + (i - 2);
             if (pos >= pos_cap) { break; }
-            uint32_t a = args32[arg_base_idx + (i - 2)];
-            plan_put(plan, pos, x64_objc_unwrap(a));
-            ++i;
+            uint32_t a = args32[i386_i++];
+            plan_put(plan, pos++, unwrap_obj_arg(a));
             if (a == 0) { break; }        /* placed the nil terminator */
          }
-         nargs = i;
+         final_pos = pos;
       }
    }
 
+   plan->nreg   = (int32_t)(final_pos > 6 ? 6 : final_pos);
    {
-      unsigned total = reg_base + (nargs - 2);   /* SysV integer positions used */
-      plan->nreg   = (int32_t)(total > 6 ? 6 : total);
-      plan->nstack = (uint32_t)(total > 6 ? total - 6 : 0);
+      unsigned stk_q = (unsigned)(cur.stk / 8);
+      unsigned va_q  = final_pos > 6 ? final_pos - 6 : 0;
+      plan->nstack = stk_q > va_q ? stk_q : va_q;
    }
+   plan->nxmm = cur.xmm;
 
-   /* ret_is_obj is really a 3-way return-kind for the asm trampoline:
-    *   0 = scalar/struct (pass rax straight back, truncated to eax by caller)
+   /* ret_is_obj is really a return-KIND for the asm trampoline:
+    *   0 = scalar (pass rax straight back, truncated to eax by caller)
     *   1 = object/Class  (wrap the 64-bit id into a 32-bit arena handle)
-    *   2 = C-string      (bounce the 64-bit char* into a low-4GB buffer so the
-    *                      i386 caller gets a 32-bit pointer it can dereference;
-    *                      UTF8String / fileSystemRepresentation / etc.) */
+    *   2 = C-string      (bounce the 64-bit char* into a low-4GB buffer)
+    *   3 = stret narrow  (native MEMORY-class struct in plan->stret_buf ->
+    *                      narrowed into the i386 caller's buffer; set by the
+    *                      stret preps, never here)
+    *   4 = fp double     (native xmm0 double -> x87 st0 for the i386 caller)
+    *   5 = small struct  (native rax/rdx/xmm0/xmm1 -> narrowed 8-byte i386
+    *                      struct returned in eax:edx)
+    *   6 = reg-return struct into i386 stret buffer (set by stret preps)
+    *   7 = fp float      (native xmm0 single -> x87 st0) */
    char *rt = m ? method_copyReturnType(m) : NULL;
-   if (rt && (rt[0] == '@' || rt[0] == '#')) {
+   const int rconv = method_is_legacy(m) ? CONV_I386 : CONV_NATIVE;
+   char rb = rt ? *enc_skip_quals(rt) : 0;
+   if (rt && (rb == '@' || rb == '#')) {
       plan->ret_is_obj = 1;
-   } else if (rt && (rt[0] == '*' || (rt[0] == 'r' && rt[1] == '*'))) {
+   } else if (rt && rb == '*') {
       plan->ret_is_obj = 2;
+   } else if (enc_is_objptr_struct(rt)) {
+      plan->ret_is_obj = 1;          /* ^{Class=#...} object return -> wrap */
+   } else if (rb == 'd' || (rb == 'f' && rconv == CONV_I386)) {
+      /* CGFloat/double: the i386 caller dispatched via _fpret and reads st0.
+       * A legacy 'f' (CGFloat) return arrives as a double too (the reverse
+       * bridge widens st0 -> xmm0 double). */
+      plan->ret_is_obj = 4;
+   } else if (rb == 'f') {
+      plan->ret_is_obj = 7;          /* genuine float: xmm0 single -> st0 */
+   } else if (rb == '{' || rb == '(' || rb == '[') {
+      /* aggregate return through the NON-stret entry: i386 size <= 8 (else
+       * the caller would have used _stret), native <= 16 (register classes) */
+      size_t isz = 0, nsz = 0; uint8_t sse[8];
+      enc_classify(rt ? enc_skip_quals(rt) : "", rconv, &isz, &nsz, sse);
+      if (nsz > 0 && nsz <= 16 && isz <= 8) {
+         plan->ret_is_obj = 5;
+         plan->sret_enc  = method_getTypeEncoding(m);  /* stable runtime str */
+         plan->sret_conv = (uint32_t)rconv;
+      } else {
+         plan->ret_is_obj = 0;
+      }
    } else {
       plan->ret_is_obj = 0;
    }
    if (getenv("OBJC_BRIDGE_TRACE") && sel) {
-      fprintf(stderr, "[bp]   ret_kind=%d rt=\"%s\" sel=%s m=%p\n",
-              plan->ret_is_obj, rt ? rt : "(null)", sel_getName(sel), (void*)m);
+      fprintf(stderr, "[bp]   ret_kind=%d rt=\"%s\" sel=%s m=%p nxmm=%u nstk=%u\n",
+              plan->ret_is_obj, rt ? rt : "(null)", sel_getName(sel), (void*)m,
+              plan->nxmm, plan->nstack);
       fflush(stderr);
    }
    free(rt);
+   return m;
+}
+
+/* ===========================================================================
+ * Legacy-AppKit method compat.
+ *
+ * Old apps call (often via [super ...] from their own overrides) methods that
+ * were deprecated in 10.4/10.5 and have since been DELETED from modern AppKit,
+ * so both the forward bridge and the super-dispatch path resolve them to
+ * m=0x0 and the call silently no-ops. Reinstall them on the REAL system class
+ * with class_addMethod, re-implemented per the documented 10.x behavior and
+ * dispatching every step through objc_msgSend so subclass overrides still win.
+ *
+ * First instance (iPhoto 20th blocker): -[ArchiveDocController
+ * openUntitledDocumentOfType:display:] does [super openUntitledDocumentOfType:
+ * display:]; NSDocumentController no longer implements it, so no document is
+ * ever created, attemptedOpenUntitledDoc stays NO, and applicationDidFinish-
+ * Launching: re-arms itself via performSelector:afterDelay: forever — the app
+ * idles windowless.
+ *
+ * Installed lazily from the bridge entry points (the legacy app's first
+ * message send happens long after AppKit is loaded). Idempotent across the
+ * several co-located libabiconv copies: class_addMethod refuses duplicates.
+ * =========================================================================== */
+
+static id msg_id0(id r, SEL s) {
+   return ((id (*)(id, SEL))objc_msgSend)(r, s);
+}
+static id msg_id1(id r, SEL s, id a) {
+   return ((id (*)(id, SEL, id))objc_msgSend)(r, s, a);
+}
+
+/* 10.x: - (id)makeUntitledDocumentOfType:(NSString *)type */
+static id compat_makeUntitledDocumentOfType(id self, SEL _cmd, id type) {
+   (void)_cmd;
+   /* Prefer the modern replacement (still present, subclass override wins). */
+   SEL s_modern = sel_registerName("makeUntitledDocumentOfType:error:");
+   if (class_getInstanceMethod(object_getClass(self), s_modern)) {
+      id err = nil;
+      return ((id (*)(id, SEL, id, id *))objc_msgSend)(self, s_modern, type, &err);
+   }
+   /* Fallback: the documented 10.x implementation. */
+   Class cls = (Class)msg_id1(self, sel_registerName("documentClassForType:"), type);
+   if (!cls) return nil;
+   id doc = msg_id0(msg_id0((id)cls, sel_registerName("alloc")),
+                    sel_registerName("init"));
+   if (doc) msg_id1(doc, sel_registerName("setFileType:"), type);
+   return doc;
+}
+
+/* 10.x: - (id)openUntitledDocumentOfType:(NSString *)type display:(BOOL)flag */
+static id compat_openUntitledDocumentOfType_display(id self, SEL _cmd,
+                                                    id type, signed char display) {
+   (void)_cmd;
+   id doc = msg_id1(self, sel_registerName("makeUntitledDocumentOfType:"), type);
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[compat] openUntitledDocumentOfType:%p display:%d -> doc=%p\n",
+              (void *)type, (int)display, (void *)doc);
+      fflush(stderr);
+   }
+   if (!doc) return nil;
+   msg_id1(self, sel_registerName("addDocument:"), doc);
+   if (display) {
+      msg_id0(doc, sel_registerName("makeWindowControllers"));
+      msg_id0(doc, sel_registerName("showWindows"));
+   }
+   return doc;
+}
+
+/* ---- NSColor component getters (iPhoto 24th blocker) ----
+ * Modern AppKit RAISES NSInvalidArgumentException from getRed:green:blue:
+ * alpha: (and family) when the receiver is an extended-sRGB / HDR / catalog
+ * system color; 10.6 answered for anything RGB-convertible. Swizzle the
+ * originals to pre-convert the receiver via colorUsingColorSpace: into the
+ * method's natural space, then run the original IMP on the converted color.
+ *
+ * Same call, second gap: i386 CGFloat is a 4-byte FLOAT. A legacy caller's
+ * out-pointers are 4-byte slots — the native double writes would both feed
+ * the caller garbage and overrun its stack. Legacy pointers are always
+ * < 4GB (i386 stacks/heaps live there by construction; native stack/heap
+ * out-params never do), so low out-pointers select a narrow-to-float path
+ * through a local double buffer. */
+
+static id compat_color_convert(id c, const char *space_sel) {
+   Class nscs = objc_getClass("NSColorSpace");
+   if (!nscs) { return c; }
+   id space = ((id (*)(Class, SEL))objc_msgSend)(
+      nscs, sel_registerName(space_sel));
+   if (!space) { return c; }
+   id conv = ((id (*)(id, SEL, id))objc_msgSend)(
+      c, sel_registerName("colorUsingColorSpace:"), space);
+   return conv ? conv : c;
+}
+
+typedef void (*color_get2_t)(id, SEL, double *, double *);
+typedef void (*color_get4_t)(id, SEL, double *, double *, double *, double *);
+typedef void (*color_get5_t)(id, SEL, double *, double *, double *, double *,
+                             double *);
+
+/* The raising implementations live on CONCRETE NSColor subclasses
+ * (NSColorSpaceColor for the extended-sRGB/HDR system colors,
+ * _NSTaggedPointerColor, NSCalibratedRGBColor) — a base-class swizzle never
+ * runs for them. Swizzle every NSColor-family class that implements the
+ * getter, keeping each class's original IMP in a small table searched up the
+ * superclass chain at call time. */
+#define COLOR_SWZ_SELS 4
+#define COLOR_SWZ_MAX  24
+struct color_orig_ent { Class cls; IMP imp; };
+static struct color_orig_ent g_color_orig[COLOR_SWZ_SELS][COLOR_SWZ_MAX];
+
+static IMP color_orig_lookup(unsigned sidx, Class cls) {
+   for (Class c = cls; c; c = class_getSuperclass(c)) {
+      for (unsigned i = 0;
+           i < COLOR_SWZ_MAX && g_color_orig[sidx][i].cls; ++i) {
+         if (g_color_orig[sidx][i].cls == c) {
+            return g_color_orig[sidx][i].imp;
+         }
+      }
+   }
+   return NULL;
+}
+
+/* Re-dispatch depth guard: colorUsingColorSpace: normally returns self once
+ * the receiver is already in the target space, but never trust that for
+ * termination — past depth 2 call the original directly. */
+static __thread int g_color_depth;
+
+/* Returns 1 if any out-pointer is a legacy (<4GB) slot needing float width. */
+static int color_outs_legacy(double *const *outs, unsigned n) {
+   for (unsigned i = 0; i < n; ++i) {
+      if (outs[i] && (uintptr_t)outs[i] < 0x100000000UL) { return 1; }
+   }
+   return 0;
+}
+static void color_narrow_outs(double *const *outs, const double *buf,
+                              unsigned n) {
+   for (unsigned i = 0; i < n; ++i) {
+      if (outs[i]) { *(float *)outs[i] = (float)buf[i]; }
+   }
+}
+
+/* Common driver for the 4-out-pointer getters (RGBA / HSBA). */
+static void color_get4_common(unsigned sidx, const char *space_sel, id self,
+                              SEL _cmd, double *o0, double *o1, double *o2,
+                              double *o3) {
+   id conv = compat_color_convert(self, space_sel);
+   if (conv != self && g_color_depth < 2) {
+      ++g_color_depth;
+      ((color_get4_t)objc_msgSend)(conv, _cmd, o0, o1, o2, o3);
+      --g_color_depth;
+      return;
+   }
+   id tgt = (conv != self) ? conv : self;
+   IMP orig = color_orig_lookup(sidx, object_getClass(tgt));
+   double *outs[4] = { o0, o1, o2, o3 };
+   if (!orig) {                      /* no original anywhere: benign zeros */
+      double zeros[4] = { 0, 0, 0, 1 };
+      color_narrow_outs(outs, zeros, 4);
+      return;
+   }
+   if (!color_outs_legacy(outs, 4)) {
+      ((color_get4_t)orig)(tgt, _cmd, o0, o1, o2, o3);
+      return;
+   }
+   double buf[4] = { 0, 0, 0, 1 };
+   ((color_get4_t)orig)(tgt, _cmd, &buf[0], &buf[1], &buf[2], &buf[3]);
+   color_narrow_outs(outs, buf, 4);
+}
+
+static void compat_getRGBA(id self, SEL _cmd, double *r, double *g,
+                           double *b, double *a) {
+   color_get4_common(0, "sRGBColorSpace", self, _cmd, r, g, b, a);
+}
+
+static void compat_getHSBA(id self, SEL _cmd, double *h, double *s,
+                           double *b, double *a) {
+   color_get4_common(1, "sRGBColorSpace", self, _cmd, h, s, b, a);
+}
+
+static void compat_getWA(id self, SEL _cmd, double *w, double *a) {
+   id conv = compat_color_convert(self, "genericGamma22GrayColorSpace");
+   if (conv != self && g_color_depth < 2) {
+      ++g_color_depth;
+      ((color_get2_t)objc_msgSend)(conv, _cmd, w, a);
+      --g_color_depth;
+      return;
+   }
+   id tgt = (conv != self) ? conv : self;
+   IMP orig = color_orig_lookup(2, object_getClass(tgt));
+   double *outs[2] = { w, a };
+   if (!orig) {
+      double zeros[2] = { 0, 1 };
+      color_narrow_outs(outs, zeros, 2);
+      return;
+   }
+   if (!color_outs_legacy(outs, 2)) {
+      ((color_get2_t)orig)(tgt, _cmd, w, a);
+      return;
+   }
+   double buf[2] = { 0, 1 };
+   ((color_get2_t)orig)(tgt, _cmd, &buf[0], &buf[1]);
+   color_narrow_outs(outs, buf, 2);
+}
+
+static void compat_getCMYKA(id self, SEL _cmd, double *c, double *m,
+                            double *y, double *k, double *a) {
+   id conv = compat_color_convert(self, "genericCMYKColorSpace");
+   if (conv != self && g_color_depth < 2) {
+      ++g_color_depth;
+      ((color_get5_t)objc_msgSend)(conv, _cmd, c, m, y, k, a);
+      --g_color_depth;
+      return;
+   }
+   id tgt = (conv != self) ? conv : self;
+   IMP orig = color_orig_lookup(3, object_getClass(tgt));
+   double *outs[5] = { c, m, y, k, a };
+   if (!orig) {
+      double zeros[5] = { 0, 0, 0, 0, 1 };
+      color_narrow_outs(outs, zeros, 5);
+      return;
+   }
+   if (!color_outs_legacy(outs, 5)) {
+      ((color_get5_t)orig)(tgt, _cmd, c, m, y, k, a);
+      return;
+   }
+   double buf[5] = { 0, 0, 0, 0, 1 };
+   ((color_get5_t)orig)(tgt, _cmd, &buf[0], &buf[1], &buf[2], &buf[3],
+                        &buf[4]);
+   color_narrow_outs(outs, buf, 5);
+}
+
+static const struct { const char *sel; IMP imp; } g_color_swz[COLOR_SWZ_SELS] = {
+   { "getRed:green:blue:alpha:",            (IMP)compat_getRGBA  },
+   { "getHue:saturation:brightness:alpha:", (IMP)compat_getHSBA  },
+   { "getWhite:alpha:",                     (IMP)compat_getWA    },
+   { "getCyan:magenta:yellow:black:alpha:", (IMP)compat_getCMYKA },
+};
+static int g_color_installed;
+
+/* ProKit (bundled 2010 pro-apps framework, runs NATIVE) installs its OWN
+ * NSColor getter replacement (getRGBAImp) during theme init — AFTER our
+ * install — whose __raiseColorSpaceException fires for every post-2010
+ * colorspace, killing modern AppKit/SwiftUI menu rendering on the extended-
+ * sRGB accent color. Re-take any slot somebody replaced; the first-captured
+ * AppKit originals stay our fallback. Called from the reverse-bridge prep
+ * (every UI event passes through the legacy sendEvent: override, so a
+ * re-swizzle never survives to the next draw). */
+static void color_sweep(void);
+
+static void appkit_color_compat_reassert(void) {
+   if (!g_color_installed) { return; }
+   for (unsigned si = 0; si < COLOR_SWZ_SELS; ++si) {
+      SEL s = sel_registerName(g_color_swz[si].sel);
+      for (unsigned i = 0;
+           i < COLOR_SWZ_MAX && g_color_orig[si][i].cls; ++i) {
+         Method m = class_getInstanceMethod(g_color_orig[si][i].cls, s);
+         if (m && method_getImplementation(m) != g_color_swz[si].imp) {
+            method_setImplementation(m, g_color_swz[si].imp);
+         }
+      }
+   }
+   /* New images can register NSColor subclasses that inherit a stealable
+    * slot (ProKit). Re-sweep only when the image count moves — the sweep
+    * itself (objc_copyClassList) is far too heavy for every reverse entry. */
+   static uint32_t s_last_imgcount;
+   uint32_t ic = _dyld_image_count();
+   if (ic != s_last_imgcount) {
+      s_last_imgcount = ic;
+      color_sweep();
+   }
+}
+
+/* One pass over every NSColor-family class, idempotent so it can re-run when
+ * new images load (ProKit registers its own color classes long after our
+ * install):
+ *   - a class that DECLARES a getter gets swizzled (original captured once);
+ *   - a class that INHERITS it gets its OWN entry via class_addMethod. This
+ *     is the ProKit-race fix: ProKit steals the BASE NSColor Method during
+ *     native theme init, mid-event, where no reverse-bridge entry (and thus
+ *     no reassert) can run before the next draw — but a stolen base slot is
+ *     unreachable when every subclass resolves to its own entry. */
+static void color_sweep(void) {
+   Class base = objc_getClass("NSColor");
+   if (!base) { return; }                 /* AppKit not loaded yet: retry */
+
+   unsigned n = 0;
+   Class *all = objc_copyClassList(&n);
+   unsigned swizzled = 0, added = 0;
+   for (unsigned ci = 0; ci < n + 1; ++ci) {
+      Class c = (ci == n) ? base : all[ci];   /* subclasses + NSColor itself */
+      if (c != base) {
+         Class sup = c;
+         int is_color = 0;
+         while ((sup = class_getSuperclass(sup)) != NULL) {
+            if (sup == base) { is_color = 1; break; }
+         }
+         if (!is_color) { continue; }
+      }
+      for (unsigned si = 0; si < COLOR_SWZ_SELS; ++si) {
+         SEL s = sel_registerName(g_color_swz[si].sel);
+         Method m = class_getInstanceMethod(c, s);
+         if (!m) { continue; }
+         /* same method_t up the chain == inherited, not declared here */
+         Method sm = (c == base) ? NULL
+                     : class_getInstanceMethod(class_getSuperclass(c), s);
+         if (sm == m) {
+            if (class_addMethod(c, s, g_color_swz[si].imp,
+                                method_getTypeEncoding(m))) { ++added; }
+            continue;
+         }
+         IMP cur = method_getImplementation(m);
+         if (cur == g_color_swz[si].imp) { continue; }      /* already ours */
+         unsigned slot = 0;
+         int known = 0;
+         while (slot < COLOR_SWZ_MAX && g_color_orig[si][slot].cls) {
+            if (g_color_orig[si][slot].cls == c) { known = 1; break; }
+            ++slot;
+         }
+         if (!known) {
+            if (slot >= COLOR_SWZ_MAX) { continue; }
+            g_color_orig[si][slot].cls = c;
+            g_color_orig[si][slot].imp = cur;
+         }
+         method_setImplementation(m, g_color_swz[si].imp);
+         ++swizzled;
+      }
+   }
+   free(all);
+   if ((swizzled || added) && getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[compat] NSColor getters: %u swizzled, %u own-entry "
+              "added\n", swizzled, added);
+      fflush(stderr);
+   }
+}
+
+static void appkit_color_compat_install(void) {
+   /* Once per PROCESS, not per libabiconv copy: a second copy would capture
+    * the first copy's compat IMP as "original" and chain through it (correct
+    * but wasteful). Same env-flag pattern as OBJC_CTRL_ENV. */
+   if (getenv("ABICONV_NSCOLOR_COMPAT")) { return; }
+   if (!objc_getClass("NSColor")) { return; }   /* AppKit not loaded: retry */
+   setenv("ABICONV_NSCOLOR_COMPAT", "1", 1);
+   color_sweep();
+   g_color_installed = 1;
+}
+
+static const struct {
+   const char *cls;
+   const char *sel;
+   IMP         imp;
+   const char *types;          /* x86_64 encoding */
+} g_appkit_compat[] = {
+   { "NSDocumentController", "makeUntitledDocumentOfType:",
+     (IMP)compat_makeUntitledDocumentOfType, "@24@0:8@16" },
+   { "NSDocumentController", "openUntitledDocumentOfType:display:",
+     (IMP)compat_openUntitledDocumentOfType_display, "@28@0:8@16c24" },
+};
+
+static void appkit_compat_install(void) {
+   static int done = 0;
+   if (done) return;
+   const unsigned n = sizeof(g_appkit_compat) / sizeof(g_appkit_compat[0]);
+   unsigned installed = 0;
+   for (unsigned i = 0; i < n; ++i) {
+      Class c = objc_getClass(g_appkit_compat[i].cls);
+      if (!c) continue;                    /* framework not loaded yet: retry */
+      SEL s = sel_registerName(g_appkit_compat[i].sel);
+      if (class_getInstanceMethod(c, s) ||  /* still exists / already added */
+          class_addMethod(c, s, g_appkit_compat[i].imp, g_appkit_compat[i].types)) {
+         ++installed;
+      }
+   }
+   appkit_color_compat_install();
+   if (installed == n) done = 1;
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[compat] appkit legacy methods installed %u/%u\n",
+              installed, n);
+      fflush(stderr);
+   }
 }
 
 /*
@@ -746,9 +2000,11 @@ static void fill_args_and_return(struct objc_call_plan *plan,
  */
 void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
+   appkit_compat_install();
 
    if (getenv("OBJC_BRIDGE_TRACE")) {
-      fprintf(stderr, "[bp] entry: self32=0x%08x cmd32=0x%08x args[2..5]=0x%08x 0x%08x 0x%08x 0x%08x arena=[0x%lx..0x%lx)\n",
+      fprintf(stderr, "[bp] entry: t=%x self32=0x%08x cmd32=0x%08x args[2..5]=0x%08x 0x%08x 0x%08x 0x%08x arena=[0x%lx..0x%lx)\n",
+              pthread_mach_thread_np(pthread_self()),
               args32[0], args32[1], args32[2], args32[3], args32[4], args32[5],
               (unsigned long)g_arena_base, (unsigned long)g_arena_end);
       fflush(stderr);
@@ -811,7 +2067,7 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    plan->reg[2] = plan->reg[3] = plan->reg[4] = plan->reg[5] = 0;
 
    fill_args_and_return(plan, args32, /*arg_base_idx=*/2, /*reg_base=*/2,
-                        real_self, sel);
+                        real_self ? object_getClass(real_self) : NULL, sel);
 }
 
 /*
@@ -824,6 +2080,62 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
  *   args32[2] = _cmd
  *   args32[3..] = explicit args
  */
+/* Shared stret-return planning: given the resolved method, decide how the
+ * struct return travels and configure the plan. Returns the reg_base for the
+ * explicit args (3 = stret form with hidden ptr in reg[0], 2 = native
+ * register-return form), and writes reg[0] when it owns it.
+ *   - layouts identical (isz==nsz) or unknown method: pass the i386 buffer
+ *     raw (today's behavior), kind 0.
+ *   - native MEMORY (>16B): hidden ptr = plan->stret_buf; kind 3 narrows it
+ *     into the i386 buffer after the call.
+ *   - native register-return (<=16B) while the i386 side used stret: the
+ *     native callee takes NO hidden pointer — shift the layout down one and
+ *     dispatch through the NON-stret msgSend variant (plan->target); kind 6
+ *     materializes rax/rdx/xmm0/xmm1 into the i386 buffer. */
+static unsigned plan_stret_return(struct objc_call_plan *plan, Method m,
+                                  uint32_t retbuf32, uint64_t plain_target) {
+   plan->target = 0;
+   char *rt = m ? method_copyReturnType(m) : NULL;
+   const int rconv = method_is_legacy(m) ? CONV_I386 : CONV_NATIVE;
+   char rb = rt ? *enc_skip_quals(rt) : 0;
+   size_t isz = 0, nsz = 0; uint8_t sse[8];
+   int have = 0;
+   if (rb == '{' || rb == '(' || rb == '[') {
+      enc_classify(enc_skip_quals(rt), rconv, &isz, &nsz, sse);
+      have = nsz > 0;
+   }
+   free(rt);
+   if (!have || isz == nsz) {
+      plan->reg[0] = (uint64_t)retbuf32;       /* raw passthrough */
+      plan->ret_is_obj = 0;
+      return 3;
+   }
+   if (nsz > 16) {
+      if (nsz > PLAN_STRET_MAX) {
+         if (getenv("OBJC_BRIDGE_TRACE")) {
+            fprintf(stderr, "[bp] WARN: stret %zuB exceeds bounce buffer; "
+                    "passing i386 buffer raw\n", nsz);
+         }
+         plan->reg[0] = (uint64_t)retbuf32;
+         plan->ret_is_obj = 0;
+         return 3;
+      }
+      plan->reg[0]   = (uint64_t)(uintptr_t)plan->stret_buf;
+      plan->ret_is_obj = 3;
+      plan->sret_dst32 = retbuf32;
+      plan->sret_enc   = m ? method_getTypeEncoding(m) : NULL;
+      plan->sret_conv  = (uint32_t)rconv;
+      return 3;
+   }
+   /* native register-return form */
+   plan->target     = plain_target;
+   plan->ret_is_obj = 6;
+   plan->sret_dst32 = retbuf32;
+   plan->sret_enc   = m ? method_getTypeEncoding(m) : NULL;
+   plan->sret_conv  = (uint32_t)rconv;
+   return 2;
+}
+
 void objc_bridge_prep_stret(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
 
@@ -839,15 +2151,21 @@ void objc_bridge_prep_stret(struct objc_call_plan *plan, const uint32_t *args32)
       trace_args("stret", cls_name, sel, args32);
    }
 
-   plan->reg[0] = (uint64_t)args32[0];
-   plan->reg[1] = (uint64_t)real_self;
-   plan->reg[2] = (uint64_t)sel;
-   plan->reg[3] = plan->reg[4] = plan->reg[5] = 0;
+   Class lookup = real_self ? object_getClass(real_self) : NULL;
+   Method m = lookup ? class_getInstanceMethod(lookup, sel) : NULL;
+   unsigned reg_base = plan_stret_return(plan, m, args32[0],
+                                         (uint64_t)(uintptr_t)objc_msgSend);
+   const int kind = plan->ret_is_obj;
 
-   fill_args_and_return(plan, args32, /*arg_base_idx=*/3, /*reg_base=*/3,
-                        real_self, sel);
-   /* The return is a struct via retbuf — never an object handle. */
-   plan->ret_is_obj = 0;
+   plan->reg[reg_base - 2] = (uint64_t)real_self;
+   plan->reg[reg_base - 1] = (uint64_t)sel;
+   for (unsigned k = reg_base; k < 6; ++k) { plan->reg[k] = 0; }
+
+   fill_args_and_return(plan, args32, /*arg_base_idx=*/3, reg_base,
+                        lookup, sel);
+   /* fill computed a kind for the encoding as if this were a plain send;
+    * the stret decision above owns the return. */
+   plan->ret_is_obj = kind;
 }
 
 /* Defined with the reverse-bridge machinery below; lets a legacy [super sel]
@@ -866,6 +2184,7 @@ static void reverse_note_super(id recv, SEL sel, Class super_lookup);
  */
 void objc_bridge_prep_super(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
+   appkit_compat_install();
 
    const struct objc_super_i386 *super_i386 =
       (const struct objc_super_i386 *)(uintptr_t)args32[0];
@@ -915,10 +2234,14 @@ void objc_bridge_prep_super(struct objc_call_plan *plan, const uint32_t *args32)
    plan->reg[2] = plan->reg[3] = plan->reg[4] = plan->reg[5] = 0;
 
    /* For arg-type introspection: look up the method on the SUPER class,
-    * not the receiver's class (the call goes to super's IMP). */
-   id type_lookup = real_receiver;
-   if (plan->super.super_class) {
-      type_lookup = (id)plan->super.super_class;
+    * not the receiver's class (the call goes to super's IMP). super_class is
+    * already the right lookup table — metaclass-converted above for class
+    * methods, the plain class for instance methods — so pass it AS the
+    * lookup class (object_getClass here would land on the metaclass and
+    * miss every instance method). */
+   Class type_lookup = plan->super.super_class;
+   if (!type_lookup && real_receiver) {
+      type_lookup = object_getClass(real_receiver);
    }
    fill_args_and_return(plan, args32, /*arg_base_idx=*/2, /*reg_base=*/2,
                         type_lookup, sel);
@@ -959,18 +2282,70 @@ void objc_bridge_prep_super_stret(struct objc_call_plan *plan,
       trace_args("super_stret", cls_name, sel, args32);
    }
 
-   plan->reg[0] = (uint64_t)args32[0];
-   plan->reg[1] = (uint64_t)(uintptr_t)&plan->super;
-   plan->reg[2] = (uint64_t)sel;
-   plan->reg[3] = plan->reg[4] = plan->reg[5] = 0;
-
-   id type_lookup = real_receiver;
-   if (plan->super.super_class) {
-      type_lookup = (id)plan->super.super_class;
+   /* See objc_bridge_prep_super: super_class IS the lookup class. */
+   Class type_lookup = plan->super.super_class;
+   if (!type_lookup && real_receiver) {
+      type_lookup = object_getClass(real_receiver);
    }
-   fill_args_and_return(plan, args32, /*arg_base_idx=*/3, /*reg_base=*/3,
+   Method m = type_lookup ? class_getInstanceMethod(type_lookup, sel) : NULL;
+   unsigned reg_base = plan_stret_return(plan, m, args32[0],
+                                         (uint64_t)(uintptr_t)objc_msgSendSuper);
+   const int kind = plan->ret_is_obj;
+
+   plan->reg[reg_base - 2] = (uint64_t)(uintptr_t)&plan->super;
+   plan->reg[reg_base - 1] = (uint64_t)sel;
+   for (unsigned k = reg_base; k < 6; ++k) { plan->reg[k] = 0; }
+
+   fill_args_and_return(plan, args32, /*arg_base_idx=*/3, reg_base,
                         type_lookup, sel);
-   plan->ret_is_obj = 0;
+   plan->ret_is_obj = kind;
+}
+
+/* Post-call return finisher for the struct-return kinds (3/5/6). Called from
+ * objc_msgSend.asm with the call's rax/rdx in the integer params and xmm0/xmm1
+ * (still live from the callee) bound to the double params. Returns the i386
+ * eax:edx pair as a __int128 (lo -> rax, hi -> rdx). */
+unsigned __int128 objc_bridge_ret_finish(struct objc_call_plan *plan,
+                                         uint64_t vrax, uint64_t vrdx,
+                                         double x0, double x1) {
+   const int kind = plan->ret_is_obj;
+   if (kind == 3) {
+      /* native MEMORY struct in stret_buf -> narrow into the i386 buffer;
+       * i386 stret returns the buffer address in eax */
+      if (plan->sret_dst32 && plan->sret_enc) {
+         enc_narrow(enc_skip_quals(plan->sret_enc), (int)plan->sret_conv,
+                    plan->stret_buf, (uint8_t *)(uintptr_t)plan->sret_dst32);
+      }
+      return (unsigned __int128)plan->sret_dst32;
+   }
+   if (kind == 5 || kind == 6) {
+      /* materialize the register-returned native aggregate, then narrow */
+      const char *enc = plan->sret_enc ? enc_skip_quals(plan->sret_enc) : NULL;
+      if (!enc) { return (unsigned __int128)vrax; }
+      uint8_t nat[16] = {0};
+      size_t isz = 0, nsz = 0; uint8_t sse[8] = {0};
+      unsigned nebs = enc_classify(enc, (int)plan->sret_conv, &isz, &nsz, sse);
+      unsigned ii = 0, fi = 0;
+      for (unsigned k = 0; k < nebs && k < 2; ++k) {
+         uint64_t eb;
+         if (sse[k]) { double d = fi++ ? x1 : x0; memcpy(&eb, &d, 8); }
+         else        { eb = ii++ ? vrdx : vrax; }
+         memcpy(nat + 8*k, &eb, 8);
+      }
+      if (kind == 6) {
+         if (plan->sret_dst32) {
+            enc_narrow(enc, (int)plan->sret_conv, nat,
+                       (uint8_t *)(uintptr_t)plan->sret_dst32);
+         }
+         return (unsigned __int128)plan->sret_dst32;
+      }
+      uint8_t out[8] = {0};                    /* i386 <=8B struct: eax:edx */
+      enc_narrow(enc, (int)plan->sret_conv, nat, out);
+      uint32_t lo, hi;
+      memcpy(&lo, out, 4); memcpy(&hi, out + 4, 4);
+      return ((unsigned __int128)hi << 64) | lo;
+   }
+   return (unsigned __int128)vrax;
 }
 
 /* ---------------------------------------------------------------------
@@ -1204,7 +2579,12 @@ static uint64_t find_method_in_lists(uint32_t methodLists, const char *sel_name)
    if (w[0] == 0 && cnt > 0 && cnt < 100000) {
       return scan_one_list(methodLists, sel_name);   /* direct single list */
    }
-   for (size_t k = 0; k < 4096 && w[k] != 0 && w[k] != 0xFFFFFFFFu; ++k) {
+   /* per-element guard: only the first 8 bytes were range-checked above,
+    * and the (unterminated-junk) array can run off its mapping */
+   for (size_t k = 0;
+        k < 4096 && ptr_ok((uint32_t)(methodLists + 4 * k), 4)
+           && w[k] != 0 && w[k] != 0xFFFFFFFFu;
+        ++k) {
       uint64_t imp = scan_one_list(w[k], sel_name);  /* array of list ptrs */
       if (imp) { return imp; }
    }
@@ -1405,12 +2785,26 @@ struct reverse_plan {
    uint64_t legacy_imp;
    uint64_t lowstack_top;
    uint64_t lowstack_base;
-   int32_t  ret_kind;        /* 0 scalar, 1 object(unwrap), 2 void */
+   int32_t  ret_kind;        /* 0 scalar, 1 object(unwrap), 2 void, 3 stret,
+                              * 4 fp (st0 -> fp_out[0] -> xmm0),
+                              * 6 small struct (eax:edx or i386 hidden buf ->
+                              *   widened to rax/rdx/xmm0/xmm1) */
    uint32_t frame_words;
    uint32_t frame[64];
+   /* stret (ret_kind 3): the i386 IMP wrote the struct (i386 layout, hidden-
+    * pointer convention) at stret_src on the lowstack; reverse_ret widens it
+    * field-by-field into the native caller's buffer stret_dst. Kind 6 with
+    * isz>8 reuses stret_src as the source. The asm reads only fp_out (+312:
+    * st0 bank-in at %%back, native xmm0:xmm1 loads at %%out). */
+   uint64_t    stret_dst;    /* +288 */
+   uint32_t    stret_src;    /* +296 */
+   uint32_t    _pad;
+   const char *stret_types;  /* +304 legacy method encoding (ret type first) */
+   uint64_t    fp_out[2];    /* +312 */
 };
 
-extern void _86x64_reverse_imp(void);   /* objc_reverse.asm */
+extern void _86x64_reverse_imp(void);        /* objc_reverse.asm */
+extern void _86x64_reverse_imp_stret(void);  /* objc_reverse.asm */
 
 /* ---- (lookup_class, sel) -> legacy method map. lookup_class is
  * object_getClass(self): the registered class for instance methods, its
@@ -1550,12 +2944,21 @@ static int is_shadow(uint32_t s) {
    if (!g_ctrl || !s) { return 0; }
    return (uint64_t)s >= g_ctrl->shadow_base + 8 && (uint64_t)s < g_ctrl->shadow_cur;
 }
+/* Stable associated-object key shared across all libabiconv copies: g_ctrl is
+ * the same pointer in every copy (published via env, adopted by address), so
+ * its address is a process-stable, collision-free key. Lets a shadow attached
+ * by the forward arg-bridge (any copy) be found by get_or_create_shadow (the
+ * registering copy). */
+static const void *shadow_assoc_key(void) { return (const void *)g_ctrl; }
+
 static id shadow_real(uint32_t s) {
-   return is_shadow(s) ? *(id *)((uintptr_t)s - 8) : (id)0;
+   if (is_shadow(s)) { return *(id *)((uintptr_t)s - 8); }
+   /* A raw legacy i386 instance we've already paired with a real modern R'. */
+   return lpair_lookup(s);
 }
 static uint32_t get_or_create_shadow(id real, Class cls) {
-   static char assoc_key;
-   uint32_t s = (uint32_t)(uintptr_t)objc_getAssociatedObject(real, &assoc_key);
+   const void *assoc_key = shadow_assoc_key();
+   uint32_t s = (uint32_t)(uintptr_t)objc_getAssociatedObject(real, assoc_key);
    if (s) { return s; }
    shadow_arena_init();
    if (!g_ctrl || !g_ctrl->shadow_base) { return 0; }
@@ -1572,7 +2975,7 @@ static uint32_t get_or_create_shadow(id real, Class cls) {
    memset((void *)s2, 0, isz);
    *(uint32_t *)s2 = isa;          /* i386 object's isa slot */
    s = (uint32_t)s2;
-   objc_setAssociatedObject(real, &assoc_key, (id)(uintptr_t)s,
+   objc_setAssociatedObject(real, assoc_key, (id)(uintptr_t)s,
                             OBJC_ASSOCIATION_ASSIGN);
    return s;
 }
@@ -1580,6 +2983,154 @@ static uint32_t get_or_create_shadow(id real, Class cls) {
 /* Public: map a shadow self32 back to its real object (forward bridge). 0 if
  * not a shadow. */
 id _86x64_shadow_real(uint32_t s) { return shadow_real(s); }
+
+/* ---------------------------------------------------------------------------
+ * Legacy i386 object -> real modern object bridge (14th iPhoto blocker).
+ *
+ * When translated i386 code hands one of its OWN ObjC objects BY VALUE to a
+ * real Foundation/AppKit method (e.g. -[NSMutableDictionary setObject:forKey:]
+ * with an instance of an iPhoto legacy class, or storing a Class object), the
+ * raw i386 pointer reaches the x86_64 runtime, which derefs the object's 4-byte
+ * legacy isa as an 8-byte modern isa and crashes in objc_retain. The forward
+ * arg marshaller previously only knew arena proxy handles and R/S shadows, so a
+ * raw legacy pointer passed straight through.
+ *
+ * Fix: recognize a raw legacy object/class arg and substitute the real modern
+ * object the framework can safely retain/message:
+ *   - a legacy CLASS object -> the registered modern Class (objc_getClass).
+ *   - a legacy INSTANCE     -> a paired modern instance R' of the registered
+ *                              class, with the original i386 object as R''s i386
+ *                              shadow, so any legacy method the framework later
+ *                              sends to R' runs against the real i386 ivar data
+ *                              via the reverse bridge.
+ * ------------------------------------------------------------------------- */
+#define LCLS_CLASS 0x1u
+#define LCLS_META  0x2u
+
+static uint32_t lpair_hash(uint32_t p) {
+   return (p * 2654435761u) & (LPAIR_CAP - 1);
+}
+static id lpair_lookup(uint32_t p) {
+   if (!g_ctrl || !g_ctrl->lpair || !p) { return (id)0; }
+   struct lpair_ent *t = (struct lpair_ent *)(uintptr_t)g_ctrl->lpair;
+   uint32_t i = lpair_hash(p);
+   for (uint32_t n = 0; n < LPAIR_CAP; ++n) {
+      if (t[i].p == 0) { return (id)0; }
+      if (t[i].p == p) { return (id)(uintptr_t)t[i].real; }
+      i = (i + 1) & (LPAIR_CAP - 1);
+   }
+   return (id)0;
+}
+static void lpair_insert(uint32_t p, id real) {
+   if (!g_ctrl || !g_ctrl->lpair || !p) { return; }
+   struct lpair_ent *t = (struct lpair_ent *)(uintptr_t)g_ctrl->lpair;
+   uint32_t i = lpair_hash(p);
+   for (uint32_t n = 0; n < LPAIR_CAP; ++n) {
+      if (t[i].p == 0 || t[i].p == p) {
+         t[i].real = (uint64_t)(uintptr_t)real;
+         t[i].p    = p;            /* publish key last */
+         return;
+      }
+      i = (i + 1) & (LPAIR_CAP - 1);
+   }
+}
+
+/* Pair a raw i386 instance with a fresh modern instance of its registered
+ * class. The i386 object IS the shadow: legacy IMPs dispatched on R' read/write
+ * their ivars at hardcoded i386 offsets directly in the original object. */
+static id legacy_instance_pair(uint32_t p, Class c) {
+   id r = lpair_lookup(p);
+   if (r) { return r; }
+   r = class_createInstance(c, 0);
+   if (!r) { return (id)0; }
+   objc_retain(r);                 /* keep alive; the i386 side owns lifetime */
+   objc_setAssociatedObject(r, shadow_assoc_key(), (id)(uintptr_t)p,
+                            OBJC_ASSOCIATION_ASSIGN);
+   lpair_insert(p, r);
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[lo] paired legacy instance 0x%08x -> %s %p\n",
+              p, class_getName(c), (void *)r);
+      fflush(stderr);
+   }
+   return r;
+}
+
+/* If `p` is a raw legacy i386 object or class object in the translated image,
+ * return the real modern object/Class the runtime can safely use; else 0. */
+static id legacy_obj_to_real(uint32_t p) {
+   if (!ptr_ok(p, 4)) { return (id)0; }
+   uint32_t isa = *(const uint32_t *)(uintptr_t)p;
+   if (!ptr_ok(isa, sizeof(struct legacy_objc_class))) { return (id)0; }
+   const struct legacy_objc_class *k =
+      (const struct legacy_objc_class *)(uintptr_t)isa;
+   if (k->info & LCLS_META) {
+      /* p is a CLASS object — its isa is the metaclass; resolve p by name. */
+      const struct legacy_objc_class *self =
+         (const struct legacy_objc_class *)(uintptr_t)p;
+      if (!ptr_ok(self->name, 1)) { return (id)0; }
+      Class c = objc_getClass((const char *)(uintptr_t)self->name);
+      if (c && getenv("OBJC_BRIDGE_TRACE")) {
+         fprintf(stderr, "[lo] legacy class 0x%08x \"%s\" -> %p\n",
+                 p, (const char *)(uintptr_t)self->name, (void *)c);
+         fflush(stderr);
+      }
+      return (id)c;
+   }
+   if (k->info & LCLS_CLASS) {
+      /* p is an INSTANCE; isa==k is its class. */
+      if (!ptr_ok(k->name, 1)) { return (id)0; }
+      Class c = objc_getClass((const char *)(uintptr_t)k->name);
+      if (!c) {
+         if (getenv("OBJC_BRIDGE_TRACE")) {
+            fprintf(stderr, "[lo] legacy instance 0x%08x class \"%s\" NOT "
+                    "registered -> passthrough\n",
+                    p, (const char *)(uintptr_t)k->name);
+            fflush(stderr);
+         }
+         return (id)0;
+      }
+      return legacy_instance_pair(p, c);
+   }
+   return (id)0;
+}
+
+/* Unwrap an i386 `@`/`#` argument to a real x86_64 id for a call into the
+ * modern runtime. Handles arena proxy handles, R/S shadows, paired legacy
+ * objects, raw legacy objects/classes, and otherwise passes through. */
+static uint64_t unwrap_obj_arg(uint32_t a) {
+   if (!a) { return 0; }
+   const int utrace = getenv("OBJC_BRIDGE_TRACE") != NULL;
+   id sr = shadow_real(a);                 /* R/S shadow or paired legacy obj */
+   if (sr) {
+      if (utrace) {
+         fprintf(stderr, "[uo] 0x%08x shadow/pair -> %p\n", a, (void *)sr);
+         fflush(stderr);
+      }
+      return (uint64_t)(uintptr_t)sr;
+   }
+   if ((uintptr_t)a >= g_arena_base && (uintptr_t)a < g_arena_end) {
+      return *(uint64_t *)(uintptr_t)a;    /* arena proxy handle */
+   }
+   id lr = legacy_obj_to_real(a);          /* raw legacy obj/class -> real */
+   if (lr) {
+      if (utrace) {
+         fprintf(stderr, "[uo] 0x%08x legacy -> %p\n", a, (void *)lr);
+         fflush(stderr);
+      }
+      return (uint64_t)(uintptr_t)lr;
+   }
+   /* Diagnose silent passthrough of high pointers (candidate isa-impedance
+    * crashes): show why nothing matched. */
+   if (utrace && a >= 0x01000000u) {
+      fprintf(stderr, "[uo] 0x%08x PASSTHROUGH (shadow=[0x%llx..0x%llx) "
+              "arena=[0x%lx..0x%lx))\n", a,
+              g_ctrl ? (unsigned long long)g_ctrl->shadow_base : 0ULL,
+              g_ctrl ? (unsigned long long)g_ctrl->shadow_cur : 0ULL,
+              (unsigned long)g_arena_base, (unsigned long)g_arena_end);
+      fflush(stderr);
+   }
+   return (uint64_t)a;                      /* nil-ish / already-low passthrough */
+}
 
 /* ---- ObjC type-encoding scanners ---- */
 static const char *enc_skip_quals(const char *t) {
@@ -1612,16 +3163,28 @@ static const char *enc_skip_digits(const char *t) {
 /* ---- the C prep called by _86x64_reverse_imp ---- */
 #define REV_STACK_SZ (512u * 1024u)
 
-void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs) {
-   id self_ = (id)regs[0];
-   SEL sel  = (SEL)regs[1];
+void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
+                         uint32_t is_stret) {
+   /* objc_msgSend_stret shifts the register file by one: rdi is the hidden
+    * native return buffer, so self/_cmd/args slide to regs[1]/regs[2]/regs[3+].
+    * The i386 stret IMP wants the SAME shape — a hidden i386 struct pointer as
+    * its first cdecl word — so frame[0] becomes a low-4GB scratch buffer the
+    * IMP writes through, widened back into regs[0] in reverse_ret. */
+   const unsigned gp0 = is_stret ? 2u : 1u;     /* GP index of _cmd */
+   id self_ = (id)regs[is_stret ? 1u : 0u];
+   SEL sel  = (SEL)regs[gp0];
+
+   /* ProKit re-swizzles the NSColor getters behind our back (see
+    * appkit_color_compat_reassert) — re-take them on every reverse entry. */
+   appkit_color_compat_reassert();
 
    plan->ret_kind = 2;          /* default void */
-   plan->frame_words = 2;
-   plan->frame[0] = 0;
-   plan->frame[1] = (uint32_t)(uintptr_t)sel;
    plan->lowstack_base = (uint64_t)(uintptr_t)malloc(REV_STACK_SZ);  /* low-4GB */
    plan->lowstack_top  = (plan->lowstack_base + REV_STACK_SZ) & ~(uint64_t)0xf;
+   plan->stret_dst = 0;
+   plan->stret_src = 0;
+   plan->stret_types = NULL;
+   plan->fp_out[0] = plan->fp_out[1] = 0;
 
    /* A pending super-dispatch hint for exactly this (self,sel) overrides the
     * derived-class lookup so [super sel] runs the SUPER's legacy method, not
@@ -1644,12 +3207,34 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs) {
       }
    }
    if (!m) { m = rmeth_lookup(lookup, sel); }
+   /* Inherited reverse method: the receiver's class never registered this sel
+    * — a reverse-registered legacy SUPERCLASS did, and the modern runtime
+    * reached its _86x64_reverse_imp by ordinary inheritance (e.g. native
+    * -[NSDocument initWithType:error:] sending init to an ArchiveDocument
+    * whose init lives on a legacy ancestor). Walk the modern superclass chain
+    * for the owning entry; the shadow below still uses the receiver's own
+    * class, whose fragile-ABI layout embeds the ancestor's ivars first. */
    if (!m) {
-      /* No legacy method — should not happen (we only register methods we map).
-       * Leave legacy_imp=0; asm will jmp to 0. Guard by returning a benign nil.
-       * Better: abort loudly so the gap is visible during bring-up. */
-      fprintf(stderr, "objc_shim: reverse_prep: no legacy method for %s[%s]\n",
-              class_getName(lookup), sel_getName(sel));
+      for (Class c = class_getSuperclass(lookup); c; c = class_getSuperclass(c)) {
+         m = rmeth_lookup(c, sel);
+         if (m) break;
+      }
+   }
+   if (!m) {
+      /* No legacy method. Reached two ways: a registration gap, or native code
+       * invoking the shared tramp address NOT as an objc IMP (direct IMP-cache
+       * call with nil receiver, block-invoke confusion, ...) — regs[0]/[1] are
+       * then not self/sel at all. legacy_imp=0 makes the asm SKIP the i386
+       * call and return 0 via reverse_ret (which also frees the lowstack);
+       * jmp'ing to 0 here used to kill the process. regs[7] = the native
+       * caller's return address, for identifying the caller. */
+      fprintf(stderr, "objc_shim: reverse_prep: no legacy method for %s[%s] "
+              "(caller ra=%p self=%p sel=%p)\n",
+              class_getName(lookup),
+              (sel && mem_readable((uintptr_t)sel, 1)) ? sel_getName(sel)
+                                                       : "(unreadable)",
+              (void *)(uintptr_t)regs[7], (void *)self_, (void *)sel);
+      fflush(stderr);
       plan->legacy_imp = 0;
       return;
    }
@@ -1659,67 +3244,419 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs) {
     * IMP's `[self ...]` resolves back through resolve_self -> unwrap -> Class ->
     * reverse bridge); an instance message uses the i386 shadow (so the IMP's
     * ivar accesses at hardcoded i386 offsets land in the shadow buffer). */
+   uint32_t self32;
    if (object_isClass(self_)) {
-      plan->frame[0] = x64_objc_wrap((uint64_t)(uintptr_t)self_);
+      self32 = x64_objc_wrap((uint64_t)(uintptr_t)self_);
    } else {
-      plan->frame[0] = get_or_create_shadow(self_, lookup);
+      self32 = get_or_create_shadow(self_, lookup);
    }
 
-   /* Return kind from the encoding's leading type. */
-   char rb = encoding_base_type(m->types);
-   if (rb == 'v') { plan->ret_kind = 2; }
-   else if (rb == '@' || rb == '#') { plan->ret_kind = 1; }
-   else { plan->ret_kind = 0; }
+   /* Return-kind decision. An i386 hidden struct pointer is prepended for
+    * BOTH a native stret entry (>16B native) and an i386-stret-only method
+    * (i386 size > 8 but native <= 16: the native caller called the plain IMP
+    * expecting a register return, while the i386 IMP wants a hidden pointer
+    * and pops it with `ret $4`). The i386 scratch buffer lives at the BASE of
+    * the lowstack (the asm builds the cdecl frame down from the TOP). */
+   unsigned head = 0;
+   {
+      char rb = encoding_base_type(m->types);
+      uint32_t i386buf = (uint32_t)((plan->lowstack_base + 15) & ~(uint64_t)0xf);
+      if (is_stret) {
+         head = 1;
+         plan->frame[0]  = i386buf;
+         plan->stret_dst = regs[0];              /* native return buffer */
+         plan->stret_src = i386buf;
+         plan->stret_types = m->types;
+         plan->ret_kind  = 3;                    /* widen in reverse_ret */
+      } else if (rb == 'v') {
+         plan->ret_kind = 2;
+      } else if (rb == '@' || rb == '#' || enc_is_objptr_struct(m->types)) {
+         plan->ret_kind = 1;
+      } else if (rb == 'f' || rb == 'd') {
+         plan->ret_kind = 4;                     /* st0 -> fp_out -> xmm0 */
+      } else if (rb == '{' || rb == '(' || rb == '[') {
+         /* register-class native return (<=16B, else we'd be in is_stret) */
+         size_t isz = 0, nsz = 0; uint8_t sse[8];
+         enc_classify(enc_skip_quals(m->types), CONV_I386, &isz, &nsz, sse);
+         plan->ret_kind = 6;
+         plan->stret_types = m->types;
+         if (isz > 8) {                          /* i386 side IS stret */
+            head = 1;
+            plan->frame[0]  = i386buf;
+            plan->stret_src = i386buf;
+         }                                       /* else: source = eax:edx */
+      } else {
+         plan->ret_kind = 0;
+      }
+   }
+   plan->frame[head + 0] = self32;
+   plan->frame[head + 1] = (uint32_t)(uintptr_t)sel;
 
-   /* Walk arg types: skip ret+offset, self(@)+offset, cmd(:)+offset, then map
-    * each explicit arg from the x86_64 GP regs to a 4-byte i386 slot. */
+   /* Walk arg types: skip ret+offset, self(@)+offset, cmd(:)+offset, then
+    * map each explicit arg from its SysV position (GP reg / XMM reg / native
+    * stack) down to i386 cdecl frame words, narrowing doubles -> CGFloat
+    * floats and native struct layouts -> i386 layouts per the legacy
+    * encoding. regs[8+k] = xmm_k; regs[6] = native stack-arg base, consumed
+    * left-to-right by every overflow/MEMORY arg. */
    const char *t = m->types;
    t = enc_skip_digits(enc_skip_type(t));    /* return type */
    t = enc_skip_digits(enc_skip_type(t));    /* self @ */
    t = enc_skip_digits(enc_skip_type(t));    /* _cmd : */
-   unsigned w = 2;        /* next frame word */
-   unsigned gp = 2;       /* next GP reg index (regs[2]=rdx ... regs[5]=r9) */
+   unsigned w = head + 2;     /* next frame word (after [hidden] self cmd) */
+   unsigned gp = gp0 + 1;     /* next GP reg index (first explicit arg) */
+   unsigned xmm = 0;          /* next XMM reg index */
+   size_t stk = 0;            /* native stack-args byte cursor */
+#define REV_GP(vout) do { \
+      if (gp < 6) { (vout) = regs[gp++]; } \
+      else { (vout) = *(const uint64_t *)((uintptr_t)regs[6] + stk); stk += 8; } \
+   } while (0)
+#define REV_XMM(vout) do { \
+      if (xmm < 8) { (vout) = regs[8 + xmm++]; } \
+      else { (vout) = *(const uint64_t *)((uintptr_t)regs[6] + stk); stk += 8; } \
+   } while (0)
    while (*t && w < 60) {
-      char b = encoding_base_type(t);
-      uint64_t v = (gp < 6) ? regs[gp]
-                   : *(const uint64_t *)((uintptr_t)regs[6] + 8 * (gp - 6));
-      if (b == '@' || b == '#') {
+      const char *tb = enc_skip_quals(t);
+      char b = *tb;
+      if (b == '@' || b == '#' || enc_is_objptr_struct(t)) {
+         uint64_t v; REV_GP(v);
          plan->frame[w++] = x64_objc_wrap(v);
+      } else if (b == ':') {
+         uint64_t v; REV_GP(v);
+         plan->frame[w++] = x64_objc_sel_wrap(v);
       } else if (b == 'q' || b == 'Q') {
+         uint64_t v; REV_GP(v);
          plan->frame[w++] = (uint32_t)v;
          plan->frame[w++] = (uint32_t)(v >> 32);
-      } else if (b == 'f' || b == 'd') {
-         /* float/double live in XMM regs we don't capture — pass 0 + warn. */
-         if (getenv("OBJC_BRIDGE_TRACE")) {
-            fprintf(stderr, "objc_shim: reverse_prep: FP arg unsupported in %s\n",
-                    sel_getName(sel));
+      } else if (b == 'f') {
+         /* legacy CGFloat: native caller passed a double in the next xmm */
+         uint64_t bits; REV_XMM(bits);
+         double dv; memcpy(&dv, &bits, 8);
+         float f = (float)dv;
+         memcpy(&plan->frame[w++], &f, 4);
+      } else if (b == 'd') {
+         uint64_t bits; REV_XMM(bits);
+         memcpy(&plan->frame[w], &bits, 8);
+         w += 2;
+      } else if (b == '{' || b == '(' || b == '[') {
+         size_t isz = 0, nsz = 0; uint8_t sse[8] = {0};
+         unsigned nebs = enc_classify(tb, CONV_I386, &isz, &nsz, sse);
+         unsigned iwords = (unsigned)((isz + 3) / 4);
+         if (nsz > 0 && nsz <= 16) {
+            uint8_t nat[16] = {0};
+            for (unsigned k = 0; k < nebs && k < 2; ++k) {
+               uint64_t eb;
+               if (sse[k]) { REV_XMM(eb); } else { REV_GP(eb); }
+               memcpy(nat + 8*k, &eb, 8);
+            }
+            if (w + iwords <= 60) {
+               enc_narrow(tb, CONV_I386, nat, (uint8_t *)&plan->frame[w]);
+               w += iwords;
+            }
+         } else if (nsz > 16) {                  /* MEMORY: on the native stack */
+            stk = align_up_sz(stk, 8);
+            if (w + iwords <= 60) {
+               enc_narrow(tb, CONV_I386,
+                          (const uint8_t *)((uintptr_t)regs[6] + stk),
+                          (uint8_t *)&plan->frame[w]);
+               w += iwords;
+            }
+            stk += align_up_sz(nsz, 8);
          }
-         plan->frame[w++] = 0;
       } else {
+         uint64_t v; REV_GP(v);
          plan->frame[w++] = (uint32_t)v;
       }
-      gp++;
       t = enc_skip_digits(enc_skip_type(t));
    }
+#undef REV_GP
+#undef REV_XMM
    plan->frame_words = w;
 
    if (getenv("OBJC_BRIDGE_TRACE")) {
-      fprintf(stderr, "[rev] %s[%s] imp=0x%llx self32=0x%x words=%u kind=%d\n",
+      fprintf(stderr, "[rev] t=%x %s[%s] imp=0x%llx self32=0x%x words=%u kind=%d "
+              "%splan=%p lowstack=0x%llx tramp=%p\n",
+              pthread_mach_thread_np(pthread_self()),
               class_getName(lookup), sel_getName(sel),
-              (unsigned long long)m->imp, plan->frame[0], plan->frame_words,
-              plan->ret_kind);
+              (unsigned long long)m->imp, plan->frame[head], plan->frame_words,
+              plan->ret_kind, is_stret ? "STRET " : "", (void *)plan,
+              (unsigned long long)plan->lowstack_top,
+              (void *)_86x64_reverse_imp);
       fflush(stderr);
    }
 }
 
-uint64_t _86x64_reverse_ret(struct reverse_plan *plan, uint32_t eax) {
-   uint64_t r;
-   if (plan->ret_kind == 1) { r = x64_objc_unwrap(eax); }   /* object */
+unsigned __int128 _86x64_reverse_ret(struct reverse_plan *plan,
+                                     uint32_t eax, uint32_t edx) {
+   unsigned __int128 r;
+   if (plan->ret_kind == 1) { r = unwrap_obj_arg(eax); }    /* object */
    else if (plan->ret_kind == 2) { r = 0; }                 /* void */
-   else { r = (uint64_t)eax; }                              /* scalar */
+   else if (plan->ret_kind == 3) {                          /* stret struct */
+      /* Widen the i386-layout struct the IMP wrote (at stret_src on the low
+       * stack) into the native caller's buffer (stret_dst). The x86_64 stret
+       * convention also returns the buffer pointer in rax. */
+      if (plan->stret_dst && plan->stret_src && plan->stret_types) {
+         enc_widen(enc_skip_quals(plan->stret_types), CONV_I386,
+                   (const uint8_t *)(uintptr_t)plan->stret_src,
+                   (uint8_t *)(uintptr_t)plan->stret_dst);
+      }
+      r = plan->stret_dst;
+   }
+   else if (plan->ret_kind == 4) { r = 0; }   /* fp: asm banked st0 in fp_out */
+   else if (plan->ret_kind == 6) {            /* small struct -> native regs */
+      const char *enc = plan->stret_types
+         ? enc_skip_quals(plan->stret_types) : NULL;
+      r = (unsigned __int128)eax;
+      if (enc) {
+         uint8_t i386[16] = {0};
+         if (plan->stret_src) {                /* i386 IMP wrote a hidden buf */
+            memcpy(i386, (const void *)(uintptr_t)plan->stret_src,
+                   sizeof i386);
+         } else {                              /* i386 8-byte struct: eax:edx */
+            memcpy(i386, &eax, 4);
+            memcpy(i386 + 4, &edx, 4);
+         }
+         uint8_t nat[16] = {0};
+         size_t isz = 0, nsz = 0; uint8_t sse[8] = {0};
+         unsigned nebs = enc_classify(enc, CONV_I386, &isz, &nsz, sse);
+         enc_widen(enc, CONV_I386, i386, nat);
+         /* distribute eightbytes: INTEGER -> rax,rdx; SSE -> fp_out (the asm
+          * reloads xmm0/xmm1 from there) */
+         uint64_t ir[2] = {0, 0}; unsigned ii = 0, fi = 0;
+         for (unsigned k = 0; k < nebs && k < 2; ++k) {
+            uint64_t eb; memcpy(&eb, nat + 8*k, 8);
+            if (sse[k]) { if (fi < 2) { plan->fp_out[fi++] = eb; } }
+            else        { if (ii < 2) { ir[ii++] = eb; } }
+         }
+         r = ((unsigned __int128)ir[1] << 64) | ir[0];
+      }
+   }
+   else { r = (unsigned __int128)eax; }                     /* scalar */
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[revret] t=%x plan=%p kind=%d eax=0x%x edx=0x%x -> 0x%llx\n",
+              pthread_mach_thread_np(pthread_self()),
+              (void *)plan, plan->ret_kind, eax, edx,
+              (unsigned long long)(uint64_t)r);
+      fflush(stderr);
+   }
    if (plan->lowstack_base) { free((void *)(uintptr_t)plan->lowstack_base); }
    return r;
 }
+
+/* ===========================================================================
+ * Table-driven C-function shims for struct-by-value signatures (28th blocker).
+ *
+ * abigen cannot express these: CGFloat's width is decided by #if at header-
+ * parse time, so one clang AST can't describe both the i386 (float) and
+ * x86_64 (double) sides. Instead each function gets an i386-convention
+ * encoding string here and is marshalled at runtime by the SAME classifier
+ * the ObjC bridge uses, then called through _86x64_plan_call. The i386 entry
+ * trampolines live in maptable_tramp.asm (GEOSHIM_I/_F/_S) — the INDEX into
+ * g_geo is baked there: KEEP BOTH LISTS IN THE SAME ORDER.
+ *
+ * Natives are dlsym'd lazily (libabiconv links neither AppKit nor CG).
+ * =========================================================================== */
+extern unsigned __int128 _86x64_plan_call(struct objc_call_plan *plan, void *fn);
+
+#define ENC_NSRECT  "{_NSRect={_NSPoint=ff}{_NSSize=ff}}"
+#define ENC_NSPOINT "{_NSPoint=ff}"
+#define ENC_NSSIZE  "{_NSSize=ff}"
+#define ENC_NSRANGE "{_NSRange=II}"
+#define ENC_CGAFF   "{CGAffineTransform=ffffff}"
+
+struct geo_ent { const char *name; const char *sig; void *fn; };
+/* sig: return encoding then arg encodings, concatenated, CONV_I386 widths.
+ * KEEP IN SYNC with the GEOSHIM_* instantiations in maptable_tramp.asm. */
+static struct geo_ent g_geo[] = {
+   /*  0 */ { "NSUnionRect",        ENC_NSRECT ENC_NSRECT ENC_NSRECT, NULL },
+   /*  1 */ { "NSIntersectionRect", ENC_NSRECT ENC_NSRECT ENC_NSRECT, NULL },
+   /*  2 */ { "NSInsetRect",        ENC_NSRECT ENC_NSRECT "ff",       NULL },
+   /*  3 */ { "NSOffsetRect",       ENC_NSRECT ENC_NSRECT "ff",       NULL },
+   /*  4 */ { "NSIntegralRect",     ENC_NSRECT ENC_NSRECT,            NULL },
+   /*  5 */ { "NSRectFromString",   ENC_NSRECT "@",                   NULL },
+   /*  6 */ { "NSPointFromString",  ENC_NSPOINT "@",                  NULL },
+   /*  7 */ { "NSSizeFromString",   ENC_NSSIZE "@",                   NULL },
+   /*  8 */ { "NSContainsRect",     "c" ENC_NSRECT ENC_NSRECT,        NULL },
+   /*  9 */ { "NSEqualPoints",      "c" ENC_NSPOINT ENC_NSPOINT,      NULL },
+   /* 10 */ { "NSEqualRects",       "c" ENC_NSRECT ENC_NSRECT,        NULL },
+   /* 11 */ { "NSEqualSizes",       "c" ENC_NSSIZE ENC_NSSIZE,        NULL },
+   /* 12 */ { "NSIntersectsRect",   "c" ENC_NSRECT ENC_NSRECT,        NULL },
+   /* 13 */ { "NSIsEmptyRect",      "c" ENC_NSRECT,                   NULL },
+   /* 14 */ { "NSMouseInRect",      "c" ENC_NSPOINT ENC_NSRECT "c",   NULL },
+   /* 15 */ { "NSPointInRect",      "c" ENC_NSPOINT ENC_NSRECT,       NULL },
+   /* 16 */ { "NSStringFromPoint",  "@" ENC_NSPOINT,                  NULL },
+   /* 17 */ { "NSStringFromRange",  "@" ENC_NSRANGE,                  NULL },
+   /* 18 */ { "NSStringFromRect",   "@" ENC_NSRECT,                   NULL },
+   /* 19 */ { "NSStringFromSize",   "@" ENC_NSSIZE,                   NULL },
+   /* 20 */ { "NSEraseRect",        "v" ENC_NSRECT,                   NULL },
+   /* 21 */ { "NSFrameRect",        "v" ENC_NSRECT,                   NULL },
+   /* 22 */ { "NSFrameRectWithWidth", "v" ENC_NSRECT "f",             NULL },
+   /* 23 */ { "NSRectClip",         "v" ENC_NSRECT,                   NULL },
+   /* 24 */ { "NSRectFill",         "v" ENC_NSRECT,                   NULL },
+   /* 25 */ { "NSRectFillUsingOperation", "v" ENC_NSRECT "I",         NULL },
+   /* 26 */ { "CGRectUnion",        ENC_NSRECT ENC_NSRECT ENC_NSRECT, NULL },
+   /* 27 */ { "CGRectIntersection", ENC_NSRECT ENC_NSRECT ENC_NSRECT, NULL },
+   /* 28 */ { "CGRectInset",        ENC_NSRECT ENC_NSRECT "ff",       NULL },
+   /* 29 */ { "CGRectOffset",       ENC_NSRECT ENC_NSRECT "ff",       NULL },
+   /* 30 */ { "CGRectIntegral",     ENC_NSRECT ENC_NSRECT,            NULL },
+   /* 31 */ { "CGRectApplyAffineTransform", ENC_NSRECT ENC_NSRECT ENC_CGAFF, NULL },
+   /* 32 */ { "CGRectContainsPoint", "c" ENC_NSRECT ENC_NSPOINT,      NULL },
+   /* 33 */ { "CGRectContainsRect", "c" ENC_NSRECT ENC_NSRECT,        NULL },
+   /* 34 */ { "CGRectEqualToRect",  "c" ENC_NSRECT ENC_NSRECT,        NULL },
+   /* 35 */ { "CGRectIntersectsRect", "c" ENC_NSRECT ENC_NSRECT,      NULL },
+   /* 36 */ { "CGRectIsEmpty",      "c" ENC_NSRECT,                   NULL },
+   /* 37 */ { "CGRectIsInfinite",   "c" ENC_NSRECT,                   NULL },
+   /* 38 */ { "CGRectIsNull",       "c" ENC_NSRECT,                   NULL },
+   /* 39 */ { "CGRectGetHeight",    "f" ENC_NSRECT,                   NULL },
+   /* 40 */ { "CGRectGetWidth",     "f" ENC_NSRECT,                   NULL },
+   /* 41 */ { "CGRectGetMaxX",      "f" ENC_NSRECT,                   NULL },
+   /* 42 */ { "CGRectGetMaxY",      "f" ENC_NSRECT,                   NULL },
+   /* 43 */ { "CGRectGetMidX",      "f" ENC_NSRECT,                   NULL },
+   /* 44 */ { "CGRectGetMidY",      "f" ENC_NSRECT,                   NULL },
+   /* 45 */ { "CGRectGetMinX",      "f" ENC_NSRECT,                   NULL },
+   /* 46 */ { "CGRectGetMinY",      "f" ENC_NSRECT,                   NULL },
+};
+
+struct geo_res { uint64_t lo, hi; double fp; };
+
+static struct geo_res geo_call(unsigned idx, const uint32_t *a32) {
+   struct geo_res res = {0, 0, 0.0};
+   if (idx >= sizeof g_geo / sizeof g_geo[0]) { return res; }
+   struct geo_ent *e = &g_geo[idx];
+   if (!e->fn) {
+      e->fn = dlsym(RTLD_DEFAULT, e->name);
+      if (!e->fn) {
+         fprintf(stderr, "objc_shim: geo shim: dlsym(%s) failed\n", e->name);
+         fflush(stderr);
+         return res;
+      }
+   }
+   struct objc_call_plan plan;
+   memset(&plan, 0, sizeof plan);
+   struct mcur cur = {0, 0, 0};
+   const char *ret  = e->sig;
+   const char *args = enc_skip_type(e->sig);
+   unsigned ai = 0;
+   char rb = *enc_skip_quals(ret);
+   size_t risz = 0, rnsz = 0; uint8_t rsse[8] = {0}; unsigned rnebs = 0;
+   int kind = 0;   /* 0 scalar/void, 1 wrap obj, 3 stret narrow, 4 fp,
+                    * 5 reg-struct -> eax:edx, 6 reg-struct -> i386 buf */
+   uint32_t dst32 = 0;
+   if (rb == '{' || rb == '(' || rb == '[') {
+      rnebs = enc_classify(ret, CONV_I386, &risz, &rnsz, rsse);
+      if (risz > 8) { dst32 = a32[ai++]; }    /* i386 hidden ptr, callee-pop */
+      if (rnsz > 16) {
+         plan.reg[cur.gp++] = (uint64_t)(uintptr_t)plan.stret_buf;
+         kind = 3;
+      } else {
+         kind = (risz > 8) ? 6 : 5;
+      }
+   } else if (rb == '@') {
+      kind = 1;
+   } else if (rb == 'f' || rb == 'd') {
+      kind = 4;
+   }
+   for (const char *t = args; *t; t = enc_skip_type(t)) {
+      marshal_arg_fwd(&plan, &cur, t, CONV_I386, a32, &ai);
+   }
+   plan.nstack = (uint32_t)((cur.stk + 7) / 8);
+   plan.nxmm   = cur.xmm;
+   unsigned __int128 rr = _86x64_plan_call(&plan, e->fn);
+   uint64_t vrax = (uint64_t)rr, vrdx = (uint64_t)(rr >> 64);
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[geo] %s kind=%d gp=%u xmm=%u stk=%zu rax=0x%llx\n",
+              e->name, kind, cur.gp, cur.xmm, cur.stk,
+              (unsigned long long)vrax);
+      fflush(stderr);
+   }
+   switch (kind) {
+   case 1:
+      res.lo = x64_objc_wrap(vrax);
+      break;
+   case 3:
+      if (dst32) {
+         enc_narrow(ret, CONV_I386, plan.stret_buf,
+                    (uint8_t *)(uintptr_t)dst32);
+      }
+      res.lo = dst32;
+      break;
+   case 4:
+      memcpy(&res.fp, &plan.fp_out[0], 8);    /* native double (CGFloat) */
+      break;
+   case 5: case 6: {
+      uint8_t nat[16] = {0};
+      unsigned ii = 0, fi = 0;
+      for (unsigned k = 0; k < rnebs && k < 2; ++k) {
+         uint64_t eb;
+         if (rsse[k]) { eb = plan.fp_out[fi++]; }
+         else         { eb = ii++ ? vrdx : vrax; }
+         memcpy(nat + 8*k, &eb, 8);
+      }
+      if (kind == 6) {
+         if (dst32) {
+            enc_narrow(ret, CONV_I386, nat, (uint8_t *)(uintptr_t)dst32);
+         }
+         res.lo = dst32;
+      } else {
+         uint8_t out[8] = {0};
+         enc_narrow(ret, CONV_I386, nat, out);
+         uint32_t lo, hi;
+         memcpy(&lo, out, 4); memcpy(&hi, out + 4, 4);
+         res.lo = lo; res.hi = hi;
+      }
+      break;
+   }
+   default:
+      res.lo = vrax; res.hi = vrdx;
+      break;
+   }
+   return res;
+}
+
+/* asm-facing dispatchers (maptable_tramp.asm GEOSHIM_*):
+ *   _i: integer/object/struct-in-regs returns -> rax (=eax) : rdx (=edx)
+ *   _f: CGFloat/double returns -> long double return = x87 st0 */
+unsigned __int128 x64_geo_i(unsigned idx, const uint32_t *a32) {
+   struct geo_res r = geo_call(idx, a32);
+   return ((unsigned __int128)r.hi << 64) | r.lo;
+}
+long double x64_geo_f(unsigned idx, const uint32_t *a32) {
+   struct geo_res r = geo_call(idx, a32);
+   return (long double)r.fp;
+}
+
+/* NSDivideRect has NSRect OUT-pointers — hand-marshalled. i386 frame:
+ * a[0..3] inRect (4 floats), a[4] NSRect* slice, a[5] NSRect* remainder,
+ * a[6] CGFloat amount, a[7] NSRectEdge. MTSHIM trampoline (returns void). */
+uint32_t mt_NSDivideRect(const uint32_t *a) {
+   struct nr64 { double v[4]; } in, slice, rem;
+   memset(&slice, 0, sizeof slice); memset(&rem, 0, sizeof rem);
+   enc_widen(ENC_NSRECT, CONV_I386, (const uint8_t *)&a[0], (uint8_t *)&in);
+   static void (*fn)(struct nr64, struct nr64 *, struct nr64 *, double,
+                     uint32_t);
+   if (!fn) {
+      fn = (void (*)(struct nr64, struct nr64 *, struct nr64 *, double,
+                     uint32_t))dlsym(RTLD_DEFAULT, "NSDivideRect");
+      if (!fn) { return 0; }
+   }
+   float amf; memcpy(&amf, &a[6], 4);
+   fn(in, &slice, &rem, (double)amf, a[7]);
+   if (a[4]) {
+      enc_narrow(ENC_NSRECT, CONV_I386, (const uint8_t *)&slice,
+                 (uint8_t *)(uintptr_t)a[4]);
+   }
+   if (a[5]) {
+      enc_narrow(ENC_NSRECT, CONV_I386, (const uint8_t *)&rem,
+                 (uint8_t *)(uintptr_t)a[5]);
+   }
+   return 0;
+}
+
+/* i386-LAYOUT shadow for the CGRectNull data constant: the native symbol
+ * holds 4 doubles {inf,inf,0,0}; an i386 reader takes the first 16 bytes as
+ * 4 floats and sees garbage. static-interpose redirects the non-lazy bind to
+ * this __-twin (same mechanism as the ObjC data shadows). The all-zero
+ * constants (NSZeroRect, CGRectZero, ...) read correctly either way. */
+const float __CGRectNull[4] = { __builtin_inff(), __builtin_inff(), 0, 0 };
 
 /* ---- registration ---- */
 
@@ -1751,19 +3688,34 @@ static void reverse_add_methods(Class target, uint32_t methodLists) {
       if (cnt <= 0 || cnt > 100000) { continue; }
       const struct legacy_objc_method *meth = (const struct legacy_objc_method *)
          ((const char *)ml + sizeof(struct legacy_objc_method_list));
+      /* Range-check the WHOLE method array (mirrors scan_one_list): a junk
+       * list pointer can pass the 8-byte header check while the entries run
+       * into a translated image's __LINKEDIT vm slack — mapped beyond the
+       * file's EOF, so the first touch SIGBUSes (KERN_MEMORY_ERROR) inside
+       * dyld's add-image callback, before main. */
+      if (!ptr_ok(mlp + (uint32_t)sizeof(*ml),
+                  (size_t)cnt * sizeof(*meth))) { continue; }
       for (int32_t k = 0; k < cnt; ++k) {
-         if (!ptr_ok(meth[k].name, 1) || meth[k].imp == 0) { continue; }
+         if (!legacy_cstr_ok(meth[k].name) || meth[k].imp == 0) { continue; }
          const char *sname = (const char *)(uintptr_t)meth[k].name;
-         const char *types = ptr_ok(meth[k].types, 1)
+         const char *types = legacy_cstr_ok(meth[k].types)
             ? (const char *)(uintptr_t)meth[k].types : "v8@0:4";
          SEL sel = sel_registerName(sname);
-         if (class_addMethod(target, sel, (IMP)_86x64_reverse_imp, types)) {
-            rmeth_insert(target, sel, meth[k].imp, types);
-         } else {
-            /* already present (e.g. an override added by a later list); still
-             * record the legacy imp so the reverse bridge can find it */
-            rmeth_insert(target, sel, meth[k].imp, types);
-         }
+         /* A struct-by-value return (>16B, e.g. -adjustScroll: -> NSRect) is
+          * dispatched by native callers through objc_msgSend_stret, whose ABI
+          * puts a hidden return-buffer pointer in rdi. Register the stret-aware
+          * trampoline for those so self/_cmd aren't read one register early. */
+         IMP tramp = enc_ret_is_stret(types) ? (IMP)_86x64_reverse_imp_stret
+                                             : (IMP)_86x64_reverse_imp;
+         class_addMethod(target, sel, tramp, types);
+         /* record the legacy imp regardless (class_addMethod fails when a
+          * later list re-adds an override; the map still needs the entry) */
+         rmeth_insert(target, sel, meth[k].imp, types);
+         /* the app's own metadata is the authoritative i386 encoding for
+          * this selector — lets the forward bridge disambiguate CGFloat vs
+          * double / NSInteger vs long long when marshalling args to the
+          * NATIVE method of the same name (e.g. [super adjustScroll:]) */
+         seltypes_insert(sel, types);
       }
    }
 }
@@ -1771,7 +3723,9 @@ static void reverse_add_methods(Class target, uint32_t methodLists) {
 /* Register one legacy class. Returns 1 if registered, 0 if deferred (super not
  * ready), -1 if skipped (collision / bad). */
 static int reverse_register_one(const struct legacy_objc_class *cls) {
-   if (!ptr_ok(cls->name, 1) || !ptr_ok(cls->super_class, 1)) { return -1; }
+   if (!legacy_cstr_ok(cls->name) || !legacy_cstr_ok(cls->super_class)) {
+      return -1;
+   }
    const char *name = (const char *)(uintptr_t)cls->name;
    if (objc_getClass(name)) { return -1; }   /* name already exists — skip */
    const char *supername = (const char *)(uintptr_t)cls->super_class;

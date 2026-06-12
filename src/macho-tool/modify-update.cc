@@ -112,6 +112,13 @@ int ModifyCommand::Update::BindNode::subopthandler(int index, char *value) {
       lazy = true;
       return 1;
 
+   case 11: // optional
+      if (value) {
+         throw std::string("`optional' flag takes no arguments");
+      }
+      optional = true;
+      return 1;
+
    default: abort();
    }
 }
@@ -167,6 +174,7 @@ void ModifyCommand::Update::BindNode::workT(MachO::Archive<b> *archive) {
 
    auto bindee_it = bindinfo->find(*old_sym);
    if (bindee_it == bindinfo->end()) {
+      if (optional) { return; }
       throw MachO::error("bind node for symbol `%s' not found", old_sym->c_str());
    }
    auto bindee = *bindee_it;
@@ -209,11 +217,14 @@ template <MachO::Bits b>
 void ModifyCommand::Update::StripBind::workT(MachO::Archive<b> *archive) {
    auto dyld_info = archive->template subcommand<MachO::DyldInfo>();
    if (dyld_info == nullptr) {
-      throw std::string("missing dyld info");
+      /* Classic Mach-O (pre-10.6) with LC_DYSYMTAB-only binding has no
+       * suffixed bind names to strip — no-op. iWeb's MobileMe.framework
+       * is an example: built 2008-era, never updated to LC_DYLD_INFO. */
+      return;
    }
-   
-   workT(dyld_info->bind);
-   workT(dyld_info->lazy_bind);
+
+   if (dyld_info->bind) { workT(dyld_info->bind); }
+   if (dyld_info->lazy_bind) { workT(dyld_info->lazy_bind); }
 
 #if 0
    auto symtab = archive->template subcommand<MachO::Symtab>();

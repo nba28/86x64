@@ -1,4 +1,5 @@
 extern "C" {
+#include <cassert>
 #include <xed/xed-interface.h>
 }
 
@@ -54,9 +55,44 @@ namespace MachO {
 
    template <Bits bits>
    void StubHelperBlob<bits>::Emit(Image& img, std::size_t offset) const {
-      /* adjust push immediate */
-      push_inst->imm->value = bindee->index;
-      
+      /*
+       * Guard against a null bindee. The lazy_bind_node_resolver
+       * matches the push imm32 (a lazy-bind-info offset) to a
+       * LazyBindNode parsed from the lazy_bind blob; if the imm
+       * doesn't correspond to any node — possible when the binary's
+       * stub_helper has stubs past the end of the lazy_bind blob, or
+       * when the parser's pointer-shape heuristic mis-marked the imm
+       * with a pointee that overwrote it — bindee stays null. With
+       * the original `push_inst->imm->value = bindee->index;` line
+       * that null-derefs SIGSEGVs mid-Emit, leaves the output file
+       * truncated, and breaks every segment header past this point.
+       * Fall back to the original imm value (whatever the parser set)
+       * with a warning so we can spot it in the log.
+       */
+      if (bindee == nullptr) {
+         fprintf(stderr,
+                 "warning: StubHelperBlob::Emit at vmaddr 0x%zx: "
+                 "bindee is null (lazy_bind_index %u unresolved); "
+                 "preserving original push imm value 0x%x\n",
+                 (size_t)this->loc.vmaddr,
+                 (unsigned)(push_inst->imm ? push_inst->imm->value : 0),
+                 push_inst->imm ? push_inst->imm->value : 0);
+      } else {
+         /* adjust push immediate */
+         push_inst->imm->value = bindee->index;
+      }
+      /*
+       * Clear any pointee the parser might have wrongly attached. The
+       * push imm32 here is the lazy-bind-info offset (a literal), but
+       * the Instruction parser's pointer-shape heuristic can mis-mark
+       * it when the offset value happens to fall in a real segment's
+       * vmaddr range (common when lazy_bind is tens of KB). Without
+       * this, Immediate::Emit prefers pointee->loc.vmaddr over the
+       * `value = bindee->index` we just set, and the dyld stub binder
+       * receives a bogus offset.
+       */
+      if (push_inst->imm) push_inst->imm->pointee = nullptr;
+
       /* emit insturctions */
       push_inst->Emit(img, offset);
       offset += push_inst->size();

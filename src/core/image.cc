@@ -34,6 +34,18 @@ namespace MachO {
          prot = PROT_READ;
       }
       
+      /* In write mode the file may be shorter than mapsize (e.g. newly created
+       * with O_CREAT, st_size=0). Writes to the mmap region past EOF SIGBUS
+       * on macOS — extend the file to mapsize up front so writes are valid
+       * for the whole mapping. Was implicit before because grow() ftruncate'd
+       * per-byte; that's now batched, so we have to do it once here. */
+      if ((mode & O_RDWR) && filesize < mapsize) {
+         if (ftruncate(fd, mapsize) < 0) {
+            close(fd);
+            throw cerror("ftruncate-init");
+         }
+      }
+
       if ((img = mmap(NULL, mapsize, prot, MAP_SHARED, fd, 0)) == MAP_FAILED) {
          close(fd);
          throw cerror("mmap");
@@ -66,11 +78,23 @@ namespace MachO {
    }
 
    void Image::grow(std::size_t size) {
+      /* Big-binary perf: the original `grow()` ftruncate'd the file on every
+       * byte beyond filesize. On iPhoto-scale (23MB) the Emit phase makes
+       * millions of small writes, multiplying into millions of ftruncate
+       * syscalls + APFS journal updates → modify subcommand hung 1h41min+ at
+       * 100% CPU on iPhoto, completed in seconds on dbRepair/photocd.
+       *
+       * Fix: only ftruncate when expanding the mmap envelope (already doubles
+       * via resize()). Track filesize as the logical high-water mark in
+       * memory; persist it via ftruncate-on-destroy in ~Image() (already does
+       * `ftruncate(fd, filesize)` on close). Within the current mmap envelope,
+       * writes don't need ftruncate because the kernel-mapped region already
+       * covers up to mapsize bytes of the file — they're zero-initialized
+       * pages until written. */
       if (size > filesize) {
          filesize = size;
-         if (ftruncate(fd, filesize) < 0) { throw cerror("ftruncate"); } 
          if (filesize > mapsize) {
-            resize(filesize * 2);
+            resize(std::max<std::size_t>(filesize, mapsize * 2));
          }
       }
    }

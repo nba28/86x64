@@ -20,4 +20,6 @@ src/abiconv/abigen
 install_manifest.txt
 _deps/
 CTestTestfile.cmake
-Testing/
+Testing/.DS_Store
+__pycache__/
+build/

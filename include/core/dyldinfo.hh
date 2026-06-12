@@ -59,17 +59,29 @@ namespace MachO {
       uint8_t type;
       ssize_t addend;
       const DylibCommand<bits> *dylib;
+      /* Non-zero ⇒ this bind targets a "special" pseudo-dylib (flat lookup,
+       * main executable, weak lookup, self). Holds the 4-bit imm field of
+       * BIND_OPCODE_SET_DYLIB_SPECIAL_IMM. When non-zero, `dylib` is null
+       * and Emit uses SET_DYLIB_SPECIAL_IMM instead of SET_DYLIB_ORDINAL_IMM.
+       * Used by Carbon/QuickTime-era frameworks (NavigationServices) for
+       * flat-namespace symbol resolution. */
+      int8_t dylib_special;
       std::string sym;
       uint8_t flags;
       const SectionBlob<bits> *blob;
       uint32_t index;
 
       std::size_t size() const;
+      std::size_t dylib_opcode_size() const;
+      std::size_t emit_dylib_opcode(Image& img, std::size_t offset) const;
       void Emit(Image& img, std::size_t offset) const;
       bool active() const { return blob == nullptr ? false : blob->active; }
+      bool emittable() const;
 
-      static BindNode<bits, lazy> *Parse(std::size_t vmaddr, ParseEnv<bits>& env, uint8_t type, ssize_t addend, std::size_t dylib, const char *sym, uint8_t flags, uint32_t index) {
-         return new BindNode(vmaddr, env, type, addend, dylib, sym, flags, index);
+      static BindNode<bits, lazy> *Parse(std::size_t vmaddr, ParseEnv<bits>& env, uint8_t type,
+                                         ssize_t addend, std::size_t dylib, int8_t dylib_special,
+                                         const char *sym, uint8_t flags, uint32_t index) {
+         return new BindNode(vmaddr, env, type, addend, dylib, dylib_special, sym, flags, index);
       }
 
       void Build(BuildEnv<bits>& env);
@@ -82,7 +94,8 @@ namespace MachO {
       
    private:
       BindNode(std::size_t vmaddr, ParseEnv<bits>& env, uint8_t type, ssize_t addend,
-               std::size_t dylib, const char *sym, uint8_t flags, uint32_t index);
+               std::size_t dylib, int8_t dylib_special, const char *sym, uint8_t flags,
+               uint32_t index);
       BindNode(const BindNode<opposite<bits>, lazy>& other, TransformEnv<opposite<bits>>& env);
       template <Bits, bool> friend class BindNode;
    };
@@ -121,10 +134,12 @@ namespace MachO {
       BindInfo(const BindInfo<opposite<bits>, lazy>& other, TransformEnv<opposite<bits>>& env);
       
       std::size_t do_bind(std::size_t vmaddr, ParseEnv<bits>& env, uint8_t type, ssize_t addend,
-                          std::size_t dylib, const char *sym, uint8_t flags, uint32_t index);
+                          std::size_t dylib, int8_t dylib_special, const char *sym, uint8_t flags,
+                          uint32_t index);
       std::size_t do_bind_times(std::size_t count, std::size_t vmaddr, ParseEnv<bits>& env,
-                                uint8_t type, ssize_t addend, std::size_t dylib, const char *sym,
-                                uint8_t flags, uint32_t index, ptr_t skipping = 0);
+                                uint8_t type, ssize_t addend, std::size_t dylib,
+                                int8_t dylib_special, const char *sym, uint8_t flags,
+                                uint32_t index, ptr_t skipping = 0);
       template <Bits, bool> friend class BindInfo;
    };
 

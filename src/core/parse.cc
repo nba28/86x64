@@ -1,5 +1,12 @@
+#include <cstdio>
+#include <cstdlib>
+#include <cstring>
+#include <execinfo.h>
+#include <unistd.h>
 #include "parse.hh"
 #include "section_blob.hh"
+#include "archive.hh"
+#include "segment.hh"
 
 namespace MachO {
 
@@ -58,7 +65,61 @@ namespace MachO {
       if (vmaddr == 0) {
          return nullptr;
       }
-      
+
+      /* A reference that lands at the base vmaddr of the HEADER-bearing segment
+       * (the one mapped at file offset 0 — __TEXT) points at the mach_header
+       * itself, which has no parsed blob (Archive::Emit produces it directly).
+       * Seen for dylibs: rebase entries / __mh_dylib_header / data slots holding
+       * the dylib's own load address. Don't create a placeholder — the
+       * originating Immediate keeps pointee=nullptr and emits raw M32 bytes;
+       * dyld slides the slot on load.
+       *
+       * IMPORTANT: this must NOT fire for the base of OTHER segments (__DATA,
+       * __OBJC, ...). Their first byte is a genuine datum — e.g. an
+       * __OBJC,__cls_refs[0] sitting exactly at the segment base. Dropping its
+       * placeholder leaves any PIC-anchored load of that datum with a stale
+       * i386 displacement (the load reads into the wrong section at runtime —
+       * the i386 ObjC class-ref-via-get_pc_thunk bug). So gate on fileoff==0. */
+      bool in_any_segment = false;
+      for (Segment<bits> *seg : archive.segments()) {
+         if (strcmp(seg->segment_command.segname, "__PAGEZERO") == 0) {
+            continue;  /* no real content */
+         }
+         if (seg->segment_command.vmaddr == vmaddr &&
+             seg->segment_command.fileoff == 0 &&
+             seg->segment_command.filesize > 0) {
+            return nullptr;  /* mach_header self-reference */
+         }
+         /* Check vmaddr is within ANY (non-__PAGEZERO) segment's vmaddr range. */
+         if (vmaddr >= seg->segment_command.vmaddr &&
+             vmaddr <  seg->segment_command.vmaddr + seg->segment_command.vmsize) {
+            in_any_segment = true;
+         }
+      }
+
+      /* Skip placeholders for vmaddrs that aren't in any real segment. These
+       * commonly arise when XED disassembles "instruction" bytes that are
+       * actually embedded data (jump tables, constants between functions); the
+       * decoded memdisp produces a garbage targetaddr like 0xffffffffba049296
+       * (sign-extended-negative junk) or 0x1001290 (inside __PAGEZERO). Was:
+       * created placeholders for these, then archive.cc threw "not all
+       * placeholders could be placed" downstream because no blob ever showed
+       * up at that vmaddr. Now: silently drop — the originating Immediate
+       * keeps its raw value and emits verbatim. If the value happens to be
+       * an actual valid bind/rebase target after the M32→M64 shift, dyld
+       * will catch it via the bind/rebase tables, not via parse-time blob
+       * resolution. */
+      if (!in_any_segment) {
+         return nullptr;
+      }
+
+      static const char *trace_str = std::getenv("MACHO_TRACE_PLACEHOLDER");
+      static const std::size_t trace_vmaddr = trace_str ? std::strtoull(trace_str, nullptr, 0) : 0;
+      if (trace_vmaddr && vmaddr == trace_vmaddr) {
+         fprintf(stderr, "add_placeholder(0x%zx) called; backtrace:\n", vmaddr);
+         void *bt[20]; int n = backtrace(bt, 20);
+         backtrace_symbols_fd(bt, n, STDERR_FILENO);
+      }
       auto it = placeholders.find(vmaddr);
       if (it == placeholders.end()) {
          Placeholder<bits> *placeholder = Placeholder<bits>::Parse(Location(0, vmaddr), *this);
@@ -74,7 +135,18 @@ namespace MachO {
       offset_resolver.do_resolve();
       vmaddr_resolver.do_resolve();
    }
-   
+
+   template <Bits bits>
+   bool ParseEnv<bits>::vmaddr_in_writable_data(std::size_t vmaddr) const {
+      for (Segment<bits> *seg : archive.segments()) {
+         if ((seg->segment_command.initprot & VM_PROT_WRITE) == 0) { continue; }
+         if (std::strncmp(seg->segment_command.segname, SEG_OBJC,
+                          sizeof(seg->segment_command.segname)) == 0) { continue; }
+         if (seg->contains_vmaddr(vmaddr)) { return true; }
+      }
+      return false;
+   }
+
    template class ParseEnv<Bits::M32>;
    template class ParseEnv<Bits::M64>;
    

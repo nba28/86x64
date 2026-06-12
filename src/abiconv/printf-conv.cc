@@ -1,3 +1,4 @@
+#include <cassert>
 #include <cstdint>
 #include <cstdlib>
 #include <stdexcept>
@@ -13,8 +14,12 @@ typedef uint32_t size32_t;
 typedef uint64_t size64_t;
 
 typedef int32_t i32_t;
-typedef int32_t i64_t;
+typedef int64_t i64_t;
 
+/* f32_t/f64_t are unused at present: every FLOAT specifier (e/E/f/F/g/G/a/A)
+ * routes through convert_arg_s<double, double> explicitly. Kept for
+ * symmetry with the other size pairs in case a future ABI variant
+ * (e.g. `%f` with explicit `l` on a long-double target) needs them. */
 typedef float f32_t;
 typedef float f64_t;
 
@@ -201,7 +206,69 @@ namespace {
       converter.at(type).at(modifier)(args32, args64, argtypes, arg_count);
 
    }
-   
+
+   /* scanf-family directive. Unlike printf, EVERY consumed scanf argument is a
+    * pointer (int*, char*, float*, ...), so the i386→x86_64 conversion is
+    * uniform: zero-extend one 4-byte pointer to 8 bytes. We only parse the
+    * directive far enough to decide whether it consumes an argument:
+    *   - '%%'      consumes nothing
+    *   - '*' flag  (assignment suppression) consumes nothing
+    *   - otherwise consumes exactly one pointer
+    */
+   void scanf_parse_directive(const void *& args32, void *& args64, reg_width_t *& argtypes,
+                              const char *& format, unsigned& arg_count) {
+      /* assignment-suppression flag */
+      bool suppress = false;
+      if (*format == '*') {
+         suppress = true;
+         ++format;
+      }
+
+      /* maximum field width */
+      while (isdigit(*format)) {
+         ++format;
+      }
+
+      /* length modifiers (h, hh, l, ll, L, j, t, z, q) — irrelevant to us
+       * since the argument is a pointer regardless. */
+      while (printf_is_length_modifier(*format) || *format == 'L' || *format == 'q') {
+         ++format;
+      }
+
+      /* conversion specifier */
+      const char conv = *format++;
+
+      if (conv == '%') {
+         /* literal '%' — consumes no argument */
+         return;
+      }
+
+      if (conv == '[') {
+         /* scanset: skip to the closing ']'. A ']' immediately after '[' or
+          * '[^' is a literal member, not the terminator. */
+         if (*format == '^') { ++format; }
+         if (*format == ']') { ++format; }
+         while (*format != '\0' && *format != ']') { ++format; }
+         if (*format == ']') { ++format; }
+      }
+
+      if (suppress) {
+         return;
+      }
+
+      convert_arg_s<ptr32_t, ptr64_t>(args32, args64, argtypes, arg_count);
+   }
+
+   void scanf_convert_format(const void *& args32, void *& args64, reg_width_t *& argtypes,
+                             const char *format, unsigned& arg_count) {
+      char c;
+      while ((c = *format++)) {
+         if (c == '%') {
+            scanf_parse_directive(args32, args64, argtypes, format, arg_count);
+         }
+      }
+   }
+
 }
 
 extern "C" unsigned printf_conversion_f(const void *args32, void *args64, reg_width_t *argtypes) {
@@ -264,4 +331,30 @@ extern "C" unsigned __sprintf_chk_conversion_f(const void *args32, void *args64,
    convert_arg<i32_t, i64_t>(args32, args64, argtypes, arg_count);
    convert_arg<size32_t, size64_t>(args32, args64, argtypes, arg_count);
    return printf_conversion_f(args32, args64, argtypes) + 3;
+}
+
+/* scanf family. The variadic arguments are all output pointers; the format
+ * string tells us how many. The leading fixed argument differs per function:
+ *   sscanf(str, fmt, ...)  — str then fmt
+ *   fscanf(FILE*, fmt, ...) — stream then fmt
+ *   scanf(fmt, ...)        — fmt only
+ */
+extern "C" unsigned scanf_conversion_f(const void *args32, void *args64, reg_width_t *argtypes) {
+   unsigned arg_count = 0;
+   const char *format = (const char *) convert_arg<ptr32_t, ptr64_t>(args32, args64, argtypes,
+                                                                     arg_count);
+   scanf_convert_format(args32, args64, argtypes, format, arg_count);
+   return arg_count;
+}
+
+extern "C" unsigned sscanf_conversion_f(const void *args32, void *args64, reg_width_t *argtypes) {
+   unsigned arg_count = 0;
+   convert_arg<ptr32_t, ptr64_t>(args32, args64, argtypes, arg_count); /* input string */
+   return scanf_conversion_f(args32, args64, argtypes) + 1;
+}
+
+extern "C" unsigned fscanf_conversion_f(const void *args32, void *args64, reg_width_t *argtypes) {
+   unsigned arg_count = 0;
+   convert_arg<ptr32_t, ptr64_t>(args32, args64, argtypes, arg_count); /* FILE * */
+   return scanf_conversion_f(args32, args64, argtypes) + 1;
 }

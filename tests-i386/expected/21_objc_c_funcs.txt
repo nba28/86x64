@@ -1,0 +1,5 @@
+NSClassFromString ok
+NSStringFromClass: NSString
+NSStringFromSelector: length
+missing class is Nil
+exit_code: 0

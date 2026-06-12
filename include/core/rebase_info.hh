@@ -18,6 +18,7 @@ namespace MachO {
       void Emit(Image& img, std::size_t offset) const;
 
       bool active() const { return blob == nullptr ? false : blob->active; }
+      bool emittable() const; /* active() + arch-specific validity (__TEXT, type) */
 
       static RebaseNode<bits> *Parse(std::size_t vmaddr, ParseEnv<bits>& env, uint8_t type) {
          return new RebaseNode(vmaddr, env, type);

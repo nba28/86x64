@@ -1,3 +1,5 @@
+#include <cassert>
+#include <cstdlib>
 #include <sstream>
 
 #include "segment.hh"
@@ -86,10 +88,13 @@ namespace MachO {
 
       /* set segment start location */
       if (strcmp(segment_command.segname, SEG_TEXT) == 0) {
+         /* __TEXT must cover the mach_header + load commands (fileoff=0).
+          * vmaddr advances by env.loc.offset so the first section's
+          * vmaddr - fileoff matches segment.vmaddr - segment.fileoff (=segment.vmaddr). */
          env.loc.vmaddr = align_up(env.loc.vmaddr, PAGESIZE);
-         segment_command.fileoff = align_down(env.loc.offset, PAGESIZE);
+         segment_command.fileoff = 0;
          segment_command.vmaddr = env.loc.vmaddr;
-         env.loc.vmaddr += env.loc.offset % PAGESIZE;
+         env.loc.vmaddr += env.loc.offset;
       } else {
          env.newsegment();
          segment_command.fileoff = env.loc.offset;
@@ -129,6 +134,14 @@ namespace MachO {
       auto data_in_code = env.archive->template subcommand<DataInCode>();
       if (data_in_code) { data_in_code->Build_LINKEDIT(env); }
 
+      /* Opaque blob linkedit commands placed AFTER data_in_code matches
+       * Apple's actual __LINKEDIT order observed in linker outputs. Their
+       * dataoff/datasize from i386 input become stale; Build_LINKEDIT recomputes.
+       * (Seen on QuickTime, which carries an LC_SEGMENT_SPLIT_INFO.) */
+      for (auto opaque : env.archive->template subcommands<OpaqueLinkeditBlob>()) {
+         opaque->Build_LINKEDIT(env);
+      }
+
       /* LC_SYMTAB: symbol table */
       auto symtab = env.archive->template subcommand<Symtab>();
       if (symtab) { symtab->Build_LINKEDIT_symtab(env); }
@@ -166,12 +179,29 @@ namespace MachO {
 
    template <Bits bits>
    void Segment<bits>::Emit(Image& img, std::size_t offset) const {
+      static const bool emit_debug = std::getenv("MACHO_EMIT_DEBUG") != nullptr;
+      if (emit_debug) {
+         fprintf(stderr,
+                 "Segment::Emit %.16s offset=0x%zx nsects=%u sections.size()=%zu cmdsize=%u\n",
+                 segment_command.segname, offset,
+                 (unsigned)segment_command.nsects, sections.size(),
+                 (unsigned)segment_command.cmdsize);
+      }
       img.at<segment_command_t<bits>>(offset) = segment_command;
       offset += sizeof(segment_command_t<bits>);
-      
+
+      std::size_t sect_i = 0;
       for (const Section<bits> *sect : sections) {
+         if (emit_debug) {
+            fprintf(stderr,
+                    "  sect[%zu]=%p name=%.16s sz=0x%zx\n",
+                    sect_i, (void*)sect,
+                    sect ? sect->sect.sectname : "<null>",
+                    (size_t)(sect ? sect->sect.size : 0));
+         }
          sect->Emit(img, offset);
          offset += sect->size();
+         ++sect_i;
       }
 
       // fprintf(stderr, "[EMIT] segment={name=%s,fileoff=0x%zx,filesize=0x%zx,vmaddr=0x%zx,vmsize=0x%zx}\n", segment_command.segname, (std::size_t) segment_command.fileoff, (size_t) segment_command.filesize, (size_t) segment_command.vmaddr, (size_t) segment_command.vmsize);

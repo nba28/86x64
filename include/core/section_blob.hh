@@ -1,4 +1,5 @@
 #pragma once
+#include <cassert>
 
 #include <vector>
 
@@ -109,7 +110,13 @@ namespace MachO {
       LazySymbolPointer(const LazySymbolPointer<opposite<bits>>& other,
                         TransformEnv<opposite<bits>>& env);
       virtual typename SymbolPointer<bits>::ptr_t raw_data() const override {
-         return pointee->loc.vmaddr;
+         /* Match NonLazySymbolPointer's null guard: a lazy slot whose pointee
+          * doesn't resolve to a known blob means dyld will bind it at first
+          * call via the lazy_bind opcodes — emit 0 and let dyld fill it in.
+          * Was unconditional pointee->loc.vmaddr; crashed in QuickTime's
+          * __la_symbol_ptr where the dylib has lazy pointers to undefined
+          * external symbols (no internal blob to point at). */
+         return pointee ? pointee->loc.vmaddr : 0x0;
       }
       template <Bits> friend class LazySymbolPointer;
    };
@@ -117,6 +124,15 @@ namespace MachO {
    template <Bits bits>
    class NonLazySymbolPointer: public SymbolPointer<bits> {
    public:
+      /*
+       * `pointee` is non-null when the parsed value is a compile-time
+       * pointer the linker baked into the slot (typical for LOCAL
+       * indirect-symbol entries that don't get a dyld bind). null when
+       * the slot is normally bound by dyld at load time (e.g.
+       * `___stderrp`) — in that case raw_data() returns 0 and dyld
+       * overwrites the slot. */
+      const SectionBlob<bits> *pointee = nullptr;
+
       static SectionBlob<bits> *Parse(const Image& img, const Location& loc,
                                                ParseEnv<bits>& env) {
          return new NonLazySymbolPointer(img, loc, env);
@@ -124,14 +140,14 @@ namespace MachO {
 
       virtual NonLazySymbolPointer<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const
          override { return new NonLazySymbolPointer<opposite<bits>>(*this, env); }
-      
+
    private:
-      NonLazySymbolPointer(const Image& img, const Location& loc, ParseEnv<bits>& env):
-         SymbolPointer<bits>(loc, env) {}
+      NonLazySymbolPointer(const Image& img, const Location& loc, ParseEnv<bits>& env);
       NonLazySymbolPointer(const NonLazySymbolPointer<opposite<bits>>& other,
-                           TransformEnv<opposite<bits>>& env):
-         SymbolPointer<bits>(other, env) {}
-      virtual typename SymbolPointer<bits>::ptr_t raw_data() const override { return 0x0; }
+                           TransformEnv<opposite<bits>>& env);
+      virtual typename SymbolPointer<bits>::ptr_t raw_data() const override {
+         return pointee ? pointee->loc.vmaddr : 0x0;
+      }
       template <Bits> friend class NonLazySymbolPointer;
    };
    
@@ -140,6 +156,9 @@ namespace MachO {
    public:
       uint32_t value;
       const SectionBlob<bits> *pointee = nullptr; /*!< optional -- only if deemed to be pointer */
+      std::size_t pointee_offset = 0;             /*!< intra-blob byte offset when
+                                                      pointee came from a
+                                                      containing-blob fallback */
       virtual std::size_t size() const override { return sizeof(uint32_t); }
       
       static Immediate<bits> *Parse(const Image& img, const Location& loc, ParseEnv<bits>& env,
@@ -157,6 +176,45 @@ namespace MachO {
       Immediate(const Immediate<opposite<bits>>& other, TransformEnv<opposite<bits>>& env);
       Immediate(uint32_t value): value(value) {}
       template <Bits> friend class Immediate;
+   };
+
+   /*
+    * One CFConstantString record from __DATA,__cfstring (the @"..." literals
+    * the compiler bakes in). The i386 record is 16 bytes
+    * {isa:4, flags:4, str:4, length:4}; the x86_64 record is 32 bytes
+    * {isa:8, flags:8, str:8, length:8}. Parsing each record as a single blob
+    * (instead of four 4-byte Immediates) lets us EXPAND it on transform so the
+    * real x86_64 CoreFoundation can read it. `isa` is left 0 and bound at load
+    * by the record's existing BIND (which targets this blob's start vmaddr);
+    * `str` is an internal pointer we resolve to the __cstring blob and re-emit
+    * pointer-width. Without this the i386 16-byte layout reaches real CF, which
+    * reads str@16/length@24 and faults (e.g. in __CFStringHash).
+    */
+   template <Bits bits>
+   class CFStringBlob: public SectionBlob<bits> {
+   public:
+      using ptr_t = select_type<bits, uint32_t, uint64_t>;
+      /* 16 bytes for the i386 source, 32 for the expanded x86_64 record. */
+      static constexpr std::size_t record_size = 4 * sizeof(ptr_t);
+
+      uint64_t flags = 0;
+      const SectionBlob<bits> *str = nullptr; /*!< pointee in __cstring */
+      uint64_t length = 0;
+
+      virtual std::size_t size() const override { return 4 * sizeof(ptr_t); }
+      virtual void Emit(Image& img, std::size_t offset) const override;
+
+      static SectionBlob<bits> *Parse(const Image& img, const Location& loc, ParseEnv<bits>& env)
+      { return new CFStringBlob(img, loc, env); }
+
+      virtual CFStringBlob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
+         return new CFStringBlob<opposite<bits>>(*this, env);
+      }
+
+   private:
+      CFStringBlob(const Image& img, const Location& loc, ParseEnv<bits>& env);
+      CFStringBlob(const CFStringBlob<opposite<bits>>& other, TransformEnv<opposite<bits>>& env);
+      template <Bits> friend class CFStringBlob;
    };
 
    template <Bits bits>

@@ -1,3 +1,4 @@
+#include <cassert>
 #include <string>
 #include <iostream>
 #include <mach-o/loader.h>
@@ -129,18 +130,67 @@ namespace MachO {
    }
 
    template <Bits bits>
+   bool RebaseNode<bits>::emittable() const {
+      /* All preconditions for safely emitting this rebase opcode. Used by
+       * both size() and Emit() so the byte counts agree (any mismatch
+       * silently corrupts every later LC). */
+      if (!active()) return false;
+      if (blob->segment == nullptr) return false;
+      if constexpr (bits == Bits::M64) {
+         /* x86_64 only allows REBASE_TYPE_POINTER, and disallows rebases
+          * into __TEXT (W^X — __TEXT pages are RX, dyld can't apply slide).
+          * The i386 binaries we translate have REBASE_TYPE_TEXT_{ABSOLUTE32,
+          * PCREL32} entries that the M32→M64 instruction rewriter has
+          * already replaced with RIP-relative addressing, so the rebase
+          * entries themselves are now superfluous and must be filtered out
+          * or dyld rejects the load: "REBASE_OPCODE_DO_REBASE_IMM_TIMES
+          * text rebase not supported for architecture". */
+         if (type != REBASE_TYPE_POINTER) return false;
+         if (strcmp(blob->segment->segment_command.segname, SEG_TEXT) == 0) {
+            return false;
+         }
+         /* Sections containing 4-byte pointer slots (legacy i386 ObjC1
+          * __OBJC,__message_refs / __cls_refs and any S_LITERAL_POINTERS)
+          * cannot be safely rebased by dyld. REBASE_TYPE_POINTER in x86_64
+          * reads + writes 8 bytes per entry; one rebase clobbers two
+          * adjacent 4-byte slots, and 494 cascading entries in __message_refs
+          * corrupt the entire section. A runtime shim (DYLD_INSERT) must
+          * walk these sections and apply the binary's slide to each 4-byte
+          * slot instead. The translator already embeds post-translate-time
+          * (unslid) M64 vmaddrs in the slots, so the shim just adds slide. */
+         if (blob->section != nullptr) {
+            const uint32_t stype =
+               blob->section->sect.flags & SECTION_TYPE;
+            if (stype == S_LITERAL_POINTERS) {
+               return false;
+            }
+            /* __OBJC segment is S_REGULAR but holds 4-byte ObjC1 slots
+             * (legacy metadata). Filter those too. */
+            if (strcmp(blob->segment->segment_command.segname, SEG_OBJC) == 0) {
+               return false;
+            }
+         }
+      }
+      return true;
+   }
+
+   template <Bits bits>
    std::size_t RebaseNode<bits>::size() const {
-      if (!active()) {
+      if (!emittable()) {
          return 0;
       }
-      
+
       /* 1   REBASE_OPCODE_SET_TYPE_IMM
        * 1+a REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB
        * 1   REBASE_OPCODE_DO_REBASE_IMM_TIMES
        * 3+a total
        */
       assert(blob->segment->id < 16);
-      return 3 + leb128_size(blob->loc.offset - blob->segment->loc().offset);
+      /* vmaddr delta, NOT file-offset delta: Emit() encodes
+       * `loc.vmaddr - segment->loc().vmaddr`, and the two diverge in
+       * segments with zerofill content. A size()/Emit() length mismatch
+       * across a LEB128 boundary would corrupt the opcode stream. */
+      return 3 + leb128_size(blob->loc.vmaddr - blob->segment->loc().vmaddr);
    }
 
    template <Bits bits>
@@ -172,10 +222,10 @@ namespace MachO {
 
    template <Bits bits>
    void RebaseNode<bits>::Emit(Image& img, std::size_t offset) const {
-      if (!active()) {
+      if (!emittable()) {
          return;
       }
-      
+
       /* REBASE_OPCODE_SET_TYPE_IMM
        * REBASE_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB
        * REBASE_OPCODE_DO_REBASE_IMM_TIMES

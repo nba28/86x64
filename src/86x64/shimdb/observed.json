@@ -1,0 +1,6766 @@
+{
+ "_APP_SANDBOX_READ": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_APP_SANDBOX_READ_WRITE": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_AddIconToSuite": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_BackColor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_CC_MD5": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_CC_MD5_Final": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_CC_MD5_Init": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_CC_MD5_Update": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_CC_SHA1": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_CGSIsCursorRegistered": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_CMEmbedImage": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_CPSLaunchAppWithData": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_ClipRect": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_CloseRgn": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_CopyBits": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_CopyDeepMask": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_CopyMask": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_CreateNewPort": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_DMGetDisplayIDByGDevice": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_DRAllFilesystems": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceAppearedNotification": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceDisappearedNotification": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceIsBusyKey": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceIsTrayOpenKey": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceMediaBlocksFreeKey": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceMediaInfoKey": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceMediaIsAppendableKey": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceMediaIsBlankKey": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceMediaIsOverwritableKey": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceStatusChangedNotification": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceSupportLevelAppleShipping": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceSupportLevelAppleSupported": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceSupportLevelKey": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceSupportLevelNone": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceSupportLevelUnsupported": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRDeviceSupportLevelVendorSupported": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DRInvisible": {
+  "first_seen_fw": "DiscRecording",
+  "stub": "function"
+ },
+ "_DTInstall": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_DisposeGWorld": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_DisposeIconSuite": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_DisposePort": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_DrawPicture": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_EraseRect": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_EraseRgn": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FSMakeFSSpec": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_FSpMakeFSRef": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_FSpOpenResFile": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_FigAudioFormatDescriptionGetChannelLayout": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigAudioFormatDescriptionGetFormatList": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigAudioFormatDescriptionGetMagicCookie": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBaseClassGetCFTypeID": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBaseClassRegisterClass": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBaseGetClassID": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBaseObjectGetDerivedStorage": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBaseObjectGetVTable": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBlockBufferCreateWithMemoryBlock": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBlockBufferGetDataLength": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBlockBufferGetDataPointer": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBlockBufferRelease": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBlockBufferRetain": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueContainsEndOfData": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueCreate": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueDequeueAndRetain": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueDequeueIfDataReadyAndRetain": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueEnqueue": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueGetBufferCount": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueGetCallbacksForUnsortedSampleBuffers": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueGetDuration": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueIsAtEndOfData": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueIsEmpty": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueMarkEndOfData": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueRelease": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueReset": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigDerivedObjectCreate": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigFormatDescriptionGetExtensions": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigFormatDescriptionGetMediaSubType": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigFormatDescriptionRelease": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigFormatDescriptionRetain": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigNotificationCenterCreate": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigRegistryAddSearchPath": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigRegistryCopyItemList": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigRegistryCreate": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigRegistryItemCopyBundle": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigRegistryItemCopyDescription": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigRegistryItemCopyMatchingInfo": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigRegistryItemGetFactory": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferCreate": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferCreateForImageBuffer": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferDataIsReady": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferGetAudioStreamPacketDescriptions": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferGetDataBuffer": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferGetFormatDescription": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferGetImageBuffer": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferGetOutputDecodeTimeStamp": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferGetOutputDuration": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferGetOutputPresentationTimeStamp": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferGetPresentationTimeStamp": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferGetSampleAttachmentsArray": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferRelease": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferRetain": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferSetDataBufferFromAudioBufferList": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigThreadRunOnce": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigTimeAdd": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigTimeCompare": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigTimeConvertScale": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigTimeCopyAsDictionary": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigTimeGetSeconds": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigTimeMake": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigTimeMakeFromDictionary": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigTimeMultiplyByFloat64": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigTimeSubtract": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigVideoFormatDescriptionCreateForImageBuffer": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigVideoFormatDescriptionGetDimensions": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigVideoFormatDescriptionGetExtensionKeysCommonWithImageBuffers": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FlushVol": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_ForEachIconDo": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_ForeColor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FrameRect": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FrameRoundRect": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetAppFont": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetBackColor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetCPixel": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetClip": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetCursor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetDeviceList": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetFNum": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetFontInfo": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetForeColor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetGDevice": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetGWorld": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetGWorldDevice": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetGWorldPixMap": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetIconRefFromFile": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_GetIconSuite": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetMainDevice": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetNextDevice": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPixBounds": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPixRowBytes": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPort": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortBounds": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortClipRegion": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortPenLocation": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortPixMap": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortTextFace": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortTextFont": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortTextMode": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortTextSize": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortVisibleRegion": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetQDGlobalsScreenBits": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetSysFont": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GlobalToLocal": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_HDelete": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_HIDPIGetScaleFactor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_HRstFLock": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_HidePen": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_IMAVManagerStateChangedNotification": {
+  "first_seen_fw": "InstantMessage",
+  "stub": "function"
+ },
+ "_InvertRect": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_IsPortOffscreen": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_LMGetCurApName": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_LMGetHiliteMode": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_LMSetHiliteMode": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_Line": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_LineTo": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_LocalToGlobal": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_LockPixels": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_LockPortBits": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_MatchAlias": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_MoveTo": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_NDR_record": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_NSAddImage": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_NSAddressOfSymbol": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_NSLookupSymbolInImage": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_NSVersionOfLinkTimeLibrary": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_NSVersionOfRunTimeLibrary": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_NewAliasMinimal": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_NewGWorld": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_NewGWorldFromPtr": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_NewIconSuite": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_OBJC_EHTYPE_id": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_OKAO_CreateAlbum": {
+  "first_seen_fw": "eOkaoFr.dylib",
+  "stub": "function"
+ },
+ "_OKAO_CreateDetection": {
+  "first_seen_fw": "eOkaoDt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_CreateDtResult": {
+  "first_seen_fw": "eOkaoDt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_CreateFaceData": {
+  "first_seen_fw": "eOkaoFr.dylib",
+  "stub": "function"
+ },
+ "_OKAO_CreatePointer": {
+  "first_seen_fw": "eOkaoPt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_CreatePtResult": {
+  "first_seen_fw": "eOkaoPt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_DeleteAlbum": {
+  "first_seen_fw": "eOkaoFr.dylib",
+  "stub": "function"
+ },
+ "_OKAO_DeleteDetection": {
+  "first_seen_fw": "eOkaoDt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_DeleteDtResult": {
+  "first_seen_fw": "eOkaoDt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_DeleteFaceData": {
+  "first_seen_fw": "eOkaoFr.dylib",
+  "stub": "function"
+ },
+ "_OKAO_DeletePointer": {
+  "first_seen_fw": "eOkaoPt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_DeletePtResult": {
+  "first_seen_fw": "eOkaoPt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_Detection": {
+  "first_seen_fw": "eOkaoDt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_GetDtCorner": {
+  "first_seen_fw": "eOkaoDt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_GetDtFaceCount": {
+  "first_seen_fw": "eOkaoDt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_GetDtVersion": {
+  "first_seen_fw": "eOkaoDt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_GetFaceData": {
+  "first_seen_fw": "eOkaoFr.dylib",
+  "stub": "function"
+ },
+ "_OKAO_GetFaceDataSize": {
+  "first_seen_fw": "eOkaoFr.dylib",
+  "stub": "function"
+ },
+ "_OKAO_GetFrVersion": {
+  "first_seen_fw": "eOkaoFr.dylib",
+  "stub": "function"
+ },
+ "_OKAO_GetPtPoint": {
+  "first_seen_fw": "eOkaoPt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_GetPtVersion": {
+  "first_seen_fw": "eOkaoPt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_Identify": {
+  "first_seen_fw": "eOkaoFr.dylib",
+  "stub": "function"
+ },
+ "_OKAO_Pointer": {
+  "first_seen_fw": "eOkaoPt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_QueryRegistUserDataNum": {
+  "first_seen_fw": "eOkaoFr.dylib",
+  "stub": "function"
+ },
+ "_OKAO_QueryRegistUserNum": {
+  "first_seen_fw": "eOkaoFr.dylib",
+  "stub": "function"
+ },
+ "_OKAO_RegistAlbum": {
+  "first_seen_fw": "eOkaoFr.dylib",
+  "stub": "function"
+ },
+ "_OKAO_SetDtDetectAngle": {
+  "first_seen_fw": "eOkaoDt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_SetDtDetectDirection": {
+  "first_seen_fw": "eOkaoDt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_SetDtFaceSizeRange": {
+  "first_seen_fw": "eOkaoDt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_SetDtPose": {
+  "first_seen_fw": "eOkaoDt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_SetDtThreshold": {
+  "first_seen_fw": "eOkaoDt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_SetFaceData": {
+  "first_seen_fw": "eOkaoFr.dylib",
+  "stub": "function"
+ },
+ "_OKAO_SetFaceDataBuffer": {
+  "first_seen_fw": "eOkaoFr.dylib",
+  "stub": "function"
+ },
+ "_OKAO_SetPtMode": {
+  "first_seen_fw": "eOkaoPt.dylib",
+  "stub": "function"
+ },
+ "_OKAO_SetPtPosition": {
+  "first_seen_fw": "eOkaoPt.dylib",
+  "stub": "function"
+ },
+ "_OSAtomicAdd32": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_OSAtomicAdd32Barrier": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_OSAtomicAdd64Barrier": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_OSAtomicCompareAndSwap32Barrier": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_OSAtomicCompareAndSwap64": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_OSAtomicCompareAndSwap64Barrier": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_OSAtomicCompareAndSwapPtrBarrier": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_OSMemoryBarrier": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_OSSpinLockLock": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_OSSpinLockUnlock": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_OpColor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_OpenRgn": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PBDTGetIconSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBDTGetPath": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBFlushFileSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBFlushVolAsync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBGetCatInfoSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBHGetDirAccessSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBHGetVInfoSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBHGetVolParmsSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBHSetDirAccessSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBSetCatInfoSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBXGetVolInfoAsync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBXGetVolInfoSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PJCCreateLocalizedPaperName": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PJCCreatePrinterModuleBundleID": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PMPaperCreate": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PMPrinterCreatePaperInfoListForMenu": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PaintRect": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PenMode": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PenSize": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PlotIconID": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PlotIconMethod": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PlotIconRef": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PlotIconSuite": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_QDAddRectToDirtyRegion": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_QDError": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_QDFlushPortBuffer": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_QDIsPortBuffered": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_RFExportCreateCopy": {
+  "first_seen_fw": "CoreMediaAuthoring",
+  "stub": "function"
+ },
+ "_RFExportSourceCreateWithMovieData": {
+  "first_seen_fw": "CoreMediaAuthoring",
+  "stub": "function"
+ },
+ "_RFExportSourceCreateWithURL": {
+  "first_seen_fw": "CoreMediaAuthoring",
+  "stub": "function"
+ },
+ "_RGBBackColor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_RGBForeColor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_Random": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_RegisterIconRefFromResource": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_SANDBOX_EXTENSION_CANONICAL": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_ScrollRect": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_SetClip": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_SetCursor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_SetGDevice": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_SetGWorld": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_SetPort": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_SetPortGrafProcs": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_SetStdCProcs": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_StringWidth": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_TempDisposeHandle": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_TestDeviceAttribute": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_TextFace": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_TextFont": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_TextMode": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_TextSize": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_TruncString": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_UnlockPixels": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_UnlockPortBits": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_UnmountVol": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_XPCOAssortmentAssortmentsKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_XPCOAssortmentPartNumberKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_XPCOInternalErrorDomain": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_XPCOOrderProcessingDomain": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_XPCOStoreReachabilityDomain": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "__Block_object_assign": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__Block_object_dispose": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__DefaultRuneLocale": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__NSConcreteGlobalBlock": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__NSConcreteStackBlock": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__Unwind_Resume": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___AECoerceDesc": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AECountItems": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AECreateAppleEvent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AECreateDesc": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AECreateList": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AEDisposeDesc": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AEFlattenDesc": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AEGetDescData": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AEGetDescDataSize": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AEGetNthDesc": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AEPutDesc": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AEPutParamDesc": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AEPutParamPtr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AESendMessage": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AESizeOfFlattenedDesc": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AddCollectionItem": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___AddResource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___BatteryCount": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFAbsoluteTimeGetCurrent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFAbsoluteTimeGetDifferenceAsGregorianUnits": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFAbsoluteTimeGetGregorianDate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFAllocatorAllocate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFAllocatorCreate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFAllocatorDeallocate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFAllocatorReallocate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFArrayAppendValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFArrayCreate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFArrayCreateCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFArrayCreateMutable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFArrayCreateMutableCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFArrayExchangeValuesAtIndices": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFArrayGetCount": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFArrayGetTypeID": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFArrayGetValueAtIndex": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFArrayInsertValueAtIndex": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFArrayRemoveAllValues": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFArrayRemoveValueAtIndex": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFArraySetValueAtIndex": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBagGetCount": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBagGetTypeID": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBagGetValues": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBooleanGetTypeID": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBooleanGetValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleCloseBundleResourceMap": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleCopyBundleLocalizations": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleCopyBundleURL": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleCopyExecutableURL": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleCopyLocalizedString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleCopyPreferredLocalizationsFromArray": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleCopyPrivateFrameworksURL": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleCopyResourceURL": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleCreate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleGetBundleWithIdentifier": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleGetDataPointerForName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleGetFunctionPointerForName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleGetMainBundle": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleGetValueForInfoDictionaryKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleGetVersionNumber": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleLoadExecutable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFBundleOpenBundleResourceMap": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFCalendarCreateWithIdentifier": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFCopyDescription": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFCopyTypeIDDescription": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDataAppendBytes": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDataCreate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDataCreateCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDataCreateMutable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDataCreateMutableCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDataCreateWithBytesNoCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDataGetBytePtr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDataGetLength": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDataGetMutableBytePtr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDataGetTypeID": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDataIncreaseLength": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDataSetLength": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDateFormatterCreate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDateFormatterCreateStringWithDate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDateFormatterGetFormat": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDateFormatterSetFormat": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryAddValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryApplyFunction": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryContainsKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryContainsValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryCreate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryCreateCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryCreateMutable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryCreateMutableCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryGetCount": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryGetCountOfKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryGetCountOfValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryGetKeysAndValues": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryGetTypeID": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryGetValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryGetValueIfPresent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryRemoveAllValues": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryRemoveValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionaryReplaceValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFDictionarySetValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFEqual": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFGetAllocator": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFGetRetainCount": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFGetTypeID": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFHash": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFLocaleCopyCurrent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFLocaleGetIdentifier": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFLocaleGetValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFMachPortCreateRunLoopSource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFMachPortCreateWithPort": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFMakeCollectable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFNotificationCenterGetDistributedCenter": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFNotificationCenterPostNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFNullGetTypeID": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFNumberCompare": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFNumberCreate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFNumberGetByteSize": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFNumberGetType": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFNumberGetTypeID": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFNumberGetValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFNumberIsFloatType": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPlugInRegisterFactoryFunction": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPlugInRegisterPlugInType": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPlugInUnregisterFactory": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPlugInUnregisterPlugInType": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesAddSuitePreferencesToApp": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesAppSynchronize": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesCopyAppValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesCopyApplicationList": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesCopyKeyList": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesCopyMultiple": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesCopyValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesGetAppBooleanValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesGetAppIntegerValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesRemoveSuitePreferencesFromApp": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesSetAppValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesSetMultiple": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesSetValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPreferencesSynchronize": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPropertyListCreateDeepCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPropertyListCreateFromXMLData": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFPropertyListCreateXMLData": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFReadStreamClose": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFReadStreamCopyProperty": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFReadStreamGetError": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFReadStreamGetStatus": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFReadStreamHasBytesAvailable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFReadStreamOpen": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFReadStreamRead": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFReadStreamScheduleWithRunLoop": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFReadStreamSetClient": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFReadStreamSetProperty": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFReadStreamUnscheduleFromRunLoop": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRelease": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRetain": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopAddObserver": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopAddSource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopAddTimer": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopGetCurrent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopGetMain": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopObserverCreate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopObserverInvalidate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopRemoveObserver": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopRemoveSource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopRun": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopRunInMode": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopSourceCreate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopSourceInvalidate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopSourceSignal": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopStop": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopTimerCreate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopTimerInvalidate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopTimerSetNextFireDate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFRunLoopWakeUp": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetAddValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetApplyFunction": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetContainsValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetCreate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetCreateCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetCreateMutable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetCreateMutableCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetGetCount": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetGetCountOfValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetGetTypeID": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetGetValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetGetValueIfPresent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetGetValues": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetRemoveAllValues": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetRemoveValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetReplaceValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSetSetValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSocketConnectToAddress": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSocketCreateRunLoopSource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSocketCreateWithNative": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSocketGetNative": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSocketInvalidate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFSocketSetSocketFlags": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStreamCreatePairWithSocketToHost": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringAppend": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringAppendCharacters": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringAppendFormatAndArguments": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCapitalize": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCompare": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringConvertEncodingToNSStringEncoding": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringConvertNSStringEncodingToEncoding": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateArrayBySeparatingStrings": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateByCombiningStrings": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateExternalRepresentation": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateFromExternalRepresentation": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateMutable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateMutableCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateMutableWithExternalCharactersNoCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateWithBytes": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateWithCString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateWithCStringNoCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateWithCharacters": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateWithCharactersNoCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateWithFormatAndArguments": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateWithPascalString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringCreateWithPascalStringNoCopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringFind": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetCString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetCStringPtr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetCharacterAtIndex": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetCharactersPtr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetDoubleValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetFastestEncoding": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetIntValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetLength": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetMaximumSizeForEncoding": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetPascalString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetPascalStringPtr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetSmallestEncoding": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetSystemEncoding": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringGetTypeID": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringHasPrefix": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringHasSuffix": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringLowercase": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringNormalize": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringTrimWhitespace": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFStringUppercase": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFTimeZoneGetSecondsFromGMT": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCopyAbsoluteURL": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCopyFileSystemPath": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCopyHostName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCopyLastPathComponent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCopyPassword": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCopyPath": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCopyQueryString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCopyResourceSpecifier": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCopyScheme": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCopyUserName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCreateCopyAppendingPathComponent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCreateCopyDeletingLastPathComponent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCreateDataAndPropertiesFromResource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCreateFromFSRef": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCreateFromFileSystemRepresentation": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCreateStringByAddingPercentEscapes": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCreateStringByReplacingPercentEscapes": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCreateStringByReplacingPercentEscapesUsingEncoding": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCreateWithBytes": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCreateWithFileSystemPath": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLCreateWithString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLGetBytes": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLGetFSRef": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLGetPortNumber": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLGetString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLGetTypeID": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFURLHasDirectoryPath": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFUUIDCreate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFUUIDCreateFromString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFUUIDCreateString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFUUIDGetConstantUUIDWithBytes": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFUUIDGetUUIDBytes": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFWriteStreamCanAcceptBytes": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFWriteStreamClose": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFWriteStreamCopyProperty": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFWriteStreamGetError": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFWriteStreamGetStatus": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFWriteStreamOpen": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFWriteStreamScheduleWithRunLoop": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFWriteStreamSetClient": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFWriteStreamSetProperty": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFWriteStreamUnscheduleFromRunLoop": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFWriteStreamWrite": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFXMLCreateStringByEscapingEntities": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CFXMLCreateStringByUnescapingEntities": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CSBackupSetItemExcluded": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CSCopyMachineName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CSCopyUserName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ChangedResource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CloneCollection": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CloseComponent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CloseResFile": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CompareAndSwap": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CoreEndianInstallFlipper": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___Count1Resources": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CountCollectionOwners": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CreateTextEncoding": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CreateTextToUnicodeInfoByEncoding": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CreateUnicodeToTextInfoByEncoding": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___CurResFile": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___DebugStr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___Debugger": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___DecrementAtomic": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___Delay": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___Dequeue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___DetachResource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___DisposeCollection": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___DisposeHandle": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___DisposePtr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___DisposeTextToUnicodeInfo": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___DisposeUnicodeToTextInfo": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___Enqueue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FNNotify": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FNNotifyByPath": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSAllocateFork": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSCloseFork": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSCloseIterator": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSCompareFSRefs": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSCreateDirectoryUnicode": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSCreateFileUnicode": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSCreateResFile": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSDeleteObject": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSExchangeObjects": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSFindFolder": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSFlushFork": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSGetForkPosition": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSGetForkSize": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSIsAliasFile": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSMakeFSRefUnicode": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSMoveObject": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSNewAlias": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSOpenFork": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSOpenIterator": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSOpenResFile": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSPathMakeRef": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSReadFork": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSRenameUnicode": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSResolveAliasFile": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSResolveAliasFileWithMountFlags": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSResolveAliasWithMountFlags": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSSetCatalogInfo": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSSetForkPosition": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSSetForkSize": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FSWriteFork": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FindFolder": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FindNextComponent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___FixRatio": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___Gestalt": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___Get1IndResource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___Get1NamedResource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___Get1Resource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetComponentInfo": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetCurrentProcess": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetCurrentThread": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetFrontProcess": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetHandleSize": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetIconFamilyData": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetIconRef": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetNextProcess": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetNextResourceFile": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetProcessInformation": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetResAttrs": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetResInfo": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetResource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetScriptManagerVariable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetThreadCurrentTaskRef": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___GetTopResourceFile": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___HandToHand": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ICAddMapEntry": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ICBegin": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ICCountMapEntries": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ICDeleteMapEntry": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ICEnd": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ICFindPrefHandle": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ICGetMapEntry": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ICGetPref": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ICLaunchURL": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ICSetMapEntry": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ICSetPrefHandle": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ICStart": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ICStop": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___IOAllowPowerChange": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___IODeregisterForSystemPower": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___IONotificationPortDestroy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___IONotificationPortGetRunLoopSource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___IORegisterForSystemPower": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___IOServiceClose": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___IncrementAtomic": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___InsertResourceFile": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___KCDeleteItem": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___KCFindFirstItem": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___KCFindNextItem": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___KCGetAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___KCGetData": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___KCNewItem": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___KCReleaseItem": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___KCReleaseSearch": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___KCSetAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___LMGetResLoad": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___LMSetResLoad": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___LSCopyApplicationForMIMEType": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___LSCopyDisplayNameForRef": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___LSCopyDisplayNameForURL": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___LSCopyItemInfoForRef": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___LSFindApplicationForInfo": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___LSGetApplicationForInfo": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___LSGetApplicationForURL": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___LSOpenFromURLSpec": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___LaunchApplication": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___LoadResource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___Long2Fix": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___MDItemCopyAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___MDItemCreate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___MPCreateQueue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___MPCreateTask": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___MPDeleteQueue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___MPNotifyQueue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___MPProcessorsScheduled": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___MPTaskIsPreemptive": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___MPWaitOnQueue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___MemError": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___Microseconds": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___Munger": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityActionDescription": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityButtonRole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityCheckBoxRole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityChildrenAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityColumnCountAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityDecrementAction": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityDecrementButtonAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityDescriptionAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityDisclosureTriangleRole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityEnabledAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityFocusedAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityFocusedUIElementAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityFocusedUIElementChangedNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityGridRole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityGroupRole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityGrowAreaAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityGrowAreaRole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityHelpAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityHorizontalOrientationValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityImageRole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityIncrementAction": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityIncrementButtonAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityIncrementorRole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityLinkedUIElementsAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityListRole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityMaxValueAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityMinValueAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityOrderedByRowAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityOrientationAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityParentAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityPositionAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityPostNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityPressAction": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityRoleAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityRoleDescription": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityRoleDescriptionAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityRowCountAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilitySelectedChildrenAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilitySelectedChildrenChangedNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityShowMenuAction": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilitySizeAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilitySliderRole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityStaticTextRole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilitySubroleAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityTimelineSubrole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityTitleAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityTitleUIElementAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityTopLevelUIElementAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityUnignoredAncestor": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityUnignoredChildren": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityUnignoredChildrenForOnlyChild": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityUnignoredDescendant": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityValueAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityValueChangedNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityValueDescriptionAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityValueIndicatorRole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityVerticalOrientationValue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityVisibleChildrenAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityWindowAttribute": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAccessibilityWindowRole": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAllMapTableKeys": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAllocateMemoryPages": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSAnimationTriggerOrderIn": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSApp": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSApplicationDidBecomeActiveNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSApplicationDidChangeScreenParametersNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSApplicationDidResignActiveNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSApplicationMain": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSApplicationWillBecomeActiveNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSApplicationWillHideNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSApplicationWillResignActiveNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSApplicationWillTerminateNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSArgumentDomain": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSBackgroundColorAttributeName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSBeep": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSCalibratedRGBColorSpace": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSClassFromString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSCocoaErrorDomain": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSConnectionReplyMode": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSControlTextDidChangeNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSControlTextDidEndEditingNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSCopyObject": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSCountHashTable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSCountMapTable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSCreateHashTable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSCreateMapTable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSCursorAttributeName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSDateFormatString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSDateTimeOrdering": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSDeallocateMemoryPages": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSDefaultRunLoopMode": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSDeviceRGBColorSpace": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSDisableScreenUpdates": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSDragPboard": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSEnableScreenUpdates": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSEndHashTableEnumeration": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSEndMapTableEnumeration": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSEnumerateHashTable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSEnumerateMapTable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSEventTrackingRunLoopMode": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFileCreationDate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFileGroupOwnerAccountName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFileHFSTypeCode": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFileModificationDate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFilePosixPermissions": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFileSize": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFileSystemFreeSize": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFileType": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFileTypeDirectory": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFileTypeForHFSTypeCode": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFileTypeRegular": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFileTypeSymbolicLink": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFilenamesPboardType": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFilesPromisePboardType": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFontAttributeName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSForegroundColorAttributeName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFreeHashTable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFreeMapTable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSFullUserName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSGeneralPboard": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSGenericException": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSGregorianCalendar": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSHFSTypeOfFile": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSHashGet": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSHashInsert": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSHashRemove": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSHomeDirectory": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSImageCompressionFactor": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSIntMapValueCallBacks": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSIntegerMapKeyCallBacks": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSIntegerMapValueCallBacks": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSInternalInconsistencyException": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSInvalidArchiveOperationException": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSInvalidArgumentException": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSKeyValueChangeNewKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSKeyValueChangeNotificationIsPriorKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSKeyValueChangeOldKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSLinkAttributeName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSLocaleCountryCode": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSLocalizedDescriptionKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSLocalizedFailureReasonErrorKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSLocalizedRecoveryOptionsErrorKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSLocalizedRecoverySuggestionErrorKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSLogv": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSMapGet": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSMapInsert": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSMapInsertIfAbsent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSMapRemove": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSMetadataQueryDidFinishGatheringNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSMetadataQueryDidStartGatheringNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSModalPanelRunLoopMode": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSMonthNameArray": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSMultipleValuesMarker": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSNextHashEnumeratorItem": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSNextMapEnumeratorPair": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSNoSelectionMarker": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSNonOwnedPointerHashCallBacks": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSNonOwnedPointerMapKeyCallBacks": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSNonOwnedPointerMapValueCallBacks": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSNonRetainedObjectMapValueCallBacks": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSNotApplicableMarker": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSOSStatusErrorDomain": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSObjectMapKeyCallBacks": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSObjectMapValueCallBacks": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSObjectNotAvailableException": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSObservedKeyPathKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSObservedObjectKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSOutlineViewItemDidCollapseNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSOutlineViewItemDidExpandNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSPOSIXErrorDomain": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSParagraphStyleAttributeName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSPointFromString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSPopUpButtonWillPopUpNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSPrintSaveJob": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSPrintSavePath": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSRangeException": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSRecoveryAttempterErrorKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSRectFromString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSReleaseAlertPanel": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSResetMapTable": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSRunLoopCommonModes": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSSearchPathForDirectoriesInDomains": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSSelectorFromString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSSetFocusRingStyle": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSShadowAttributeName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSShortDateFormatString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSShortMonthNameArray": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSShortTimeDateFormatString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSShortWeekDayNameArray": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSSizeFromString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSStreamSocketSSLErrorDomain": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSStringFromClass": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSStringFromSelector": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSStringPboardType": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSTIFFPboardType": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSTaskDidTerminateNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSTemporaryDirectory": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSTextDidEndEditingNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSTextViewDidChangeSelectionNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSTimeFormatString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSToolbarFlexibleSpaceItemIdentifier": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSURLAuthenticationMethodHTTPDigest": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSURLErrorDomain": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSUnderlineStyleAttributeName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSUndoManagerDidRedoChangeNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSUndoManagerDidUndoChangeNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSUndoManagerWillCloseUndoGroupNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSUpdateDynamicServices": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSUserDefaultsDidChangeNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSUserName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSValueTransformerBindingOption": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSValueTransformerNameBindingOption": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSViewAnimationEndFrameKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSViewAnimationTargetKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSViewBoundsDidChangeNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSViewFrameDidChangeNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWeekDayNameArray": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWindowDidBecomeKeyNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWindowDidBecomeMainNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWindowDidChangeScreenNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWindowDidEndSheetNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWindowDidMiniaturizeNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWindowDidMoveNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWindowDidResignKeyNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWindowDidResignMainNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWindowDidResizeNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWindowWillBeginSheetNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWindowWillCloseNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWindowWillMiniaturizeNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWindowWillMoveNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWorkspaceRecycleOperation": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSWorkspaceWillPowerOffNotification": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NSZoneFromPointer": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NewCollection": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NewHandle": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NewHandleClear": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NewPtr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NewPtrClear": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___NewThread": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___OpenAComponent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___OpenADefaultComponent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___OpenComponent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___OpenDefaultComponent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMCopyPageFormat": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMCopyPrintSettings": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMCreateGenericPrinter": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMCreatePageFormatWithPMPaper": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMPaperGetHeight": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMPaperGetID": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMPaperGetMargins": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMPaperGetWidth": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMPresetCopyName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMPresetCreatePrintSettings": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMPresetGetAttributes": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMPrinterCopyDescriptionURL": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMPrinterCopyPresets": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMPrinterGetName": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMPrinterGetPaperList": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMPrinterIsDefault": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMPrinterIsFavorite": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMRelease": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMRetain": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMServerCreatePrinterList": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMSessionGetCurrentPrinter": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMSessionValidatePageFormat": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PMSessionValidatePrintSettings": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___PtrToHand": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ReleaseIconRef": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ReleaseResource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___RemoveResource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ResError": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ResolveComponentAlias": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___SameProcess": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___SetFrontProcess": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___SetHandleSize": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___SetResAttrs": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___SetResLoad": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___SetThreadReadyGivenTaskRef": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___SetThreadScheduler": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___SetThreadState": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___TECConvertText": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___TECCreateConverter": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___TECDisposeConverter": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___TempNewHandle": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___TickCount": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___UCCompareTextDefault": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___UCGetCharProperty": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___UTGetOSTypeFromString": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___Unique1ID": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___UnregisterComponent": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___UpdateResFile": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___UpdateSystemActivity": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___UseResFile": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___WriteResource": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___YieldToAnyThread": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___YieldToThread": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "_____assert_rtn": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "_____error": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "_____maskrune": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "_____sprintf_chk": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___accept": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___access": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___arc4random": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___assert_rtn": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___atexit": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___atof": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___atoi": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___bcopy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___bind": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___bzero": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___calloc": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___close": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___closedir": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___connect": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___creat": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ctime": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___cxa_atexit": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___error": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___exit": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___exp10": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___fclose": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___feof": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ferror": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___fflush": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___fileno": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___fopen": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___fprintf": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___fputc": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___fputs": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___fread": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___free": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___fscanf": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___fseek": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___ftell": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___funopen": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___fwrite": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___getaddrinfo": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___geteuid": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___gethostbyname": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___gethostname": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___getpeername": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___getpid": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___getppid": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___getrusage": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___getsockname": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___gettimeofday": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___getuid": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___gmtime_r": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___host_info": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___inet_addr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___inet_aton": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___inet_makeaddr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFAllocatorDefault": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFAllocatorMalloc": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFAllocatorNull": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFAllocatorSystemDefault": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFBooleanFalse": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFBooleanTrue": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFBundleExecutableKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFBundleIdentifierKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFBundleNameKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFBundleVersionKey": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFGregorianCalendar": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFPreferencesCurrentApplication": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFPreferencesCurrentHost": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFPreferencesCurrentUser": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFRunLoopCommonModes": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFRunLoopDefaultMode": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFStreamPropertySOCKSProxyHost": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFStreamPropertySOCKSProxyPort": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kCFStreamPropertySocketNativeHandle": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kMDItemCodecs": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kMDItemContentTypeTree": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kMDItemDurationSeconds": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kMDItemPath": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kMDItemPixelHeight": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kMDItemPixelWidth": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kMDItemTitle": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kUTTypeJPEG": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kUTTypePNG": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___kUTTypeTIFF": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___lchmod": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___lchown": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___listen": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___localtime": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___mach_host_self": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___mach_port_deallocate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___mach_thread_self": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___malloc": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___maskrune": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___memchr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___memcmp": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___memcpy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___memcpy_chk": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___memmove": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___memmove_chk": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___memset": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___mkdir": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___mkstemp": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___mktime": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___objc_msgSend": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___objc_msgSendSuper": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___objc_msgSendSuper_stret": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___objc_msgSend_fpret": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___objc_msgSend_stret": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___objc_personality_v0": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "___opendir$INODE64": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pclose": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pipe": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___popen": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___printf": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_attr_destroy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_attr_init": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_attr_setdetachstate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_cancel": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_cond_broadcast": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_cond_destroy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_cond_init": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_cond_signal": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_cond_timedwait": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_cond_timedwait_relative_np": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_cond_wait": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_create": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_equal": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_exit": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_join": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_mach_thread_np": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_main_np": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_mutex_destroy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_mutex_init": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_mutex_lock": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_mutex_trylock": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_mutex_unlock": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_mutexattr_init": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_mutexattr_settype": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_once": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_self": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_setname_np": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pthread_yield_np": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___putchar": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___puts": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___pwrite": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___qsort": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___rand": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___random": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___read": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___readdir$INODE64": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___realloc": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___realpath$DARWIN_EXTSN": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___recv": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___recvfrom": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___remove": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___rewind": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___rmdir": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___sched_yield": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___select": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___send": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___sendto": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___setbuf": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___setsockopt": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___setvbuf": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___shutdown": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___sigaction": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___sleep": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___snprintf": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___snprintf_chk": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___socket": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___sprintf": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___sprintf_chk": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___srand": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___srandom": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___sscanf": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___stack_chk_fail": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___stack_chk_guard": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___stderrp": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___stdoutp": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___strcasecmp": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strcat": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strchr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strcmp": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strcpy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strcpy_chk": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___strdup": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strerror": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strlen": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strncasecmp": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strncat": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strncat_chk": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___strncmp": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strncpy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strncpy_chk": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___strnstr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strrchr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strstr": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strtol": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strtoul": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___strtouq": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___sysctl": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___sysctlbyname": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___task_info": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___task_threads": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___thread_info": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___thread_policy": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___thread_policy_set": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___thread_switch": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___time": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___toupper": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "___unlink": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___usleep": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___utimes": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___vfprintf": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___vm_deallocate": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___vm_region_64": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___vprintf": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___waitpid": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "___write": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "__c_locale": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__dispatch_main_q": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__dispatch_queue_attr_concurrent": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__dispatch_source_type_timer": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__dyld_stub_binder": {
+  "first_seen_fw": "libabiconv.dylib",
+  "stub": "function"
+ },
+ "__objc_empty_cache": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "__objc_empty_vtable": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "__os_log_pack_fill": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__os_log_pack_size": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__os_nospin_lock_lock": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__os_nospin_lock_unlock": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__setjmp": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__xpc_error_key_description": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__xpc_runtime_is_app_sandboxed": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__xpc_type_error": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_abort": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_accept": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_access": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_acos": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_acosf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_arc4random": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_asin": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_asl_free": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_asl_new": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_asl_send": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_asl_set": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_atan": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_atan2": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_atan2f": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_atanf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_atoi": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_backtrace": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_backtrace_symbols": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_bcmp": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_bcopy": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_bind": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_calloc": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_cblas_sgemm": {
+  "first_seen_fw": "vecLib",
+  "stub": "function"
+ },
+ "_ceil": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_ceilf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_cfmakeraw": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_cfsetspeed": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_chmod": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_class_addMethod": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_class_copyMethodList": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_class_getClassMethod": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_class_getInstanceMethod": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_class_getInstanceSize": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_class_getMethodImplementation": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_class_getSuperclass": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_class_setSuperclass": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_close": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_confstr": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_connect": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_cos": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_cosf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_cosh": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_coshf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_create_fftsetup": {
+  "first_seen_fw": "Accelerate",
+  "stub": "function"
+ },
+ "_destroy_fftsetup": {
+  "first_seen_fw": "Accelerate",
+  "stub": "function"
+ },
+ "_difftime": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_after": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_async": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_barrier_async": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_get_global_queue": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_group_create": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_group_enter": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_group_leave": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_group_wait": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_once": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_queue_create": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_release": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_resume": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_retain": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_set_target_queue": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_source_create": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_source_set_event_handler": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_sync": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dispatch_time": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dlopen": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dlsym": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_dyld_stub_binder": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_exit": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_exp": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_exp2": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_expf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fclose": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fcntl": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_feof": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fflush": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fft2d_zip": {
+  "first_seen_fw": "Accelerate",
+  "stub": "function"
+ },
+ "_fgets": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fig_logP": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_fig_log_CF1P": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_fileno": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_floor": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_floorf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fmax": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fmaxf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fmin": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fminf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fmod": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fmodf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fopen": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fprintf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fputc": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fputs": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fread": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_free": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_freeifaddrs": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_frexp": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fseek": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fstat": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fstat$INODE64": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_ftell": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_ftruncate": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fts_children": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fts_close": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fts_open": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fts_read": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fwrite": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_fwrite$UNIX2003": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_getenv": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_gethostbyname": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_getifaddrs": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_getpagesize": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_getpid": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_gettimeofday": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_getuid": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_gmtime_r": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_host_info": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_hypot": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_ilogbf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_index": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_inet_addr": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_inet_ntoa": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_ioctl": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_kMEQTMovieOptions": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMEQTOutputFrameRate": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMEQTTrackOptions": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMEQTWriteToFileOptions": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAssetMapLatLongPoints": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringAspectRatio": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringAssetKeyDelegate": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringAudioDuration": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringAudioScalingMode": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringColorScheme": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringCroppingMode": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringImageOrderingMode": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringKenBurnsLikelihood": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringLayerTimeScale": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringMinimumEffectDuration": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringReconfigureIndices": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringSeed": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringSkipTransitions": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringStyleID": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringSubtitles": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringTitleStrings": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringTransitionDuration": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringTransitionList": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringUseDefaultAudio": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringUseLoopTransition": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPAuthoringUseTitleEffect": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPDocumentAuthoringOptions": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPDocumentRandomTransitionList": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataArea": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataCity": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataCountry": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataCreationDate": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataDefinedPlaceName": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataDuration": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataLatitude": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataLongitude": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataMediaType": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataNeighborhood": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataOcean": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataPlace": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataRegionOfInterestRectangles": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataResolution": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataStartTime": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataStateOrProvince": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPMetaDataStopTime": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPSaveOptionExternalPrefix": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPSlideAnimatedCropCenterKey": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPSlideAnimatedCropRotationKey": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPSlideAnimatedCropZoomKey": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPSlideSizingModeCrop": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMPSlideSizingModeFit": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMRNotificationLayerIsIn": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMRNotificationPlaybackOver": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kMRRendererRunLoopModeRender": {
+  "first_seen_fw": "iLifeSlideshow",
+  "stub": "function"
+ },
+ "_kRFExportOption_EnableHardwareVideoEncoder": {
+  "first_seen_fw": "CoreMediaAuthoring",
+  "stub": "function"
+ },
+ "_kRFExportOption_UseQTSourceAlways": {
+  "first_seen_fw": "CoreMediaAuthoring",
+  "stub": "function"
+ },
+ "_kVTProfileLevel_H264_Baseline_1_3": {
+  "first_seen_fw": "VideoToolbox",
+  "stub": "function"
+ },
+ "_kVTProfileLevel_H264_Baseline_3_0": {
+  "first_seen_fw": "VideoToolbox",
+  "stub": "function"
+ },
+ "_kVTProfileLevel_H264_Extended_5_0": {
+  "first_seen_fw": "VideoToolbox",
+  "stub": "function"
+ },
+ "_kVTProfileLevel_H264_High_5_0": {
+  "first_seen_fw": "VideoToolbox",
+  "stub": "function"
+ },
+ "_kVTProfileLevel_H264_Main_3_0": {
+  "first_seen_fw": "VideoToolbox",
+  "stub": "function"
+ },
+ "_kVTProfileLevel_H264_Main_3_1": {
+  "first_seen_fw": "VideoToolbox",
+  "stub": "function"
+ },
+ "_kVTProfileLevel_H264_Main_4_0": {
+  "first_seen_fw": "VideoToolbox",
+  "stub": "function"
+ },
+ "_kVTProfileLevel_H264_Main_4_1": {
+  "first_seen_fw": "VideoToolbox",
+  "stub": "function"
+ },
+ "_kVTProfileLevel_H264_Main_5_0": {
+  "first_seen_fw": "VideoToolbox",
+  "stub": "function"
+ },
+ "_kXPCOAssetAlbumNameKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOAssetFileChecksumsKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOAssetFilePathKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOAssetFileSizeKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOAssetHeightKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOAssetMediaType": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOAssetMediaTypeKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOAssetPDFPageCountKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOAssetPageCountKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOAssetPartNumberKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOAssetScaleImageKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOAssetTokenKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOAssetVendorShouldEnhanceImageKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOAssetWidthKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOConfiguration": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOFailedFinalization": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOIncludeMadeOnMacLogoKey": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOInternetAvailable": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCONoURLInConfiguration": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOOscar": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kXPCOThumbnailMediaType": {
+  "first_seen_fw": "ExpressCheckout",
+  "stub": "function"
+ },
+ "_kevent": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_listen": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_localtime_r": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_log": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_log10": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_log10f": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_log2": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_log2f": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_logf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_lrint": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_lrintf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_lround": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_lroundf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_lseek": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_lstat$INODE64": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mach_absolute_time": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mach_error_string": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mach_host_self": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mach_msg": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mach_msg_destroy": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mach_port_allocate": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mach_port_deallocate": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mach_port_destroy": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mach_port_insert_right": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mach_port_mod_refs": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mach_task_self_": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mach_thread_self": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mach_timebase_info": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_malloc": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_memcmp": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_memcpy": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_memmove": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_memset": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_memset_pattern16": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_method_exchangeImplementations": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_method_getDescription": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_method_getImplementation": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_method_getTypeEncoding": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_method_invoke": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_method_setImplementation": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_mig_allocate": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mig_dealloc_reply_port": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mig_deallocate": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mig_get_reply_port": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mig_put_reply_port": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mk_timer_arm": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mk_timer_cancel": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mk_timer_create": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mk_timer_destroy": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mkdir": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mkstemp": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mktime": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mmap": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_modf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_mprotect": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_msync": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_munmap": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_objc_assign_global": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_assign_ivar": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_assign_strongCast": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_begin_catch": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_collecting_enabled": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_copyStruct": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_ehtype_vtable": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_empty_vtable": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_end_catch": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_enumerationMutation": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_exception_extract": {
+  "first_seen_fw": "WebKit",
+  "stub": "function"
+ },
+ "_objc_exception_match": {
+  "first_seen_fw": "WebKit",
+  "stub": "function"
+ },
+ "_objc_exception_rethrow": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_exception_throw": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_exception_try_enter": {
+  "first_seen_fw": "WebKit",
+  "stub": "function"
+ },
+ "_objc_exception_try_exit": {
+  "first_seen_fw": "WebKit",
+  "stub": "function"
+ },
+ "_objc_getAssociatedObject": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_getClass": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_getMetaClass": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_getProperty": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_loadWeak": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_msgSend": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_msgSendSuper": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_msgSendSuper2": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_msgSendSuper2_fixup": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_msgSendSuper2_stret": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_msgSendSuper2_stret_fixup": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_msgSend_fixup": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_msgSend_fpret": {
+  "first_seen_fw": "WebKit",
+  "stub": "function"
+ },
+ "_objc_msgSend_stret": {
+  "first_seen_fw": "WebKit",
+  "stub": "function"
+ },
+ "_objc_msgSend_stret_fixup": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_setAssociatedObject": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_setProperty": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_setProperty_atomic_copy": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_setProperty_nonatomic": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_setProperty_nonatomic_copy": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_storeWeak": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_sync_enter": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_sync_exit": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_objc_terminate": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_object_getInstanceVariable": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_open": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_perror": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pow": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_powf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pread": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_printf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_proc_name": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_attr_destroy": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_attr_init": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_attr_setdetachstate": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_attr_setscope": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_cond_broadcast": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_cond_destroy": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_cond_init": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_cond_signal": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_cond_timedwait": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_cond_wait": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_create": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_detach": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_main_np": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_mutex_destroy": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_mutex_init": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_mutex_lock": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_mutex_unlock": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_mutexattr_destroy": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_mutexattr_init": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_mutexattr_settype": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_once": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_self": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_setcanceltype": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_setname_np": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pthread_setschedparam": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_putchar": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_puts": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_pwrite": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_qsort": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_qsort_r": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_rand": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_random": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_read": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_readv": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_realloc": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_realpath$DARWIN_EXTSN": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_recv": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_remainder": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_rint": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_rintf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_round": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_roundf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_sandbox_check": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_sandbox_extension_issue_file": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_scalbnf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_sched_get_priority_max": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_sched_get_priority_min": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_sel_isEqual": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_sel_registerName": {
+  "first_seen_fw": "libobjc.A.dylib",
+  "stub": "function"
+ },
+ "_select$1050": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_setlocale": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_setsockopt": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_sgesv_": {
+  "first_seen_fw": "vecLib",
+  "stub": "function"
+ },
+ "_sin": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_sinf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_sinh": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_sleep": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_snprintf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_socket": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_sprintf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_srand": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_srandom": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_sscanf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_stat": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_stat$INODE64": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_statfs": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_statfs$INODE64": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strchr": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strcmp": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strcpy": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strdup": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strerror": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strlcat": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strlen": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strncat": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strncmp": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strncpy": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strnstr": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strrchr": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strsep": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strtod": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strtod$UNIX2003": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strtod_l": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strtof": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strtol": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strtoll": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_strtoul": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_syscall": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_sysctl": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_sysctlbyname": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_tan": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_tanf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_tanh": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_task_info": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_task_threads": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_tcgetattr": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_tcsetattr": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_thread_info": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_time": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_trunc": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_tzset": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_unlink": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_usleep": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_valloc": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_vfprintf": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_vm_deallocate": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_vm_map": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_vm_region_64": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_voucher_mach_msg_set": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_vsmul": {
+  "first_seen_fw": "Accelerate",
+  "stub": "function"
+ },
+ "_write": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_writev": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_connection_cancel": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_connection_create": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_connection_get_pid": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_connection_resume": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_connection_send_message": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_connection_send_message_with_reply_sync": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_connection_set_event_handler": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_connection_set_target_queue": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_dictionary_create": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_dictionary_get_string": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_dictionary_get_value": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_dictionary_set_bool": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_dictionary_set_value": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_get_type": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_mach_send_create": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_mach_send_get_right": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_release": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_xpc_retain": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_zvmul": {
+  "first_seen_fw": "Accelerate",
+  "stub": "function"
+ },
+ "dyld_stub_binder": {
+  "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ }
+}

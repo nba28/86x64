@@ -1,0 +1,2 @@
+ops[0]=1 ops[1]=2 ops[2]=3
+exit_code: 0

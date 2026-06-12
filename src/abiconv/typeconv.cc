@@ -1,5 +1,9 @@
+#include <cassert>
 #include <clang-c/Index.h>
+#include <cstdint>
+#include <map>
 #include <sstream>
+#include <vector>
 
 #include "emit.hh"
 #include "util.hh"
@@ -62,13 +66,36 @@ void record_decl::populate_fields() {
                   break;
 
                case CXCursor_StructDecl:
-                  /* ignore */
+               case CXCursor_UnionDecl:
+                  /* nested anonymous record type declaration: ignored; the
+                   * corresponding anonymous FieldDecl carries the layout */
                   break;
 
-               default: abort();
+               case CXCursor_UnexposedAttr:
+                  /* attribute on a field/record (availability, alignment hint,
+                   * swift_name, etc.) that libclang doesn't expose. These do
+                   * not affect the C field layout we compute, so ignore. */
+                  break;
+
+               default:
+                  if (getenv("ABIGEN_DEBUG_MEMBERS")) {
+                     auto ks = clang_getCursorKindSpelling(clang_getCursorKind(c));
+                     std::cerr << "  member kind: " << clang_getCString(ks) << std::endl;
+                     clang_disposeString(ks);
+                  }
+                  /* This runs inside a libclang visitor callback (C frame),
+                   * so we must not throw across it. Record the condition and
+                   * let populate_fields() throw after the visit completes
+                   * (e.g. C++ member functions, bitfields, or other members
+                   * we can't lay out). */
+                  unsupported = true;
+                  break;
                }
                return CXChildVisit_Continue;
             });
+   if (unsupported) {
+      throw std::invalid_argument("record_decl: unsupported struct/union member");
+   }
 }
 
 void conversion::push(std::ostream& os, const RegisterLocation& loc, Location& src, Location& dst) {
@@ -202,6 +229,16 @@ void conversion::convert(std::ostream& os, CXType type, const Location& src, con
       convert_int(os, CXType_Pointer, src, dst);
       break;
 
+   case CXType_ObjCObjectPointer:
+   case CXType_ObjCId:
+   case CXType_ObjCClass:
+      convert_objc_ptr(os, src, dst);
+      break;
+
+   case CXType_ObjCSel:
+      convert_objc_sel(os, src, dst);
+      break;
+
    case CXType_ConstantArray:
       convert_constant_array(os, type,
                              dynamic_cast<const MemoryLocation&>(src),
@@ -216,8 +253,9 @@ void conversion::convert(std::ostream& os, CXType type, const Location& src, con
 
    case CXType_FunctionProto:
       break;
-      
-   default: abort();
+
+   default:
+      throw std::invalid_argument("conversion::convert: unsupported type kind");
    }
 }
 
@@ -275,7 +313,11 @@ void conversion::convert_constant_array(std::ostream& os, CXType array, MemoryLo
 void conversion::convert_record(std::ostream& os, CXType record, MemoryLocation src,
                                 MemoryLocation dst) {
    record_decl decl(record);
-   assert(decl.cursor.kind == CXCursor_StructDecl);
+   /* Unions can't be converted field-by-field (members overlap; which one is
+    * live is unknown). Skip the whole function rather than mislaying it. */
+   if (decl.cursor.kind != CXCursor_StructDecl) {
+      throw std::invalid_argument("convert_record: union by value not supported");
+   }
    for (CXType field_type : decl.field_types) {
       src.align_field(field_type, from_arch);
       dst.align_field(field_type, to_arch);
@@ -293,12 +335,392 @@ void conversion::convert_record(std::ostream& os, CXType record, MemoryLocation 
    }
 }
 
+/* ---- callback-signature registry (fn-ptr parameter bridging) ----
+ *
+ * A fn-ptr parameter's value is an i386 code address the native API will
+ * eventually CALL with the x86_64 ABI. The shim therefore can't pass it (or
+ * any deep copy) through: it must substitute a NATIVE trampoline bound to the
+ * i386 callback. The marshalling the trampoline must perform is fully
+ * determined by the callback's prototype, which we have here from the
+ * header — encode it as a descriptor blob the runtime dispatcher
+ * (cb_bridge.c) interprets per invocation. Codes must match cb_bridge.c. */
+
+namespace {
+
+   enum cb_arg_code : uint8_t {
+      CBA_I32 = 0,   /* int-domain arg, low 32 bits -> 1 word              */
+      CBA_I64 = 1,   /* long long -> 2 words (lo, hi)                      */
+      CBA_PTR = 2,   /* pointer, truncate (process heap is low-4GB)        */
+      CBA_OBJ = 3,   /* objc/CF object ptr: wrap via x64_objc_wrap if high */
+      CBA_F32 = 4,   /* float (xmm low 4 bytes) -> 1 word                  */
+      CBA_F64 = 5,   /* double -> 2 words                                  */
+   };
+   enum cb_ret_code : uint32_t {
+      CBR_VOID  = 0,
+      CBR_I32   = 1, /* eax, zero-extended                                 */
+      CBR_PTR   = 2, /* eax, zero-extended                                 */
+      CBR_OBJ   = 3, /* eax; arena handle -> unwrap to the real object     */
+      CBR_I32SX = 4, /* eax sign-extended (i386 long -> native 64-bit long)*/
+   };
+   constexpr unsigned CB_MAX_ARGS = 16; /* x64_cb_sig.arg_kinds[] capacity */
+
+   struct cb_sig {
+      uint32_t ret_kind;
+      std::vector<uint8_t> arg_kinds;
+   };
+   std::vector<cb_sig> cb_sigs;
+   std::map<std::string, unsigned> cb_sig_dedupe;
+
+   bool cb_is_cf_record_ptr(CXType pointee_canon) {
+      if (pointee_canon.kind != CXType_Record) { return false; }
+      CXString s = clang_getTypeSpelling(pointee_canon);
+      const bool cf = std::string(clang_getCString(s)).find("__CF") != std::string::npos;
+      clang_disposeString(s);
+      return cf;
+   }
+
+   uint8_t cb_arg_code_for(CXType t) {
+      t = clang_getCanonicalType(t);
+      switch (t.kind) {
+      case CXType_Bool:
+      case CXType_Char_U:
+      case CXType_UChar:
+      case CXType_Char_S:
+      case CXType_SChar:
+      case CXType_UShort:
+      case CXType_Short:
+      case CXType_UInt:
+      case CXType_Int:
+      case CXType_Enum:
+      /* native long is 64-bit; the i386 callback's long is the low 4 bytes */
+      case CXType_ULong:
+      case CXType_Long:
+         return CBA_I32;
+      case CXType_ULongLong:
+      case CXType_LongLong:
+         return CBA_I64;
+      case CXType_Float:
+         return CBA_F32;
+      case CXType_Double:
+         return CBA_F64;
+      case CXType_ObjCObjectPointer:
+      case CXType_ObjCId:
+      case CXType_ObjCClass:
+         return CBA_OBJ;
+      case CXType_Pointer:
+         return cb_is_cf_record_ptr(clang_getCanonicalType(clang_getPointeeType(t)))
+            ? CBA_OBJ : CBA_PTR;
+      case CXType_BlockPointer:
+      case CXType_ConstantArray:
+      case CXType_IncompleteArray:
+         return CBA_PTR;
+      default:
+         throw std::invalid_argument("callback arg type unsupported: " + to_string(t));
+      }
+   }
+
+   uint32_t cb_ret_code_for(CXType t) {
+      t = clang_getCanonicalType(t);
+      switch (t.kind) {
+      case CXType_Void:
+         return CBR_VOID;
+      case CXType_Bool:
+      case CXType_Char_U:
+      case CXType_UChar:
+      case CXType_Char_S:
+      case CXType_SChar:
+      case CXType_UShort:
+      case CXType_Short:
+      case CXType_UInt:
+      case CXType_Int:
+      case CXType_Enum:
+      case CXType_ULong:
+         return CBR_I32;
+      case CXType_Long: /* CFIndex comparators: native caller reads all of rax */
+         return CBR_I32SX;
+      case CXType_ObjCObjectPointer:
+      case CXType_ObjCId:
+      case CXType_ObjCClass:
+         return CBR_OBJ;
+      case CXType_Pointer:
+         return cb_is_cf_record_ptr(clang_getCanonicalType(clang_getPointeeType(t)))
+            ? CBR_OBJ : CBR_PTR;
+      default:
+         /* long long (eax:edx) and x87 FP returns aren't captured by
+          * _86x64_call_i386 */
+         throw std::invalid_argument("callback return type unsupported: " + to_string(t));
+      }
+   }
+
+}
+
+/* exported: is this canonical type an opaque-CF-ref pointer (CFStringRef &c)?
+ * Used by abigen's return-value wrapping. */
+bool cf_opaque_ptr_type(CXType canon) {
+   if (canon.kind != CXType_Pointer) { return false; }
+   return cb_is_cf_record_ptr(
+      clang_getCanonicalType(clang_getPointeeType(canon)));
+}
+
+unsigned cb_sig_register(CXType fnproto) {
+   if (fnproto.kind != CXType_FunctionProto) {
+      throw std::invalid_argument("callback has no prototype");
+   }
+   if (clang_isFunctionTypeVariadic(fnproto)) {
+      throw std::invalid_argument("variadic callback");
+   }
+   const int nargs = clang_getNumArgTypes(fnproto);
+   if (nargs < 0 || nargs > (int)CB_MAX_ARGS) {
+      throw std::invalid_argument("callback has too many args");
+   }
+
+   cb_sig sig;
+   sig.ret_kind = cb_ret_code_for(clang_getResultType(fnproto));
+   for (int i = 0; i < nargs; ++i) {
+      sig.arg_kinds.push_back(cb_arg_code_for(clang_getArgType(fnproto, i)));
+   }
+
+   std::string key = std::to_string(sig.ret_kind) + ":";
+   for (uint8_t k : sig.arg_kinds) { key += (char)('0' + k); }
+   auto it = cb_sig_dedupe.find(key);
+   if (it != cb_sig_dedupe.end()) { return it->second; }
+
+   const unsigned idx = cb_sigs.size();
+   cb_sigs.push_back(std::move(sig));
+   cb_sig_dedupe.emplace(std::move(key), idx);
+   return idx;
+}
+
+void cb_sig_emit(std::ostream& os) {
+   os << "\n\tsegment .data" << std::endl;
+   os << "\t; callback-signature descriptors (struct x64_cb_sig, cb_bridge.c)"
+      << std::endl;
+   for (unsigned i = 0; i < cb_sigs.size(); ++i) {
+      const cb_sig& sig = cb_sigs[i];
+      os << "_x64_cbsig_" << i << ":" << std::endl;
+      os << "\tdd " << sig.arg_kinds.size() << std::endl;
+      os << "\tdd " << sig.ret_kind << std::endl;
+      os << "\tdb ";
+      for (unsigned k = 0; k < CB_MAX_ARGS; ++k) {
+         if (k) { os << ", "; }
+         os << (k < sig.arg_kinds.size() ? (unsigned)sig.arg_kinds[k] : 0u);
+      }
+      os << std::endl;
+   }
+}
+
+/* Emit a mid-conversion-stream call to a one-argument libabiconv runtime
+ * helper: r14 <- src; rdi <- r14 (+ optional rsi operand); r14 <- callee(...);
+ * dst <- r14. Conversion streams run with x86_64 arg registers (and, inside a
+ * record deep copy, the r11/r12 pointee bases) holding live values: save
+ * every caller-saved GP reg + xmm0-7 around the call, keep values in r13/r14
+ * (callee-saved, unused by the conversion machinery), and only touch
+ * rsp-relative src/dst OUTSIDE the pushed region (src is read into r14
+ * before the pushes; dst is written after the pops). */
+void conversion::emit_runtime_bridge_call(std::ostream& os, const char *callee,
+                                          const std::string& rsi_operand,
+                                          const Location& src, reg_width src_width,
+                                          const Location& dst, reg_width dst_width) {
+   emit_inst(os, "mov", src_width == reg_width::Q ? "r14" : "r14d",
+             src.op(src_width));
+
+   static const char *saves[] = {"rax", "rcx", "rdx", "rsi", "rdi",
+                                 "r8", "r9", "r10", "r11", "r12"};
+   for (const char *r : saves) { emit_inst(os, "push", r); }
+   emit_inst(os, "sub", "rsp", 64);
+   for (int k = 0; k < 8; ++k) {
+      emit_inst(os, "movsd", "[rsp + " + std::to_string(k * 8) + "]",
+                "xmm" + std::to_string(k));
+   }
+
+   emit_inst(os, "mov", "rdi", "r14");
+   if (!rsi_operand.empty()) {
+      emit_inst(os, "lea", "rsi", rsi_operand);
+   }
+   emit_inst(os, "mov", "r13", "rsp");
+   emit_inst(os, "and", "rsp", "~0xf");
+   emit_inst(os, "call", callee);
+   emit_inst(os, "mov", "rsp", "r13");
+   emit_inst(os, "mov", "r14", "rax");
+
+   for (int k = 0; k < 8; ++k) {
+      emit_inst(os, "movsd", "xmm" + std::to_string(k),
+                "[rsp + " + std::to_string(k * 8) + "]");
+   }
+   emit_inst(os, "add", "rsp", 64);
+   for (int i = sizeof(saves) / sizeof(saves[0]); i-- > 0; ) {
+      emit_inst(os, "pop", saves[i]);
+   }
+
+   emit_inst(os, "mov", dst.op(dst_width),
+             dst_width == reg_width::Q ? "r14" : "r14d");
+}
+
+/* A fn-ptr parameter (i386 -> x86_64 direction): substitute a native
+ * trampoline bound to the i386 callback via the runtime x64_cb_wrap. */
+void conversion::convert_fnptr(std::ostream& os, CXType pointee, const Location& src,
+                               const Location& dst) {
+   if (!(from_arch == arch::i386 && to_arch == arch::x86_64)) {
+      /* copy-back direction: a callback pointer has no reverse conversion;
+       * leave the i386 caller's value untouched. */
+      return;
+   }
+
+   unsigned idx;
+   try {
+      idx = cb_sig_register(pointee);
+   } catch (const std::exception& e) {
+      std::cerr << "abigen: fn-ptr arg '" << to_string(pointee) << "': " << e.what()
+                << "; passing raw value" << std::endl;
+      /* keep the emitted symbol set identical to pre-callback-bridge builds
+       * (already-interposed binaries reference this shim by name) */
+      convert_int(os, CXType_Pointer, src, dst);
+      return;
+   }
+
+   os << "\t; wrap i386 fn ptr in native callback trampoline (sig " << idx << ")"
+      << std::endl;
+   emit_runtime_bridge_call(os, "_x64_cb_wrap",
+                            "[rel _x64_cbsig_" + std::to_string(idx) + "]",
+                            src, reg_width::D, dst, reg_width::Q);
+}
+
+/* An ObjC object / Class parameter. i386 -> x86_64: the i386 value is either
+ * a low-4GB proxy-arena HANDLE (data-symbol shadows, wrapped returns) or an
+ * already-usable low pointer (slid legacy CFString constants, registered
+ * reverse-class objects) — x64_objc_unwrap resolves handles and passes raw
+ * values through. x86_64 -> i386 (deep-copy-back of out-params like
+ * NSError**): wrap the real 64-bit object into a handle the bridge unwraps
+ * on the next message send (x64_objc_wrap dedupes, so handles are stable
+ * per object and equality survives). */
+void conversion::convert_objc_ptr(std::ostream& os, const Location& src,
+                                  const Location& dst) {
+   if (from_arch == arch::i386 && to_arch == arch::x86_64) {
+      os << "\t; objc object arg: unwrap handle -> real object" << std::endl;
+      emit_runtime_bridge_call(os, "_x64_objc_unwrap", "",
+                               src, reg_width::D, dst, reg_width::Q);
+   } else {
+      os << "\t; objc object copy-back: wrap real object -> handle" << std::endl;
+      emit_runtime_bridge_call(os, "_x64_objc_wrap", "",
+                               src, reg_width::Q, dst, reg_width::D);
+   }
+}
+
+/* An opaque CF-ref parameter (CFStringRef etc.). Forward: unwrap proxy-arena
+ * handles to the real ref (x64_objc_unwrap passes raw values through).
+ * Copy-back: only re-wrap values above 4GB (a dyld-cache constant the i386
+ * slot can't hold); low heap refs are stored raw as they always were —
+ * wrapping every created ref would churn arena slots for nothing. */
+void conversion::convert_cf_ptr(std::ostream& os, const Location& src,
+                                const Location& dst) {
+   if (from_arch == arch::i386 && to_arch == arch::x86_64) {
+      os << "\t; CF ref arg: unwrap handle -> real ref" << std::endl;
+      emit_runtime_bridge_call(os, "_x64_objc_unwrap", "",
+                               src, reg_width::D, dst, reg_width::Q);
+   } else {
+      os << "\t; CF ref copy-back: wrap only if >4GB" << std::endl;
+      const std::string low_lbl = label();
+      emit_inst(os, "mov", "r14", src.op(reg_width::Q));
+      emit_inst(os, "mov", "r13", "r14");
+      emit_inst(os, "shr", "r13", "32");
+      emit_inst(os, "jz", low_lbl);
+      emit_runtime_bridge_call(os, "_x64_objc_wrap", "",
+                               src, reg_width::Q, dst, reg_width::D);
+      const std::string done_lbl = label();
+      emit_inst(os, "jmp", done_lbl);
+      os << low_lbl << ":" << std::endl;
+      emit_inst(os, "mov", dst.op(reg_width::D), "r14d");
+      os << done_lbl << ":" << std::endl;
+   }
+}
+
+/* A SEL parameter: i386 SELs are low selector-name pointers; register them
+ * with the modern runtime going in, intern a stable low name copy coming
+ * back (objc_shim.c x64_objc_sel_unwrap/_wrap). */
+void conversion::convert_objc_sel(std::ostream& os, const Location& src,
+                                  const Location& dst) {
+   if (from_arch == arch::i386 && to_arch == arch::x86_64) {
+      os << "\t; objc SEL arg: register legacy name -> real SEL" << std::endl;
+      emit_runtime_bridge_call(os, "_x64_objc_sel_unwrap", "",
+                               src, reg_width::D, dst, reg_width::Q);
+   } else {
+      os << "\t; objc SEL copy-back: real SEL -> low name ptr" << std::endl;
+      emit_runtime_bridge_call(os, "_x64_objc_sel_wrap", "",
+                               src, reg_width::Q, dst, reg_width::D);
+   }
+}
+
 void conversion::convert_pointer(std::ostream& os, CXType pointee, const Location& src_,
                                  const Location& dst_) {
+   /* a pointer-to-function is NOT data to deep-copy (the old path handed the
+    * native API a pointer to an uninitialized dead stack temp — the 22nd
+    * blocker); bind it to a native callback trampoline instead */
+   const CXType pointee_canon = clang_getCanonicalType(pointee);
+   if (pointee_canon.kind == CXType_FunctionProto ||
+       pointee_canon.kind == CXType_FunctionNoProto) {
+      convert_fnptr(os, pointee_canon, src_, dst_);
+      return;
+   }
+
+   /* libclang models a SEL parameter as Pointer-to-ObjCSel (canonical
+    * spelling "SEL *"): the Pointer level IS the SEL value itself, not an
+    * out-param. Deep-copying would dereference the selector name. */
+   if (pointee_canon.kind == CXType_ObjCSel) {
+      convert_objc_sel(os, src_, dst_);
+      return;
+   }
+
+   /* In pure-C contexts SEL/id/Class canonicalize to pointers to the opaque
+    * runtime records `struct objc_selector|objc_object|objc_class`.
+    * Deep-copying those would dereference a selector-name/isa as struct
+    * data; route them to the objc marshalling instead. */
+   if (pointee_canon.kind == CXType_Record) {
+      CXString ps = clang_getTypeSpelling(pointee_canon);
+      const std::string spelling(clang_getCString(ps));
+      clang_disposeString(ps);
+      if (spelling.find("objc_selector") != std::string::npos) {
+         convert_objc_sel(os, src_, dst_);
+         return;
+      }
+      if (spelling.find("objc_object") != std::string::npos ||
+          spelling.find("objc_class") != std::string::npos) {
+         convert_objc_ptr(os, src_, dst_);
+         return;
+      }
+   }
+
+   /* Opaque CF refs (CFStringRef = `struct __CFString *`...): the i386 value
+    * may be a proxy-arena HANDLE (data-symbol shadows, wrapped returns) —
+    * passing it raw into a native CF API trips __CF_IS_OBJC and aborts.
+    * Unwrap going in (raw low values pass through); on copy-back wrap only
+    * values above 4GB (dyld-cache constants) — low heap refs stay raw,
+    * exactly the pre-existing behavior. */
+   if (cb_is_cf_record_ptr(pointee_canon)) {
+      convert_cf_ptr(os, src_, dst_);
+      return;
+   }
+
    if (ignore_structs.find(to_string(pointee)) != ignore_structs.end()) {
       convert_int(os, CXType_Pointer, src_, dst_);
       return;
    }
+
+   /* Break cycles in self-referential types and bound deep object graphs:
+    * if we're already deep-converting this pointee type higher on the
+    * recursion stack (e.g. struct QElem whose qLink is a QElem*), or we've
+    * descended too far, marshal the pointer as an opaque value rather than
+    * recursively deep-copying — which would never terminate. */
+   const std::string pointee_key = to_string(clang_getCanonicalType(pointee));
+   if (active_pointees.count(pointee_key) || active_pointees.size() >= max_pointer_depth) {
+      convert_int(os, CXType_Pointer, src_, dst_);
+      return;
+   }
+   active_pointees.insert(pointee_key);
+   struct pointee_guard {
+      std::set<std::string>& set;
+      const std::string& key;
+      ~pointee_guard() { set.erase(key); }
+   } guard{active_pointees, pointee_key};
 
    std::unique_ptr<Location> srcp(src_.copy());
    std::unique_ptr<Location> dstp(dst_.copy());
@@ -314,10 +736,10 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
          data.align(pointee, to_arch);
          emit_inst(os, "lea", "r11", data.op());
          data += sizeof_type(pointee, to_arch);
-      
+
          /* load reg_dst to dst */
          convert_int(os, CXType_Pointer, reg_dst, dst);
-         
+
          /* load src pointer into reg_src */
          RegisterLocation reg_src(r12);
          MemoryLocation mem_src(r12, 0);
@@ -325,13 +747,30 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
          {
             convert_int(os, CXType_Pointer, src, reg_src);
 
+            /* A NULL pointer argument must marshal to NULL, not to a pointer
+             * into the freshly-reserved (uninitialised) scratch buffer:
+             * dereferencing it to deep-copy the pointee would fault (the i386
+             * caller legitimately passes NULL for optional args), and a callee
+             * that tests `arg == NULL` must still observe NULL. Guard the deep
+             * copy on a non-null source; on NULL, store a null pointer to dst. */
+            const std::string null_lbl = label();
+            const std::string done_lbl = label();
+            emit_inst(os, "test", reg_src.reg.reg_q, reg_src.reg.reg_q);
+            emit_inst(os, "jz", null_lbl);
+
             /* convert */
             convert(os, pointee, mem_src, mem_dst);
+            emit_inst(os, "jmp", done_lbl);
+
+            os << null_lbl << ":" << std::endl;
+            emit_inst(os, "xor", reg_dst.reg.reg_d, reg_dst.reg.reg_d);
+            convert_int(os, CXType_Pointer, reg_dst, dst);
+            os << done_lbl << ":" << std::endl;
          }
          pop(os, reg_src, src, dst);
       }
       pop(os, reg_dst, src, dst);
-      
+
    } else {
       /* let dst pointer be */
       RegisterLocation reg_src(r12);
@@ -345,11 +784,18 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
             data.align(pointee, from_arch);
             emit_inst(os, "lea", "r12", data.op());
             data += sizeof_type(pointee, from_arch);
-            
+
             convert_int(os, CXType_Pointer, dst, reg_dst);
-            
+
+            /* NULL pointer arg: nothing to copy back, and dereferencing the
+             * null destination would fault (mirror the allocate path). */
+            const std::string done_lbl = label();
+            emit_inst(os, "test", reg_dst.reg.reg_q, reg_dst.reg.reg_q);
+            emit_inst(os, "jz", done_lbl);
+
             /* convert underlying data */
             convert(os, pointee, mem_src, mem_dst);
+            os << done_lbl << ":" << std::endl;
          }
          pop(os, reg_dst, src, dst);
       }
@@ -395,6 +841,10 @@ size_t sizeof_type(CXType type, arch a) {
       return sizeof(long double);
    case CXType_Pointer:
    case CXType_BlockPointer:
+   case CXType_ObjCObjectPointer:
+   case CXType_ObjCId:
+   case CXType_ObjCClass:
+   case CXType_ObjCSel:
       switch (a) {
       case arch::i386: return 4;
       case arch::x86_64: return 8;
@@ -413,10 +863,10 @@ size_t sizeof_type(CXType type, arch a) {
       return 0;
 
    case CXType_IncompleteArray:
-      abort();
-      
+      throw std::invalid_argument("sizeof_type: incomplete array");
+
    default:
-      abort();
+      throw std::invalid_argument("sizeof_type: unsupported type kind");
    }
 }
 
@@ -453,13 +903,17 @@ size_t sizeof_type(CXTypeKind type_kind, arch a) {
       return sizeof(long double);
    case CXType_Pointer:
    case CXType_BlockPointer:
+   case CXType_ObjCObjectPointer:
+   case CXType_ObjCId:
+   case CXType_ObjCClass:
+   case CXType_ObjCSel:
       switch (a) {
       case arch::i386: return 4;
       case arch::x86_64: return 8;
       default: abort();
       }
    default:
-      abort();
+      throw std::invalid_argument("sizeof_type(kind): unsupported type kind");
    }
 }
 
@@ -471,7 +925,8 @@ static size_t sizeof_record(CXType type, arch a) {
       return sizeof_union(type, a);
    case CXCursor_StructDecl:
       return sizeof_struct(type, a);
-   default: abort();
+   default:
+      throw std::invalid_argument("sizeof_record: not a struct/union");
    }
 }
 

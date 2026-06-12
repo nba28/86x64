@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <sstream>
 #include <stdexcept>
 
@@ -10,19 +11,6 @@
 
 namespace MachO {
 
-#if 0
-   uint32_t lc_build_order[] =
-      {LC_SEGMENT,
-       LC_SEGMENT_64,
-       LC_DYLD_INFO,
-       LC_DYLD_INFO_ONLY,
-       LC_DYSYMTAB,
-       LC_SYMTAB,
-      };
-#endif
-   // build order -- do later
-   // rather, need build regions. e.g. 
-   
    template <Bits b>
    Archive<b>::Archive(const Image& img, std::size_t offset):
       header(img.at<mach_header_t<b>>(offset))
@@ -30,9 +18,34 @@ namespace MachO {
       ParseEnv<b> env(*this);
       offset += sizeof(header);
       for (int i = 0; i < header.ncmds; ++i) {
+         /* Advance by the LC header's stored cmdsize, not by cmd->size().
+          * size() recomputes from the parsed string length and may disagree
+          * with the file's cmdsize if a tool (e.g. an in-place install_name
+          * patch) shortened a path but kept the same cmdsize via null
+          * padding. Trusting the file's cmdsize keeps subsequent LCs at
+          * their actual on-disk offsets. */
+         const std::size_t lc_start = offset;
+         const auto& lc_hdr = img.at<load_command>(lc_start);
+         const std::size_t lc_cmdsize = lc_hdr.cmdsize;
          LoadCommand<b> *cmd = LoadCommand<b>::Parse(img, offset, env);
          load_commands.push_back(cmd);
-         offset += cmd->size();
+         offset = lc_start + lc_cmdsize;
+      }
+
+      /*
+       * Adopt the input binary's existing vmaddr base instead of forcing
+       * the default `vmaddr_start<b>`. Picking it from the first non-
+       * __PAGEZERO segment preserves the base across multi-step toolchain
+       * passes (transform → modify → convert) so internal pointer values
+       * baked into __data by the transform step don't get truncated when a
+       * later step rebuilds at a different base.
+       */
+      for (LoadCommand<b> *cmd : load_commands) {
+         auto seg = dynamic_cast<Segment<b> *>(cmd);
+         if (seg == nullptr) continue;
+         if (strcmp(seg->segment_command.segname, SEG_PAGEZERO) == 0) continue;
+         vmaddr = seg->segment_command.vmaddr;
+         break;
       }
 
       for (LoadCommand<b> *cmd : load_commands) {
@@ -59,10 +72,50 @@ namespace MachO {
       }
 
       if (!env.placeholders.empty()) {
-         throw std::logic_error("not all placeholders could be placed");
+         /* Stranded placeholders represent addresses the parser thought might
+          * be pointers (instruction memdisp targets, nlist values, etc.) but
+          * for which no parsed blob exists at that vmaddr. Common origins:
+          *   - XED-decoded instruction bytes that are actually data
+          *     (jump tables, constants between functions) → garbage memdisp
+          *   - Values that land in __LINKEDIT (opaque metadata, no section
+          *     blobs)
+          *   - Cross-segment addresses computed from translator-emitted code
+          *     that no longer correspond to a real blob after layout shift
+          * The originating Immediate keeps its raw value (pointee=nullptr)
+          * and emits the bytes verbatim. dyld doesn't resolve via parsed
+          * blobs; it uses LC_DYLD_INFO bind/rebase, which is unaffected.
+          * So stranded placeholders are non-fatal — warn and continue. Was:
+          * threw std::logic_error, which blocked modify on iPhoto run23. */
+         static const bool verbose = std::getenv("MACHO_PARSE_VERBOSE") != nullptr;
+         if (verbose) {
+            for (const auto& p : env.placeholders) {
+               std::size_t vmaddr = p.first;
+               const char *where = "outside any segment";
+               for (const Segment<b> *seg : segments()) {
+                  if (vmaddr >= seg->segment_command.vmaddr &&
+                      vmaddr <  seg->segment_command.vmaddr + seg->segment_command.vmsize) {
+                     where = seg->segment_command.segname;
+                     break;
+                  }
+               }
+               fprintf(stderr, "stranded placeholder vmaddr=0x%zx (%s)\n", vmaddr, where);
+            }
+         }
+         if (env.placeholders.size() > 0) {
+            fprintf(stderr,
+                    "warning: %zu stranded placeholder(s) at parse; "
+                    "originating Immediate values preserved verbatim "
+                    "(set MACHO_PARSE_VERBOSE=1 for per-placeholder addresses).\n",
+                    env.placeholders.size());
+         }
+         env.placeholders.clear();
       }
 
       env.do_resolve();
+      /* Containing-blob fallback for absolute data refs that land mid-blob
+       * (exact-key resolve missed). Must run after do_resolve (so exact wins
+       * where possible) and after all blobs are registered. */
+      env.vmaddr_resolver.do_resolve_containing();
    }
 
    template <Bits b>
@@ -99,13 +152,33 @@ namespace MachO {
 
       env.allocate(header.sizeofcmds);
 
+      /* Optional headerpad: reserve bytes between end-of-LCs and first __TEXT
+       * section so install_name_tool can later -add_rpath / -change to longer
+       * strings without "load commands do not fit". Apple's linker reserves 32
+       * bytes by default (1024 with -headerpad_max_install_names). Opt in via
+       * MACHO_HEADERPAD=N env var — 0 by default to keep regressions byte-stable
+       * with prior outputs. Recommended: 1024 for binaries that will be path-
+       * patched after translation (e.g. iPhoto + bundled frameworks). */
+      static const char *hp_env = std::getenv("MACHO_HEADERPAD");
+      const std::size_t headerpad = hp_env ? std::strtoull(hp_env, nullptr, 0) : 0;
+      if (headerpad > 0) {
+         env.allocate(headerpad);
+      }
+
       /* assign IDs */
       for (LoadCommand<b> *lc : load_commands) {
          lc->AssignID(env);
       }
       
       /* build each command */
-      for (LoadCommand<b> *lc : load_commands) {
+      static const bool build_debug = std::getenv("MACHO_BUILD_DEBUG") != nullptr;
+      for (size_t i = 0; i < load_commands.size(); ++i) {
+         LoadCommand<b> *lc = load_commands[i];
+         if (build_debug) {
+            fprintf(stderr,
+                    "Build: lc[%zu] cmd=0x%x size=%u\n",
+                    i, (unsigned)lc->cmd(), (unsigned)lc->size());
+         }
          lc->Build(env);
       }
 
@@ -117,12 +190,23 @@ namespace MachO {
    void Archive<b>::Emit(Image& img) const {
       /* emit header */
       img.at<mach_header_t<b>>(0) = header;
-      
+
       /* emit load commands */
+      static const bool emit_debug = std::getenv("MACHO_EMIT_DEBUG") != nullptr;
       std::size_t offset = sizeof(header);
+      std::size_t i = 0;
       for (LoadCommand<b> *lc : load_commands) {
+         if (emit_debug) {
+            fprintf(stderr,
+                    "Archive::Emit lc[%zu] cmd=0x%x size=%u @ offset=0x%zx\n",
+                    i, (unsigned)lc->cmd(), (unsigned)lc->size(), offset);
+         }
          lc->Emit(img, offset);
          offset += lc->size();
+         ++i;
+      }
+      if (emit_debug) {
+         fprintf(stderr, "Archive::Emit completed all %zu LCs\n", load_commands.size());
       }
    }
 
@@ -131,6 +215,22 @@ namespace MachO {
    {
       env(other.header, header);
       for (const auto lc : other.load_commands) {
+         /* Drop LC_SEGMENT_SPLIT_INFO, LC_DYLIB_CODE_SIGN_DRS, and
+          * LC_LINKER_OPTIMIZATION_HINT from the translated output. These are
+          * hints for Apple's static linker / dyld shared cache builder, not
+          * required for runtime image loading. install_name_tool has strict
+          * ordering checks for them that depend on absolute file offsets, and
+          * our M32→M64 layout shifts (especially dyld_info data growth) push
+          * them off the expected positions — install_name_tool then refuses
+          * to mutate with "X data out of place". Dropping them silences the
+          * error, lets later -change/-add_rpath calls succeed, and costs
+          * nothing at runtime since dyld doesn't consult these blobs. */
+         const uint32_t cmd = lc->cmd();
+         if (cmd == LC_SEGMENT_SPLIT_INFO ||
+             cmd == LC_DYLIB_CODE_SIGN_DRS ||
+             cmd == LC_LINKER_OPTIMIZATION_HINT) {
+            continue;
+         }
          load_commands.push_back(lc->Transform(env));
       }
    }
@@ -209,9 +309,14 @@ namespace MachO {
 
    template <Bits b>
    void Archive<b>::remove_commands(uint32_t cmd) {
-      for (auto it = load_commands.begin(); it != load_commands.end(); ++it) {
+      /* erase-friendly loop: erase returns the iterator to the next element,
+       * which we use directly instead of ++it'ing past it. The prior version
+       * `it = erase(it); ++it;` skipped every second consecutive match. */
+      for (auto it = load_commands.begin(); it != load_commands.end(); ) {
          if ((*it)->cmd() == cmd) {
             it = load_commands.erase(it);
+         } else {
+            ++it;
          }
       }
    }

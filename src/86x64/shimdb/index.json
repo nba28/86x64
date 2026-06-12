@@ -1,0 +1,8 @@
+{
+  "_OBJC_CLASS_$_NSFlippableView": {
+    "kind": "objc_class",
+    "superclass": "NSView",
+    "methods": "- (BOOL)isFlipped { return YES; }",
+    "note": "private AppKit flipped-coordinate view, removed from modern AppKit; iLifeKit subclasses it"
+  }
+}

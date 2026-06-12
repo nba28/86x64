@@ -46,6 +46,14 @@ namespace MachO {
       void Parse1(const Image& img, ParseEnv<bits>& env);
       void Parse2(ParseEnv<bits>& env);
 
+      /* Post-parse dataflow pass: in a __text section, find i386 PIC
+       * anchor patterns (`call $+0; pop %reg`) and resolve subsequent
+       * `[reg + disp32]` reads to their target SectionBlob via
+       * env.add_placeholder(anchor + disp). Sets pic_anchored=true on
+       * each rewritten instruction so the transform can emit a
+       * rip-relative load. No-op on non-text sections. Idempotent. */
+      void DetectPicAnchoredDisps(ParseEnv<bits>& env);
+
       void AssignID(BuildEnv<bits>& env);
       void Build(BuildEnv<bits>& env);
       // std::size_t content_size() const;
@@ -70,12 +78,6 @@ namespace MachO {
             throw std::invalid_argument(ss.str());
          } else if ((*it)->loc.vmaddr != vmaddr) {
             std::stringstream ss;
-
-            // DEBUG
-            for (auto blob : content) {
-               std::cerr << "\t0x" << std::hex << blob->loc.vmaddr << std::endl;
-            }
-            
             ss << "vmaddr " << std::hex << vmaddr << " not aligned with blob start";
             throw std::invalid_argument(ss.str());
          } else {
@@ -105,6 +107,8 @@ namespace MachO {
       Section(const Section<opposite<bits>>& other, TransformEnv<opposite<bits>>& env);
 
       static SectionBlob<bits> *TextParser(const Image& img, const Location& loc,
+                                           ParseEnv<bits>& env);
+      static SectionBlob<bits> *DataParser(const Image& img, const Location& loc,
                                            ParseEnv<bits>& env);
       static SectionBlob<bits> *StubHelperParser(const Image& img, const Location& loc,
                                                  ParseEnv<bits>& env);

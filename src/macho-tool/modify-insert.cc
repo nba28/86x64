@@ -1,3 +1,4 @@
+#include <cassert>
 #include "modify-insert.hh"
 #include "core/archive.hh"
 #include "core/instruction.hh"

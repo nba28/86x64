@@ -32,6 +32,7 @@ namespace MachO {
       std::size_t vmaddr = 0;
       uint8_t type = 0;
       std::size_t dylib = 0;
+      int8_t dylib_special = 0;
       const char *sym = nullptr;
       uint8_t flags = 0;
       std::size_t addend = 0;
@@ -76,6 +77,7 @@ namespace MachO {
          switch (opcode) {
          case BIND_OPCODE_DONE:
             dylib = 0;
+            dylib_special = 0;
             addend = 0;
             flags = 0;
             type = 0;
@@ -85,16 +87,29 @@ namespace MachO {
 
          case BIND_OPCODE_SET_DYLIB_ORDINAL_IMM:
             dylib = imm;
+            dylib_special = 0;
             break;
 
          case BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB:
+            /* Ordinal is the ULEB value, NOT the imm bits — imm is 0 for the
+             * ULEB form (encoder switches to ULEB only when ordinal exceeds
+             * the 4-bit imm range, i.e. > 15). The original `dylib = imm`
+             * silently dropped every bind targeting dylibs with ordinals
+             * 16+: CountResolver::resolve(0,&dylib) found no key 0, dylib
+             * stayed nullptr, BindNode::emittable() returned false, the
+             * bind was omitted from the M64 output. iPhoto with 53 LC_LOAD
+             * entries lost roughly half its binds to this. */
             it += leb128_decode(img, it, uleb);
-            // it += leb128_decode(&img.at<uint8_t>(it), end - it, uleb);
-            dylib = imm;
+            dylib = uleb;
+            dylib_special = 0;
             break;
 
          case BIND_OPCODE_SET_DYLIB_SPECIAL_IMM:
-            throw error("%s: BIND_OPCODE_SET_DYLIB_SPECIAL_IMM not supported", __FUNCTION__);
+            /* Sign-extend the 4-bit imm: -1 = main_executable, -2 = flat_lookup,
+             * -3 = weak_lookup, 0 = self. Stored in dylib_special; dylib stays 0. */
+            dylib = 0;
+            dylib_special = (imm & 0x8) ? (int8_t)(imm | 0xF0) : (int8_t)imm;
+            break;
 
          case BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM:
             flags = imm;
@@ -121,40 +136,64 @@ namespace MachO {
             break;
 
          case BIND_OPCODE_DO_BIND:
-            vmaddr = do_bind(vmaddr, env, type, addend, dylib, sym, flags, index);
+            vmaddr = do_bind(vmaddr, env, type, addend, dylib, dylib_special, sym, flags, index);
             break;
 
          case BIND_OPCODE_DO_BIND_ADD_ADDR_ULEB:
-            vmaddr = do_bind(vmaddr, env, type, addend, dylib, sym, flags, index);
+            vmaddr = do_bind(vmaddr, env, type, addend, dylib, dylib_special, sym, flags, index);
             it += leb128_decode(img, it, uleb);
             vmaddr += uleb;
             break;
 
          case BIND_OPCODE_DO_BIND_ADD_ADDR_IMM_SCALED:
-            vmaddr = do_bind(vmaddr, env, type, addend, dylib, sym, flags, index);
+            vmaddr = do_bind(vmaddr, env, type, addend, dylib, dylib_special, sym, flags, index);
             vmaddr += imm * sizeof(ptr_t);
             break;
 
          case BIND_OPCODE_DO_BIND_ULEB_TIMES_SKIPPING_ULEB:
-            it += leb128_decode(img, it, uleb);
-            it += leb128_decode(img, it, uleb2);
-            vmaddr = do_bind_times(uleb, vmaddr, env, type, addend, dylib, sym, flags,
-                                   uleb2);
+            it += leb128_decode(img, it, uleb);   /* count   */
+            it += leb128_decode(img, it, uleb2);  /* skipping */
+            /* uleb2 is the per-iteration SKIP, and must be passed as the
+             * `skipping` argument. It was previously passed positionally as
+             * `index`, leaving `skipping` at its default 0 — so every
+             * TIMES_SKIPPING bind advanced by only sizeof(ptr_t) and bound
+             * EVERY pointer slot instead of every (ptr+skip)-th. For a
+             * strided array like __cfstring (16-byte records, skip=12) this
+             * bound ___CFConstantStringClassReference into all four 4-byte
+             * slots of every record, smearing the whole section with the
+             * class pointer and corrupting every constant @"..." string. */
+            vmaddr = do_bind_times(uleb, vmaddr, env, type, addend, dylib, dylib_special, sym,
+                                   flags, index, uleb2);
             break;
 
-         case BIND_OPCODE_THREADED:
-            throw error("%s: BIND_OPCODE_THREADED not supported", __FUNCTION__);
+         case BIND_OPCODE_THREADED: {
+            /* Chained-fixup sub-opcode follows in the imm bits. The imm
+             * encodes a sub-action (set table size or apply). We don't
+             * currently translate threaded binds — skip the sub-opcode
+             * payload to keep parsing in sync rather than throw. Translated
+             * binary won't have these binds applied; affects only frameworks
+             * that genuinely use chained fixups, which most pre-Big Sur
+             * binaries don't. */
+            const uint8_t subopcode = imm;
+            if (subopcode == BIND_SUBOPCODE_THREADED_SET_BIND_ORDINAL_TABLE_SIZE_ULEB) {
+               std::size_t uleb_skip;
+               it += leb128_decode(img, it, uleb_skip);
+            }
+            /* BIND_SUBOPCODE_THREADED_APPLY consumes no extra bytes. */
+            break;
+         }
          }
       }
    }
       
    template <Bits bits, bool lazy>
    std::size_t BindInfo<bits, lazy>::do_bind(std::size_t vmaddr, ParseEnv<bits>& env, uint8_t type,
-                                             ssize_t addend, std::size_t dylib, const char *sym,
+                                             ssize_t addend, std::size_t dylib,
+                                             int8_t dylib_special, const char *sym,
                                              uint8_t flags, uint32_t index) {
       if (vmaddr != 0 && sym != nullptr) {
-         bindees.push_back(BindNode<bits, lazy>::Parse(vmaddr, env, type, addend, dylib, sym,
-                                                       flags, index));
+         bindees.push_back(BindNode<bits, lazy>::Parse(vmaddr, env, type, addend, dylib,
+                                                       dylib_special, sym, flags, index));
       }
       return vmaddr + sizeof(ptr_t);
    }
@@ -163,10 +202,11 @@ namespace MachO {
    std::size_t BindInfo<bits, lazy>::do_bind_times(std::size_t count, std::size_t vmaddr,
                                                    ParseEnv<bits>& env, uint8_t type,
                                                    ssize_t addend, std::size_t dylib,
-                                                   const char *sym, uint8_t flags, uint32_t index, 
+                                                   int8_t dylib_special, const char *sym,
+                                                   uint8_t flags, uint32_t index,
                                                    ptr_t skipping) {
       for (std::size_t i = 0; i < count; ++i) {
-         vmaddr = do_bind(vmaddr, env, type, addend, dylib, sym, flags, index);
+         vmaddr = do_bind(vmaddr, env, type, addend, dylib, dylib_special, sym, flags, index);
          vmaddr += skipping;
       }
       return vmaddr;
@@ -174,13 +214,15 @@ namespace MachO {
 
    template <Bits bits, bool lazy>
    BindNode<bits, lazy>::BindNode(std::size_t vmaddr, ParseEnv<bits>& env, uint8_t type,
-                                  ssize_t addend, std::size_t dylib, const char *sym, uint8_t flags,
-                                  uint32_t index):
-      type(type), addend(addend), dylib(nullptr), sym(sym), flags(flags), blob(nullptr),
-      index(index)
+                                  ssize_t addend, std::size_t dylib, int8_t dylib_special,
+                                  const char *sym, uint8_t flags, uint32_t index):
+      type(type), addend(addend), dylib(nullptr), dylib_special(dylib_special), sym(sym),
+      flags(flags), blob(nullptr), index(index)
    {
       env.vmaddr_resolver.resolve(vmaddr, &blob);
-      env.dylib_resolver.resolve(dylib, &this->dylib);
+      if (dylib_special == 0) {
+         env.dylib_resolver.resolve(dylib, &this->dylib);
+      }
       if constexpr (lazy) {
             env.lazy_bind_node_resolver.add(index, this);
          }
@@ -219,37 +261,80 @@ namespace MachO {
    }
 
    template <Bits bits, bool lazy>
+   bool BindNode<bits, lazy>::emittable() const {
+      /* All preconditions for safely emitting this bind opcode. size()
+       * and Emit() must agree (any mismatch silently corrupts every
+       * later LC), so they share this single predicate. */
+      if (!active()) return false;
+      if (blob->segment == nullptr) return false;
+      if (dylib_special == 0 && dylib == nullptr) return false;
+      if constexpr (bits == Bits::M64) {
+         /* x86_64 W^X: __TEXT pages are RX, dyld can't write a bind
+          * target there ("KERN_PROTECTION_FAILURE" SIGBUS during
+          * dyld4::Loader::applyFixupsGeneric). The i386 binaries we
+          * translate sometimes have bind entries targeting __TEXT
+          * (e.g. __unwind_info pointer slots, lazy-stub patch sites);
+          * the M32→M64 rewriter has already eliminated the actual
+          * dependency on writing there, so drop the bind. Parallel
+          * to RebaseNode::emittable(). */
+         if (strcmp(blob->segment->segment_command.segname, SEG_TEXT) == 0) {
+            return false;
+         }
+      }
+      return true;
+   }
+
+   template <Bits bits, bool lazy>
+   std::size_t BindNode<bits, lazy>::dylib_opcode_size() const {
+      /* SPECIAL ordinals (main_exec/flat/weak/self) fit in the 4-bit imm,
+       * so 1 byte. Real dylib ordinals: 1-15 fit in the IMM form (1 byte);
+       * 16+ require SET_DYLIB_ORDINAL_ULEB (1 opcode byte + ULEB payload).
+       * Failing to switch encoding form would OR the ordinal into the
+       * opcode bits, corrupting it into SET_DYLIB_SPECIAL_IMM with an
+       * invalid signed-extended ordinal (dyld_info reports "unknown library
+       * special ordinal (-15)" etc.). */
+      if (dylib_special != 0) return 1;
+      if (dylib->id <= 15) return 1;
+      return 1 + leb128_size(dylib->id);
+   }
+
+   template <Bits bits, bool lazy>
    std::size_t BindNode<bits, lazy>::size() const {
-      if (!active()) { return 0; }
+      if (!emittable()) { return 0; }
 
       if (!lazy) {
          /* NON-LAZY
-          * 1   BIND_OPCODE_SET_DYLIB_ORDINAL_IMM 
+          * d   BIND_OPCODE_SET_DYLIB_{ORDINAL_IMM, ORDINAL_ULEB, SPECIAL_IMM}
           * 1   BIND_OPCODE_SET_TYPE_IMM
-          * 1+a   [BIND_OPCODE_SET_ADDEND_SLEB]
+          * 1+a BIND_OPCODE_SET_ADDEND_SLEB
           * 1+b BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB
           * 1+c BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM
           * 1   BIND_OPCODE_DO_BIND
-          * 6+a+b+c total
           */
          return
-            1 +
+            dylib_opcode_size() +
             1 +
             (1 + leb128_size(addend)) +
-            (1 + leb128_size(blob->loc.offset - blob->segment->loc().offset)) +
+            /* vmaddr delta, NOT file-offset delta: Emit() encodes
+             * `loc.vmaddr - segment->loc().vmaddr`, and the two diverge
+             * in segments with zerofill content. A mismatch that
+             * straddles a LEB128 length boundary would corrupt every
+             * later LC. */
+            (1 + leb128_size(blob->loc.vmaddr - blob->segment->loc().vmaddr)) +
             (1 + (sym.size() + 1)) +
             1;
       } else {
-         /* LAZY 
+         /* LAZY
           * 1+a BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB
-          * 1   BIND_OPCODE_SET_DYLIB_ORDINAL_IMM
+          * d   BIND_OPCODE_SET_DYLIB_{ORDINAL_IMM, ORDINAL_ULEB, SPECIAL_IMM}
           * 1+c BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM
           * 1   BIND_OPCODE_DO_BIND
           * 1   BIND_OPCODE_DONE
           */
          return
-            (1 + leb128_size(blob->loc.offset - blob->segment->loc().offset)) +
-            1 +
+            /* vmaddr delta to match Emit() — see non-lazy case above. */
+            (1 + leb128_size(blob->loc.vmaddr - blob->segment->loc().vmaddr)) +
+            dylib_opcode_size() +
             (1 + (sym.size() + 1)) +
             1 +
             1;
@@ -281,47 +366,68 @@ namespace MachO {
    }
 
    template <Bits bits, bool lazy>
+   std::size_t BindNode<bits, lazy>::emit_dylib_opcode(Image& img, std::size_t offset) const {
+      /* Three valid encodings for "which dylib to bind against":
+       *   SPECIAL_IMM:   opcode 0x30, imm = sign-extended 4-bit special ordinal
+       *                  (-1=main_exec, -2=flat, -3=weak, 0=self). Always 1 byte.
+       *   ORDINAL_IMM:   opcode 0x10, imm = ordinal in [1, 15]. 1 byte.
+       *   ORDINAL_ULEB:  opcode 0x20, followed by ULEB(ordinal). For ordinals 16+.
+       * Picking the wrong form for ordinal 16+ (i.e. OR-ing into IMM) silently
+       * corrupts the opcode byte — high bits leak into next opcode's nibble,
+       * dyld_info reports "unknown library special ordinal (-15)" etc. */
+      if (dylib_special != 0) {
+         img.at<uint8_t>(offset) = (uint8_t)(BIND_OPCODE_SET_DYLIB_SPECIAL_IMM |
+                                             (dylib_special & 0xF));
+         return 1;
+      }
+      if (dylib->id <= 15) {
+         img.at<uint8_t>(offset) = (uint8_t)(BIND_OPCODE_SET_DYLIB_ORDINAL_IMM |
+                                             (dylib->id & 0xF));
+         return 1;
+      }
+      img.at<uint8_t>(offset) = (uint8_t)BIND_OPCODE_SET_DYLIB_ORDINAL_ULEB;
+      return 1 + leb128_encode(img, offset + 1, dylib->id);
+   }
+
+   template <Bits bits, bool lazy>
    void BindNode<bits, lazy>::Emit(Image& img, std::size_t offset) const {
-      if (!active()) {
+      /* emittable() folds active(), null-guards, and the M64 __TEXT
+       * filter into one predicate that size() and Emit() share. Any
+       * divergence here corrupts byte counts and zeroes later LCs. */
+      if (!emittable()) {
          return;
       }
 
       if (!lazy) {
-         /* BIND_OPCODE_SET_DYLIB_ORDINAL_IMM 
+         /* BIND_OPCODE_SET_DYLIB_{ORDINAL_IMM, ORDINAL_ULEB, SPECIAL_IMM}
           * BIND_OPCODE_SET_TYPE_IMM
           * BIND_OPCODE_SET_ADDEND_SLEB
           * BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB
           * BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM
           * BIND_OPCODE_DO_BIND
           */
-         img.at<uint8_t>(offset++) = BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | dylib->id;
+         offset += emit_dylib_opcode(img, offset);
          img.at<uint8_t>(offset++) = BIND_OPCODE_SET_TYPE_IMM | type;
-         
+
          img.at<uint8_t>(offset++) = BIND_OPCODE_SET_ADDEND_SLEB;
          offset += leb128_encode(img, offset, addend);
-         
+
          img.at<uint8_t>(offset++) = BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | blob->segment->id;
          const std::size_t segoff = blob->loc.vmaddr - blob->segment->loc().vmaddr;
          offset += leb128_encode(img, offset, segoff);
-         
+
          img.at<uint8_t>(offset++) = BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | flags;
          img.copy(offset, sym.c_str(), sym.size() + 1);
          offset += sym.size() + 1;
          img.at<uint8_t>(offset++) = BIND_OPCODE_DO_BIND;
       } else {
-         /* LAZY 
-          * BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB
-          * BIND_OPCODE_SET_DYLIB_ORDINAL_IMM
-          * BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM
-          * BIND_OPCODE_DO_BIND
-          * BIND_OPCODE_DONE
-          */
+         /* LAZY */
          img.at<uint8_t>(offset++) = BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | blob->segment->id;
          const std::size_t segoff = blob->loc.vmaddr - blob->segment->loc().vmaddr;
          offset += leb128_encode(img, offset, segoff);
 
-         img.at<uint8_t>(offset++) = BIND_OPCODE_SET_DYLIB_ORDINAL_IMM | dylib->id;
-         
+         offset += emit_dylib_opcode(img, offset);
+
          img.at<uint8_t>(offset++) = BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | flags;
          img.copy(offset, sym.c_str(), sym.size() + 1);
          offset += sym.size() + 1;
@@ -348,11 +454,14 @@ namespace MachO {
    template <Bits bits, bool lazy>
    BindNode<bits, lazy>::BindNode(const BindNode<opposite<bits>, lazy>& other,
                             TransformEnv<opposite<bits>>& env):
-      type(other.type), addend(other.addend), dylib(nullptr), sym(other.sym), flags(other.flags),
+      type(other.type), addend(other.addend), dylib(nullptr),
+      dylib_special(other.dylib_special), sym(other.sym), flags(other.flags),
       blob(nullptr)
    {
       if constexpr (lazy) { env.template add<LazyBindNode>(&other, this); }
-      env.resolve(other.dylib, &dylib);
+      if (dylib_special == 0) {
+         env.resolve(other.dylib, &dylib);
+      }
       env.resolve(other.blob, &blob);
    }
 

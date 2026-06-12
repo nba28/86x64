@@ -72,7 +72,7 @@ namespace MachO {
 
       static CodeSignature<bits> *Parse(const Image& img, std::size_t offset, ParseEnv<bits>& env)
       { return new CodeSignature(img, offset, env); }
-      
+
       virtual CodeSignature<opposite<bits>> *Transform(TransformEnv<bits>& env) const override {
          return new CodeSignature<opposite<bits>>(*this, env);
       }
@@ -88,6 +88,40 @@ namespace MachO {
       virtual void Emit_content(Image& img, std::size_t offset) const override;
 
       template <Bits b> friend class CodeSignature;
-   };   
-   
+   };
+
+   /* Opaque __LINKEDIT byte-blob for load commands we don't interpret semantically:
+    * LC_SEGMENT_SPLIT_INFO, LC_DYLIB_CODE_SIGN_DRS, LC_LINKER_OPTIMIZATION_HINT.
+    * Same "copy bytes verbatim through transform" as CodeSignature but distinct
+    * class so subcommand<CodeSignature>() lookups (which dynamic_cast) don't
+    * collide and accidentally return one of these instead of the real signature. */
+   template <Bits bits>
+   class OpaqueLinkeditBlob: public LinkeditData<bits> {
+   public:
+      std::vector<uint8_t> bytes;
+
+      virtual std::size_t content_size() const override { return bytes.size(); }
+
+      static OpaqueLinkeditBlob<bits> *Parse(const Image& img, std::size_t offset,
+                                             ParseEnv<bits>& env)
+      { return new OpaqueLinkeditBlob(img, offset, env); }
+
+      virtual OpaqueLinkeditBlob<opposite<bits>> *Transform(TransformEnv<bits>& env) const override {
+         return new OpaqueLinkeditBlob<opposite<bits>>(*this, env);
+      }
+
+   private:
+      OpaqueLinkeditBlob(const Image& img, std::size_t offset, ParseEnv<bits>& env):
+         LinkeditData<bits>(img, offset, env),
+         bytes(&img.at<uint8_t>(this->linkedit.dataoff),
+               &img.at<uint8_t>(this->linkedit.dataoff + this->linkedit.datasize)) {}
+      OpaqueLinkeditBlob(const OpaqueLinkeditBlob<opposite<bits>>& other,
+                         TransformEnv<opposite<bits>>& env):
+         LinkeditData<bits>(other, env), bytes(other.bytes) {}
+
+      virtual void Emit_content(Image& img, std::size_t offset) const override;
+
+      template <Bits b> friend class OpaqueLinkeditBlob;
+   };
+
 }

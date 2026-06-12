@@ -1,6 +1,9 @@
 #pragma once
 
+#include <cassert>
+#include <limits>
 #include <stdexcept>
+#include <type_traits>
 
 #include "leb.h"
 #include "image.hh"

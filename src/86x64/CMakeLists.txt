@@ -1,4 +1,4 @@
-add_library(wrapper STATIC wrapper.asm)
+add_library(wrapper STATIC wrapper.asm wrapper_setup.c)
 add_library(interpose SHARED interpose.c)
 
 install(TARGETS wrapper interpose

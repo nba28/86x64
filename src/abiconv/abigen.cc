@@ -1,5 +1,7 @@
+#include <cassert>
 #include <iostream>
 #include <list>
+#include <vector>
 #include <fstream>
 #include <sstream>
 #include <getopt.h>
@@ -148,7 +150,8 @@ struct ABIConversion {
    }
 #endif
 
-   void emit(std::ostream& os, Symbols& symbols, const Symbols& ignore_structs) {
+   void emit(std::ostream& final_os, Symbols& symbols, const Symbols& ignore_structs,
+             const Symbols& reserved_names) {
       const bool variadic = clang_isFunctionTypeVariadic(function_type);
       const std::string& override_prefix = "__";
 
@@ -156,13 +159,47 @@ struct ABIConversion {
          /* skip variadic functions */
          return;
       }
-      
+
       if (symbols.find(sym) == symbols.end()) {
          return;
       }
-      symbols.erase(sym);
-      
 
+      /* Shim-name collision guard. The shim for symbol S is named
+       * override_prefix+S (e.g. _tolower -> ___tolower). If this symbol's own
+       * linker name equals some OTHER bridged symbol's shim name, emitting it
+       * would (a) clash with that shim's label and (b) make this shim's
+       * `extern <sym>` reference its own colliding shim instead of the real
+       * function. This happens for libc's internal double-underscore twins
+       * (e.g. __tolower's name ___tolower == tolower's shim name). Skip this
+       * one; the public twin (tolower) is bridged instead. */
+      if (reserved_names.find(sym) != reserved_names.end()) {
+         std::cerr << "abigen: skipping " << sym
+                   << ": linker name collides with another symbol's shim" << std::endl;
+         return;
+      }
+
+      /* Build the trampoline into a local buffer first. The conversion
+       * machinery throws std::invalid_argument on signatures it cannot handle
+       * (e.g. struct-by-value args). Catch it and SKIP this one function
+       * rather than aborting the whole generation run or leaving half-emitted
+       * asm in the output. This keeps abigen robust when fed large framework
+       * umbrella headers. The symbol is only consumed (erased) on success. */
+      std::ostringstream os;
+      if (getenv("ABIGEN_TRACE")) {
+         std::cerr << "abigen: emitting " << sym << std::endl;
+      }
+      try {
+         emit_body(os, ignore_structs, override_prefix);
+      } catch (const std::exception& e) {
+         std::cerr << "abigen: skipping " << sym << ": " << e.what() << std::endl;
+         return;
+      }
+      symbols.erase(sym);
+      final_os << os.str();
+   }
+
+   void emit_body(std::ostream& os, const Symbols& ignore_structs,
+                  const std::string& override_prefix) {
       os << "\tglobal\t" << override_prefix << sym << std::endl;
       os << "\textern\t" << sym << std::endl;
 
@@ -241,10 +278,28 @@ struct ABIConversion {
             from_conv.convert_pointer(from_ss, type, *dst, load_loc);
             break;
 
+         /* objc object/Class/SEL by-value args: no post-call copy-back — it
+          * would only re-wrap the (unchanged) value into a fresh proxy-arena
+          * handle per distinct object, growing the arena for nothing. The
+          * reverse wrap still runs for deep-copied pointees (NSError **). */
+         case CXType_ObjCObjectPointer:
+         case CXType_ObjCId:
+         case CXType_ObjCClass:
+         case CXType_ObjCSel:
+            type_kind = type.kind;
+            to_conv.convert(to_ss, type, load_loc, *dst);
+            break;
+
          default:
             type_kind = type.kind;
             to_conv.convert(to_ss, type, load_loc, *dst);
-            from_conv.convert(from_ss, type, *dst, load_loc);
+            /* CF-ref by-value args: same no-copy-back rule as the objc
+             * kinds — the arg registers are clobbered after the call, and
+             * the conditional re-wrap would mint arena handles from that
+             * garbage on every call */
+            if (!cf_opaque_ptr_type(type)) {
+               from_conv.convert(from_ss, type, *dst, load_loc);
+            }
             break;
          }
 
@@ -263,6 +318,52 @@ struct ABIConversion {
 
       /* convert from x86_64 to i386 */
       os << from_ss.str();
+
+      /* Wrap an ObjC-object return value into a 32-bit proxy handle. A C
+       * function declared to return an ObjC object (NSString*, id, NSArray*,
+       * ...) — e.g. NSHomeDirectory(), NSSearchPath..., NSFullUserName() —
+       * returns a real 64-bit Foundation pointer. The i386 caller reads only
+       * the low 4 bytes (eax), truncating it to a wild pointer that crashes the
+       * moment the object is retained/messaged (e.g. inserted into a real
+       * NSDictionary). x64_objc_wrap mints a low-4GB handle that the
+       * objc_msgSend bridge unwraps back to the real object. rsp is still the
+       * 16-aligned call frame here, so the call is ABI-safe; rdi was saved at
+       * [rbp-8]. CF `^struct` returns are left untouched (no regression). */
+      {
+         const CXType rcanon =
+            clang_getCanonicalType(clang_getResultType(function_type));
+         /* libclang models SEL as Pointer-to-ObjCSel (see typeconv
+          * convert_pointer); catch both shapes */
+         const bool ret_is_sel =
+            rcanon.kind == CXType_ObjCSel ||
+            (rcanon.kind == CXType_Pointer &&
+             clang_getCanonicalType(clang_getPointeeType(rcanon)).kind
+                == CXType_ObjCSel);
+         if (rcanon.kind == CXType_ObjCObjectPointer ||
+             rcanon.kind == CXType_ObjCId ||
+             rcanon.kind == CXType_ObjCClass) {
+            /* Class returns too (NSClassFromString): native Class objects
+             * live in the dyld shared cache, far above 4GB */
+            emit_inst(os, "mov", "rdi", "rax");
+            emit_inst(os, "call", "_x64_objc_wrap");
+         } else if (ret_is_sel) {
+            /* SEL returns (NSSelectorFromString): intern a stable low-4GB
+             * selector-name pointer the i386 caller can store and re-message */
+            emit_inst(os, "mov", "rdi", "rax");
+            emit_inst(os, "call", "_x64_objc_sel_wrap");
+         } else if (cf_opaque_ptr_type(rcanon)) {
+            /* opaque CF refs: a dyld-cache constant (CFSTR, kCF*) would
+             * truncate in the i386 caller's eax — wrap only those; low
+             * heap refs stay raw (status quo, no arena churn). The CF-arg
+             * unwrap (convert_cf_ptr) accepts both forms. */
+            emit_inst(os, "mov", "rdi", "rax");
+            emit_inst(os, "shr", "rdi", "32");
+            emit_inst(os, "jz", ".cfretlow");
+            emit_inst(os, "mov", "rdi", "rax");
+            emit_inst(os, "call", "_x64_objc_wrap");
+            os << ".cfretlow:" << std::endl;
+         }
+      }
 
       // emit_inst(os, "add", "rsp", stack_data_size() + stack_args_size());
       emit_inst(os, "lea", "rsp", "[rbp - 0x10]");
@@ -306,10 +407,29 @@ struct ABIGenerator {
    std::ostream& os;
    Symbols symbols;
    Symbols ignore_structs;
+   Symbols collision_names; /* shim names (override_prefix+sym) reserved across
+                             * the whole consider set; a symbol whose own linker
+                             * name is in here is skipped to avoid label clashes */
    enum class ABI {FUNCTION, SYSCALL} abi;
    bool force_all;
+   std::vector<std::string> clang_args;  /* extra args passed to libclang */
+   /* External ObjC-object DATA constants (e.g. NSString* const NSArgumentDomain)
+    * in the consider set. abigen emits a low-4GB shadow variable + a runtime
+    * table for each; see emit_data_shadows(). Stored WITH the leading
+    * underscore (e.g. "_NSArgumentDomain"), like function `sym`. */
+   std::vector<std::string> data_shadow_syms;
 
    ABIGenerator(std::ostream& os, ABI abi): os(os), abi(abi) {}
+
+   /* Build the reserved shim-name set from the final consider set. Must be
+    * called after symbols/ignore are loaded and before any header is handled
+    * (emit() consumes `symbols`, so compute from the full set up front). */
+   void compute_collision_names() {
+      const std::string override_prefix = "__";
+      for (const std::string& s : symbols) {
+         collision_names.insert(override_prefix + s);
+      }
+   }
 
    ~ABIGenerator() {
       clang_disposeIndex(index);
@@ -318,18 +438,56 @@ struct ABIGenerator {
    void emit_header() {
       os << "\tsegment .text" << std::endl;
       os << "\textern __dyld_stub_binder_flag" << std::endl;
+      /* objc-object return wrapping (see emit_body): a C function returning an
+       * ObjC object hands back a 64-bit pointer that would truncate to the i386
+       * caller's 4-byte eax. Wrap it into a low-4GB proxy handle the objc bridge
+       * unwraps on the next message send. */
+      os << "\textern _x64_objc_wrap" << std::endl;
+      /* fn-ptr parameter bridging (typeconv convert_fnptr): binds an i386
+       * callback to a native trampoline at shim time. cb_bridge.c. */
+      os << "\textern _x64_cb_wrap" << std::endl;
+      /* objc object/Class/SEL parameter marshalling (typeconv
+       * convert_objc_ptr / convert_objc_sel; objc_shim.c) */
+      os << "\textern _x64_objc_unwrap" << std::endl;
+      os << "\textern _x64_objc_sel_unwrap" << std::endl;
+      os << "\textern _x64_objc_sel_wrap" << std::endl;
    }
 
    void handle_file(const std::string& path) {
-      CXTranslationUnit unit = clang_parseTranslationUnit(index, path.c_str(), nullptr, 0, nullptr,
-                                                          0, CXTranslationUnit_None);
+      std::vector<const char *> argv;
+      argv.reserve(clang_args.size());
+      for (const std::string& s : clang_args) {
+         argv.push_back(s.c_str());
+      }
+      CXTranslationUnit unit = clang_parseTranslationUnit(
+         index, path.c_str(),
+         argv.empty() ? nullptr : argv.data(),
+         static_cast<int>(argv.size()),
+         nullptr, 0, CXTranslationUnit_None);
       if (unit == nullptr) {
          std::cerr << "Unable to parse translation unit. Quitting." << std::endl;
          exit(-1);
       }
-      
+
+      /* Surface parse diagnostics so missing-include problems aren't silent. */
+      const unsigned ndiag = clang_getNumDiagnostics(unit);
+      unsigned errors = 0;
+      for (unsigned i = 0; i < ndiag; ++i) {
+         CXDiagnostic d = clang_getDiagnostic(unit, i);
+         if (clang_getDiagnosticSeverity(d) >= CXDiagnostic_Error) {
+            CXString s = clang_formatDiagnostic(d, clang_defaultDiagnosticDisplayOptions());
+            std::cerr << "abigen: " << clang_getCString(s) << std::endl;
+            clang_disposeString(s);
+            ++errors;
+         }
+         clang_disposeDiagnostic(d);
+      }
+      if (errors > 0) {
+         std::cerr << "abigen: " << errors << " parse error(s) in " << path << std::endl;
+      }
+
       for_each(unit, [&] (CXCursor c, CXCursor p) { return handle_cursor(c, p); });
-      
+
       clang_disposeTranslationUnit(unit);
    }
 
@@ -337,6 +495,9 @@ struct ABIGenerator {
       switch (clang_getCursorKind(c)) {
       case CXCursor_FunctionDecl:
          handle_function_decl(c);
+         break;
+      case CXCursor_VarDecl:
+         handle_var_decl(c);
          break;
       case CXCursor_AsmLabelAttr:
          handle_asm_label_attr(c, p);
@@ -348,15 +509,31 @@ struct ABIGenerator {
    }
 
    void handle_function_decl(CXCursor c) {
-      switch (clang_getCursorType(c).kind) {
+      const CXType t = clang_getCursorType(c);
+      switch (t.kind) {
       case CXType_BlockPointer:
          return;
       default:
          break;
       }
 
-      std::unique_ptr<ABIConversion> conv(make_conv(c));
-      conv->emit(os, symbols, ignore_structs);
+      /* Only proper prototyped functions can be marshalled. K&R-style
+       * declarations (CXType_FunctionNoProto), common in legacy framework
+       * headers, have no argument-type info; constructing an ABIConversion
+       * for them would trip the FunctionProto assertion and abort the whole
+       * run. Skip them. This runs inside a libclang visitor, so any
+       * exception from emit() must be caught here, not allowed to unwind
+       * across the C callback frame. */
+      if (t.kind != CXType_FunctionProto) {
+         return;
+      }
+
+      try {
+         std::unique_ptr<ABIConversion> conv(make_conv(c));
+         conv->emit(os, symbols, ignore_structs, collision_names);
+      } catch (const std::exception& e) {
+         std::cerr << "abigen: skipping function: " << e.what() << std::endl;
+      }
    }
 
    void handle_asm_label_attr(CXCursor c, CXCursor p) {
@@ -364,8 +541,110 @@ struct ABIGenerator {
       if (sym.find('$') == std::string::npos) {
          return; /* this is something else */
       }
-      std::unique_ptr<ABIConversion> conv(make_conv(clang_getCursorType(p), sym));
-      conv->emit(os, symbols, ignore_structs);
+      if (clang_getCursorType(p).kind != CXType_FunctionProto) {
+         return;
+      }
+      try {
+         std::unique_ptr<ABIConversion> conv(make_conv(clang_getCursorType(p), sym));
+         conv->emit(os, symbols, ignore_structs, collision_names);
+      } catch (const std::exception& e) {
+         std::cerr << "abigen: skipping " << sym << ": " << e.what() << std::endl;
+      }
+   }
+
+   /* External ObjC-object data constants. An i386 reference to e.g.
+    * `NSString * const NSArgumentDomain` is a non-lazy symbol pointer the
+    * linker fills with the symbol's 64-bit address; the i386 code then does
+    * `movl slot,%reg; movl (%reg),%reg` (a double-deref: slot -> &var -> value).
+    * Both the 64-bit &var AND the 64-bit object value overflow i386's 4-byte
+    * loads, so we can't bind the real symbol. Instead we record the symbol and
+    * emit (in emit_data_shadows) a low-4GB shadow variable ___SYM whose value
+    * is a 32-bit proxy HANDLE wrapping the real object; static-interpose
+    * redirects the binary's non-lazy bind for _SYM to ___SYM so the double-deref
+    * yields the handle, which the objc bridge unwraps. We only shadow ObjC
+    * object pointers (id, NSString *, Class), whose value is always an objc
+    * object; a scalar/struct global mis-wrapped this way could corrupt it. */
+   void handle_var_decl(CXCursor c) {
+      const enum CX_StorageClass sc = clang_Cursor_getStorageClass(c);
+      if (sc != CX_SC_None && sc != CX_SC_Extern) {
+         return; /* static / register / etc. — not an imported global */
+      }
+      const CXType canon = clang_getCanonicalType(clang_getCursorType(c));
+      switch (canon.kind) {
+      case CXType_ObjCObjectPointer:
+      case CXType_ObjCId:
+      case CXType_ObjCClass:
+         break;
+      case CXType_Pointer: {
+         /* Opaque CoreFoundation refs (CFStringRef = `struct __CFString *`,
+          * etc.) are 64-bit pointers to objects that live high in the dyld
+          * region, so an i386 `movl slot,%reg; movl (%reg),%reg` double-deref
+          * of such a data constant (e.g. kCFRunLoopDefaultMode) truncates and
+          * faults — exactly like the objc case. Shadow them too, keyed on the
+          * CF opaque-struct naming convention (`__CF*`). The runtime ctor
+          * x64_init_data_shadows() wraps the >4GB value as a handle; toll-free
+          * CF objects unwrap fine through the objc bridge. We do NOT shadow
+          * void / char / scalar globals (mis-wrapping could corrupt them).
+          * NOTE: a pure-C consumer of a CF string constant (e.g. the
+          * CFRunLoopRunInMode mode arg) would get a handle, not a real
+          * CFString -- acceptable for now (it was a hard crash before); the
+          * proper fix is a low-4GB value-equal CFString copy. */
+         const CXType pointee = clang_getCanonicalType(clang_getPointeeType(canon));
+         if (pointee.kind != CXType_Record) { return; }
+         CXString ps = clang_getTypeSpelling(pointee);
+         const bool is_cf =
+            std::string(clang_getCString(ps)).find("__CF") != std::string::npos;
+         clang_disposeString(ps);
+         if (!is_cf) { return; }
+         break;
+      }
+      default:
+         return; /* only objc-object + opaque-CF data constants */
+      }
+      CXString cxsym = clang_getCursorSpelling(c);
+      const std::string sym = std::string("_") + clang_getCString(cxsym);
+      clang_disposeString(cxsym);
+
+      if (symbols.find(sym) == symbols.end()) {
+         return; /* not in the consider set */
+      }
+      symbols.erase(sym); /* consume so a re-declaration isn't shadowed twice */
+      if (getenv("ABIGEN_TRACE")) {
+         std::cerr << "abigen: data shadow " << sym << std::endl;
+      }
+      data_shadow_syms.push_back(sym);
+   }
+
+   /* Emit the data-shadow storage + the runtime table consumed by
+    * x64_init_data_shadows() in objc_shim.c. Always emits the table/count
+    * symbols (possibly empty) so the C side links. */
+   void emit_data_shadows() {
+      const std::string override_prefix = "__";
+      os << "\n\tsegment .data" << std::endl;
+      for (const std::string& s : data_shadow_syms) {
+         const std::string shadow = override_prefix + s; /* ___NSArgumentDomain */
+         os << "\tglobal " << shadow << std::endl;
+         os << shadow << ": dq 0" << std::endl;
+      }
+      std::size_t idx = 0;
+      for (const std::string& s : data_shadow_syms) {
+         /* dlsym wants the name without the leading underscore */
+         os << "_x64_dsn_" << idx << ": db \"" << s.substr(1) << "\", 0"
+            << std::endl;
+         ++idx;
+      }
+      os << "\tglobal _x64_data_shadows" << std::endl;
+      os << "_x64_data_shadows:" << std::endl;
+      idx = 0;
+      for (const std::string& s : data_shadow_syms) {
+         const std::string shadow = override_prefix + s;
+         os << "\tdq " << shadow << std::endl;
+         os << "\tdq _x64_dsn_" << idx << std::endl;
+         ++idx;
+      }
+      os << "\tglobal _x64_data_shadows_count" << std::endl;
+      os << "_x64_data_shadows_count: dq " << data_shadow_syms.size()
+         << std::endl;
    }
 
    template <typename... Args>
@@ -415,26 +694,32 @@ int main(int argc, char *argv[]) {
                       "  -s <symfile>    file containing symbols to consider\n" \
                       "  -i <ignorefile> file containing symbols to ignore\n" \
                       "  -r <structfile> file containing struct names to not convert\n" \
-                      "  -c              use system call ABI"           \
+                      "  -c              use system call ABI\n"         \
+                      "  -X <arg>        extra arg to forward to libclang (may repeat)\n" \
+                      "  --isysroot <path>  shorthand for -X -isysroot -X <path>\n" \
                       "";
                    fprintf(f, usage, argv[0]);
                 };
-   
+
    const char *outpath = nullptr;
    const char *sympath = nullptr;
    const char *symignorepath = nullptr;
    const char *structpath = nullptr;
    ABIGenerator::ABI abi = ABIGenerator::ABI::FUNCTION;
-   const char *optstring = "ho:s:i:r:";
+   std::vector<std::string> clang_args;
+   const char *optstring = "ho:s:i:r:cX:";
+   enum { OPT_ISYSROOT = 1000 };
    const struct option longopts[] = {{"help", no_argument, nullptr, 'h'},
                                      {"output", required_argument, nullptr, 'o'},
                                      {"symfile", required_argument, nullptr, 's'},
                                      {"ignorefile", required_argument, nullptr, 'i'},
                                      {"structfile", required_argument, nullptr, 'r'},
-                                     {"syscall", required_argument, nullptr, 'c'},
+                                     {"syscall", no_argument, nullptr, 'c'},
+                                     {"clang-arg", required_argument, nullptr, 'X'},
+                                     {"isysroot", required_argument, nullptr, OPT_ISYSROOT},
                                      {0}
    };
-   
+
    int optchar;
    while ((optchar = getopt_long(argc, argv, optstring, longopts, nullptr)) >= 0) {
       switch (optchar) {
@@ -456,12 +741,19 @@ int main(int argc, char *argv[]) {
       case 'c':
          abi = ABIGenerator::ABI::SYSCALL;
          break;
+      case 'X':
+         clang_args.emplace_back(optarg);
+         break;
+      case OPT_ISYSROOT:
+         clang_args.emplace_back("-isysroot");
+         clang_args.emplace_back(optarg);
+         break;
       case '?':
          usage(stderr);
          return 1;
       }
    }
-   
+
    std::ofstream of;
    if (outpath) {
       of.open(outpath);
@@ -469,6 +761,7 @@ int main(int argc, char *argv[]) {
    std::ostream& os = outpath ? of : std::cout;
 
    ABIGenerator abigen(os, abi);
+   abigen.clang_args = std::move(clang_args);
 
    if (sympath) {
       parse_syms(sympath, [&] (const std::string& s) { abigen.symbols.insert(s); });
@@ -484,12 +777,22 @@ int main(int argc, char *argv[]) {
       parse_lines(structpath, [&] (const std::string& s) { abigen.ignore_structs.insert(s); });
    }
 
+   /* must run after the consider set is finalized (load + ignore) and before
+    * any emit, which mutates abigen.symbols */
+   abigen.compute_collision_names();
+
    abigen.emit_header();
    
    /* handle each header */
    for (int i = optind; i < argc; ++i) {
       abigen.handle_file(argv[i]);
    }
+
+   /* emit external ObjC-object data-constant shadows + their runtime table */
+   abigen.emit_data_shadows();
+
+   /* emit the callback-signature descriptors registered by convert_fnptr */
+   cb_sig_emit(os);
 
    return 0;
 }

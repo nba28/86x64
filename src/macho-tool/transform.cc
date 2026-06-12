@@ -35,6 +35,20 @@ int TransformCommand::workT(MachO::MachO *macho) {
    }
    archive->Build(0);
    auto newarchive = archive->Transform();
+   /*
+    * Force the transformed M64 binary to live entirely in low 32-bit
+    * address space. The i386 → x86_64 translation patches up internal
+    * pointers in __data (e.g. `extern char *gptr = &common_var;`) to
+    * point at the new (shifted) segment locations — but each slot is
+    * still only 4 bytes wide, so the new vmaddr has to fit in 32 bits.
+    * The default M64 vmaddr_start is 0x100000000 (4GB PAGEZERO), which
+    * would silently truncate every patched pointer.
+    *
+    * 0x10000000 (256 MB) is well above where dyld places the wrapper
+    * executable and leaves room for ASLR slide of 0; the convert step
+    * preserves this base and the wrapper disables ASLR at spawn time.
+    */
+   newarchive->vmaddr = 0x10000000;
    newarchive->Build(0);
    newarchive->Emit(*out_img);
    return 0;

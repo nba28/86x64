@@ -128,8 +128,14 @@ add_library(abiconv SHARED
   objc_slide.c
   maptable_shim.m
   sysctl_shim.c
+  proc_shim.c
+  cf_callback_shim.c
+  cb_bridge.c
+  iokit_shim.c
+  lazy_bind.c
   objc_msgSend.asm
   objc_reverse.asm
+  cb_tramp.asm
   init_trampoline.asm
   maptable_tramp.asm
   dyld_stub_binder.asm
@@ -147,6 +153,7 @@ target_link_libraries(abiconv System objc
   "-framework CoreFoundation"
   "-framework CoreServices"
   "-framework ApplicationServices"
+  "-framework IOKit"
   )
 add_dependencies(abiconv abiconv_asm)
 

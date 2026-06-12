@@ -1,4 +1,5 @@
 #pragma once
+#include <cassert>
 
 #include <vector>
 extern "C" {
@@ -36,6 +37,12 @@ namespace MachO {
       inline opcode_t lea_rsp_mem_rsp_4() { return {0x48, 0x8D, 0x64, 0x24, 0x04}; }
 
       opcode_t lea_r32_mem_rip_disp32(xed_reg_enum_t r32);
+
+      /* mov r32, [rip + disp32]    (load: x86_64 replacement for i386 `mov r32, [abs32]`) */
+      opcode_t mov_r32_mem_rip_disp32(xed_reg_enum_t r32);
+
+      /* mov [rip + disp32], r32    (store: x86_64 replacement for i386 `mov [abs32], r32`) */
+      opcode_t mov_mem_rip_disp32_r32(xed_reg_enum_t r32);
 
       /* jmp [rip+disp32] */
       inline opcode_t jmp_mem_rip_disp32() { return {0xff, 0x25, 0x00, 0x00, 0x00, 0x00}; }

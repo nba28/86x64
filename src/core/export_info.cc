@@ -21,9 +21,18 @@ namespace MachO {
    {
       std::size_t value_offset;
       offset += leb128_decode(img, offset, value_offset);
-      // env.offset_resolver.resolve(value_offset, &value);
       if (value_offset > 0) {
-         value = env.add_placeholder(env.archive.offset_to_vmaddr(value_offset));
+         /* The export's value_offset is a file offset from the dylib base. Most
+          * exports point at __TEXT or __DATA sections, but some can point into
+          * sectionless segments (notably __LINKEDIT). offset_to_vmaddr throws on
+          * the latter; use try_ and skip placeholdering when the offset lands
+          * outside any parsed section. The export still emits — its leb128 value
+          * just stays 0 instead of tracking a moved blob. Affects exports that
+          * reference __LINKEDIT data (rare; seen in iLife framework dylibs). */
+         auto maybe_vmaddr = env.archive.try_offset_to_vmaddr(value_offset);
+         if (maybe_vmaddr) {
+            value = env.add_placeholder(*maybe_vmaddr);
+         }
       }
    }
 
@@ -109,8 +118,26 @@ namespace MachO {
             auto result = subnode->children.emplace(*sym++, node());
             subnode = &result.first->second;
          }
-         
-         *subnode = ParseNode(img, edge_diff + start, start, env);
+
+         /* Apple's export trie format allows a zero-length edge label that
+          * points at this node's own terminal info. When that's the case the
+          * while loop above didn't move `subnode` away from `curnode`, so a
+          * blind `*subnode = ParseNode(...)` would clobber whatever children
+          * other edges of `curnode` had already populated — observed on iWeb's
+          * SFDrawables where `_SFDPropertiesChangedNotification` has both a
+          * multi-char "PropertiesKey" edge and an empty-label edge to its own
+          * terminal, and the empty-label edge wiped the PropertiesKey child.
+          * For the empty-label case copy the value only, preserving children.
+          * For non-empty labels keep the original whole-node overwrite. */
+         auto parsed = ParseNode(img, edge_diff + start, start, env);
+         if (subnode == &curnode) {
+            if (parsed.value) { subnode->value = parsed.value; }
+            for (auto& kv : parsed.children) {
+               subnode->children.emplace(kv.first, std::move(kv.second));
+            }
+         } else {
+            *subnode = std::move(parsed);
+         }
       }
       
       return curnode;

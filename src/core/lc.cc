@@ -1,3 +1,5 @@
+#include <cstdlib>
+#include <cassert>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
 
@@ -45,6 +47,10 @@ namespace MachO {
          return Dysymtab<bits>::Parse(img, offset, env);
 
       case LC_LOAD_DYLINKER:
+      case LC_RPATH:
+         /* dylinker_command and rpath_command share layout (cmd/cmdsize/lc_str),
+          * so DylinkerCommand parses/builds/emits both correctly; the stored
+          * cmd field carries LC_RPATH through to emission. */
          return DylinkerCommand<bits>::Parse(img, offset, env);
 
       case LC_UUID:
@@ -56,23 +62,47 @@ namespace MachO {
       case LC_SOURCE_VERSION:
          return SourceVersion<bits>::Parse(img, offset, env);
 
+      case LC_VERSION_MIN_MACOSX:
+      case LC_VERSION_MIN_IPHONEOS:
+      case LC_VERSION_MIN_WATCHOS:
+      case LC_VERSION_MIN_TVOS:
+         /* All four share version_min_command layout; pre-10.13 toolchains
+          * still emit LC_VERSION_MIN_MACOSX on i386 builds. */
+         return VersionMin<bits>::Parse(img, offset, env);
+
       case LC_MAIN:
          return EntryPoint<bits>::Parse(img, offset, env);
 
+      case LC_UNIXTHREAD:
+         return UnixThread<bits>::Parse(img, offset, env);
+
       case LC_LOAD_DYLIB:
+      case LC_LOAD_WEAK_DYLIB:
+      case LC_REEXPORT_DYLIB:
+      case LC_LOAD_UPWARD_DYLIB:
+      case LC_LAZY_LOAD_DYLIB:
       case LC_ID_DYLIB:
+         /* All six share the dylib_command layout. AssignID (Build phase)
+          * and the parse-time dylib_resolver.add(this) (DylibCommand ctor)
+          * both handle them uniformly, so any bind ordinal targeting a
+          * weak/reexport/upward/lazy dylib resolves correctly. Was: throw
+          * on weak — broke any i386 binary linking with -weak_framework. */
          return DylibCommand<bits>::Parse(img, offset, env);
 
       case LC_DATA_IN_CODE:
       case LC_FUNCTION_STARTS:
       case LC_CODE_SIGNATURE:
+      case LC_SEGMENT_SPLIT_INFO:
+      case LC_DYLIB_CODE_SIGN_DRS:
+      case LC_LINKER_OPTIMIZATION_HINT:
+         /* All five share linkedit_data_command layout: cmd/cmdsize/dataoff/datasize.
+          * Parse generically; the data blob in __LINKEDIT is copied through verbatim
+          * since none of it references vmaddrs that the M32→M64 transform shifts. */
          return LinkeditData<bits>::Parse(img, offset, env);
          
       default:
          throw error("load command 0x%x not supported", lc.cmd);
       }
-      
-      // TODO
    }
 
 
@@ -128,7 +158,15 @@ namespace MachO {
       const std::size_t len = strnlen(&img.at<char>(offset + stroff), strrem);
       name = std::string(&img.at<char>(offset + stroff), &img.at<char>(offset + stroff + len));
 
-      if (dylib_cmd.cmd == LC_LOAD_DYLIB) {
+      /* Every dylib-loading LC contributes to the ordinal counter that
+       * BindNode references via SET_DYLIB_ORDINAL_{IMM,ULEB}. AssignID
+       * already handles all five (LOAD/WEAK/REEXPORT/UPWARD/LAZY); the
+       * parse-time resolver must mirror that or any bind targeting a
+       * WEAK/REEXPORT/etc. dylib would resolve to nullptr and be silently
+       * dropped from the output (same failure mode as the ULEB-ordinal bug
+       * in dyldinfo.cc). LC_ID_DYLIB is excluded — it identifies *this*
+       * library, not a dependency, and never receives a bind ordinal. */
+      if (dylib_cmd.cmd != LC_ID_DYLIB) {
          env.dylib_resolver.add(this);
       }
    }
@@ -232,6 +270,111 @@ namespace MachO {
    }
 #endif
 
+   /* ---- LC_UNIXTHREAD ---- */
+
+   template <Bits bits>
+   UnixThread<bits>::UnixThread(const Image& img, std::size_t offset, ParseEnv<bits>& env):
+      LoadCommand<bits>(img, offset, env),
+      thread_cmd(img.at<thread_command>(offset))
+   {
+      const std::size_t state_off = offset + sizeof(thread_command);
+      flavor = img.at<uint32_t>(state_off);
+      count = img.at<uint32_t>(state_off + sizeof(uint32_t));
+
+      /* Sanity: cmdsize must hold the header + flavor + count + state words. */
+      const std::size_t expect = sizeof(thread_command) + 2 * sizeof(uint32_t)
+                                 + count * sizeof(uint32_t);
+      if (thread_cmd.cmdsize < expect) {
+         throw error("LC_UNIXTHREAD: cmdsize %u smaller than header+state %zu",
+                     thread_cmd.cmdsize, expect);
+      }
+
+      /* Refuse flavors whose pc index we don't know. The pipeline targets
+       * x86, so reject ppc/arm thread states up front rather than silently
+       * mis-locating the entry point. */
+      const uint32_t want_flavor = (bits == Bits::M32) ? 1u /* x86_THREAD_STATE32 */
+                                                       : 4u /* x86_THREAD_STATE64 */;
+      if (flavor != want_flavor) {
+         throw error("LC_UNIXTHREAD: unexpected thread-state flavor %u for %d-bit binary",
+                     flavor, (bits == Bits::M32) ? 32 : 64);
+      }
+      if (count <= pc_word_index()) {
+         throw error("LC_UNIXTHREAD: thread state count %u too small to hold pc", count);
+      }
+
+      state.resize(count);
+      const std::size_t words_off = state_off + 2 * sizeof(uint32_t);
+      for (uint32_t i = 0; i < count; ++i) {
+         state[i] = img.at<uint32_t>(words_off + i * sizeof(uint32_t));
+      }
+   }
+
+   template <Bits bits>
+   void UnixThread<bits>::Parse1(const Image& img, ParseEnv<bits>& env) {
+      /* eip / rip is the virtual address the kernel sets up before jumping
+       * into the binary. Wire it through the placeholder resolver like
+       * EntryPoint does so it follows any later moves of the entry blob. */
+      std::size_t pc;
+      if constexpr (bits == Bits::M32) {
+         pc = state[pc_word_index()];
+      } else {
+         pc = static_cast<uint64_t>(state[pc_word_index()])
+            | (static_cast<uint64_t>(state[pc_word_index() + 1]) << 32);
+      }
+      entry = env.add_placeholder(pc);
+   }
+
+   template <Bits bits>
+   void UnixThread<bits>::Build(BuildEnv<bits>& env) {
+      thread_cmd.cmdsize = size();
+   }
+
+   template <Bits bits>
+   void UnixThread<bits>::Emit(Image& img, std::size_t offset) const {
+      img.at<thread_command>(offset) = thread_cmd;
+      offset += sizeof(thread_command);
+      img.at<uint32_t>(offset) = flavor;                            offset += sizeof(uint32_t);
+      img.at<uint32_t>(offset) = count;                             offset += sizeof(uint32_t);
+
+      /* Rewrite the pc slot with the (possibly relocated) entry vmaddr. */
+      std::vector<uint32_t> out = state;
+      const std::size_t pc_vmaddr = entry ? entry->loc.vmaddr : 0;
+      if constexpr (bits == Bits::M32) {
+         out[pc_word_index()] = static_cast<uint32_t>(pc_vmaddr);
+      } else {
+         out[pc_word_index()    ] = static_cast<uint32_t>(pc_vmaddr & 0xffffffffu);
+         out[pc_word_index() + 1] = static_cast<uint32_t>(pc_vmaddr >> 32);
+      }
+      for (uint32_t w : out) {
+         img.at<uint32_t>(offset) = w;
+         offset += sizeof(uint32_t);
+      }
+   }
+
+   template <Bits bits>
+   UnixThread<bits>::UnixThread(const UnixThread<opposite<bits>>& other,
+                                TransformEnv<opposite<bits>>& env):
+      LoadCommand<bits>(other, env), entry(nullptr)
+   {
+      thread_cmd = other.thread_cmd;
+      /* Switch flavor + extend the state buffer for the new bit-width. The
+       * kernel ignores everything but pc for LC_UNIXTHREAD bring-up of a
+       * userspace process, so the zero-extension of other registers is fine.
+       */
+      if constexpr (bits == Bits::M64) {
+         flavor = 4;          /* x86_THREAD_STATE64 */
+         count = 42;          /* x86_THREAD_STATE64_COUNT */
+      } else {
+         flavor = 1;          /* x86_THREAD_STATE32 */
+         count = 16;          /* x86_THREAD_STATE32_COUNT */
+      }
+      state.assign(count, 0);
+
+      env.resolve(other.entry, &entry);
+   }
+
+   /* ---- /LC_UNIXTHREAD ---- */
+
    template <Bits bits>
    void DylibCommand<bits>::Build(BuildEnv<bits>& env) {
       dylib_cmd.cmdsize = size();
@@ -241,15 +384,34 @@ namespace MachO {
    template <Bits bits>
    void DylibCommand<bits>::AssignID(BuildEnv<bits>& env) {
       switch (dylib_cmd.cmd) {
-      case LC_LOAD_DYLIB:
-         id = env.dylib_counter();
-         break;
-
       case LC_ID_DYLIB:
          id = 0;
          break;
 
-      default: abort();
+      /*
+       * All dylib-loading commands behave the same way for the link-order
+       * counter (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB, LC_REEXPORT_DYLIB,
+       * LC_LOAD_UPWARD_DYLIB, LC_LAZY_LOAD_DYLIB). iPhoto links some
+       * frameworks weakly; was abort() on those, which crashed Build.
+       */
+      case LC_LOAD_DYLIB:
+      case LC_LOAD_WEAK_DYLIB:
+      case LC_REEXPORT_DYLIB:
+      case LC_LOAD_UPWARD_DYLIB:
+      case LC_LAZY_LOAD_DYLIB:
+         id = env.dylib_counter();
+         break;
+
+      default:
+         /* Unknown LC_*_DYLIB variant — best effort: allocate a counter
+          * id (treat as load). Logs once if MACHO_BUILD_DEBUG is set. */
+         if (std::getenv("MACHO_BUILD_DEBUG")) {
+            fprintf(stderr,
+                    "DylibCommand::AssignID: unknown cmd 0x%x; treating as LC_LOAD_DYLIB\n",
+                    (unsigned)dylib_cmd.cmd);
+         }
+         id = env.dylib_counter();
+         break;
       }
    }
 
@@ -269,5 +431,8 @@ namespace MachO {
 
    template class DylibCommand<Bits::M32>;
    template class DylibCommand<Bits::M64>;
+
+   template class UnixThread<Bits::M32>;
+   template class UnixThread<Bits::M64>;
    
 }
