@@ -89,6 +89,12 @@ struct objc_shared_ctrl {
     * Shared so every libabiconv copy agrees on which modern R' stands for a
     * given raw i386 instance. Allocated by the first copy (see arena_init). */
    uint64_t        lpair;        /* struct lpair_ent * (open-addressed) */
+   /* Legacy ObjC1 setjmp-exception chain (NS_DURING): per-thread top of the
+    * _objc_exception_data list. MUST be cross-copy: try_enter runs in one
+    * image's adjacent libabiconv copy, the matching objc_exception_throw can
+    * run in another's. Slot claimed by tid (open-addressed, CAS on tid);
+    * top==0 marks the slot reclaimable. */
+   struct { uint64_t tid; uint32_t top; uint32_t _pad; } exc_chain[64];
 };
 #define SUPER_HINT_SLOTS 64
 #define OBJC_CTRL_MAGIC 0x3836583634415243ULL  /* "86X64ARC" */
@@ -2741,19 +2747,28 @@ void _86x64_objc_index_legacy_classes(const struct mach_header_64 *mh,
  * Runs once per libabiconv copy; x64_objc_wrap uses the process-shared arena,
  * so handles minted here are valid across all copies.
  */
-extern void    *x64_data_shadows[];      /* flat: [&shadow0,name0, &shadow1,name1,...] */
-extern uint64_t x64_data_shadows_count;  /* number of PAIRS */
+extern void    *x64_data_shadows[];      /* flat triples: [&shadow,name,info,...] */
+extern uint64_t x64_data_shadows_count;  /* number of TRIPLES */
 
 __attribute__((constructor))
 static void x64_init_data_shadows(void) {
    const uint64_t n = x64_data_shadows_count;
    for (uint64_t i = 0; i < n; ++i) {
-      uint64_t *shadow = (uint64_t *)x64_data_shadows[2 * i];
-      const char *name = (const char *)x64_data_shadows[2 * i + 1];
+      uint64_t *shadow = (uint64_t *)x64_data_shadows[3 * i];
+      const char *name = (const char *)x64_data_shadows[3 * i + 1];
+      const uint64_t info = (uint64_t)x64_data_shadows[3 * i + 2];
       if (!shadow || !name) { continue; }
       void *addr = dlsym(RTLD_DEFAULT, name);   /* &realvar */
       if (!addr) { continue; }
-      uint64_t v = *(uint64_t *)addr;           /* the object pointer (or scalar) */
+      if (info != 0) {
+         /* SCALAR data constant: the i386 code derefs &shadow ONCE to read the
+          * value, so the shadow must hold a low-4GB COPY of the value bytes
+          * (info = byte width, 1..8). No handle wrap — the bits ARE the datum. */
+         *shadow = 0;
+         memcpy(shadow, addr, (size_t)info);
+         continue;
+      }
+      uint64_t v = *(uint64_t *)addr;           /* the object pointer */
       if (v >= 0x100000000ULL) {
          *shadow = x64_objc_wrap(v);            /* 32-bit handle, zero-extended */
       } else {
@@ -3792,4 +3807,514 @@ static void reverse_register_image(const struct mach_header_64 *mh,
               registered, ndefs);
       fflush(stderr);
    }
+}
+
+/* ======================================================================
+ * Legacy ObjC1 runtime compat (first hit: iWeb's iWork-shared SF* frameworks).
+ *
+ * Modern libobjc dropped the ObjC1 setjmp exception machinery
+ * (objc_exception_try_enter/try_exit/extract/match + the longjmp half of
+ * objc_exception_throw), the `id (*_dealloc)(id)` allocation vector,
+ * _objc_setNilReceiver and class_nextMethodList. SFUtility etc. bind all of
+ * them (NS_DURING/NS_HANDLER expand to try_enter + _setjmp), so dyld refuses
+ * to load the translated images. static-interpose redirects those binds to
+ * the __-prefixed exports below (i386-cdecl trampolines in maptable_tramp.asm).
+ *
+ * NS_DURING also calls _setjmp on the 18-int i386 jmp_buf embedded in
+ * _objc_exception_data (88 bytes total). The native x86_64 _setjmp writes 148
+ * bytes into that 72-byte buffer -> silent stack smash on every NS_DURING,
+ * and its buf couldn't be longjmp'd by us anyway. ____setjmp
+ * (maptable_tramp.asm) instead captures a compact translated-i386 context
+ * {rbx,rsi,rdi,rbp,rsp,eip} + magic into the same buffer; our
+ * objc_exception_throw restores it via x64_exc_longjmp. We own BOTH ends:
+ * no iWeb payload imports any longjmp — the only longjmp lived inside the
+ * old runtime's throw.
+ *
+ * Known limits (traced loudly when hit):
+ *  - an exception raised by NATIVE code (e.g. +[NSException raise:...] deep
+ *    in Foundation) unwinds as a C++ exception and never reaches this chain;
+ *  - a longjmp across reverse-bridge re-entries does not unwind their
+ *    per-thread rsp stashes (g_rstash) or other translator bookkeeping.
+ * ====================================================================== */
+
+#define EXC32_MAGIC      0x36346a62u
+#define EXC_CHAIN_SLOTS  64
+
+/* i386 _objc_exception_data: { int buf[18]; void *pointers[4]; }.
+ * buf[18] (72B) holds our ____setjmp capture instead of a real jmp_buf. */
+struct exc_data32 {
+   uint64_t regs[6];      /* rbx rsi rdi rbp rsp eip — written by ____setjmp */
+   uint32_t magic;        /* EXC32_MAGIC when regs[] is ours */
+   uint32_t pad[5];       /* rest of buf[18] */
+   uint32_t pointers[4];  /* [0]=thrown id32  [1]=chain next (i386 ptr) */
+};
+_Static_assert(sizeof(struct exc_data32) == 88, "exc_data32 layout");
+
+extern void x64_exc_longjmp(uint64_t *regs, int val) __attribute__((noreturn));
+
+/* This thread's chain-top slot in the shared ctrl (cross-copy, see above). */
+static uint32_t *exc_top_slot(void) {
+   arena_init();
+   if (!g_ctrl) { return NULL; }
+   const uint64_t tid = super_hint_tid();
+   const unsigned start = (unsigned)(tid % EXC_CHAIN_SLOTS);
+   for (unsigned k = 0; k < EXC_CHAIN_SLOTS; ++k) {
+      const unsigned i = (start + k) % EXC_CHAIN_SLOTS;
+      if (g_ctrl->exc_chain[i].tid == tid) { return &g_ctrl->exc_chain[i].top; }
+   }
+   for (unsigned k = 0; k < EXC_CHAIN_SLOTS; ++k) {
+      const unsigned i = (start + k) % EXC_CHAIN_SLOTS;
+      const uint64_t old = g_ctrl->exc_chain[i].tid;
+      if (g_ctrl->exc_chain[i].top == 0 &&
+          __sync_bool_compare_and_swap(&g_ctrl->exc_chain[i].tid, old, tid)) {
+         return &g_ctrl->exc_chain[i].top;
+      }
+   }
+   fprintf(stderr, "[exc1] no free exception-chain slot (>%d threads in "
+           "NS_DURING)\n", EXC_CHAIN_SLOTS);
+   fflush(stderr);
+   return NULL;
+}
+
+uint32_t shim_objc_exception_try_enter(uint32_t *a) {
+   struct exc_data32 *d = (struct exc_data32 *)(uintptr_t)a[0];
+   uint32_t *top = exc_top_slot();
+   if (!d || !top) { return 0; }
+   d->pointers[1] = *top;
+   *top = a[0];
+   return 0;
+}
+
+uint32_t shim_objc_exception_try_exit(uint32_t *a) {
+   struct exc_data32 *d = (struct exc_data32 *)(uintptr_t)a[0];
+   uint32_t *top = exc_top_slot();
+   if (!d || !top) { return 0; }
+   *top = d->pointers[1];
+   return 0;
+}
+
+uint32_t shim_objc_exception_extract(uint32_t *a) {
+   struct exc_data32 *d = (struct exc_data32 *)(uintptr_t)a[0];
+   return d ? d->pointers[0] : 0;
+}
+
+/* int objc_exception_match(Class cls, id exception) — isKindOf walk. */
+uint32_t shim_objc_exception_match(uint32_t *a) {
+   id cls = resolve_self(a[0]);
+   id exc = resolve_self(a[1]);
+   if (!cls || !exc) { return 0; }
+   for (Class c = object_getClass(exc); c; c = class_getSuperclass(c)) {
+      if (c == (Class)cls) { return 1; }
+   }
+   return 0;
+}
+
+extern void objc_exception_throw(id exception);
+
+uint32_t shim_objc_exception_throw(uint32_t *a) {
+   const uint32_t exc32 = a[0];
+   const int trace = getenv("OBJC_BRIDGE_TRACE") != NULL;
+   uint32_t *top = exc_top_slot();
+   if (top && *top) {
+      struct exc_data32 *d = (struct exc_data32 *)(uintptr_t)*top;
+      *top = d->pointers[1];                /* pop: handler runs un-entered */
+      d->pointers[0] = exc32;
+      if (d->magic == EXC32_MAGIC) {
+         if (trace) {
+            fprintf(stderr, "[exc1] throw exc32=0x%08x -> longjmp data=%p\n",
+                    exc32, (void *)d);
+            fflush(stderr);
+         }
+         x64_exc_longjmp(d->regs, 1);       /* noreturn */
+      }
+      fprintf(stderr, "[exc1] throw: _objc_exception_data %p not written by "
+              "our _setjmp (magic=0x%08x) — falling through to native throw\n",
+              (void *)d, d->magic);
+      fflush(stderr);
+   }
+   id real = resolve_self(exc32);
+   fprintf(stderr, "[exc1] throw exc32=0x%08x real=%p with EMPTY legacy chain "
+           "-> native objc_exception_throw (likely fatal)\n",
+           exc32, (void *)real);
+   fflush(stderr);
+   objc_exception_throw(real);
+   __builtin_unreachable();
+}
+
+/* struct objc_method_list *class_nextMethodList(Class, void **) — ObjC1
+ * method-list iterator. No caller has surfaced yet; report an empty list and
+ * trace so a real consumer is visible immediately. */
+uint32_t shim_class_nextMethodList(uint32_t *a) {
+   fprintf(stderr, "[exc1] class_nextMethodList(cls32=0x%08x) unimplemented "
+           "-> NULL (no method lists)\n", a[0]);
+   fflush(stderr);
+   return 0;
+}
+
+/* id _objc_setNilReceiver(id) — nil-message hook, removed from the modern
+ * runtime. Accept and discard; previous receiver was always nil. */
+uint32_t shim_objc_setNilReceiver(uint32_t *a) {
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[exc1] _objc_setNilReceiver(0x%08x) ignored\n", a[0]);
+      fflush(stderr);
+   }
+   return 0;
+}
+
+/* Target of the `id (*_dealloc)(id)` vector: terminal instance free, the old
+ * runtime's _internal_object_dispose. The instance is a reverse-bridged REAL
+ * object (legacy classes are registered with the modern runtime), so dispose
+ * the real peer without re-running -dealloc. */
+uint32_t shim_dealloc_vec(uint32_t *a) {
+   id real = resolve_self(a[0]);
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[exc1] (*_dealloc)(0x%08x) -> real %p object_dispose\n",
+              a[0], (void *)real);
+      fflush(stderr);
+   }
+   if (real) { object_dispose(real); }
+   return 0;
+}
+
+/* The vector itself: i386 code movl-loads the 4-byte function pointer through
+ * its (interposed) __dealloc non-lazy bind and calls it, or overwrites it
+ * with a hook of its own (which the modern runtime simply never consults).
+ * Both the variable and the trampoline live in libabiconv = low-4GB. */
+extern void x64_dealloc_vec_tramp(void);
+uint32_t ___dealloc = 0;            /* exported as ____dealloc */
+
+__attribute__((constructor))
+static void x64_init_objc1_compat(void) {
+   ___dealloc = (uint32_t)(uintptr_t)&x64_dealloc_vec_tramp;
+}
+
+/* ======================================================================
+ * ObjC runtime C functions called directly by translated code (iPhoto 29th
+ * blocker: object_getClass reached the NATIVE entry with i386 stack args ->
+ * native read a stale/fused rdi). libobjc was never in abigen's consider set
+ * (its types need bridge-aware marshalling, not deep copies), so every
+ * direct runtime call had this hazard. Uniform i386-cdecl shims for the
+ * whole imported set (trampolines in maptable_tramp.asm; static-interpose
+ * redirects the binds on the next translate).
+ *
+ * Conventions, mirroring the msgSend bridge:
+ *   id/Class args   -> resolve_self (handle / shadow / raw / class-name)
+ *   id/Class rets   -> x64_objc_wrap (32-bit arena handle, deduped)
+ *   SEL args        -> resolve_sel (i386 SEL == selector-name cstring ptr)
+ *   SEL rets        -> x64_objc_sel_wrap (low name ptr; identity for low in)
+ *   const char* ret -> x64_objc_bounce_cstr (low ring copy)
+ *   Method/Ivar     -> arena handles (dedup map makes equality compares work)
+ *   malloc'd arrays -> shim malloc (low-4GB) of 4-byte slots; caller free()s
+ *                      through the interposed free, which is the same heap.
+ * ====================================================================== */
+
+extern void _objc_flush_caches(Class cls);
+extern id objc_retain(id obj);
+extern int objc_sync_enter(id obj);   /* objc/objc-sync.h */
+extern int objc_sync_exit(id obj);
+
+uint32_t shim_object_getClass(uint32_t *a) {
+   id real = resolve_self(a[0]);
+   return real ? x64_objc_wrap((uint64_t)(uintptr_t)object_getClass(real)) : 0;
+}
+
+uint32_t shim_objc_getClass(uint32_t *a) {
+   if (!legacy_cstr_ok(a[0])) { return 0; }
+   Class c = objc_getClass((const char *)(uintptr_t)a[0]);
+   return c ? x64_objc_wrap((uint64_t)(uintptr_t)c) : 0;
+}
+
+uint32_t shim_class_getSuperclass(uint32_t *a) {
+   id cls = resolve_self(a[0]);
+   if (!cls) { return 0; }
+   Class s = class_getSuperclass((Class)cls);
+   return s ? x64_objc_wrap((uint64_t)(uintptr_t)s) : 0;
+}
+
+uint32_t shim_class_getName(uint32_t *a) {
+   id cls = resolve_self(a[0]);
+   return cls ? x64_objc_bounce_cstr(class_getName((Class)cls)) : 0;
+}
+
+uint32_t shim_object_getClassName(uint32_t *a) {
+   id real = resolve_self(a[0]);
+   return real ? x64_objc_bounce_cstr(object_getClassName(real)) : 0;
+}
+
+uint32_t shim_class_isMetaClass(uint32_t *a) {
+   id cls = resolve_self(a[0]);
+   return cls ? (uint32_t)class_isMetaClass((Class)cls) : 0;
+}
+
+uint32_t shim_object_isClass(uint32_t *a) {
+   id obj = resolve_self(a[0]);
+   return obj ? (uint32_t)object_isClass(obj) : 0;
+}
+
+uint32_t shim_object_setClass(uint32_t *a) {
+   id obj = resolve_self(a[0]);
+   id cls = resolve_self(a[1]);
+   if (!obj || !cls) { return 0; }
+   Class old = object_setClass(obj, (Class)cls);
+   return old ? x64_objc_wrap((uint64_t)(uintptr_t)old) : 0;
+}
+
+uint32_t shim_objc_retain(uint32_t *a) {
+   id real = resolve_self(a[0]);
+   if (real) { objc_retain(real); }
+   return a[0];                       /* objc_retain returns its argument */
+}
+
+uint32_t shim_objc_sync_enter(uint32_t *a) {
+   id real = resolve_self(a[0]);
+   return real ? (uint32_t)objc_sync_enter(real) : 0;
+}
+
+uint32_t shim_objc_sync_exit(uint32_t *a) {
+   id real = resolve_self(a[0]);
+   return real ? (uint32_t)objc_sync_exit(real) : 0;
+}
+
+uint32_t shim_objc_setAssociatedObject(uint32_t *a) {
+   id obj = resolve_self(a[0]);
+   id val = resolve_self(a[2]);       /* nil is fine (clears) */
+   if (!obj) { return 0; }
+   /* key: any i386 pointer, used opaquely; consistent as long as the same
+    * i386 code passes the same low address. */
+   objc_setAssociatedObject(obj, (const void *)(uintptr_t)a[1], val,
+                            (objc_AssociationPolicy)a[3]);
+   return 0;
+}
+
+uint32_t shim_objc_getAssociatedObject(uint32_t *a) {
+   id obj = resolve_self(a[0]);
+   if (!obj) { return 0; }
+   id v = objc_getAssociatedObject(obj, (const void *)(uintptr_t)a[1]);
+   return v ? x64_objc_wrap((uint64_t)(uintptr_t)v) : 0;
+}
+
+uint32_t shim_sel_registerName(uint32_t *a) {
+   if (!legacy_cstr_ok(a[0])) { return 0; }
+   sel_registerName((const char *)(uintptr_t)a[0]);  /* ensure registered */
+   return a[0];                       /* i386 SEL == the name pointer */
+}
+
+uint32_t shim_sel_getName(uint32_t *a) {
+   return legacy_cstr_ok(a[0]) ? a[0] : 0;  /* identity: SEL IS a name ptr */
+}
+
+uint32_t shim_sel_isEqual(uint32_t *a) {
+   if (a[0] == a[1]) { return 1; }
+   SEL s1 = resolve_sel(a[0]);
+   SEL s2 = resolve_sel(a[1]);
+   return (uint32_t)(s1 && s1 == s2);
+}
+
+uint32_t shim_objc_flush_caches(uint32_t *a) {
+   id cls = resolve_self(a[0]);
+   if (cls) { _objc_flush_caches((Class)cls); }
+   return 0;
+}
+
+uint32_t shim_class_createInstance(uint32_t *a) {
+   id cls = resolve_self(a[0]);
+   if (!cls) { return 0; }
+   id obj = class_createInstance((Class)cls, (size_t)a[1]);
+   return obj ? x64_objc_wrap((uint64_t)(uintptr_t)obj) : 0;
+}
+
+uint32_t shim_objc_allocateClassPair(uint32_t *a) {
+   id super = resolve_self(a[0]);     /* Nil superclass is legal */
+   if (!legacy_cstr_ok(a[1])) { return 0; }
+   Class c = objc_allocateClassPair((Class)super,
+                                    (const char *)(uintptr_t)a[1],
+                                    (size_t)a[2]);
+   return c ? x64_objc_wrap((uint64_t)(uintptr_t)c) : 0;
+}
+
+uint32_t shim_objc_registerClassPair(uint32_t *a) {
+   id cls = resolve_self(a[0]);
+   if (cls) { objc_registerClassPair((Class)cls); }
+   return 0;
+}
+
+/* BOOL class_addMethod(Class, SEL, IMP, const char *types) — the IMP is an
+ * i386 function pointer: register the generic reverse trampoline exactly as
+ * legacy-image registration does and record (class,sel)->imp32 in the
+ * reverse-method map + the i386 encoding in the seltypes registry. */
+uint32_t shim_class_addMethod(uint32_t *a) {
+   id cls = resolve_self(a[0]);
+   SEL sel = resolve_sel(a[1]);
+   const uint32_t imp32 = a[2];
+   const char *types = legacy_cstr_ok(a[3])
+      ? (const char *)(uintptr_t)a[3] : "v8@0:4";
+   if (!cls || !sel || !imp32) { return 0; }
+   IMP tramp = enc_ret_is_stret(types) ? (IMP)_86x64_reverse_imp_stret
+                                       : (IMP)_86x64_reverse_imp;
+   BOOL ok = class_addMethod((Class)cls, sel, tramp, types);
+   rmeth_insert((Class)cls, sel, imp32, types);
+   seltypes_insert(sel, types);
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[rt] class_addMethod %s %s imp32=0x%08x -> %d\n",
+              class_getName((Class)cls), sel_getName(sel), imp32, (int)ok);
+      fflush(stderr);
+   }
+   return (uint32_t)ok;
+}
+
+uint32_t shim_class_getInstanceMethod(uint32_t *a) {
+   id cls = resolve_self(a[0]);
+   SEL sel = resolve_sel(a[1]);
+   if (!cls || !sel) { return 0; }
+   Method m = class_getInstanceMethod((Class)cls, sel);
+   return m ? x64_objc_wrap((uint64_t)(uintptr_t)m) : 0;
+}
+
+uint32_t shim_class_getClassMethod(uint32_t *a) {
+   id cls = resolve_self(a[0]);
+   SEL sel = resolve_sel(a[1]);
+   if (!cls || !sel) { return 0; }
+   Method m = class_getClassMethod((Class)cls, sel);
+   return m ? x64_objc_wrap((uint64_t)(uintptr_t)m) : 0;
+}
+
+uint32_t shim_class_copyMethodList(uint32_t *a) {
+   id cls = resolve_self(a[0]);
+   unsigned n = 0;
+   Method *list = cls ? class_copyMethodList((Class)cls, &n) : NULL;
+   uint32_t *out = NULL;
+   if (list && n) {
+      out = (uint32_t *)malloc((n + 1) * sizeof(uint32_t)); /* low heap */
+      if (out) {
+         for (unsigned i = 0; i < n; ++i) {
+            out[i] = x64_objc_wrap((uint64_t)(uintptr_t)list[i]);
+         }
+         out[n] = 0;
+      }
+   }
+   free(list);
+   if (a[1] && ptr_ok(a[1], 4)) { *(uint32_t *)(uintptr_t)a[1] = out ? n : 0; }
+   return (uint32_t)(uintptr_t)out;
+}
+
+uint32_t shim_method_getName(uint32_t *a) {
+   Method m = (Method)(uintptr_t)x64_objc_unwrap(a[0]);
+   return m ? x64_objc_sel_wrap((uint64_t)(uintptr_t)method_getName(m)) : 0;
+}
+
+uint32_t shim_method_getTypeEncoding(uint32_t *a) {
+   Method m = (Method)(uintptr_t)x64_objc_unwrap(a[0]);
+   return m ? x64_objc_bounce_cstr(method_getTypeEncoding(m)) : 0;
+}
+
+uint32_t shim_method_getNumberOfArguments(uint32_t *a) {
+   Method m = (Method)(uintptr_t)x64_objc_unwrap(a[0]);
+   return m ? method_getNumberOfArguments(m) : 0;
+}
+
+/* The returned IMP is a HANDLE: equality compares work (dedup map), calling
+ * it from i386 code would not. Trace so a calling consumer is visible. */
+uint32_t shim_method_getImplementation(uint32_t *a) {
+   Method m = (Method)(uintptr_t)x64_objc_unwrap(a[0]);
+   if (!m) { return 0; }
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[rt] method_getImplementation(0x%08x) -> handle "
+              "(compare-only)\n", a[0]);
+      fflush(stderr);
+   }
+   return x64_objc_wrap((uint64_t)(uintptr_t)method_getImplementation(m));
+}
+
+/* Replacing a native Method's IMP with an i386 one needs a (class,sel) keyed
+ * reverse entry, which a bare Method does not identify. Unimplemented. */
+uint32_t shim_method_setImplementation(uint32_t *a) {
+   fprintf(stderr, "[rt] method_setImplementation(m32=0x%08x, imp32=0x%08x) "
+           "UNIMPLEMENTED -> 0\n", a[0], a[1]);
+   fflush(stderr);
+   return 0;
+}
+
+static uint32_t method_copy_type_common(const char *t) {
+   if (!t) { return 0; }
+   const size_t n = strlen(t) + 1;
+   char *low = (char *)malloc(n);           /* shim malloc, low-4GB */
+   if (!low) { return 0; }
+   memcpy(low, t, n);
+   return (uint32_t)(uintptr_t)low;
+}
+
+uint32_t shim_method_copyReturnType(uint32_t *a) {
+   Method m = (Method)(uintptr_t)x64_objc_unwrap(a[0]);
+   if (!m) { return 0; }
+   char *t = method_copyReturnType(m);
+   uint32_t r = method_copy_type_common(t);
+   free(t);
+   return r;
+}
+
+uint32_t shim_method_copyArgumentType(uint32_t *a) {
+   Method m = (Method)(uintptr_t)x64_objc_unwrap(a[0]);
+   if (!m) { return 0; }
+   char *t = method_copyArgumentType(m, a[1]);
+   uint32_t r = method_copy_type_common(t);
+   free(t);
+   return r;
+}
+
+uint32_t shim_objc_getClassList(uint32_t *a) {
+   int total = objc_getClassList(NULL, 0);
+   if (a[0] && (int)a[1] > 0 && total > 0 && ptr_ok(a[0], 4)) {
+      int want = (int)a[1] < total ? (int)a[1] : total;
+      Class *tmp = (Class *)malloc((size_t)total * sizeof(Class));
+      if (tmp) {
+         total = objc_getClassList(tmp, total);
+         if (want > total) { want = total; }
+         uint32_t *out = (uint32_t *)(uintptr_t)a[0];
+         for (int i = 0; i < want; ++i) {
+            out[i] = x64_objc_wrap((uint64_t)(uintptr_t)tmp[i]);
+         }
+         free(tmp);
+      }
+   }
+   return (uint32_t)total;
+}
+
+uint32_t shim_objc_copyClassList(uint32_t *a) {
+   unsigned n = 0;
+   Class *list = objc_copyClassList(&n);
+   uint32_t *out = NULL;
+   if (list && n) {
+      out = (uint32_t *)malloc((n + 1) * sizeof(uint32_t));
+      if (out) {
+         for (unsigned i = 0; i < n; ++i) {
+            out[i] = x64_objc_wrap((uint64_t)(uintptr_t)list[i]);
+         }
+         out[n] = 0;
+      }
+   }
+   free(list);
+   if (a[0] && ptr_ok(a[0], 4)) { *(uint32_t *)(uintptr_t)a[0] = out ? n : 0; }
+   return (uint32_t)(uintptr_t)out;
+}
+
+/* Legacy-registered classes carry their ivars in the i386 SHADOW, not the
+ * modern class, so the native lookup legitimately misses there — trace it. */
+uint32_t shim_object_getInstanceVariable(uint32_t *a) {
+   id real = resolve_self(a[0]);
+   if (!real || !legacy_cstr_ok(a[1])) { return 0; }
+   void *val = NULL;
+   Ivar iv = object_getInstanceVariable(real, (const char *)(uintptr_t)a[1],
+                                        &val);
+   if (!iv) {
+      fprintf(stderr, "[rt] object_getInstanceVariable(0x%08x, \"%s\"): no "
+              "native ivar (legacy shadow ivars not bridged)\n",
+              a[0], (const char *)(uintptr_t)a[1]);
+      fflush(stderr);
+   }
+   if (a[2] && ptr_ok(a[2], 4)) {
+      uint64_t v = (uint64_t)(uintptr_t)val;
+      *(uint32_t *)(uintptr_t)a[2] =
+         v >= 0x100000000ULL ? x64_objc_wrap(v) : (uint32_t)v;
+   }
+   return iv ? x64_objc_wrap((uint64_t)(uintptr_t)iv) : 0;
 }

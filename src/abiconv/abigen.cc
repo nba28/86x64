@@ -418,6 +418,14 @@ struct ABIGenerator {
     * table for each; see emit_data_shadows(). Stored WITH the leading
     * underscore (e.g. "_NSArgumentDomain"), like function `sym`. */
    std::vector<std::string> data_shadow_syms;
+   /* Per-shadow kind/size, parallel to data_shadow_syms. 0 = ObjC-object /
+    * opaque-CF pointer constant (runtime wraps the >4GB value as a handle).
+    * 1/2/4/8 = SCALAR data constant (double/float/int/...): the runtime copies
+    * that many value bytes into the shadow verbatim. A scalar extern is read
+    * `movl slot,%reg` (-> &var) then dereferenced ONCE; binding the real 64-bit
+    * &var truncates (NSAppKitVersionNumber: 0x7ff8_12f60850 -> 0x12f60850 ->
+    * fault). The shadow is a low-4GB value copy so the single-deref reads it. */
+   std::vector<unsigned> data_shadow_info;
 
    ABIGenerator(std::ostream& os, ABI abi): os(os), abi(abi) {}
 
@@ -570,11 +578,30 @@ struct ABIGenerator {
          return; /* static / register / etc. — not an imported global */
       }
       const CXType canon = clang_getCanonicalType(clang_getCursorType(c));
+      unsigned info = 0;   /* 0 = object/CF handle-wrap; else scalar byte size */
       switch (canon.kind) {
       case CXType_ObjCObjectPointer:
       case CXType_ObjCId:
       case CXType_ObjCClass:
          break;
+      /* Scalar data constants (e.g. `double NSAppKitVersionNumber`). The i386
+       * code loads &var via the non-lazy ptr then dereferences once; the real
+       * 64-bit &var truncates on the 4-byte load. Shadow a low-4GB COPY of the
+       * value (filled by x64_init_data_shadows). Only fixed-width scalars whose
+       * value fits the 8-byte shadow slot; long double (16B) is excluded. */
+      case CXType_Bool:
+      case CXType_Char_U: case CXType_UChar:
+      case CXType_Char_S: case CXType_SChar:
+      case CXType_Short:  case CXType_UShort:
+      case CXType_Int:    case CXType_UInt:
+      case CXType_Long:   case CXType_ULong:
+      case CXType_LongLong: case CXType_ULongLong:
+      case CXType_Float:  case CXType_Double: {
+         const long long sz = clang_Type_getSizeOf(canon);
+         if (sz < 1 || sz > 8) { return; }
+         info = (unsigned)sz;
+         break;
+      }
       case CXType_Pointer: {
          /* Opaque CoreFoundation refs (CFStringRef = `struct __CFString *`,
           * etc.) are 64-bit pointers to objects that live high in the dyld
@@ -610,9 +637,12 @@ struct ABIGenerator {
       }
       symbols.erase(sym); /* consume so a re-declaration isn't shadowed twice */
       if (getenv("ABIGEN_TRACE")) {
-         std::cerr << "abigen: data shadow " << sym << std::endl;
+         std::cerr << "abigen: data shadow " << sym
+                   << (info ? " (scalar " : " (object")
+                   << (info ? std::to_string(info) + "B)" : ")") << std::endl;
       }
       data_shadow_syms.push_back(sym);
+      data_shadow_info.push_back(info);
    }
 
    /* Emit the data-shadow storage + the runtime table consumed by
@@ -638,8 +668,10 @@ struct ABIGenerator {
       idx = 0;
       for (const std::string& s : data_shadow_syms) {
          const std::string shadow = override_prefix + s;
+         /* triple: &shadow, name, info (0=object/CF wrap, else scalar size) */
          os << "\tdq " << shadow << std::endl;
          os << "\tdq _x64_dsn_" << idx << std::endl;
+         os << "\tdq " << data_shadow_info[idx] << std::endl;
          ++idx;
       }
       os << "\tglobal _x64_data_shadows_count" << std::endl;
