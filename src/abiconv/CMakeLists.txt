@@ -26,6 +26,14 @@ set(ABICONV_SYM_SOURCES
   /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
   /System/Library/Frameworks/CoreServices.framework/CoreServices
   /System/Library/Frameworks/ApplicationServices.framework/ApplicationServices
+  # CoreGraphics is re-exported by ApplicationServices, but re-exports are not in
+  # AS's own export trie, so its CG* C functions never got ABI shims and its
+  # __CF* data constants (kCGColorSpaceGenericRGB, kCGImageProperty*, ...) never
+  # got low-4GB shadows. An i386 `movl [nl_ptr],%eax` of such a 64-bit CFString
+  # const truncates -> deref fault (iPhoto main color-space setup, exposed once
+  # the PIC-anchor fix resolved the load to the real nl_ptr). List directly so
+  # both the functions and the data constants enter the consider set.
+  /System/Library/Frameworks/CoreGraphics.framework/CoreGraphics
   /System/Library/Frameworks/Foundation.framework/Foundation
   /System/Library/Frameworks/AppKit.framework/AppKit
   )
@@ -128,6 +136,7 @@ add_library(abiconv SHARED
   objc_slide.c
   maptable_shim.m
   sysctl_shim.c
+  cxx_shim.c
   proc_shim.c
   cf_callback_shim.c
   cb_bridge.c

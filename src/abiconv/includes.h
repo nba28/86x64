@@ -27,6 +27,11 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreServices/CoreServices.h>
 #include <ApplicationServices/ApplicationServices.h>
+/* CoreGraphics is now in ABICONV_SYM_SOURCES (its CG* functions + __CF* data
+ * constants are otherwise invisible re-exports of ApplicationServices). AS
+ * already transitively includes the CG headers, but list it explicitly so the
+ * VarDecls (kCGColorSpaceGenericRGB, ...) are unambiguously parsed. */
+#include <CoreGraphics/CoreGraphics.h>
 
 /* Foundation + AppKit C functions (NSBeep, NSLog, NSSearchPathForDirectories-
  * InDomains, NSStringFromClass, ...) — legacy i386 apps call these directly,
