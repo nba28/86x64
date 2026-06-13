@@ -3824,9 +3824,46 @@ static void reverse_register_image(const struct mach_header_64 *mh,
       if (!progress) { break; }
    }
 
+   /* Legacy categories on EXISTING classes: add their instance/class methods
+    * to the real runtime class via the reverse bridge. Native targets (e.g.
+    * NSClipView) are always present; legacy targets were just registered
+    * above. class_addMethod adds only NEW selectors, so a native method of the
+    * same name is never clobbered — but iWeb's added selectors (the
+    * `p_replacement*` swizzle sources looked up via class_getInstanceMethod)
+    * become real, dispatchable methods. Without this, category instance
+    * methods were merely indexed for class-method lookup and stayed invisible
+    * to class_getInstanceMethod / direct messaging. */
+   uint32_t cats_applied = 0;
+   for (size_t i = 0; i < nmodules; ++i) {
+      const struct legacy_objc_module *mod = &modules[i];
+      if (mod->version != 7 || mod->size != sizeof(*mod)) { continue; }
+      if (!ptr_ok(mod->symtab, sizeof(struct legacy_objc_symtab))) { continue; }
+      const struct legacy_objc_symtab *st =
+         (const struct legacy_objc_symtab *)(uintptr_t)mod->symtab;
+      const uint32_t *ddefs = (const uint32_t *)
+         ((const char *)st + sizeof(struct legacy_objc_symtab));
+      for (uint16_t j = 0; j < st->cat_def_cnt; ++j) {
+         uint32_t cref = ddefs[(uint32_t)st->cls_def_cnt + j];
+         if (!ptr_ok(cref, sizeof(struct legacy_objc_category))) { continue; }
+         const struct legacy_objc_category *cat =
+            (const struct legacy_objc_category *)(uintptr_t)cref;
+         if (!legacy_cstr_ok(cat->class_name)) { continue; }
+         Class tgt = objc_getClass((const char *)(uintptr_t)cat->class_name);
+         if (!tgt) { continue; }   /* target class not present yet */
+         if (cat->instance_methods) {
+            reverse_add_methods(tgt, cat->instance_methods);
+         }
+         if (cat->class_methods) {
+            Class meta = object_getClass((id)tgt);
+            if (meta) { reverse_add_methods(meta, cat->class_methods); }
+         }
+         ++cats_applied;
+      }
+   }
+
    if (getenv("ABICONV_OBJC_SLIDE_VERBOSE")) {
-      fprintf(stderr, "objc_shim: registered %u/%zu legacy classes\n",
-              registered, ndefs);
+      fprintf(stderr, "objc_shim: registered %u/%zu legacy classes, "
+              "applied %u categories\n", registered, ndefs, cats_applied);
       fflush(stderr);
    }
 }
@@ -4184,20 +4221,74 @@ uint32_t shim_class_addMethod(uint32_t *a) {
    return (uint32_t)ok;
 }
 
+/* The i386 swizzle helpers (SFReplaceMethodImplementation*, and method-
+ * swizzling code generally) read a Method's fragile ObjC1 layout directly —
+ * {SEL name@0; char *types@4; IMP imp@8}, all 32-bit — and even WRITE the imp
+ * field to install a new implementation. A modern Method is opaque with a
+ * different 64-bit layout, and our arena handle is just an 8-byte slot;
+ * dereferencing either at offset 8 crashes (the observed NSClipView
+ * poseAsClass:/swizzle blocker). So class_get{Instance,Class}Method hand back a
+ * pointer to a synthetic low-4GB struct in i386 layout. Reads see a plausible
+ * {name,types,imp}; the swizzle's write to imp lands in our scratch — the
+ * effect on the real runtime is a no-op, consistent with poseAsClass: itself
+ * already being a no-op on the modern runtime. Cached per real Method so the
+ * two lookups a swizzle performs return stable, comparable pointers. */
+struct i386_method32 { uint32_t name; uint32_t types; uint32_t imp; };
+
+#define I386METH_CAP 8192u
+static Method   g_i386meth_key[I386METH_CAP];
+static uint32_t g_i386meth_val[I386METH_CAP];
+static uint32_t g_i386meth_cnt;
+
+static uint32_t i386_method_wrap(Method m) {
+   if (!m) { return 0; }
+   for (uint32_t i = 0; i < g_i386meth_cnt; ++i) {
+      if (g_i386meth_key[i] == m) { return g_i386meth_val[i]; }
+   }
+   struct i386_method32 *s = (struct i386_method32 *)malloc(sizeof(*s));
+   if (!s || (uintptr_t)s >= 0x100000000UL) { return 0; }
+   s->name  = x64_objc_sel_wrap((uint64_t)(uintptr_t)method_getName(m));
+   s->types = x64_objc_bounce_cstr(method_getTypeEncoding(m));
+   s->imp   = x64_objc_wrap((uint64_t)(uintptr_t)method_getImplementation(m));
+   if (g_i386meth_cnt < I386METH_CAP) {
+      g_i386meth_key[g_i386meth_cnt] = m;
+      g_i386meth_val[g_i386meth_cnt] = (uint32_t)(uintptr_t)s;
+      g_i386meth_cnt++;
+   }
+   return (uint32_t)(uintptr_t)s;
+}
+
+/* Inverse of i386_method_wrap: map a synthetic i386_method32 pointer back to
+ * the real Method. The method_* shims accept whatever class_get*Method handed
+ * the i386 code, so recognise our synthetic pointers; fall back to the legacy
+ * arena-handle unwrap for any other value. */
+static Method i386_method_unwrap(uint32_t v) {
+   if (!v) { return NULL; }
+   for (uint32_t i = 0; i < g_i386meth_cnt; ++i) {
+      if (g_i386meth_val[i] == v) { return g_i386meth_key[i]; }
+   }
+   return (Method)(uintptr_t)x64_objc_unwrap(v);
+}
+
 uint32_t shim_class_getInstanceMethod(uint32_t *a) {
    id cls = resolve_self(a[0]);
    SEL sel = resolve_sel(a[1]);
-   if (!cls || !sel) { return 0; }
-   Method m = class_getInstanceMethod((Class)cls, sel);
-   return m ? x64_objc_wrap((uint64_t)(uintptr_t)m) : 0;
+   Method m = (cls && sel) ? class_getInstanceMethod((Class)cls, sel) : NULL;
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[rt] class_getInstanceMethod a0=0x%08x a1=0x%08x "
+              "cls=%s sel=%s -> m=%p\n", a[0], a[1],
+              cls ? class_getName((Class)cls) : "(nil)",
+              sel ? sel_getName(sel) : "(nil)", (void *)m);
+      fflush(stderr);
+   }
+   return i386_method_wrap(m);
 }
 
 uint32_t shim_class_getClassMethod(uint32_t *a) {
    id cls = resolve_self(a[0]);
    SEL sel = resolve_sel(a[1]);
-   if (!cls || !sel) { return 0; }
-   Method m = class_getClassMethod((Class)cls, sel);
-   return m ? x64_objc_wrap((uint64_t)(uintptr_t)m) : 0;
+   Method m = (cls && sel) ? class_getClassMethod((Class)cls, sel) : NULL;
+   return i386_method_wrap(m);
 }
 
 uint32_t shim_class_copyMethodList(uint32_t *a) {
@@ -4220,24 +4311,24 @@ uint32_t shim_class_copyMethodList(uint32_t *a) {
 }
 
 uint32_t shim_method_getName(uint32_t *a) {
-   Method m = (Method)(uintptr_t)x64_objc_unwrap(a[0]);
+   Method m = i386_method_unwrap(a[0]);
    return m ? x64_objc_sel_wrap((uint64_t)(uintptr_t)method_getName(m)) : 0;
 }
 
 uint32_t shim_method_getTypeEncoding(uint32_t *a) {
-   Method m = (Method)(uintptr_t)x64_objc_unwrap(a[0]);
+   Method m = i386_method_unwrap(a[0]);
    return m ? x64_objc_bounce_cstr(method_getTypeEncoding(m)) : 0;
 }
 
 uint32_t shim_method_getNumberOfArguments(uint32_t *a) {
-   Method m = (Method)(uintptr_t)x64_objc_unwrap(a[0]);
+   Method m = i386_method_unwrap(a[0]);
    return m ? method_getNumberOfArguments(m) : 0;
 }
 
 /* The returned IMP is a HANDLE: equality compares work (dedup map), calling
  * it from i386 code would not. Trace so a calling consumer is visible. */
 uint32_t shim_method_getImplementation(uint32_t *a) {
-   Method m = (Method)(uintptr_t)x64_objc_unwrap(a[0]);
+   Method m = i386_method_unwrap(a[0]);
    if (!m) { return 0; }
    if (getenv("OBJC_BRIDGE_TRACE")) {
       fprintf(stderr, "[rt] method_getImplementation(0x%08x) -> handle "
@@ -4266,7 +4357,7 @@ static uint32_t method_copy_type_common(const char *t) {
 }
 
 uint32_t shim_method_copyReturnType(uint32_t *a) {
-   Method m = (Method)(uintptr_t)x64_objc_unwrap(a[0]);
+   Method m = i386_method_unwrap(a[0]);
    if (!m) { return 0; }
    char *t = method_copyReturnType(m);
    uint32_t r = method_copy_type_common(t);
@@ -4275,7 +4366,7 @@ uint32_t shim_method_copyReturnType(uint32_t *a) {
 }
 
 uint32_t shim_method_copyArgumentType(uint32_t *a) {
-   Method m = (Method)(uintptr_t)x64_objc_unwrap(a[0]);
+   Method m = i386_method_unwrap(a[0]);
    if (!m) { return 0; }
    char *t = method_copyArgumentType(m, a[1]);
    uint32_t r = method_copy_type_common(t);
