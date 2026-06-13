@@ -587,6 +587,30 @@ static int enc_is_objptr_struct(const char *t) {
    return *t == '=' && t[1] == '#';
 }
 
+/* Opaque CF/CG pointer: `^{Name=}` with an EMPTY struct body (no members), e.g.
+ * `^{CGColor=}` / `^{CGContext=}` / `^{__CFString=}`. i386 code treats these as
+ * opaque tokens it never dereferences, so they must be HANDLE-bridged like '@'
+ * (wrap real->handle on return, unwrap handle->real on arg) rather than
+ * truncated to 32 bits. This MIRRORS abigen's C-function CF-ptr bridging
+ * (typeconv.cc cf_opaque_ptr_type / convert_cf_ptr + abigen.cc return wrap), so
+ * a CF ref round-trips consistently between ObjC-bridge and C-shim call sites.
+ * A struct pointer WITH a body (`^{CGRect=...}`) or a typed buffer ('^v','^c',
+ * '^i') is NOT matched and keeps raw-pointer behaviour (i386 derefs it). The
+ * `=#` objc-object-struct shape is handled by enc_is_objptr_struct, which the
+ * callers check first; its body is non-empty so it is not matched here. */
+static int enc_is_cfptr(const char *t) {
+   if (!t) { return 0; }
+   while (*t && strchr("rnNoORV", *t)) { ++t; }
+   if (*t != '^') { return 0; }
+   ++t;
+   while (*t && strchr("rnNoORV", *t)) { ++t; }
+   if (*t != '{') { return 0; }
+   ++t;
+   while (*t && *t != '=' && *t != '}') { ++t; }  /* struct tag */
+   if (*t == '}') { return 1; }                   /* `^{Name}` — no body */
+   return *t == '=' && t[1] == '}';               /* `^{Name=}` — empty body */
+}
+
 /* ---- struct layout walk over an ObjC type encoding ----
  * The legacy method's encoding carries i386 widths (notably CGFloat == 'f',
  * a 4-byte float). We need both the i386 layout (to read the struct the legacy
@@ -1007,7 +1031,7 @@ static int marshal_arg_fwd(struct objc_call_plan *plan, struct mcur *c,
    const int trace = getenv("OBJC_BRIDGE_TRACE") != NULL;
    const char *t = enc_skip_quals(enc);
    char b = *t;
-   if (b == '@' || b == '#' || enc_is_objptr_struct(enc)) {
+   if (b == '@' || b == '#' || enc_is_objptr_struct(enc) || enc_is_cfptr(enc)) {
       return mcur_put_gp(plan, c, unwrap_obj_arg(args32[(*ai)++]));
    }
    if (b == ':') {
@@ -1561,8 +1585,8 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
       plan->ret_is_obj = 1;
    } else if (rt && rb == '*') {
       plan->ret_is_obj = 2;
-   } else if (enc_is_objptr_struct(rt)) {
-      plan->ret_is_obj = 1;          /* ^{Class=#...} object return -> wrap */
+   } else if (enc_is_objptr_struct(rt) || enc_is_cfptr(rt)) {
+      plan->ret_is_obj = 1;          /* ^{Class=#...} obj / ^{CF=} ref -> wrap */
    } else if (rb == 'd' || (rb == 'f' && rconv == CONV_I386)) {
       /* CGFloat/double: the i386 caller dispatched via _fpret and reads st0.
        * A legacy 'f' (CGFloat) return arrives as a double too (the reverse
@@ -3355,7 +3379,8 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
          plan->ret_kind  = 3;                    /* widen in reverse_ret */
       } else if (rb == 'v') {
          plan->ret_kind = 2;
-      } else if (rb == '@' || rb == '#' || enc_is_objptr_struct(m->types)) {
+      } else if (rb == '@' || rb == '#' || enc_is_objptr_struct(m->types)
+                 || enc_is_cfptr(m->types)) {
          plan->ret_kind = 1;
       } else if (rb == 'f' || rb == 'd') {
          plan->ret_kind = 4;                     /* st0 -> fp_out -> xmm0 */
@@ -3402,7 +3427,7 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
    while (*t && w < 60) {
       const char *tb = enc_skip_quals(t);
       char b = *tb;
-      if (b == '@' || b == '#' || enc_is_objptr_struct(t)) {
+      if (b == '@' || b == '#' || enc_is_objptr_struct(t) || enc_is_cfptr(t)) {
          uint64_t v; REV_GP(v);
          plan->frame[w++] = x64_objc_wrap(v);
       } else if (b == ':') {
@@ -3608,6 +3633,35 @@ static struct geo_ent g_geo[] = {
    /* 47 */ { "CGStyleCreateShadow", "^{CGStyle=}" ENC_NSSIZE "f^{CGColor=}", NULL },
    /* 48 */ { "CGContextSetStyle",   "v^{CGContext=}^{CGStyle=}",     NULL },
    /* 49 */ { "CGStyleRelease",      "v^{CGStyle=}",                  NULL },
+   /* CG context 2D drawing family — abigen skips these (CGRect/CGFloat/
+    * CGAffineTransform by value). The leading CGContextRef and any CGImageRef/
+    * CGColorRef are handle-bridged by geo_call (geo_cfptr_arg / '^' return). */
+   /* 50 */ { "CGContextFillRect",        "v^{CGContext=}" ENC_NSRECT,        NULL },
+   /* 51 */ { "CGContextStrokeRect",      "v^{CGContext=}" ENC_NSRECT,        NULL },
+   /* 52 */ { "CGContextStrokeRectWithWidth", "v^{CGContext=}" ENC_NSRECT "f", NULL },
+   /* 53 */ { "CGContextClearRect",       "v^{CGContext=}" ENC_NSRECT,        NULL },
+   /* 54 */ { "CGContextClipToRect",      "v^{CGContext=}" ENC_NSRECT,        NULL },
+   /* 55 */ { "CGContextAddRect",         "v^{CGContext=}" ENC_NSRECT,        NULL },
+   /* 56 */ { "CGContextFillEllipseInRect",   "v^{CGContext=}" ENC_NSRECT,    NULL },
+   /* 57 */ { "CGContextStrokeEllipseInRect", "v^{CGContext=}" ENC_NSRECT,    NULL },
+   /* 58 */ { "CGContextAddEllipseInRect","v^{CGContext=}" ENC_NSRECT,        NULL },
+   /* 59 */ { "CGContextMoveToPoint",     "v^{CGContext=}ff",                 NULL },
+   /* 60 */ { "CGContextAddLineToPoint",  "v^{CGContext=}ff",                 NULL },
+   /* 61 */ { "CGContextTranslateCTM",    "v^{CGContext=}ff",                 NULL },
+   /* 62 */ { "CGContextScaleCTM",        "v^{CGContext=}ff",                 NULL },
+   /* 63 */ { "CGContextRotateCTM",       "v^{CGContext=}f",                  NULL },
+   /* 64 */ { "CGContextConcatCTM",       "v^{CGContext=}" ENC_CGAFF,         NULL },
+   /* 65 */ { "CGContextSetLineWidth",    "v^{CGContext=}f",                  NULL },
+   /* 66 */ { "CGContextSetAlpha",        "v^{CGContext=}f",                  NULL },
+   /* 67 */ { "CGContextSetRGBFillColor", "v^{CGContext=}ffff",              NULL },
+   /* 68 */ { "CGContextSetRGBStrokeColor","v^{CGContext=}ffff",             NULL },
+   /* 69 */ { "CGContextSetGrayFillColor","v^{CGContext=}ff",               NULL },
+   /* 70 */ { "CGContextSetGrayStrokeColor","v^{CGContext=}ff",             NULL },
+   /* 71 */ { "CGContextDrawImage",       "v^{CGContext=}" ENC_NSRECT "^{CGImage=}", NULL },
+   /* 72 */ { "CGColorCreateGenericRGB",  "^{CGColor=}ffff",                 NULL },
+   /* struct returns (i386 hidden-ptr stret -> GEOSHIM_S) */
+   /* 73 */ { "CGContextGetClipBoundingBox", ENC_NSRECT "^{CGContext=}",     NULL },
+   /* 74 */ { "CGContextGetCTM",          ENC_CGAFF "^{CGContext=}",         NULL },
 };
 
 struct geo_res { uint64_t lo, hi; double fp; };

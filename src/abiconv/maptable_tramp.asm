@@ -217,6 +217,32 @@
    GEOSHIM_I ___CGStyleCreateShadow, 47
    GEOSHIM_I ___CGContextSetStyle,   48
    GEOSHIM_I ___CGStyleRelease,      49
+;; CG context 2D drawing family (struct/CGFloat by value; opaque CF-ptr args).
+   GEOSHIM_I ___CGContextFillRect,           50
+   GEOSHIM_I ___CGContextStrokeRect,         51
+   GEOSHIM_I ___CGContextStrokeRectWithWidth, 52
+   GEOSHIM_I ___CGContextClearRect,          53
+   GEOSHIM_I ___CGContextClipToRect,         54
+   GEOSHIM_I ___CGContextAddRect,            55
+   GEOSHIM_I ___CGContextFillEllipseInRect,  56
+   GEOSHIM_I ___CGContextStrokeEllipseInRect, 57
+   GEOSHIM_I ___CGContextAddEllipseInRect,   58
+   GEOSHIM_I ___CGContextMoveToPoint,        59
+   GEOSHIM_I ___CGContextAddLineToPoint,     60
+   GEOSHIM_I ___CGContextTranslateCTM,       61
+   GEOSHIM_I ___CGContextScaleCTM,           62
+   GEOSHIM_I ___CGContextRotateCTM,          63
+   GEOSHIM_I ___CGContextConcatCTM,          64
+   GEOSHIM_I ___CGContextSetLineWidth,       65
+   GEOSHIM_I ___CGContextSetAlpha,           66
+   GEOSHIM_I ___CGContextSetRGBFillColor,    67
+   GEOSHIM_I ___CGContextSetRGBStrokeColor,  68
+   GEOSHIM_I ___CGContextSetGrayFillColor,   69
+   GEOSHIM_I ___CGContextSetGrayStrokeColor, 70
+   GEOSHIM_I ___CGContextDrawImage,          71
+   GEOSHIM_I ___CGColorCreateGenericRGB,     72
+   GEOSHIM_S ___CGContextGetClipBoundingBox, 73
+   GEOSHIM_S ___CGContextGetCTM,             74
 
 ;; NSRect out-pointers: hand-marshalled in objc_shim.c (mt_NSDivideRect).
    MTSHIM ___NSDivideRect, _mt_NSDivideRect
