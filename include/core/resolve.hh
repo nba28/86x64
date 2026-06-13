@@ -95,6 +95,23 @@ namespace MachO {
          found.insert({key, pointee});
       }
       
+      /* Cancel a pending deferred resolve() for `key` whose destination is
+       * `pointer`. Used when a later analysis pass (DetectPicAnchoredDisps)
+       * reinterprets an operand: instruction.cc's `[base+disp32]` absolute-
+       * table path eagerly registers resolve(raw_disp, &memdisp) before the
+       * anchor pass knows `base` is a PIC anchor. Without cancellation that
+       * deferred todo fires in do_resolve() and clobbers the anchor-corrected
+       * placeholder (anchor+disp), so the selector/data load resolves to the
+       * raw displacement's blob (lands in __eh_frame -> garbage). Only removes
+       * todo entries aimed at exactly `pointer`; an already-fired resolve has
+       * no todo entry, so the anchor pass's direct memdisp overwrite wins. */
+      void cancel(const T& key, const U **pointer) {
+         auto it = todo.find(key);
+         if (it == todo.end()) { return; }
+         it->second.remove_if([&](const TodoNode& n){ return n.first == pointer; });
+         if (it->second.empty()) { todo.erase(it); }
+      }
+
       void resolve(const T& key, const U **pointer,
                    std::shared_ptr<functor> callback = std::make_shared<noop>()) {
          if constexpr (std::is_integral_v<T>) {

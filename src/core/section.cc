@@ -435,8 +435,18 @@ namespace MachO {
          }
 
          /* (2) Rewrite anchored reads/writes BEFORE handling writes
-          *     (so `mov %ebx, disp(%ebx)` still transforms its load). */
-         if (!anchors.empty() && inst->memdisp == nullptr) {
+          *     (so `mov %ebx, disp(%ebx)` still transforms its load).
+          *     Override an ABSOLUTE memdisp too: instruction.cc's
+          *     `[base+disp32]` absolute-table path (parse, runs before this)
+          *     can't know `base` is a PIC anchor, so it eagerly resolves the
+          *     RAW disp as an absolute vmaddr (memdisp_absolute=true, often a
+          *     deferred resolve into &memdisp). When we recognise `base` as an
+          *     anchor here, anchor+disp is authoritative — take over and cancel
+          *     the competing resolve below so do_resolve() can't clobber the
+          *     placeholder. A non-absolute, non-null memdisp (only EIP-relative
+          *     in M32, which doesn't occur) is left untouched. */
+         if (!anchors.empty() &&
+             (inst->memdisp == nullptr || inst->memdisp_absolute)) {
             const xed_operand_values_t* ops =
                xed_decoded_inst_operands_const(&xedd);
             const unsigned nops = xed_decoded_inst_noperands(&xedd);
@@ -465,6 +475,15 @@ namespace MachO {
                }
                SectionBlob<bits> *target_blob = env.add_placeholder(target);
                if (target_blob == nullptr) continue;
+
+               /* Cancel the absolute-table path's deferred resolve(raw_disp)
+                * aimed at this memdisp, or it fires in do_resolve() and
+                * overwrites target_blob with the raw-disp blob (__eh_frame
+                * garbage). No-op if the resolve already fired (no todo entry);
+                * the assignment below then wins outright. */
+               env.vmaddr_resolver.cancel(
+                  (std::size_t)disp,
+                  (const SectionBlob<bits> **)&inst->memdisp);
 
                inst->memidx = i;
                inst->memdisp = target_blob;
