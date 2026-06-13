@@ -3599,9 +3599,32 @@ static struct geo_ent g_geo[] = {
    /* 44 */ { "CGRectGetMidY",      "f" ENC_NSRECT,                   NULL },
    /* 45 */ { "CGRectGetMinX",      "f" ENC_NSRECT,                   NULL },
    /* 46 */ { "CGRectGetMinY",      "f" ENC_NSRECT,                   NULL },
+   /* Private CG "style" (drop-shadow) chain — unshimmed by abigen (struct +
+    * CGFloat by value, opaque CF-ptr args/return). iLifeKit's GradientView
+    * draws a drop shadow via these. The opaque CF ptrs (CGColorRef/CGContextRef/
+    * CGStyleRef) are handle-bridged by geo_call: arena handles unwrap to the
+    * real ptr, an unrecoverable truncated ptr becomes NULL (the draw degrades
+    * to no shadow rather than dereferencing garbage). */
+   /* 47 */ { "CGStyleCreateShadow", "^{CGStyle=}" ENC_NSSIZE "f^{CGColor=}", NULL },
+   /* 48 */ { "CGContextSetStyle",   "v^{CGContext=}^{CGStyle=}",     NULL },
+   /* 49 */ { "CGStyleRelease",      "v^{CGStyle=}",                  NULL },
 };
 
 struct geo_res { uint64_t lo, hi; double fp; };
+
+/* Bridge an opaque CF/CG pointer arg (e.g. CGColorRef/CGContextRef/CGStyleRef,
+ * encoded `^{Name=}`) from its i386 32-bit slot to the real 64-bit pointer:
+ *  - an arena handle unwraps to the real object;
+ *  - 0 stays NULL;
+ *  - any other bare 32-bit value is a TRUNCATED native pointer (genuine CF/CG
+ *    objects live above 4GB) that we cannot reconstruct, so we pass NULL and let
+ *    the native call degrade gracefully rather than dereference garbage. */
+static uint64_t geo_cfptr_arg(uint32_t raw) {
+   if (raw == 0) { return 0; }
+   uint64_t r = x64_objc_unwrap(raw);
+   if (r == (uint64_t)raw) { return 0; }   /* not a handle -> truncated -> NULL */
+   return r;
+}
 
 static struct geo_res geo_call(unsigned idx, const uint32_t *a32) {
    struct geo_res res = {0, 0, 0.0};
@@ -3635,12 +3658,17 @@ static struct geo_res geo_call(unsigned idx, const uint32_t *a32) {
       } else {
          kind = (risz > 8) ? 6 : 5;
       }
-   } else if (rb == '@') {
-      kind = 1;
+   } else if (rb == '@' || rb == '^') {
+      kind = 1;   /* '^' = opaque CF/CG ptr return -> wrap as arena handle */
    } else if (rb == 'f' || rb == 'd') {
       kind = 4;
    }
    for (const char *t = args; *t; t = enc_skip_type(t)) {
+      const char *tb = enc_skip_quals(t);
+      if (*tb == '^') {            /* opaque CF/CG ptr arg -> handle-bridge */
+         mcur_put_gp(&plan, &cur, geo_cfptr_arg(a32[ai++]));
+         continue;
+      }
       marshal_arg_fwd(&plan, &cur, t, CONV_I386, a32, &ai);
    }
    plan.nstack = (uint32_t)((cur.stk + 7) / 8);
