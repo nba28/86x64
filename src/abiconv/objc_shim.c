@@ -4306,15 +4306,59 @@ static uint32_t i386_method_wrap(Method m) {
    return (uint32_t)(uintptr_t)s;
 }
 
+/* TOMBSTONE Method structs: class_get{Instance,Class}Method must hand i386
+ * code a NON-NULL pointer even for an absent method, because some legacy
+ * swizzlers (e.g. iWeb's SFReplaceMethodImplementationWithSelectorOnClass,
+ * which swizzles the now-missing private WebKit class WebClipView) deref the
+ * returned Method UNGUARDED (`movl 0x8(%rax),%esi`). A tombstone is a synthetic
+ * i386_method32 with imp==0/types==0 so the deref reads 0 -> the swizzle no-ops
+ * and the caller's graceful "couldn't fix" path runs. The lie is bounded: every
+ * Method i386 code sees is already a synthetic copy and method_setImplementation
+ * is a no-op, so a tombstone cannot corrupt any real libobjc method; the only
+ * residual is that class_get*Method(c,s)!=NULL is no longer a valid existence
+ * test. We track tombstones so method_get{Name,Implementation,TypeEncoding}
+ * report them as absent (return 0). Deduped per selector handle. */
+#define I386TOMB_CAP 4096u
+static uint32_t g_tomb_sel[I386TOMB_CAP];
+static uint32_t g_tomb_val[I386TOMB_CAP];
+static uint32_t g_tomb_cnt;
+
+static int i386_method_is_tombstone(uint32_t v) {
+   for (uint32_t i = 0; i < g_tomb_cnt; ++i) {
+      if (g_tomb_val[i] == v) { return 1; }
+   }
+   return 0;
+}
+
+static uint32_t i386_method_tombstone(SEL sel) {
+   uint32_t selh = sel ? x64_objc_sel_wrap((uint64_t)(uintptr_t)sel) : 0;
+   for (uint32_t i = 0; i < g_tomb_cnt; ++i) {
+      if (g_tomb_sel[i] == selh) { return g_tomb_val[i]; }
+   }
+   struct i386_method32 *s = (struct i386_method32 *)malloc(sizeof(*s));
+   if (!s || (uintptr_t)s >= 0x100000000UL) { return 0; }
+   s->name  = selh;   /* a real sel handle, so name queries still work */
+   s->types = 0;
+   s->imp   = 0;      /* the unguarded `0x8(%rax)` deref reads 0 -> no-op */
+   if (g_tomb_cnt < I386TOMB_CAP) {
+      g_tomb_sel[g_tomb_cnt] = selh;
+      g_tomb_val[g_tomb_cnt] = (uint32_t)(uintptr_t)s;
+      g_tomb_cnt++;
+   }
+   return (uint32_t)(uintptr_t)s;
+}
+
 /* Inverse of i386_method_wrap: map a synthetic i386_method32 pointer back to
  * the real Method. The method_* shims accept whatever class_get*Method handed
  * the i386 code, so recognise our synthetic pointers; fall back to the legacy
- * arena-handle unwrap for any other value. */
+ * arena-handle unwrap for any other value. Tombstones map back to NULL (absent),
+ * so the method_* shims report them as a missing method. */
 static Method i386_method_unwrap(uint32_t v) {
    if (!v) { return NULL; }
    for (uint32_t i = 0; i < g_i386meth_cnt; ++i) {
       if (g_i386meth_val[i] == v) { return g_i386meth_key[i]; }
    }
+   if (i386_method_is_tombstone(v)) { return NULL; }
    return (Method)(uintptr_t)x64_objc_unwrap(v);
 }
 
@@ -4329,6 +4373,9 @@ uint32_t shim_class_getInstanceMethod(uint32_t *a) {
               sel ? sel_getName(sel) : "(nil)", (void *)m);
       fflush(stderr);
    }
+   /* Absent method on a valid class+sel -> hand back a tombstone (non-NULL,
+    * imp==0) so an unguarded i386 swizzler deref no-ops instead of faulting. */
+   if (!m && cls && sel) { return i386_method_tombstone(sel); }
    return i386_method_wrap(m);
 }
 
@@ -4336,6 +4383,7 @@ uint32_t shim_class_getClassMethod(uint32_t *a) {
    id cls = resolve_self(a[0]);
    SEL sel = resolve_sel(a[1]);
    Method m = (cls && sel) ? class_getClassMethod((Class)cls, sel) : NULL;
+   if (!m && cls && sel) { return i386_method_tombstone(sel); }
    return i386_method_wrap(m);
 }
 
