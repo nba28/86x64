@@ -1661,6 +1661,48 @@ static id compat_openUntitledDocumentOfType_display(id self, SEL _cmd,
    return doc;
 }
 
+/* ---- iLife ProKit font construction (NSProFont) ----
+ * +[NSProFont _proSystemFontWithFontName:pointSize:fontAppearance:
+ * useSystemHelveticaAdjustments:] drives a private CoreText/UIFoundation typeface
+ * init path that is gone/incompatible on modern macOS: iLife'11 ProKit sends
+ * -[IPKFont initWithInstanceInfo:renderingMode:] (unrecognized selector on the
+ * NSProFont subclass), and later ProKit builds send -[NSFont initWithTypefaceInfo:
+ * key:renderingMode:] -> CTFontGetClientObject access fault. This is the SAME
+ * crash Retroactive hits running Aperture/iPhoto, and the SAME fix: bypass the
+ * pro-font construction and return a plain system font of the requested size.
+ * boldSystemFontOfSize:withAppearance: and proSetFont: both funnel through here,
+ * so this one swizzle covers the family. Cosmetic only (loses the custom
+ * Helvetica-adjusted pro font). */
+static id compat_proSystemFont(id self, SEL _cmd, id name, double size,
+                               id appearance, signed char adj) {
+   (void)self; (void)_cmd; (void)name; (void)appearance; (void)adj;
+   Class nsfont = objc_getClass("NSFont");
+   if (!nsfont) { return nil; }
+   if (!(size > 0.0)) { size = 13.0; }
+   return ((id (*)(id, SEL, double))objc_msgSend)(
+      (id)nsfont, sel_registerName("systemFontOfSize:"), size);
+}
+
+/* Replace the broken class method's IMP once ProKit is loaded. Once-per-process
+ * (env guard, like NSColor) — but only marked done after the swizzle lands, so
+ * it retries on later message sends until ProKit appears. */
+static void prokit_font_compat_install(void) {
+   if (getenv("ABICONV_PROFONT_COMPAT")) { return; }
+   Class c = objc_getClass("NSProFont");
+   if (!c) { return; }                  /* ProKit not loaded yet: retry */
+   SEL s = sel_registerName("_proSystemFontWithFontName:pointSize:"
+                            "fontAppearance:useSystemHelveticaAdjustments:");
+   Method m = class_getClassMethod(c, s);   /* class method -> metaclass */
+   if (!m) { return; }
+   method_setImplementation(m, (IMP)compat_proSystemFont);
+   setenv("ABICONV_PROFONT_COMPAT", "1", 1);
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[compat] swizzled +[NSProFont _proSystemFontWithFontName:"
+              "...] -> systemFontOfSize:\n");
+      fflush(stderr);
+   }
+}
+
 /* ---- NSColor component getters (iPhoto 24th blocker) ----
  * Modern AppKit RAISES NSInvalidArgumentException from getRed:green:blue:
  * alpha: (and family) when the receiver is an extended-sRGB / HDR / catalog
@@ -1951,6 +1993,13 @@ static const struct {
 };
 
 static void appkit_compat_install(void) {
+   /* These self-guard (own env vars) and must keep retrying until THEIR
+    * framework loads — NSColor/AppKit early, NSProFont/ProKit much later — so
+    * run them BEFORE the `done` short-circuit (which only tracks the AppKit
+    * document methods below). */
+   appkit_color_compat_install();
+   prokit_font_compat_install();
+
    static int done = 0;
    if (done) return;
    const unsigned n = sizeof(g_appkit_compat) / sizeof(g_appkit_compat[0]);
@@ -1964,7 +2013,6 @@ static void appkit_compat_install(void) {
          ++installed;
       }
    }
-   appkit_color_compat_install();
    if (installed == n) done = 1;
    if (getenv("OBJC_BRIDGE_TRACE")) {
       fprintf(stderr, "[compat] appkit legacy methods installed %u/%u\n",
