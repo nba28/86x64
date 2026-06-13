@@ -2999,6 +2999,28 @@ static uint32_t get_or_create_shadow(id real, Class cls) {
  * not a shadow. */
 id _86x64_shadow_real(uint32_t s) { return shadow_real(s); }
 
+/* Return-value wrap that PRESERVES legacy-object identity (objc_msgSend asm
+ * ret_kind==1 path). A (super) call returning a legacy-class instance — most
+ * importantly `self = [super init]` — must come back to the i386 caller as that
+ * object's i386 SHADOW, not a fresh proxy handle. The caller then writes ivars
+ * through the returned self (`mov [self+off], x`); a proxy handle is just an
+ * 8-byte arena slot with no ivar space, so the store lands in (and corrupts)
+ * adjacent handle slots — the high 32 bits of a sibling become a stray handle,
+ * producing a fused object pointer (0x<handle><lowptr>) that later crashes in
+ * object_getClass/object_isClass. The shadow carries the i386 ivar layout, so
+ * ivar writes are correct and resolve_self maps it back to the real object for
+ * re-sends. A returned object with no shadow association (every native object)
+ * mints a proxy handle exactly as before, so only our own legacy instances
+ * change behavior. Tagged pointers have no association -> proxy path, unchanged. */
+uint32_t x64_objc_wrap_ret(uint64_t real) {
+   if (real != 0 && g_ctrl) {
+      uint32_t s = (uint32_t)(uintptr_t)objc_getAssociatedObject(
+                      (id)(uintptr_t)real, shadow_assoc_key());
+      if (s) { return s; }
+   }
+   return x64_objc_wrap(real);
+}
+
 /* ---------------------------------------------------------------------------
  * Legacy i386 object -> real modern object bridge (14th iPhoto blocker).
  *

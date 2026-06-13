@@ -57,6 +57,7 @@
    extern _objc_bridge_prep_super_stret
    extern _objc_bridge_ret_finish
    extern _x64_objc_wrap
+   extern _x64_objc_wrap_ret
    extern _x64_objc_bounce_cstr
    extern __dyld_stub_binder_flag
 
@@ -194,7 +195,8 @@
    jmp %%ret
 %%wrap:
    mov rdi, rax                    ; object return -> 32-bit handle
-   call _x64_objc_wrap             ; result in eax
+   call _x64_objc_wrap_ret         ; identity-preserving: legacy instance -> its
+                                   ; i386 shadow (ivar space); else proxy handle
 %%ret:
    lea rsp, [rbp - 24]             ; rsi slot (top of pushes: rbx, rdi, rsi)
    pop rsi
