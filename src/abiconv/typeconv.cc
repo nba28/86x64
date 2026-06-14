@@ -373,6 +373,18 @@ namespace {
 
    bool cb_is_cf_record_ptr(CXType pointee_canon) {
       if (pointee_canon.kind != CXType_Record) { return false; }
+      /* An OPAQUE (incomplete, forward-declared) record is the universal shape
+       * of a CF/CG/IOKit *Ref handle type: CFStringRef = struct __CFString *,
+       * CGColorSpaceRef = struct CGColorSpace *, CGContextRef, IOHIDDeviceRef,
+       * &c. Such a pointer value is a low-4GB arena handle that must be
+       * unwrapped to the real 64-bit ref before crossing into a native API.
+       * A COMPLETE struct pointer (CGRect *, NSRect *) is a by-value record and
+       * must NOT be treated as a handle. The old "__CF" name match only caught
+       * CoreFoundation's own opaque types and missed all of CoreGraphics, so
+       * a CGColorSpaceRef reached native CGBitmapContextCreate raw (iPhoto). */
+      if (clang_Type_getSizeOf(pointee_canon) == CXTypeLayoutError_Incomplete) {
+         return true;
+      }
       CXString s = clang_getTypeSpelling(pointee_canon);
       const bool cf = std::string(clang_getCString(s)).find("__CF") != std::string::npos;
       clang_disposeString(s);
