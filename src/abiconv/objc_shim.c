@@ -63,8 +63,26 @@ struct map_ent { uint64_t real; uint32_t handle; };
  * are directly usable. The map is allocated with mach_vm_allocate (not the
  * shim's calloc) so it never depends on a per-copy heap.
  */
+/* Shared page-readability memo (see page_readable_len). Genuinely-readable
+ * byte extent from a 4K page base, determined once with real reads and reused
+ * by every libabiconv copy — readability is a process-global fact, so without
+ * sharing each of the ~12 active copies re-probes the same metadata pages with
+ * a cold cache (the iWeb startup hang: 14 images × 12 copies of syscalls). */
+#define PGMEMO_CAP 262144u   /* power of two; holds mapped pages AND cached
+                              * negative (unmapped garbage-page) verdicts, so
+                              * size well above both to avoid probe-degrading
+                              * saturation */
+/* rb = readable byte extent from page base (0..4096). rb>0 is permanent (a
+ * mapped page's readability is stable for the life of its mapping). rb==0
+ * (unmapped) is valid only for image generation `gen` = _dyld_image_count at
+ * probe time, since a later dlopen could map the page — without caching the
+ * negative, the same garbage metadata pointer is re-probed millions of times
+ * (the iWeb startup storm: 3M+ repeated unmapped syscalls). */
+struct pgmemo_ent { uintptr_t pg; uint32_t gen; uint16_t rb; uint8_t used; };
+
 struct objc_shared_ctrl {
    uint64_t        magic;        /* OBJC_CTRL_MAGIC once fully initialized */
+   uint64_t        pgmemo;       /* struct pgmemo_ent *[PGMEMO_CAP], shared */
    uint64_t        arena;        /* low-4GB slot array base */
    uint64_t        arena_base;
    uint64_t        arena_end;
@@ -177,6 +195,8 @@ static void arena_init(void) {
    c->map        = map;
    c->lpair      = (uint64_t)(uintptr_t)
       calloc(LPAIR_CAP, sizeof(struct lpair_ent));
+   c->pgmemo     = (uint64_t)(uintptr_t)
+      calloc(PGMEMO_CAP, sizeof(struct pgmemo_ent));
    __sync_synchronize();
    c->magic      = OBJC_CTRL_MAGIC;
 
@@ -407,8 +427,12 @@ struct objc_super_i386 { uint32_t receiver; uint32_t super_class; };
  * crashes deep inside libobjc with KERN_INVALID_ADDRESS. Only ever hit on
  * the non-arena (class-message / selector) path, so the cost is off the
  * common instance-message hot path. */
-static int mem_readable(uintptr_t p, size_t len) {
-   if (p == 0) { return 0; }
+#define PAGE_SZ_4K 0x1000u
+
+/* genuine readability probe: actually touch [p, p+len) so a file-backed page
+ * mapped READ but past its file's EOF (faults KERN_MEMORY_ERROR) is rejected.
+ * Region protection bits alone do NOT catch that. */
+static int genuine_probe(uintptr_t p, size_t len) {
    char buf[32];
    while (len) {
       size_t chunk = len < sizeof buf ? len : sizeof buf;
@@ -423,23 +447,113 @@ static int mem_readable(uintptr_t p, size_t len) {
    return 1;
 }
 
+/* mem_readable() is called O(classes×methods) times per image, once per
+ * add-image callback, once per co-located libabiconv copy (~27 in iWeb), and
+ * the class-registration fixpoint re-probes every class name up to 64 times.
+ * A genuine_probe syscall per call turns startup into a multi-minute hang once
+ * the iWork SF* frameworks load. So memoize, per 4K page, the genuinely-
+ * readable byte extent from the page base (0..4096) — determined once with
+ * real reads (so a file-backed page that faults past EOF is handled), then
+ * every later probe in that page is a syscall-free table lookup. A mapped
+ * page's readable extent is stable for the life of the mapping (never torn
+ * down during startup), so the memo never goes stale. Fully-unreadable pages
+ * (rb==0, i.e. unmapped garbage pointers) are NOT memoized — they are already
+ * filtered out by ptr_ok before reaching the hot fixpoint loop, and skipping
+ * them avoids caching a verdict that a later image-load could invalidate.
+ * The memo table lives in the shared objc_shared_ctrl (pgmemo) so a page is
+ * probed once per PROCESS, not once per libabiconv copy — see arena_init. A
+ * tiny per-copy table backs the window before the shared ctrl is attached. */
+static struct pgmemo_ent g_pgmemo_boot[256];
+
+static struct pgmemo_ent *pgmemo_table(uint32_t *cap_out) {
+   if (!g_ctrl) { arena_init(); }
+   if (g_ctrl && g_ctrl->pgmemo) {
+      *cap_out = PGMEMO_CAP;
+      return (struct pgmemo_ent *)(uintptr_t)g_ctrl->pgmemo;
+   }
+   *cap_out = (uint32_t)(sizeof g_pgmemo_boot / sizeof g_pgmemo_boot[0]);
+   return g_pgmemo_boot;
+}
+
+/* Genuinely-readable byte count from page base pg (page-aligned, nonzero). */
+static uint32_t page_readable_len(uintptr_t pg) {
+   uint32_t cap;
+   struct pgmemo_ent *memo = pgmemo_table(&cap);
+   uint32_t mask = cap - 1;
+   uint32_t cur_gen = _dyld_image_count();
+   uint32_t h0 = (uint32_t)((pg >> 12) * 2654435761u) & mask;
+   uint32_t h = h0, slot = h0;
+   int have_slot = 0;
+   for (uint32_t n = 0; n < cap; ++n) {
+      if (!memo[h].used) { slot = h; have_slot = 1; break; }
+      if (memo[h].pg == pg) {
+         if (memo[h].rb > 0) { return memo[h].rb; }       /* permanent positive */
+         if (memo[h].gen == cur_gen) { return 0; }        /* fresh negative */
+         slot = h; have_slot = 1; break;                  /* stale negative: reprobe */
+      }
+      h = (h + 1) & mask;
+   }
+   uint32_t rb;
+   if (genuine_probe(pg, PAGE_SZ_4K)) {
+      rb = PAGE_SZ_4K;                       /* common case: fully mapped */
+   } else if (!genuine_probe(pg, 1)) {
+      rb = 0;                                /* unmapped */
+   } else {
+      uint32_t lo = 1, hi = PAGE_SZ_4K;      /* partial: bisect EOF boundary */
+      while (lo + 1 < hi) {
+         uint32_t mid = (lo + hi) / 2;
+         if (genuine_probe(pg, mid)) { lo = mid; } else { hi = mid; }
+      }
+      rb = lo;
+   }
+   if (have_slot) {
+      memo[slot].pg = pg; memo[slot].gen = cur_gen; memo[slot].rb = (uint16_t)rb;
+      __sync_synchronize();                  /* publish fields before used flag */
+      memo[slot].used = 1;
+   }
+   return rb;
+}
+
+static int mem_readable(uintptr_t p, size_t len) {
+   if (p == 0) { return 0; }
+   if (len == 0) { return 1; }
+   uintptr_t end = p + len;
+   if (end < p) { return 0; }                            /* wrap */
+   for (uintptr_t pg = p & ~(uintptr_t)(PAGE_SZ_4K - 1); pg < end;
+        pg += PAGE_SZ_4K) {
+      uintptr_t readable_end = pg + page_readable_len(pg);
+      uintptr_t need_end = end < pg + PAGE_SZ_4K ? end : pg + PAGE_SZ_4K;
+      if (need_end > readable_end) { return 0; }
+   }
+   return 1;
+}
+
 /* Validate a legacy metadata C-string: readable AND NUL-terminated without
  * running off the mapping. ptr_ok/mem_readable(p,1) only prove the FIRST
  * byte; a name string ending flush against the end of a mapped segment makes
  * strlen (inside objc_getClass / sel_registerName) fault on the next page —
  * the intermittent registration-time SIGBUS (reverse_register_one+202,
- * KERN_MEMORY_ERROR at 0x...003). Scan page-by-page, probing each page once. */
-#define PAGE_SZ_4K 0x1000u
+ * KERN_MEMORY_ERROR at 0x...003). Resolve each page's readable extent once
+ * (memoized) and scan it with a tight in-bounds loop rather than a per-byte
+ * mem_readable call. Capped: real class/selector/type-encoding strings are
+ * short, and a garbage pointer that lands in a large readable region must not
+ * cost a multi-KB scan per class per registration pass (the iWeb startup
+ * hang once syscalls were eliminated). */
+#define LEGACY_CSTR_MAX 1024u
 static int legacy_cstr_ok(uint32_t p32) {
    uintptr_t p = p32;
    if (!p) { return 0; }
-   for (unsigned pages = 0; pages < 4; ++pages) {     /* names are short */
-      uintptr_t page_end = (p & ~(uintptr_t)(PAGE_SZ_4K - 1)) + PAGE_SZ_4K;
-      if (!mem_readable(p, 1)) { return 0; }
-      for (; p < page_end; ++p) {
+   uintptr_t limit = p + LEGACY_CSTR_MAX;
+   while (p < limit) {
+      uintptr_t pg = p & ~(uintptr_t)(PAGE_SZ_4K - 1);
+      uintptr_t readable_end = pg + page_readable_len(pg);
+      if (p >= readable_end) { return 0; }          /* p itself unreadable */
+      uintptr_t scan_end = readable_end < limit ? readable_end : limit;
+      for (; p < scan_end; ++p) {
          if (*(const char *)p == '\0') { return 1; }
       }
-      /* string continues onto the next page; probe it before reading */
+      if (readable_end < pg + PAGE_SZ_4K) { return 0; }  /* EOF before a NUL */
+      /* else fall through: continues into the next (contiguous) page */
    }
    return 0;
 }
@@ -953,7 +1067,12 @@ static void enc_narrow(const char *t, int conv, const uint8_t *native_src,
  * declares or overrides, which disambiguates CGFloat-vs-double and
  * NSInteger-vs-long-long when the native runtime encoding is all we'd have.
  * Keyed by real SEL (runtime-interned, so pointer compare is exact). */
-#define SELTYPES_CAP 16384u   /* power of two */
+/* power of two; must exceed the total DISTINCT selectors across every legacy
+ * framework loaded — iWork's SF* set alone registers tens of thousands. An
+ * undersized table saturates: open-addressed inserts degrade to full-table
+ * O(n) scans (the post-syscall iWeb startup hang) and, worse, silently drop
+ * entries so the forward bridge later can't recover an arg encoding. */
+#define SELTYPES_CAP 131072u
 static struct { SEL sel; const char *types; } g_seltypes[SELTYPES_CAP];
 static void seltypes_insert(SEL s, const char *types) {
    if (!s || !types) { return; }
@@ -2605,7 +2724,10 @@ static const struct legacy_objc_class *legacy_registry_lookup(const char *name) 
 }
 
 static void legacy_registry_insert(const struct legacy_objc_class *cls) {
-   if (!ptr_ok(cls->name, 1)) { return; }
+   /* str_hash/strcmp below walk the whole name to its NUL, so 1 byte of
+    * validation is not enough — a name flush against a mapping's EOF makes
+    * the hash run off into an unmapped page (SIGBUS KERN_MEMORY_ERROR). */
+   if (!legacy_cstr_ok(cls->name)) { return; }
    const char *name = (const char *)(uintptr_t)cls->name;
    uint32_t i = str_hash(name) & (LEGACY_REG_CAP - 1);
    for (uint32_t n = 0; n < LEGACY_REG_CAP; ++n) {
@@ -2896,7 +3018,11 @@ extern void _86x64_reverse_imp_stret(void);  /* objc_reverse.asm */
 /* ---- (lookup_class, sel) -> legacy method map. lookup_class is
  * object_getClass(self): the registered class for instance methods, its
  * metaclass for class methods. ---- */
-#define RMETH_CAP 32768u   /* power of two */
+/* power of two; keyed by (class,selector) so it must exceed the TOTAL legacy
+ * method count across all loaded frameworks (iWork SF*: 100k+). Saturation
+ * here both hangs registration (O(n) per insert) and silently drops method
+ * IMPs, breaking later reverse dispatch — see SELTYPES_CAP. */
+#define RMETH_CAP 262144u
 struct rmeth_ent { Class cls; SEL sel; uint64_t imp; const char *types; };
 static struct rmeth_ent g_rmeth[RMETH_CAP];
 static uint32_t rmeth_hash(Class c, SEL s) {
