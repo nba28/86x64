@@ -110,6 +110,14 @@ _CGRectGetMidY
 _CGRectGetMinX
 _CGRectGetMinY
 _CGRectNull
+_CGAffineTransformIdentity
+_CATransform3DIdentity
+_CGRectZero
+_CGPointZero
+_CGSizeZero
+_NSZeroRect
+_NSZeroPoint
+_NSZeroSize
 _CGStyleCreateShadow
 _CGContextSetStyle
 _CGStyleRelease

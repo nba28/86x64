@@ -4029,12 +4029,28 @@ uint32_t shim_CGPatternCreate(const uint32_t *a) {
    return x64_objc_wrap((uint64_t)(uintptr_t)pat);
 }
 
-/* i386-LAYOUT shadow for the CGRectNull data constant: the native symbol
- * holds 4 doubles {inf,inf,0,0}; an i386 reader takes the first 16 bytes as
- * 4 floats and sees garbage. static-interpose redirects the non-lazy bind to
- * this __-twin (same mechanism as the ObjC data shadows). The all-zero
- * constants (NSZeroRect, CGRectZero, ...) read correctly either way. */
-const float __CGRectNull[4] = { __builtin_inff(), __builtin_inff(), 0, 0 };
+/* i386-LAYOUT shadows for CG/NS geometry DATA constants. The native symbols
+ * are structs of x86_64 *doubles* living above 4GB; an external i386 reader
+ * (a) takes them through a non-lazy GOT pointer that a 32-bit `movl` TRUNCATES
+ * to the low 4GB -> dereference faults, and (b) even unbroken would read the
+ * double layout as i386 floats and see garbage. static-interpose redirects each
+ * non-lazy bind to its __-twin here (same mechanism as the ObjC/CF data
+ * shadows): a low-4GB symbol holding the i386 (float) layout, so the GOT
+ * pointer fits in 32 bits AND the field reads land on correct float values.
+ * Required for ALL such struct constants accessed via the GOT, not just the
+ * non-zero ones — CGAffineTransformIdentity's truncated pointer was the
+ * iPhoto -[NSCustomView nibInstantiate] SIGSEGV. (Each is listed in
+ * custom.syms so abigen skips it and static-interpose can find the twin.) */
+const float __CGRectNull[4]  = { __builtin_inff(), __builtin_inff(), 0, 0 };
+const float __CGAffineTransformIdentity[6] = { 1, 0, 0, 1, 0, 0 };
+const float __CATransform3DIdentity[16] = { 1, 0, 0, 0,  0, 1, 0, 0,
+                                            0, 0, 1, 0,  0, 0, 0, 1 };
+const float __CGRectZero[4]  = { 0, 0, 0, 0 };
+const float __CGPointZero[2] = { 0, 0 };
+const float __CGSizeZero[2]  = { 0, 0 };
+const float __NSZeroRect[4]  = { 0, 0, 0, 0 };
+const float __NSZeroPoint[2] = { 0, 0 };
+const float __NSZeroSize[2]  = { 0, 0 };
 
 /* ---- registration ---- */
 
