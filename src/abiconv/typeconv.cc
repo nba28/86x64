@@ -484,6 +484,23 @@ bool cf_opaque_ptr_type(CXType canon) {
       clang_getCanonicalType(clang_getPointeeType(canon)));
 }
 
+/* exported: CFTypeRef / CFPropertyListRef (void*-backed CF object-ref typedefs)
+ * detected by the AS-WRITTEN typedef name, since their canonical type is a
+ * bare const void* that can't be told apart from a non-object void* arg. A
+ * plain void* (data/context pointer) keeps its raw pass-through. */
+bool cf_void_ref_type(CXType orig) {
+   CXType canon = clang_getCanonicalType(orig);
+   if (canon.kind != CXType_Pointer) { return false; }
+   if (clang_getCanonicalType(clang_getPointeeType(canon)).kind != CXType_Void) {
+      return false;
+   }
+   CXString s = clang_getTypeSpelling(orig);
+   const std::string name(clang_getCString(s));
+   clang_disposeString(s);
+   return name.find("CFTypeRef") != std::string::npos ||
+          name.find("CFPropertyListRef") != std::string::npos;
+}
+
 unsigned cb_sig_register(CXType fnproto) {
    if (fnproto.kind != CXType_FunctionProto) {
       throw std::invalid_argument("callback has no prototype");

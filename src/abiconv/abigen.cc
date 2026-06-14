@@ -249,7 +249,8 @@ struct ABIConversion {
            param_it != param_end;
            ++param_it) {
 
-         CXType type = handle_type(clang_getArgType(function_type, param_it));
+         CXType orig_type = clang_getArgType(function_type, param_it);
+         CXType type = handle_type(orig_type);
 
          std::unique_ptr<Location> src;
          std::unique_ptr<Location> dst;
@@ -271,6 +272,14 @@ struct ABIConversion {
          }
 
          CXTypeKind type_kind;
+         if (cf_void_ref_type(orig_type)) {
+            /* CFTypeRef / CFPropertyListRef value: a void*-backed CF object
+             * ref that carries a proxy handle (e.g. CFDateFormatterSetProperty's
+             * value arg — iWeb passed a raw handle, CF then msgSend'd its garbage
+             * isa). Unwrap going in; no copy-back, same as the opaque *Ref args. */
+            type_kind = CXType_Pointer;
+            to_conv.convert_cf_ptr(to_ss, load_loc, *dst);
+         } else
          switch (type.kind) {
          case CXType_ConstantArray:
             type_kind = CXType_Pointer;

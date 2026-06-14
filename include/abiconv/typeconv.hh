@@ -27,6 +27,13 @@ void cb_sig_emit(std::ostream& os);
  * (CFStringRef, CFURLRef, ...) — marshalled via the proxy-handle bridge */
 bool cf_opaque_ptr_type(CXType canonical);
 
+/* true iff `orig` (the AS-WRITTEN, un-canonicalized arg type) is a void*-backed
+ * CoreFoundation object ref typedef — CFTypeRef / CFPropertyListRef. These
+ * canonicalize to `const void *`, indistinguishable from a plain void*, so they
+ * must be detected by typedef name before canonicalization. They carry proxy
+ * handles that need the same unwrap as the opaque `*Ref` records. */
+bool cf_void_ref_type(CXType orig);
+
 size_t sizeof_type(CXType type, arch a);
 size_t sizeof_type(CXTypeKind type_kind, arch a);
 
