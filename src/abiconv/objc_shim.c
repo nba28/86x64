@@ -2135,6 +2135,8 @@ static const struct {
      (IMP)compat_openUntitledDocumentOfType_display, "@28@0:8@16c24" },
 };
 
+extern void legacy_locale_compat_install(void);   /* maptable_shim.m */
+
 static void appkit_compat_install(void) {
    /* These self-guard (own env vars) and must keep retrying until THEIR
     * framework loads — NSColor/AppKit early, NSProFont/ProKit much later — so
@@ -2142,6 +2144,7 @@ static void appkit_compat_install(void) {
     * document methods below). */
    appkit_color_compat_install();
    prokit_font_compat_install();
+   legacy_locale_compat_install();   /* re-seed removed old-style locale keys */
 
    static int done = 0;
    if (done) return;

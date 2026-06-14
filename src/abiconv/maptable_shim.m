@@ -42,6 +42,8 @@
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
 #import <Foundation/Foundation.h>
+#include <objc/runtime.h>
+#include <objc/message.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -317,3 +319,170 @@ KEY_SHADOW(NSIntegerMapKeyCallBacks,         CB_MAP_KEY_INTEGER);
 KEY_SHADOW(NSNonOwnedPointerMapKeyCallBacks, CB_MAP_KEY_NONOWNED);
 
 HASH_SHADOW(NSNonOwnedPointerHashCallBacks,  CB_HASH_NONOWNED);
+
+/* ===========================================================================
+ * Legacy "old-style" NSUserDefaults locale compat (generic, NOT app-specific).
+ *
+ * Pre-10.4 apps (iPhoto, etc.) read date/number formatting from the old
+ * NSUserDefaults locale keys (NSDateTimeOrdering, NSMonthNameArray,
+ * NSShortDateFormatString, ...). Modern macOS dropped them: every one reads
+ * back nil, so the app computes nil/garbage and crashes.
+ *
+ * We DERIVE the values from the LIVE system locale (NSLocale/NSDateFormatter)
+ * so this works for any app AND any locale — no hard-coded en_US table. The
+ * modern locale exposes Unicode (CLDR) date patterns + symbol arrays; the
+ * legacy keys want strftime-style ("%m/%d/%y") format strings, so we convert.
+ *
+ * Delivery is by SWIZZLING -[NSUserDefaults objectForKey:]: call the original,
+ * and only when it returns nil for one of the legacy keys substitute the
+ * derived value. (-registerDefaults: silently no-ops this early in these
+ * processes; the swizzle is robust and a real user/app value still wins because
+ * the original is consulted first.) Self-guarded.
+ * =========================================================================== */
+
+/* Convert a Unicode (CLDR) date pattern to a legacy strftime-style string. */
+static NSString *mt_uni_to_strftime(NSString *pat) {
+   if (!pat) { return @""; }
+   NSMutableString *out = [NSMutableString string];
+   NSUInteger n = [pat length];
+   for (NSUInteger i = 0; i < n; ) {
+      unichar c = [pat characterAtIndex:i];
+      if (c == '\'') {                       /* quoted literal */
+         i++;
+         while (i < n) {
+            unichar d = [pat characterAtIndex:i];
+            if (d == '\'') {
+               if (i + 1 < n && [pat characterAtIndex:i + 1] == '\'') {
+                  [out appendString:@"'"]; i += 2; continue;
+               }
+               i++; break;
+            }
+            [out appendFormat:@"%C", d]; i++;
+         }
+         continue;
+      }
+      if ((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+         NSUInteger j = i;
+         while (j < n && [pat characterAtIndex:j] == c) { j++; }
+         NSUInteger w = j - i;
+         const char *rep = "";
+         switch (c) {
+         case 'y': case 'Y': case 'u': rep = (w <= 2) ? "%y" : "%Y"; break;
+         case 'M': case 'L': rep = (w >= 4) ? "%B" : (w == 3) ? "%b" : "%m"; break;
+         case 'd':           rep = "%d"; break;
+         case 'E': case 'c': rep = (w >= 4) ? "%A" : "%a"; break;
+         case 'a':           rep = "%p"; break;
+         case 'h': case 'K': rep = "%I"; break;
+         case 'H': case 'k': rep = "%H"; break;
+         case 'm':           rep = "%M"; break;
+         case 's':           rep = "%S"; break;
+         case 'z': case 'Z': case 'v': case 'V': rep = "%Z"; break;
+         default:            rep = ""; break;   /* era/quarter/etc.: drop */
+         }
+         [out appendFormat:@"%s", rep];
+         i = j; continue;
+      }
+      [out appendFormat:@"%C", c]; i++;        /* separators pass through */
+   }
+   return out;
+}
+
+/* Derive the legacy NSDateTimeOrdering (e.g. "MDYH") from the live patterns:
+ * the order in which month/day/year/hour first appear. */
+static NSString *mt_derive_ordering(NSString *datePat, NSString *timePat) {
+   NSMutableString *o = [NSMutableString string];
+   NSString *comb = [(datePat ?: @"") stringByAppendingString:(timePat ?: @"")];
+   BOOL m = NO, d = NO, y = NO, h = NO;
+   for (NSUInteger i = 0; i < [comb length]; i++) {
+      unichar c = [comb characterAtIndex:i];
+      if ((c == 'M' || c == 'L') && !m) { [o appendString:@"M"]; m = YES; }
+      else if (c == 'd' && !d)          { [o appendString:@"D"]; d = YES; }
+      else if ((c == 'y' || c == 'Y' || c == 'u') && !y) { [o appendString:@"Y"]; y = YES; }
+      else if ((c == 'H' || c == 'h' || c == 'k' || c == 'K') && !h) { [o appendString:@"H"]; h = YES; }
+   }
+   if ([o length] == 0) { [o appendString:@"MDYH"]; }   /* sane fallback */
+   return o;
+}
+
+static NSDictionary *mt_build_legacy_locale(void) {
+   NSLocale *loc = [NSLocale currentLocale];
+   NSDateFormatter *df = [[[NSDateFormatter alloc] init] autorelease];
+   [df setLocale:loc];
+
+   #define PAT(ds, ts) (^{ [df setDateStyle:(ds)]; [df setTimeStyle:(ts)]; \
+                           return [df dateFormat]; }())
+   NSString *shortDate = PAT(NSDateFormatterShortStyle,  NSDateFormatterNoStyle);
+   NSString *fullDate  = PAT(NSDateFormatterFullStyle,   NSDateFormatterNoStyle);
+   NSString *timeP     = PAT(NSDateFormatterNoStyle,     NSDateFormatterMediumStyle);
+   NSString *medDT     = PAT(NSDateFormatterMediumStyle, NSDateFormatterMediumStyle);
+   NSString *shortDT   = PAT(NSDateFormatterShortStyle,  NSDateFormatterShortStyle);
+   #undef PAT
+
+   NSString *sep   = [loc objectForKey:NSLocaleDecimalSeparator]  ?: @".";
+   NSString *grp   = [loc objectForKey:NSLocaleGroupingSeparator] ?: @",";
+   NSString *cursym= [loc objectForKey:NSLocaleCurrencySymbol]    ?: @"$";
+   NSString *curcod= [loc objectForKey:NSLocaleCurrencyCode]      ?: @"USD";
+
+   NSMutableDictionary *d = [NSMutableDictionary dictionary];
+   #define SET(k, v) do { id _v = (v); if (_v) d[k] = _v; } while (0)
+   SET(@"NSDateTimeOrdering",          mt_derive_ordering(shortDate, timeP));
+   SET(@"NSAMPMDesignation",           (@[ [df AMSymbol] ?: @"AM",
+                                           [df PMSymbol] ?: @"PM" ]));
+   SET(@"NSMonthNameArray",            [df monthSymbols]);
+   SET(@"NSShortMonthNameArray",       [df shortMonthSymbols]);
+   SET(@"NSWeekDayNameArray",          [df weekdaySymbols]);
+   SET(@"NSShortWeekDayNameArray",     [df shortWeekdaySymbols]);
+   SET(@"NSTimeFormatString",          mt_uni_to_strftime(timeP));
+   SET(@"NSDateFormatString",          mt_uni_to_strftime(fullDate));
+   SET(@"NSShortDateFormatString",     mt_uni_to_strftime(shortDate));
+   SET(@"NSTimeDateFormatString",      mt_uni_to_strftime(medDT));
+   SET(@"NSShortTimeDateFormatString", mt_uni_to_strftime(shortDT));
+   SET(@"NSDecimalSeparator",          sep);
+   SET(@"NSThousandsSeparator",        grp);
+   SET(@"NSCurrencySymbol",            cursym);
+   SET(@"NSInternationalCurrencyString", curcod);
+   /* Natural-language designations are en-centric and rarely consulted by the
+    * crashing format path; provide harmless defaults so lookups don't return
+    * nil. */
+   SET(@"NSThisDayDesignations",       (@[@"today", @"now"]));
+   SET(@"NSNextDayDesignations",       (@[@"tomorrow"]));
+   SET(@"NSPriorDayDesignations",      (@[@"yesterday"]));
+   SET(@"NSYearMonthWeekDesignations", (@[@"year", @"month", @"week"]));
+   SET(@"NSEarlierTimeDesignations",   (@[@"prior", @"last", @"past", @"ago"]));
+   SET(@"NSLaterTimeDesignations",     (@[@"next"]));
+   #undef SET
+   return d;
+}
+
+static NSDictionary *g_legacy_locale;                 /* retained, live-derived */
+static id (*g_orig_objectForKey)(id, SEL, id);        /* original IMP */
+
+static id mt_compat_objectForKey(id self, SEL _cmd, id key) {
+   id v = g_orig_objectForKey ? g_orig_objectForKey(self, _cmd, key) : nil;
+   if (!v && key) {
+      id sub = [g_legacy_locale objectForKey:key];
+      if (sub) { return sub; }
+   }
+   return v;
+}
+
+void legacy_locale_compat_install(void) {
+   static int done = 0;
+   if (done) { return; }
+   Class cUD = objc_getClass("NSUserDefaults");
+   if (!cUD) { return; }                  /* Foundation not up yet: retry */
+   done = 1;
+
+   g_legacy_locale = [mt_build_legacy_locale() retain];
+
+   Method m = class_getInstanceMethod(cUD, sel_registerName("objectForKey:"));
+   if (m) {
+      g_orig_objectForKey = (id (*)(id, SEL, id))
+         method_setImplementation(m, (IMP)mt_compat_objectForKey);
+   }
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[compat] legacy locale objectForKey: swizzled "
+              "(%lu keys, orig=%p)\n",
+              (unsigned long)[g_legacy_locale count], (void *)g_orig_objectForKey);
+   }
+}
