@@ -56,28 +56,18 @@ NONLAZY=$(otool -bind_info "$BIN" 2>/dev/null \
                                   !($1 in tr){print $2}' \
           | grep -vE '^__Z' | sort -u)
 
-# 3. Symbols read by the exact crashing object-load signature: a 32-bit
-#    `movl slot(%rip), %eREG` (truncates the slot address) IMMEDIATELY followed
-#    by `movl (%rREG), %r..` (derefs it to read the object pointer). This is how
-#    the compiler emits `[obj msg: NSStringConst]` (load &var -> load value).
-#    Requiring the double-deref keeps us to genuine object/CF VALUE loads and
-#    excludes single-load address-passing (which may not be handle-safe). movq
-#    (64-bit, non-truncating) is correctly excluded.
-LOADED=$(otool -tV "$BIN" 2>/dev/null | awk '
-   match($0, /movl[[:space:]]+0x[0-9a-f]+\(%rip\), %e[a-z][a-z]/) {
-      reg = substr($0, RSTART+RLENGTH-3, 3)              # e.g. "edx"
-      sub(/^e/, "r", reg)                                # -> "rdx"
-      sym = ""
-      if ($0 ~ /literal pool symbol address: _/) {
-         sym = $0
-         sub(/.*literal pool symbol address: /, "", sym)
-         sub(/[^A-Za-z0-9_].*$/, "", sym)
-      }
-      pend_reg = reg; pend_sym = sym; next
-   }
-   pend_sym != "" && index($0, "movl\t(%" pend_reg "),") { print pend_sym }
-   { pend_reg = ""; pend_sym = "" }
-' | sort -u)
+# 3. Symbols read by a 32-bit `movl slot(%rip), %eREG`, which truncates the
+#    slot's 64-bit address (movq 64-bit loads are correctly excluded). otool
+#    annotates the rip-relative target as `## literal pool symbol address: _X`.
+#    We don't require a following deref: object-vs-C-global safety is already
+#    guaranteed by step 2 (native ObjC frameworks only; C/C++ runtime, already
+#    shadowed, and translated frameworks all excluded). Requiring an adjacent
+#    deref missed compiler-scheduled cases (e.g. a store inserted between the
+#    load and `movl (%rREG),%edx` for _IMAVManagerStateChangedNotification).
+LOADED=$(otool -tV "$BIN" 2>/dev/null \
+         | grep -E 'movl[[:space:]]+0x[0-9a-f]+\(%rip\), %e' \
+         | grep -oE 'literal pool symbol address: _[A-Za-z0-9_]+' \
+         | sed 's/.*: //' | sort -u)
 
 # result = (data imports that are truncate-loaded) minus already-shadowed.
 comm -23 <(comm -12 <(printf '%s\n' "$NONLAZY") <(printf '%s\n' "$LOADED")) \
