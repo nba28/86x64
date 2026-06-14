@@ -3788,6 +3788,7 @@ static struct geo_ent g_geo[] = {
    /* struct returns (i386 hidden-ptr stret -> GEOSHIM_S) */
    /* 73 */ { "CGContextGetClipBoundingBox", ENC_NSRECT "^{CGContext=}",     NULL },
    /* 74 */ { "CGContextGetCTM",          ENC_CGAFF "^{CGContext=}",         NULL },
+   /* 75 */ { "CGContextSetPatternPhase", "v^{CGContext=}" ENC_NSSIZE,       NULL },
 };
 
 struct geo_res { uint64_t lo, hi; double fp; };
@@ -3942,6 +3943,90 @@ uint32_t mt_NSDivideRect(const uint32_t *a) {
                  (uint8_t *)(uintptr_t)a[5]);
    }
    return 0;
+}
+
+/* ===========================================================================
+ * CGPatternCreate — abigen skips it (CGRect/CGAffineTransform/CGFloat by value
+ * AND a CGPatternCallbacks* whose drawPattern/releaseInfo are i386 code that
+ * native CG will CALL BACK with the x86_64 ABI). Hand-marshalled here:
+ *  - the by-value geometry is widened i386-float -> x86_64-double;
+ *  - the callback fn-ptrs are bridged through x64_cb_wrap (cb_bridge.c), so
+ *    native CG re-enters the translated callbacks on a fresh low stack. The
+ *    CGContextRef handed to drawPattern is a high native ptr -> wrapped to an
+ *    arena handle (CBA_OBJ) the i386 callback can feed back to the CGContext*
+ *    geo-shims; `info` is opaque and round-trips as a raw 32-bit word.
+ *  - the returned CGPatternRef is wrapped as an arena handle (eax).
+ * i386 cdecl frame (caller-pop, structs expanded inline), 4-byte slots:
+ *   a[0]      info
+ *   a[1..4]   CGRect bounds        (4 floats)
+ *   a[5..10]  CGAffineTransform    (6 floats)
+ *   a[11]     xStep  a[12] yStep   (floats)
+ *   a[13]     tiling  a[14] isColored  a[15] callbacks*
+ * =========================================================================== */
+typedef struct { uint32_t nargs; uint32_t ret_kind; uint8_t arg_kinds[16]; }
+   x64_cb_sig_t;
+extern uint64_t x64_cb_wrap(uint32_t fn32, const x64_cb_sig_t *sig);
+/* arg kinds: PTR=2 OBJ=3 ; ret: VOID=0  (mirror cb_bridge.c) */
+static const x64_cb_sig_t g_cgpat_draw_sig    = { 2, 0, { 2, 3 } };
+static const x64_cb_sig_t g_cgpat_release_sig = { 1, 0, { 2 } };
+
+struct cg_rect64 { double a, b, c, d; };       /* >16B -> MEMORY class, like CGRect */
+struct cg_aff64  { double a, b, c, d, e, f; }; /* >16B -> MEMORY class */
+struct cg_patcb64 {
+   unsigned int version;
+   void (*drawPattern)(void *info, void *ctx);
+   void (*releaseInfo)(void *info);
+};
+
+uint32_t shim_CGPatternCreate(const uint32_t *a) {
+   static void *(*fn)(void *, struct cg_rect64, struct cg_aff64, double, double,
+                      uint32_t, int, const struct cg_patcb64 *);
+   if (!fn) {
+      fn = (void *(*)(void *, struct cg_rect64, struct cg_aff64, double, double,
+                      uint32_t, int, const struct cg_patcb64 *))
+           dlsym(RTLD_DEFAULT, "CGPatternCreate");
+      if (!fn) {
+         fprintf(stderr, "objc_shim: dlsym(CGPatternCreate) failed\n");
+         return 0;
+      }
+   }
+   float f;
+   struct cg_rect64 bounds;
+   memcpy(&f, &a[1], 4); bounds.a = f;
+   memcpy(&f, &a[2], 4); bounds.b = f;
+   memcpy(&f, &a[3], 4); bounds.c = f;
+   memcpy(&f, &a[4], 4); bounds.d = f;
+   struct cg_aff64 m;
+   memcpy(&f, &a[5],  4); m.a = f;
+   memcpy(&f, &a[6],  4); m.b = f;
+   memcpy(&f, &a[7],  4); m.c = f;
+   memcpy(&f, &a[8],  4); m.d = f;
+   memcpy(&f, &a[9],  4); m.e = f;
+   memcpy(&f, &a[10], 4); m.f = f;
+   double xStep, yStep;
+   memcpy(&f, &a[11], 4); xStep = f;
+   memcpy(&f, &a[12], 4); yStep = f;
+   uint32_t tiling   = a[13];
+   int      isColored = (int)(a[14] & 0xff);
+
+   struct cg_patcb64 ncb, *ncbp = NULL;
+   if (a[15]) {
+      const uint32_t *icb = (const uint32_t *)(uintptr_t)a[15];
+      ncb.version     = icb[0];
+      ncb.drawPattern = (void (*)(void *, void *))
+                        (uintptr_t)x64_cb_wrap(icb[1], &g_cgpat_draw_sig);
+      ncb.releaseInfo = (void (*)(void *))
+                        (uintptr_t)x64_cb_wrap(icb[2], &g_cgpat_release_sig);
+      ncbp = &ncb;
+   }
+   void *info = (void *)(uintptr_t)a[0];
+   void *pat  = fn(info, bounds, m, xStep, yStep, tiling, isColored, ncbp);
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[geo] CGPatternCreate colored=%d cb=0x%x -> %p\n",
+              isColored, a[15], pat);
+      fflush(stderr);
+   }
+   return x64_objc_wrap((uint64_t)(uintptr_t)pat);
 }
 
 /* i386-LAYOUT shadow for the CGRectNull data constant: the native symbol

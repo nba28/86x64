@@ -243,9 +243,14 @@
    GEOSHIM_I ___CGColorCreateGenericRGB,     72
    GEOSHIM_S ___CGContextGetClipBoundingBox, 73
    GEOSHIM_S ___CGContextGetCTM,             74
+   GEOSHIM_I ___CGContextSetPatternPhase,    75
 
 ;; NSRect out-pointers: hand-marshalled in objc_shim.c (mt_NSDivideRect).
    MTSHIM ___NSDivideRect, _mt_NSDivideRect
+
+;; CGPatternCreate: struct/CGFloat by value + a CGPatternCallbacks* whose
+;; drawPattern/releaseInfo native CG calls back -> hand-marshalled in objc_shim.c.
+   MTSHIM ___CGPatternCreate, _shim_CGPatternCreate
 
 ;; ---------------------------------------------------------------------
 ;; Legacy ObjC1 runtime compat (objc_shim.c "exc1" section): symbols modern

@@ -138,6 +138,8 @@ _CGContextDrawImage
 _CGColorCreateGenericRGB
 _CGContextGetClipBoundingBox
 _CGContextGetCTM
+_CGContextSetPatternPhase
+_CGPatternCreate
 __dealloc
 __objc_setNilReceiver
 __setjmp
