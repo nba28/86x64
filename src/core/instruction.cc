@@ -691,6 +691,33 @@ namespace MachO {
          }
       }
 
+      /* `mov [reg+disp], imm32` for a GENERAL register base (rax/rcx/rdx/rbx/
+       * rsi/rdi — not esp/ebp, handled above) where imm32 is an absolute data
+       * pointer the i386 image baked in, e.g. `movl $&__cfstring, 0x7c(%edi)`
+       * (c7 47 7c imm32) storing a constant NSString into an ivar. The
+       * esp/ebp heuristic above accepts ANY segment because stack-arg setup
+       * is overwhelmingly string/pointer args; a struct-field store through an
+       * arbitrary base, however, is just as often an integer ivar, so to avoid
+       * mis-relocating integer constants that merely alias a vmaddr we require
+       * the value to land in a CONSTANT/STRING section (cstring, cfstring,
+       * const, objc metadata, text) -- a high-confidence pointer target. The
+       * MOV_MEMv_IMMz transform rewrites this to a slide-correct lea+store. */
+      if (imm == nullptr && instbuf.size() >= 6 && instbuf.at(0) == 0xc7
+          && (instbuf.at(1) & 0x38) == 0          /* 0xc7 /0 = MOV r/m32, imm32 */
+          && (instbuf.at(1) >> 6) != 3) {         /* memory destination */
+         const uint8_t rm = instbuf.at(1) & 0x07;
+         if (rm != 0x04 && rm != 0x05               /* esp/ebp handled above */
+             && xed_operand_values_has_immediate(operands)
+             && xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
+            const std::size_t imm_off = instbuf.size() - sizeof(uint32_t);
+            const uint32_t value = img.template at<uint32_t>(loc.offset + imm_off);
+            if (value >= 0x1000 && value < 0x80000000U
+                && env.vmaddr_in_const_section(value)) {
+               imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);
+            }
+         }
+      }
+
    }
    template <Bits bits>
    void Instruction<bits>::Emit(Image& img, std::size_t offset) const {
@@ -1001,30 +1028,49 @@ namespace MachO {
 
          case XED_IFORM_MOV_MEMv_IMMz:
             {
-               /* i386 | mov [abs32], imm32   (c7 05 disp32 imm32)
-                * -----|-------------------------------------------
-                * X86  | mov [rip+disp32], imm32
+               /* `mov mem, imm32` where imm32 is a pointer. Two dest shapes:
                 *
-                * Reached only when the imm32 is itself a pointer. The
-                * instruction has BOTH an abs32 destination and the imm32
-                * pointer; the parser put the destination in `memdisp` and
-                * the imm32 in `imm`. Resolve the destination (rip-relative
-                * disp32) and rewrite the imm32 to its pointee's new
-                * vmaddr.
+                * (a) REGISTER-BASE dest, e.g. `movl $&cfstring, 0x7c(%rdi)`
+                *     (c7 47 7c imm32) — no memdisp. A plain immediate store
+                *     can't hold the SLID runtime address (it's a 32-bit field
+                *     baked in __text; the dylib slides), so emit a slide-correct
+                *     sequence:
+                *        lea r11, [rip+disp32]      ; r11 = pointee's new vmaddr
+                *        mov  [reg+disp], r11d       ; store low 32 (dylib < 4GB)
+                *     r11 is the translator's scratch (no i386 reg maps to it).
+                *     This is PRECISE — only instructions the parser marked as
+                *     pointer-bearing are rewritten, unlike a blind __text scan.
                 *
-                * The pointer immediate is carried by a STANDALONE
-                * Immediate, not imm->Transform_one(): the latter would
-                * register it as the transform of the M32 immediate, so
-                * the rebasified input's rebase entry would resolve to it
-                * and emit a bogus dyld rebase for a 32-bit slot embedded
-                * in __text. The wrapper's runtime __text patcher applies
-                * the slide to this immediate instead.
-                */
+                * (b) ABS32 dest `mov [abs32], imm32` (c7 05 disp32 imm32) — the
+                *     parser put the dest in memdisp and the imm32 in imm. Keep
+                *     the rip-relative form and let the wrapper's runtime __text
+                *     patcher slide the imm (a STANDALONE Immediate avoids a
+                *     bogus dyld rebase for the embedded 32-bit slot). */
+               if (!this->memdisp) {
+                  auto *lea_inst = new Instruction<opposite<bits>>(
+                     opcode::lea_r11_mem_rip_disp32());
+                  lea_inst->memidx = 0;
+                  env.resolve(imm->pointee, &lea_inst->memdisp);
+                  lea_inst->memdisp_offset = imm->pointee_offset;
+
+                  /* mov [mem], r11d : REX.R + 0x89 + modrm(reg=r11) + sib/disp.
+                   * Reuse the original c7 /0 ModR/M + any SIB/disp bytes
+                   * (everything after the ModR/M except the trailing imm32);
+                   * swap the reg field to r11 (low 3 = 011) and add REX.R. */
+                  std::vector<uint8_t> mb;
+                  mb.push_back(0x44);                                   /* REX.R */
+                  mb.push_back(0x89);                                   /* MOV r/m32,r32 */
+                  mb.push_back((uint8_t)((instbuf.at(1) & 0xC7) | (0x3 << 3)));
+                  for (std::size_t bi = 2; bi + sizeof(uint32_t) < instbuf.size(); ++bi) {
+                     mb.push_back(instbuf.at(bi));
+                  }
+                  auto *mov_inst = new Instruction<opposite<bits>>(opcode_t(mb));
+                  return {lea_inst, mov_inst};
+               }
+
                auto *clone = new Instruction<opposite<bits>>(instbuf);
                clone->memidx = memidx;
-               if (this->memdisp) {
-                  env.resolve(this->memdisp, &clone->memdisp);
-               }
+               env.resolve(this->memdisp, &clone->memdisp);
                auto *m64imm = Immediate<opposite<bits>>::Create(0);
                env.resolve(imm->pointee, &m64imm->pointee);
                m64imm->pointee_offset = imm->pointee_offset;

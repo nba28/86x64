@@ -147,6 +147,35 @@ namespace MachO {
       return false;
    }
 
+   template <Bits bits>
+   bool ParseEnv<bits>::vmaddr_in_const_section(std::size_t vmaddr) const {
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(vmaddr)) { continue; }
+            const std::string n = sec->name();
+            /* NARROW string/object-pointer targets only: a 32-bit value aliasing
+             * one of these is almost always a real pointer. Deliberately
+             * EXCLUDES __text/__const/literals — those are large/varied ranges
+             * that integer constants frequently alias, which would mis-relocate
+             * a `movl $int, off(%reg)` integer ivar store as a pointer (observed
+             * to crash iPhoto's early AppKit init). The constant @"..." path
+             * that needs this lives in __cstring/__cfstring; objc receiver
+             * pointers live in the class-ref / metadata sections. */
+            return n == "__cstring" || n == "__cfstring"
+                || n.rfind("__objc_", 0) == 0   /* modern ObjC metadata */
+                || n == "__cls_refs" || n == "__message_refs"
+                || n == "__cls_meth" || n == "__inst_meth"
+                || n == "__class" || n == "__meta_class" || n == "__category"
+                || n == "__module_info" || n == "__symbols"
+                || n == "__instance_vars" || n == "__class_vars"
+                || n == "__protocol" || n == "__string_object";
+         }
+         return false;   /* in segment but between/outside sections */
+      }
+      return false;
+   }
+
    template class ParseEnv<Bits::M32>;
    template class ParseEnv<Bits::M64>;
    

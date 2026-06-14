@@ -558,6 +558,24 @@ static int legacy_cstr_ok(uint32_t p32) {
    return 0;
 }
 
+/* A real x86_64 object the i386 code references by its raw LOW-4GB address —
+ * e.g. a __DATA,__cfstring constant @"..." stored/loaded via a relocated
+ * absolute immediate (movl $&cfstring, ivar). Such an object's isa is a real
+ * (high, >4GB) Class pointer, unlike a legacy i386 object whose isa is a
+ * low-4GB legacy_objc_class. legacy_obj_to_real reads only the low 4 bytes of
+ * the isa and would false-match the constant as a legacy object, so recognise
+ * it first and use it directly. Heuristic but safe: a legacy i386 object's
+ * 8-byte "isa" (isa_low | next_ivar<<32) is essentially never a readable
+ * high pointer whose own isa (metaclass) is also a readable high pointer. */
+static int is_real_x86_object(uint32_t p) {
+   if (p == 0 || !mem_readable(p, 8)) { return 0; }
+   uint64_t isa = *(const uint64_t *)(uintptr_t)p;
+   if (isa < 0x100000000ULL || (isa & 0x7) || !mem_readable(isa, 8)) { return 0; }
+   uint64_t meta = *(const uint64_t *)(uintptr_t)isa;   /* class's isa = metaclass */
+   if (meta < 0x100000000ULL || (meta & 0x7) || !mem_readable(meta, 8)) { return 0; }
+   return 1;
+}
+
 /* Resolve an i386 self32 to a real x86_64 id. Handles the three forms a
  * translated binary can pass: arena proxy handle, class-name cstring
  * pointer (for class messages), or nil. An unmapped value is none of these:
@@ -573,6 +591,9 @@ static id resolve_self(uint32_t self32) {
    if (sp >= g_arena_base && sp < g_arena_end) {
       return (id)(uintptr_t)*(uint64_t *)sp;
    }
+   /* A raw constant x86_64 object (e.g. a __cfstring @"") referenced by its
+    * low-4GB address — use it directly before the legacy mapper mis-claims it. */
+   if (is_real_x86_object(self32)) { return (id)(uintptr_t)self32; }
    /* A raw legacy i386 object/class used as a receiver (e.g. a static class
     * object, or an instance handed back to us): map to its real modern peer.
     * For a class-name cstring (the usual class-message receiver) this returns
@@ -2213,6 +2234,7 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    id real_self = resolve_self(args32[0]);
    SEL sel = resolve_sel(args32[1]);
 
+
    if (getenv("OBJC_BRIDGE_TRACE")) {
       const char *cls_name = "(nil)";
       if (real_self) {
@@ -3348,6 +3370,10 @@ static uint64_t unwrap_obj_arg(uint32_t a) {
    }
    if ((uintptr_t)a >= g_arena_base && (uintptr_t)a < g_arena_end) {
       return *(uint64_t *)(uintptr_t)a;    /* arena proxy handle */
+   }
+   if (is_real_x86_object(a)) {            /* raw constant x86_64 obj (cfstring) */
+      if (utrace) { fprintf(stderr, "[uo] 0x%08x real-obj passthrough\n", a); }
+      return (uint64_t)a;
    }
    id lr = legacy_obj_to_real(a);          /* raw legacy obj/class -> real */
    if (lr) {

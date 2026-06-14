@@ -60,8 +60,14 @@ namespace MachO {
        * containing blob" guess corrupts category/method metadata (regressed
        * +[NSObject isLogEnabled] legacy category lookup). */
       bool vmaddr_in_writable_data(std::size_t vmaddr) const;
-      
-      
+
+      /* True iff vmaddr falls in a constant/string/code section that is a
+       * high-confidence pointer target (__cstring/__cfstring/__const/__text/
+       * __objc* etc.). Used to disambiguate a `mov [reg+disp], imm32` whose
+       * imm32 might be a baked-in absolute pointer vs. an integer constant. */
+      bool vmaddr_in_const_section(std::size_t vmaddr) const;
+
+
       ParseEnv(Archive<bits>& archive):
          archive(archive),
          vmaddr_resolver("ParseEnv::vmaddr_resolver"), offset_resolver("ParseEnv::offset_resolver"),
