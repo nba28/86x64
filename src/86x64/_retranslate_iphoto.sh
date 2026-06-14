@@ -25,11 +25,11 @@ do_one() {  # $1 = bundle, $2 = relpath, $3 = backup_root
             return
         fi
     fi
-    if bash "$TB" "$bundle" "$rel" > /tmp/tb_one.log 2>&1; then
+    if bash "$TB" "$bundle" "$rel" > /tmp/tb_one_iphoto.log 2>&1; then
         pass=$((pass+1)); echo "OK  $rel"
     else
         fail=$((fail+1)); failed_list="$failed_list $rel"
-        echo "FAIL $rel"; tail -8 /tmp/tb_one.log | sed 's/^/    /'
+        echo "FAIL $rel"; tail -8 /tmp/tb_one_iphoto.log | sed 's/^/    /'
     fi
 }
 
