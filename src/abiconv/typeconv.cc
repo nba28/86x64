@@ -146,6 +146,16 @@ void conversion::convert_int(std::ostream& os, CXTypeKind type_kind, const Locat
       if (from_width < to_width) {
          if (get_type_signed(type_kind)) {
             opcode = "movsx";
+         } else if (dst.kind() == Location::Kind::MEM) {
+            /* Unsigned widen into MEMORY: the `mov r32` zero-extend trick only
+             * clears the upper half when the destination is a REGISTER. Writing
+             * dword to an 8-byte stack arg slot leaves its top 4 bytes garbage
+             * -> a truncated pointer/unsigned-long arg passed on the stack (the
+             * mem->mem case above bounces through rax, so src here is a register
+             * already holding the zero-extended value). Store the full width.
+             * (iPhoto: CGImageCreate's 9th arg, the `decode` pointer.) */
+            opcode = "mov";
+            from_width = to_width;
          } else {
             to_width = from_width;
             opcode = "mov";
