@@ -427,6 +427,17 @@ struct ABIGenerator {
     * table for each; see emit_data_shadows(). Stored WITH the leading
     * underscore (e.g. "_NSArgumentDomain"), like function `sym`. */
    std::vector<std::string> data_shadow_syms;
+   /* Symbols forced to be OBJECT data-shadows (info=0) WITHOUT a header decl.
+    * Used for external data-pointer constants from frameworks we have no
+    * headers for — most importantly an app's bundled PRIVATE frameworks
+    * (RedRock, iLifeSlideshow, ...). Those export NSString or CF object
+    * constants the translated i386 binary reads via the truncating
+    * `movl slot,%reg; movl (%reg),%reg` double-deref, exactly like the
+    * header-typed NS / CF constants, but they never enter the consider set
+    * (it is built from SYSTEM framework exports) so handle_var_decl never
+    * shadows them. Seeded generically from a binary's own un-shadowed data
+    * imports (see _extract_data_shadows.sh). Stored WITH leading underscore. */
+   std::vector<std::string> forced_object_shadows;
    /* Per-shadow kind/size, parallel to data_shadow_syms. 0 = ObjC-object /
     * opaque-CF pointer constant (runtime wraps the >4GB value as a handle).
     * 1/2/4/8 = SCALAR data constant (double/float/int/...): the runtime copies
@@ -654,6 +665,23 @@ struct ABIGenerator {
       data_shadow_info.push_back(info);
    }
 
+   /* Append forced object data-shadows (header-less; see forced_object_shadows)
+    * to the shadow set, skipping any a header already shadowed so the emitted
+    * `__<sym>: dq 0` label is not duplicated (which would fail to assemble).
+    * Run after all headers are processed and before emit_data_shadows. */
+   void finalize_forced_shadows() {
+      Symbols already(data_shadow_syms.begin(), data_shadow_syms.end());
+      for (const std::string& sym : forced_object_shadows) {
+         if (already.count(sym)) { continue; }
+         already.insert(sym);
+         data_shadow_syms.push_back(sym);
+         data_shadow_info.push_back(0);   /* object / CF handle-wrap */
+         if (getenv("ABIGEN_TRACE")) {
+            std::cerr << "abigen: forced object data shadow " << sym << std::endl;
+         }
+      }
+   }
+
    /* Emit the data-shadow storage + the runtime table consumed by
     * x64_init_data_shadows() in objc_shim.c. Always emits the table/count
     * symbols (possibly empty) so the C side links. */
@@ -735,6 +763,9 @@ int main(int argc, char *argv[]) {
                       "  -s <symfile>    file containing symbols to consider\n" \
                       "  -i <ignorefile> file containing symbols to ignore\n" \
                       "  -r <structfile> file containing struct names to not convert\n" \
+                      "  --data-shadow-file <file>  symbols (one per line, leading\n" \
+                      "                  underscore) to force as OBJECT data-shadows\n" \
+                      "                  with no header decl (private-framework consts)\n" \
                       "  -c              use system call ABI\n"         \
                       "  -X <arg>        extra arg to forward to libclang (may repeat)\n" \
                       "  --isysroot <path>  shorthand for -X -isysroot -X <path>\n" \
@@ -746,10 +777,11 @@ int main(int argc, char *argv[]) {
    const char *sympath = nullptr;
    const char *symignorepath = nullptr;
    const char *structpath = nullptr;
+   const char *datashadowpath = nullptr;
    ABIGenerator::ABI abi = ABIGenerator::ABI::FUNCTION;
    std::vector<std::string> clang_args;
    const char *optstring = "ho:s:i:r:cX:";
-   enum { OPT_ISYSROOT = 1000 };
+   enum { OPT_ISYSROOT = 1000, OPT_DATASHADOW = 1001 };
    const struct option longopts[] = {{"help", no_argument, nullptr, 'h'},
                                      {"output", required_argument, nullptr, 'o'},
                                      {"symfile", required_argument, nullptr, 's'},
@@ -758,6 +790,7 @@ int main(int argc, char *argv[]) {
                                      {"syscall", no_argument, nullptr, 'c'},
                                      {"clang-arg", required_argument, nullptr, 'X'},
                                      {"isysroot", required_argument, nullptr, OPT_ISYSROOT},
+                                     {"data-shadow-file", required_argument, nullptr, OPT_DATASHADOW},
                                      {0}
    };
 
@@ -789,6 +822,9 @@ int main(int argc, char *argv[]) {
          clang_args.emplace_back("-isysroot");
          clang_args.emplace_back(optarg);
          break;
+      case OPT_DATASHADOW:
+         datashadowpath = optarg;
+         break;
       case '?':
          usage(stderr);
          return 1;
@@ -818,6 +854,17 @@ int main(int argc, char *argv[]) {
       parse_lines(structpath, [&] (const std::string& s) { abigen.ignore_structs.insert(s); });
    }
 
+   /* Header-less forced object data-shadows (one symbol per line, with the
+    * leading underscore). Comment lines (#) and blanks are skipped. */
+   if (datashadowpath) {
+      parse_lines(datashadowpath, [&] (const std::string& line) {
+         std::size_t a = line.find_first_not_of(" \t\r\n");
+         if (a == std::string::npos || line[a] == '#') { return; }
+         std::size_t b = line.find_last_not_of(" \t\r\n");
+         abigen.forced_object_shadows.push_back(line.substr(a, b - a + 1));
+      });
+   }
+
    /* must run after the consider set is finalized (load + ignore) and before
     * any emit, which mutates abigen.symbols */
    abigen.compute_collision_names();
@@ -829,7 +876,9 @@ int main(int argc, char *argv[]) {
       abigen.handle_file(argv[i]);
    }
 
-   /* emit external ObjC-object data-constant shadows + their runtime table */
+   /* append header-less forced object shadows, then emit external ObjC-object
+    * data-constant shadows + their runtime table */
+   abigen.finalize_forced_shadows();
    abigen.emit_data_shadows();
 
    /* emit the callback-signature descriptors registered by convert_fnptr */
