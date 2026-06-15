@@ -252,6 +252,11 @@
 ;; drawPattern/releaseInfo native CG calls back -> hand-marshalled in objc_shim.c.
    MTSHIM ___CGPatternCreate, _shim_CGPatternCreate
 
+;; objc_setProperty/getProperty: @synthesize accessor helpers (libobjc, never
+;; shimmed). Operate on the i386 SHADOW ivar; bridge retain/copy/release.
+   MTSHIM ___objc_setProperty, _shim_objc_setProperty
+   MTSHIM ___objc_getProperty, _shim_objc_getProperty
+
 ;; ---------------------------------------------------------------------
 ;; Legacy ObjC1 runtime compat (objc_shim.c "exc1" section): symbols modern
 ;; libobjc dropped. static-interpose redirects each image's libobjc binds

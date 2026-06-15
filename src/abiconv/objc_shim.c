@@ -3222,6 +3222,83 @@ static uint32_t get_or_create_shadow(id real, Class cls) {
  * not a shadow. */
 id _86x64_shadow_real(uint32_t s) { return shadow_real(s); }
 
+/* ---------------------------------------------------------------------------
+ * objc_setProperty / objc_getProperty — the modern-runtime @synthesize'd
+ * accessor helpers. iPhoto's property setters/getters call them via classic
+ * symbol stubs, but they are libobjc functions abigen never shimmed (libobjc
+ * is not in the consider set), so the translated i386 cdecl call reached NATIVE
+ * objc_setProperty, which read x86_64 REGISTER args -> garbage (self=nil,
+ * newValue=tiny) -> EXC_BAD_ACCESS retaining junk during nib unarchiving.
+ *
+ * We cannot just call native objc_setProperty on the bridged object: `offset`
+ * is the i386 ivar offset, and a legacy instance keeps its ivars in a low-4GB
+ * i386-layout SHADOW buffer (self32 = the shadow), NOT in the real modern
+ * object (whose NSObject/superclass ivars occupy those offsets). So we operate
+ * on the i386 ivar slot directly and bridge retain/copy/release to the real
+ * object. Atomicity is ignored (nib loading is single-threaded main-thread).
+ *
+ * i386 cdecl frames (4-byte slots, MTSHIM hands &args at a[0]):
+ *   setProperty: a0 self, a1 _cmd, a2 offset, a3 newValue, a4 atomic, a5 copy
+ *   getProperty: a0 self, a1 _cmd, a2 offset, a3 atomic
+ * ------------------------------------------------------------------------- */
+extern void objc_release(id);
+
+/* The i386 ivar slot (a 4-byte id) for property `offset` on i386 object obj32,
+ * or NULL if obj32 isn't a legacy instance we can safely store into. */
+static uint32_t *prop_ivar_slot(uint32_t obj32, uint32_t offset) {
+   if (!obj32) { return NULL; }
+   /* legacy instance: self32 = its i386 shadow buffer; ivars at i386 offsets. */
+   if (is_shadow(obj32)) { return (uint32_t *)(uintptr_t)(obj32 + offset); }
+   /* a proxy-arena handle wraps a NATIVE object: an i386 offset is meaningless
+    * there and a 4-byte store would corrupt the handle slots — never touch it. */
+   if ((uintptr_t)obj32 >= g_arena_base && (uintptr_t)obj32 < g_arena_end) {
+      return NULL;
+   }
+   /* a raw low-4GB legacy instance with in-place i386 ivars (not shadow-backed). */
+   if (mem_readable((uintptr_t)obj32 + offset, 4)) {
+      return (uint32_t *)(uintptr_t)(obj32 + offset);
+   }
+   return NULL;
+}
+
+uint32_t shim_objc_setProperty(const uint32_t *a) {
+   uint32_t  self32     = a[0];
+   uint32_t  offset     = a[2];
+   uint32_t  newValue32 = a[3];
+   int       shouldCopy = (int)a[5];
+
+   uint32_t *slot = prop_ivar_slot(self32, offset);
+   if (!slot) { return 0; }
+
+   /* Hold a strong ref to the new value's real object (retain), or store a
+    * copy. The ivar keeps the i386 representation (handle / shadow / low ptr). */
+   uint32_t store32 = newValue32;
+   if (newValue32) {
+      id nv = resolve_self(newValue32);
+      if (nv) {
+         if (shouldCopy) {
+            id cp = msg_id1(nv, sel_registerName("copyWithZone:"), (id)0);
+            store32 = cp ? x64_objc_wrap((uint64_t)(uintptr_t)cp) : newValue32;
+         } else {
+            objc_retain(nv);
+         }
+      }
+   }
+
+   uint32_t old = *slot;
+   *slot = store32;
+   if (old && old != store32) {
+      id ov = resolve_self(old);
+      if (ov) { objc_release(ov); }
+   }
+   return 0;
+}
+
+uint32_t shim_objc_getProperty(const uint32_t *a) {
+   uint32_t *slot = prop_ivar_slot(a[0], a[2]);
+   return slot ? *slot : 0;
+}
+
 /* Return-value wrap that PRESERVES legacy-object identity (objc_msgSend asm
  * ret_kind==1 path). A (super) call returning a legacy-class instance — most
  * importantly `self = [super init]` — must come back to the i386 caller as that
