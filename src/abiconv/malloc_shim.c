@@ -89,35 +89,52 @@ struct heap_ctrl {
 #define HEAP_CTRL_MAGIC 0x3836583634484541ULL  /* "86X64HEA" */
 
 static struct heap_ctrl *g_hc = NULL;
+/* Per-copy lock serialising heap_init within this copy: real targets call
+ * malloc from many threads, and the first calls can race before g_hc is set;
+ * without this two threads would each create a control block (two heaps, env
+ * var written twice) and corrupt allocation. The cross-COPY race (different
+ * copies racing to be first) is still resolved by the env-var + magic
+ * mechanism below; copy constructors run dyld-serialized so it is rare. */
+static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
 
 /* Attach to the shared control block, creating it if we are the first copy.
- * Idempotent; safe to call at the top of every entry point. The startup race
- * (two copies both first) is benign in practice: the first malloc happens in a
- * dyld-serialized static initializer, before the program spawns threads. */
+ * Idempotent; safe to call at the top of every entry point. */
 static void heap_init(void) {
    if (g_hc) { return; }
+   os_unfair_lock_lock(&g_init_lock);
+   if (g_hc) { os_unfair_lock_unlock(&g_init_lock); return; }
    const char *e = getenv(HEAP_CTRL_ENV);
    if (e && *e) {
       struct heap_ctrl *c =
          (struct heap_ctrl *)(uintptr_t)strtoull(e, NULL, 16);
       volatile uint64_t *mp = &c->magic;
       for (int i = 0; i < 1000000 && *mp != HEAP_CTRL_MAGIC; ++i) { }
-      if (*mp == HEAP_CTRL_MAGIC) { g_hc = c; return; }
+      if (*mp == HEAP_CTRL_MAGIC) {
+         g_hc = c;
+         os_unfair_lock_unlock(&g_init_lock);
+         return;
+      }
    }
    /* First copy: reserve the control block (zero-filled by the kernel). */
    mach_vm_address_t addr = 0;
    if (mach_vm_allocate(mach_task_self(), &addr, sizeof(struct heap_ctrl),
                         VM_FLAGS_ANYWHERE) != KERN_SUCCESS) {
+      os_unfair_lock_unlock(&g_init_lock);
       return;   /* leaves g_hc NULL; malloc will return NULL (caller handles) */
    }
    struct heap_ctrl *c = (struct heap_ctrl *)(uintptr_t)addr;
    c->lock = OS_UNFAIR_LOCK_INIT;
    __sync_synchronize();
    c->magic = HEAP_CTRL_MAGIC;
+   /* Publish g_hc BEFORE setenv: setenv strdups its value via malloc, which
+    * re-enters this copy's malloc -> heap_init. With g_hc already set, that
+    * re-entrant call hits the lock-free fast path and returns immediately
+    * instead of deadlocking on the non-recursive g_init_lock. */
+   g_hc = c;
    char buf[32];
    snprintf(buf, sizeof buf, "0x%llx", (unsigned long long)(uintptr_t)c);
    setenv(HEAP_CTRL_ENV, buf, 1);
-   g_hc = c;
+   os_unfair_lock_unlock(&g_init_lock);
 }
 
 /* Reserve one more low-4GB region. Caller holds g_hc->lock. Returns the new
