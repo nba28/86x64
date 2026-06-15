@@ -40,6 +40,10 @@ set(ABICONV_SYM_SOURCES
   # DiskArbitration with i386 cdecl stack args -> garbage -> jump-to-garbage
   # crash. The opaque *Ref args/returns bridge via the generic CF-handle path.
   /System/Library/Frameworks/DiskArbitration.framework/DiskArbitration
+  # SystemConfiguration: iPhoto's IP_IPHostReachabilityMgr/IP_ReachableHost call
+  # SCNetworkReachabilityCreateWithName/GetFlags/ScheduleWithRunLoop/SetCallback,
+  # SCDynamicStore*, SCNetworkInterface* — unshimmed they crashed the same way.
+  /System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration
   /System/Library/Frameworks/Foundation.framework/Foundation
   /System/Library/Frameworks/AppKit.framework/AppKit
   )

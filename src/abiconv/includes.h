@@ -37,6 +37,11 @@
  * registerWithDiskArb:) get ABI shims; opaque DASessionRef/DADiskRef bridge
  * via the generic CF-handle path. */
 #include <DiskArbitration/DiskArbitration.h>
+/* SystemConfiguration: iPhoto's IP_IPHostReachabilityMgr / IP_ReachableHost
+ * call SCNetworkReachabilityCreateWithName / GetFlags / ScheduleWithRunLoop /
+ * SetCallback and SCDynamicStore* / SCNetworkInterface*. Opaque SC*Ref bridge
+ * via the generic CF-handle path; the reachability callback fn-ptr via cb_bridge. */
+#include <SystemConfiguration/SystemConfiguration.h>
 
 /* Foundation + AppKit C functions (NSBeep, NSLog, NSSearchPathForDirectories-
  * InDomains, NSStringFromClass, ...) — legacy i386 apps call these directly,
