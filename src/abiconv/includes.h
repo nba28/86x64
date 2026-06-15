@@ -32,6 +32,11 @@
  * already transitively includes the CG headers, but list it explicitly so the
  * VarDecls (kCGColorSpaceGenericRGB, ...) are unambiguously parsed. */
 #include <CoreGraphics/CoreGraphics.h>
+/* DiskArbitration: in ABICONV_SYM_SOURCES so DASessionCreate /
+ * DADiskCreateFromBSDName / DADiskCopyDescription (iPhoto's PhotoCDManager
+ * registerWithDiskArb:) get ABI shims; opaque DASessionRef/DADiskRef bridge
+ * via the generic CF-handle path. */
+#include <DiskArbitration/DiskArbitration.h>
 
 /* Foundation + AppKit C functions (NSBeep, NSLog, NSSearchPathForDirectories-
  * InDomains, NSStringFromClass, ...) — legacy i386 apps call these directly,

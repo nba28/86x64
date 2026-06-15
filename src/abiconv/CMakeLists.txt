@@ -34,6 +34,12 @@ set(ABICONV_SYM_SOURCES
   # the PIC-anchor fix resolved the load to the real nl_ptr). List directly so
   # both the functions and the data constants enter the consider set.
   /System/Library/Frameworks/CoreGraphics.framework/CoreGraphics
+  # DiskArbitration: iPhoto's PhotoCDManager registerWithDiskArb: calls
+  # DASessionCreate / DADiskCreateFromBSDName / DADiskCopyDescription (opaque
+  # DASessionRef/DADiskRef + CFDictionaryRef). Unshimmed they reached native
+  # DiskArbitration with i386 cdecl stack args -> garbage -> jump-to-garbage
+  # crash. The opaque *Ref args/returns bridge via the generic CF-handle path.
+  /System/Library/Frameworks/DiskArbitration.framework/DiskArbitration
   /System/Library/Frameworks/Foundation.framework/Foundation
   /System/Library/Frameworks/AppKit.framework/AppKit
   )
