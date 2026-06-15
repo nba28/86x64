@@ -34,6 +34,9 @@
 #include <mach-o/loader.h>
 #include <mach-o/dyld.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
+#include <fcntl.h>
+#include <unistd.h>
 #include <stdio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -337,6 +340,66 @@ static void slide_cfstrings(const struct mach_header_64 *mh64, intptr_t slide,
    }
 }
 
+/* Repair + slide a legacy selector/class-ref section (__message_refs /
+ * __cls_refs) from the ON-DISK original instead of the live slot value.
+ *
+ * Modern libobjc's old-ABI (__OBJC,__module_info) reader runs at map_images,
+ * BEFORE our add-image callback, and uniques the selector refs by writing the
+ * 8-byte native SEL back into each ref. The translated binary keeps these refs
+ * as 4-byte slots (i386 stride), so each 8-byte write clobbers TWO 4-byte
+ * slots: the low half lands in slot[i], the high half (0x00007ff8…) in
+ * slot[i+1]. The translated code then reads slot[i+1] as a selector -> nil
+ * sel -> objc_msgSend(obj,nil) -> jump to garbage. The original 4-byte cstring
+ * pointers are unrecoverable from the corrupted live slots, but they are
+ * intact in the file. We mmap the file, read each original 4-byte slot, and
+ * (re)write original+slide into the live section — idempotent, and immune to
+ * whatever libobjc did. Only the pure ref arrays are repaired this way; other
+ * __OBJC sections (which our reverse registration legitimately mutates) keep
+ * the in-place slide. */
+static int repair_refs_from_file(const char *imgname,
+                                 const char *sectname,
+                                 uint64_t vmaddr, uint64_t fileoff,
+                                 uint64_t size, intptr_t slide,
+                                 uint64_t vmaddr_lo, uint64_t vmaddr_hi) {
+   if (size == 0 || !imgname) { return 0; }
+   int fd = open(imgname, O_RDONLY);
+   if (fd < 0) { return 0; }
+   struct stat stb;
+   if (fstat(fd, &stb) != 0 || (uint64_t)stb.st_size < fileoff + size) {
+      close(fd); return 0;
+   }
+   /* The translated image may be a thin slice inside a fat file, but the
+    * wrapper-installed dylibs are thin (translate-bundle lipo-thins), so the
+    * mach_header is at offset 0 and section file offsets are absolute. */
+   void *fmap = mmap(NULL, (size_t)(fileoff + size), PROT_READ, MAP_PRIVATE, fd, 0);
+   close(fd);
+   if (fmap == MAP_FAILED) { return 0; }
+   const uint32_t *orig = (const uint32_t *)((uintptr_t)fmap + fileoff);
+
+   void *base = (void *)(uintptr_t)(vmaddr + slide);
+   const size_t page = 4096;
+   uintptr_t a = (uintptr_t)base, e = a + size;
+   uintptr_t aa = a & ~(uintptr_t)(page - 1);
+   size_t la = ((e + page - 1) & ~(uintptr_t)(page - 1)) - aa;
+   if (mprotect((void *)aa, la, PROT_READ | PROT_WRITE) != 0) {
+      munmap(fmap, (size_t)(fileoff + size)); return 0;
+   }
+   uint32_t *live = (uint32_t *)base;
+   size_t n = size / 4, fixed = 0;
+   for (size_t i = 0; i < n; i++) {
+      uint32_t ov = orig[i];
+      uint32_t want = (ov >= vmaddr_lo && ov < vmaddr_hi)
+                          ? (uint32_t)((uint64_t)ov + (uint64_t)slide) : ov;
+      if (live[i] != want) { live[i] = want; ++fixed; }
+   }
+   if (g_verbose && fixed) {
+      fprintf(stderr, "abiconv objc_slide: repaired %zu/%zu slots in __OBJC,%s "
+              "of %s from file\n", fixed, n, sectname, imgname);
+   }
+   munmap(fmap, (size_t)(fileoff + size));
+   return 1;
+}
+
 static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    if (mh->magic != MH_MAGIC_64) { return; }
    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
@@ -404,6 +467,23 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
          slide_section_4byte(imgname, sect->segname, sect->sectname,
                              sect->addr, sect->size, slide,
                              vmaddr_lo, vmaddr_hi);
+      }
+   }
+
+   /* Repair the selector/class ref arrays from the on-disk originals. libobjc's
+    * old-ABI reader corrupts these at map_images (before this callback), so the
+    * in-place slide above can't recover them — see repair_refs_from_file. Runs
+    * for slide==0 images too (the corruption is independent of the slide). */
+   {
+      const struct section_64 *sect =
+         (const struct section_64 *)(objc_seg + 1);
+      for (uint32_t i = 0; i < objc_seg->nsects; i++, sect++) {
+         if (strncmp(sect->sectname, "__message_refs", 16) == 0
+             || strncmp(sect->sectname, "__cls_refs", 16) == 0) {
+            repair_refs_from_file(imgname, sect->sectname, sect->addr,
+                                  sect->offset, sect->size, slide,
+                                  vmaddr_lo, vmaddr_hi);
+         }
       }
    }
 
