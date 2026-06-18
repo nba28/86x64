@@ -159,6 +159,8 @@ _objc_exception_try_enter
 _objc_exception_try_exit
 _objc_getProperty
 _objc_setProperty
+_RequestVolumeNotification
+_DeclineVolumeNotification
 __objc_flush_caches
 _class_addMethod
 _class_copyMethodList

@@ -257,6 +257,11 @@
    MTSHIM ___objc_setProperty, _shim_objc_setProperty
    MTSHIM ___objc_getProperty, _shim_objc_getProperty
 
+;; Deprecated CarbonCore volume-notification SPIs (no-ops on modern macOS);
+;; native ret over-pops the i386 4-byte return addr -> fused PC. No-op shims.
+   MTSHIM ___RequestVolumeNotification, _shim_RequestVolumeNotification
+   MTSHIM ___DeclineVolumeNotification, _shim_DeclineVolumeNotification
+
 ;; ---------------------------------------------------------------------
 ;; Legacy ObjC1 runtime compat (objc_shim.c "exc1" section): symbols modern
 ;; libobjc dropped. static-interpose redirects each image's libobjc binds

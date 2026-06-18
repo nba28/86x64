@@ -107,6 +107,9 @@ struct objc_shared_ctrl {
     * Shared so every libabiconv copy agrees on which modern R' stands for a
     * given raw i386 instance. Allocated by the first copy (see arena_init). */
    uint64_t        lpair;        /* struct lpair_ent * (open-addressed) */
+   /* reverse-registered class -> i386 instance size, shared so any copy's
+    * get_or_create_shadow sizes the shadow buffer right (see struct rcls_ent). */
+   uint64_t        rcls;         /* struct rcls_ent * (open-addressed) */
    /* Legacy ObjC1 setjmp-exception chain (NS_DURING): per-thread top of the
     * _objc_exception_data list. MUST be cross-copy: try_enter runs in one
     * image's adjacent libabiconv copy, the matching objc_exception_throw can
@@ -121,6 +124,19 @@ struct objc_shared_ctrl {
 /* legacy i386 object pointer -> real modern id (paired proxy). */
 struct lpair_ent { uint32_t p; uint64_t real; };
 #define LPAIR_CAP (1u << 16)
+
+/* reverse-registered legacy class -> (modern Class, legacy isa addr, i386
+ * instance size). Lives in the shared g_ctrl so get_or_create_shadow in ANY
+ * libabiconv copy sizes the i386 shadow buffer correctly: a per-copy table
+ * misses for a class another copy registered, defaulting isz to 64 and
+ * UNDER-allocating the shadow, so the i386 init overruns into the next
+ * shadow's real-object header (-> object_getClass on a garbage receiver). */
+struct rcls_ent { Class cls; uint32_t legacy_addr; uint32_t instance_size; };
+#define RCLS_CAP 8192u
+/* Per-shadow trailing slack: absorbs i386 -init writes beyond a class's
+ * (under-reported) instance_size so they can't reach the next shadow's
+ * real-object header. Cheap — the shadow arena is 64MB. */
+#define SHADOW_SLACK 1024u
 
 static struct objc_shared_ctrl *g_ctrl = NULL;
 /* hot-path caches; identical across copies once attached to the shared ctrl */
@@ -195,6 +211,8 @@ static void arena_init(void) {
    c->map        = map;
    c->lpair      = (uint64_t)(uintptr_t)
       calloc(LPAIR_CAP, sizeof(struct lpair_ent));
+   c->rcls       = (uint64_t)(uintptr_t)
+      calloc(RCLS_CAP, sizeof(struct rcls_ent));
    c->pgmemo     = (uint64_t)(uintptr_t)
       calloc(PGMEMO_CAP, sizeof(struct pgmemo_ent));
    __sync_synchronize();
@@ -254,11 +272,15 @@ uint32_t x64_objc_wrap(uint64_t real) {
       i = (i + 1) & (MAP_CAP - 1);
    }
 
-   if (g_ctrl->arena_used >= ARENA_SLOTS) {
+   /* Atomic bump: iPhoto creates reverse-bridge instances on multiple threads
+    * concurrently (e.g. IP_IPHostReachabilityMgr on a background thread while
+    * PhotoCDManager inits on main), so a plain `arena_used++` loses updates and
+    * hands two callers the same slot. */
+   uint32_t slot = __atomic_fetch_add(&g_ctrl->arena_used, 1, __ATOMIC_SEQ_CST);
+   if (slot >= ARENA_SLOTS) {
       fprintf(stderr, "objc_shim: proxy arena exhausted\n");
       abort();
    }
-   uint32_t slot = g_ctrl->arena_used++;
    g_arena[slot] = real;
    uint32_t handle = (uint32_t)(uintptr_t)&g_arena[slot];
 
@@ -3130,28 +3152,30 @@ static Class reverse_take_super(id self_, SEL sel) {
 }
 
 /* ---- registered Class -> legacy class metadata addr + instance_size ---- */
-#define RCLS_CAP 8192u
-struct rcls_ent { Class cls; uint32_t legacy_addr; uint32_t instance_size; };
-static struct rcls_ent g_rcls[RCLS_CAP];
 static uint32_t rcls_hash(Class c) {
    uint64_t h = (uint64_t)(uintptr_t)c * 2654435761ULL;
    return (uint32_t)((h ^ (h >> 32)) & (RCLS_CAP - 1));
 }
 static void rcls_insert(Class c, uint32_t addr, uint32_t isz) {
+   if (!g_ctrl || !g_ctrl->rcls) { return; }
+   struct rcls_ent *t = (struct rcls_ent *)(uintptr_t)g_ctrl->rcls;
    uint32_t i = rcls_hash(c);
    for (uint32_t n = 0; n < RCLS_CAP; ++n) {
-      if (!g_rcls[i].cls || g_rcls[i].cls == c) {
-         g_rcls[i].cls = c; g_rcls[i].legacy_addr = addr;
-         g_rcls[i].instance_size = isz; return;
+      if (!t[i].cls || t[i].cls == c) {
+         t[i].legacy_addr = addr; t[i].instance_size = isz;
+         __sync_synchronize();        /* publish size/addr before the key */
+         t[i].cls = c; return;
       }
       i = (i + 1) & (RCLS_CAP - 1);
    }
 }
 static struct rcls_ent *rcls_lookup(Class c) {
+   if (!g_ctrl || !g_ctrl->rcls) { return NULL; }
+   struct rcls_ent *t = (struct rcls_ent *)(uintptr_t)g_ctrl->rcls;
    uint32_t i = rcls_hash(c);
    for (uint32_t n = 0; n < RCLS_CAP; ++n) {
-      if (!g_rcls[i].cls) { return NULL; }
-      if (g_rcls[i].cls == c) { return &g_rcls[i]; }
+      if (!t[i].cls) { return NULL; }
+      if (t[i].cls == c) { return &t[i]; }
       i = (i + 1) & (RCLS_CAP - 1);
    }
    return NULL;
@@ -3203,11 +3227,28 @@ static uint32_t get_or_create_shadow(id real, Class cls) {
    struct rcls_ent *ce = rcls_lookup(cls);
    uint32_t isz = ce ? ce->instance_size : 64;
    uint32_t isa = ce ? ce->legacy_addr : 0;
+   /* A legacy class's reported instance_size is unreliable: iPhoto's
+    * PhotoCDManager reports 20 although its superclass IP_IPHostReachabilityMgr
+    * reports 52, and even the latter's -init writes an ivar past its own 52.
+    * A subclass -init runs [super init], which writes the SUPERCLASS's ivars at
+    * the superclass's (larger) i386 offsets, so the shadow must cover the whole
+    * chain. Take the max instance_size over cls and its registered ancestors,
+    * then add slack to absorb the under-reporting. */
+   for (Class sc = class_getSuperclass(cls); sc; sc = class_getSuperclass(sc)) {
+      struct rcls_ent *se = rcls_lookup(sc);
+      if (se && se->instance_size > isz) { isz = se->instance_size; }
+   }
    if (isz < 4) { isz = 4; }
-   size_t need = 8 + ((isz + 15) & ~(size_t)15);
-   if (g_ctrl->shadow_cur + need > g_ctrl->shadow_end) { return 0; }
-   uintptr_t hdr = (uintptr_t)g_ctrl->shadow_cur;
-   g_ctrl->shadow_cur += need;
+   size_t need = 8 + ((isz + 15) & ~(size_t)15) + SHADOW_SLACK;
+   /* Atomic bump: concurrent reverse-bridge instance creation on multiple
+    * threads (background reachability mgr + main-thread PhotoCDManager) would
+    * otherwise lose-update shadow_cur and hand two instances the same buffer,
+    * so one instance's ivar writes clobber the other's real-object header
+    * (-> object_getClass on a garbage receiver). */
+   uint64_t hdr64 = __atomic_fetch_add(&g_ctrl->shadow_cur, need,
+                                       __ATOMIC_SEQ_CST);
+   if (hdr64 + need > g_ctrl->shadow_end) { return 0; }   /* arena exhausted */
+   uintptr_t hdr = (uintptr_t)hdr64;
    *(uint64_t *)hdr = (uint64_t)real;
    uintptr_t s2 = hdr + 8;
    memset((void *)s2, 0, isz);
@@ -3298,6 +3339,15 @@ uint32_t shim_objc_getProperty(const uint32_t *a) {
    uint32_t *slot = prop_ivar_slot(a[0], a[2]);
    return slot ? *slot : 0;
 }
+
+/* Deprecated CarbonCore volume-notification SPIs. On modern macOS they are
+ * no-ops ("Volume Notification SPI is no longer supported"), but iPhoto's
+ * PhotoCDManager registerWithDiskArb: calls them via classic stubs that bind to
+ * the NATIVE functions, whose x86_64 64-bit `ret` over-pops the translated
+ * i386 4-byte return address -> fused PC crash. Shim them as no-ops returning
+ * noErr; MTSHIM makes the call respect the i386 ABI. */
+uint32_t shim_RequestVolumeNotification(const uint32_t *a) { (void)a; return 0; }
+uint32_t shim_DeclineVolumeNotification(const uint32_t *a) { (void)a; return 0; }
 
 /* Return-value wrap that PRESERVES legacy-object identity (objc_msgSend asm
  * ret_kind==1 path). A (super) call returning a legacy-class instance — most
