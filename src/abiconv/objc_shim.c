@@ -3363,10 +3363,28 @@ uint32_t shim_DeclineVolumeNotification(const uint32_t *a) { (void)a; return 0; 
  * mints a proxy handle exactly as before, so only our own legacy instances
  * change behavior. Tagged pointers have no association -> proxy path, unchanged. */
 uint32_t x64_objc_wrap_ret(uint64_t real) {
-   if (real != 0 && g_ctrl) {
+   if (real >= 0x100000000ULL && g_ctrl) {
       uint32_t s = (uint32_t)(uintptr_t)objc_getAssociatedObject(
                       (id)(uintptr_t)real, shadow_assoc_key());
       if (s) { return s; }
+      /* No shadow association yet, but if `real` is an instance of one of OUR
+       * reverse-registered legacy classes, the i386 code receiving it accesses
+       * ivars at hardcoded i386 offsets and may STORE through it. A proxy
+       * handle is an 8-byte arena slot with no ivar space, so such a store
+       * clobbers a sibling slot's high half -> a fused 0x<handle><lowptr>
+       * pointer that later faults in objc_retain inside native setObject:forKey:
+       * (s13). Hand it the i386-layout shadow instead, exactly as the
+       * reverse-bridge `self` path (get_or_create_shadow) does. Native objects
+       * are never in rcls, so they keep the proxy-handle path; tagged pointers
+       * resolve to a tagged class that isn't ours -> proxy path too. */
+      Class cls = object_getClass((id)(uintptr_t)real);
+      for (Class c = cls; c; c = class_getSuperclass(c)) {
+         if (rcls_lookup(c)) {
+            uint32_t sh = get_or_create_shadow((id)(uintptr_t)real, cls);
+            if (sh) { return sh; }   /* 0 == shadow arena exhausted: fall back */
+            break;
+         }
+      }
    }
    return x64_objc_wrap(real);
 }
@@ -3711,7 +3729,20 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
       char b = *tb;
       if (b == '@' || b == '#' || enc_is_objptr_struct(t) || enc_is_cfptr(t)) {
          uint64_t v; REV_GP(v);
-         plan->frame[w++] = x64_objc_wrap(v);
+         /* A value already representable in 32 bits is an i386-side object the
+          * native caller is handing back (a proxy handle, a legacy-instance
+          * shadow, or a raw low-4GB legacy ptr) — pass it through verbatim.
+          * Re-wrapping it would mint a FRESH proxy handle (an 8-byte arena
+          * slot) where the i386 IMP expects its OWN object: a `[arg ...]`
+          * send still resolves, but any ivar store through the arg writes
+          * into the arena slot and clobbers a sibling handle's high half,
+          * producing a fused 0x<handle><lowptr> pointer that later faults in
+          * objc_retain inside native setObject:forKey: (s13). Only a true
+          * >4GB native object needs a handle; wrap_ret (not wrap) returns the
+          * existing shadow if that object is one of OUR legacy instances,
+          * identity-preserving exactly like the `self=[super init]` path. */
+         plan->frame[w++] = (v >= 0x100000000ULL)
+                               ? x64_objc_wrap_ret(v) : (uint32_t)v;
       } else if (b == ':') {
          uint64_t v; REV_GP(v);
          plan->frame[w++] = x64_objc_sel_wrap(v);
