@@ -120,6 +120,14 @@ struct objc_shared_ctrl {
     * run in another's. Slot claimed by tid (open-addressed, CAS on tid);
     * top==0 marks the slot reclaimable. */
    struct { uint64_t tid; uint32_t top; uint32_t _pad; } exc_chain[64];
+   /* Process-global "claim once" flag for the locale objectForKey: swizzle.
+    * MUST be cross-copy: every libabiconv copy runs legacy_locale_compat_install,
+    * and if more than one swizzles -[NSUserDefaults objectForKey:] they chain
+    * mt_compat onto the previous copy's mt_compat — a broken link in that chain
+    * collapses EVERY defaults read to nil (iPhoto then can't read RootDirectory
+    * -> "library missing"). Only the winner of this CAS swizzles, so it captures
+    * the REAL Foundation IMP. */
+   uint32_t        locale_ofk_done;
 };
 #define SUPER_HINT_SLOTS 64
 #define OBJC_CTRL_MAGIC 0x3836583634415243ULL  /* "86X64ARC" */
@@ -227,6 +235,20 @@ static void arena_init(void) {
    setenv(OBJC_CTRL_ENV, buf, 1);
 
    arena_attach(c);
+}
+
+/* Process-global claim for the locale objectForKey: swizzle (maptable_shim.m).
+ * Returns non-zero to EXACTLY ONE caller across all libabiconv copies; that
+ * winner swizzles -[NSUserDefaults objectForKey:] and so captures the real
+ * Foundation IMP instead of a sibling copy's mt_compat trampoline. Race-free
+ * via an atomic exchange on the shared ctrl (the env-var pattern used elsewhere
+ * has a TOCTOU window we can't afford here — a lost race breaks ALL defaults). */
+int objc_shared_claim_locale_ofk(void);
+int objc_shared_claim_locale_ofk(void) {
+   if (!g_ctrl) { arena_init(); }
+   if (!g_ctrl) { return 1; }   /* no shared ctrl: act as the sole installer */
+   return __atomic_exchange_n(&g_ctrl->locale_ofk_done, 1u,
+                              __ATOMIC_SEQ_CST) == 0u;
 }
 
 static uint32_t hash64(uint64_t x) {

@@ -460,6 +460,21 @@ static id (*g_orig_objectForKey)(id, SEL, id);        /* original IMP */
 static id mt_compat_objectForKey(id self, SEL _cmd, id key) {
    id v = g_orig_objectForKey ? g_orig_objectForKey(self, _cmd, key) : nil;
    if (!v && key) {
+      /* In these translated processes NSUserDefaults' own search-list lookup for
+       * the app (persistent) domain comes back nil even though the value is
+       * present one layer down in CFPreferences: -[NSUserDefaults objectForKey:]
+       * returns nil for EVERY key while CFPreferencesCopyAppValue and
+       * -dictionaryRepresentation both have it (the NSUserDefaults source cache
+       * for the app domain is never populated). That left iPhoto unable to read
+       * RootDirectory -> "Your photo library is missing". Fall back to the
+       * CFPreferences app domain — exactly what objectForKey: should consult —
+       * for the standard defaults. */
+      if (self == [NSUserDefaults standardUserDefaults] &&
+          [key isKindOfClass:[NSString class]]) {
+         CFTypeRef cf = CFPreferencesCopyAppValue((CFStringRef)key,
+                                                  kCFPreferencesCurrentApplication);
+         if (cf) { return [(id)cf autorelease]; }  /* Copy is +1: balance it */
+      }
       id sub = [g_legacy_locale objectForKey:key];
       if (sub) { return sub; }
    }
@@ -471,6 +486,15 @@ void legacy_locale_compat_install(void) {
    if (done) { return; }
    Class cUD = objc_getClass("NSUserDefaults");
    if (!cUD) { return; }                  /* Foundation not up yet: retry */
+
+   /* Swizzle -[NSUserDefaults objectForKey:] in EXACTLY ONE libabiconv copy
+    * process-wide. Every copy runs this installer; if more than one swizzles,
+    * each chains mt_compat onto the previous copy's mt_compat, and a broken
+    * link in that chain makes objectForKey: return nil for ALL keys (defaults
+    * become unreadable -> iPhoto can't read RootDirectory -> "library missing").
+    * The winner of the atomic claim captures the REAL Foundation IMP. */
+   extern int objc_shared_claim_locale_ofk(void);   /* objc_shim.c */
+   if (!objc_shared_claim_locale_ofk()) { done = 1; return; }
    done = 1;
 
    g_legacy_locale = [mt_build_legacy_locale() retain];
