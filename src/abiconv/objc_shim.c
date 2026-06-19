@@ -2091,6 +2091,63 @@ static void compat_getCMYKA(id self, SEL _cmd, double *c, double *m,
    color_narrow_outs(outs, buf, 5);
 }
 
+/* ProKit also swizzles the SINGLE-component NSColor getters (-redComponent,
+ * -greenComponent, -blueComponent, -whiteComponent, -hueComponent,
+ * -saturationComponent, -brightnessComponent) with its own *ComponentImp
+ * functions, each of which raises the SAME color-space exception for an
+ * extended/HDR system color ("whiteComponent is not implemented for Generic
+ * Gray Gamma 2.2 Profile (extended) colorspace ..."). Modern AppKit calls these
+ * while drawing text (NSHighContrastForegroundColorModifier asks a dynamic
+ * color for its whiteComponent), so the s14 getRGBAImp patch alone isn't enough.
+ * Compute each component straight from the CGColor — never raises. which:
+ * 0=red 1=green 2=blue 3=white(luminance) 4=hue 5=saturation 6=brightness. */
+static double color_component_via_cgcolor(id self, int which) {
+   double r = 0, g = 0, b = 0;
+   double rgba[4];
+   int have = color_rgba_via_cgcolor(self, rgba);   /* RGB-model CGColor */
+   if (have) {
+      r = rgba[0]; g = rgba[1]; b = rgba[2];
+   } else if (self) {                               /* gray / monochrome */
+      CGColorRef cg = ((CGColorRef (*)(id, SEL))objc_msgSend)(
+         self, sel_registerName("CGColor"));
+      if (cg) {
+         size_t nc = CGColorGetNumberOfComponents(cg);
+         const CGFloat *comp = CGColorGetComponents(cg);
+         if (comp && nc >= 1) { r = g = b = comp[0]; have = 1; }
+      }
+   }
+   if (!have) { return 0.0; }
+   switch (which) {
+   case 0: return r;
+   case 1: return g;
+   case 2: return b;
+   case 3: return 0.299 * r + 0.587 * g + 0.114 * b;   /* luminance */
+   default: break;
+   }
+   double mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
+   double mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
+   double d = mx - mn, h = 0;
+   if (d > 0) {
+      if (mx == r)      { h = (g - b) / d + (g < b ? 6 : 0); }
+      else if (mx == g) { h = (b - r) / d + 2; }
+      else              { h = (r - g) / d + 4; }
+      h /= 6;
+   }
+   switch (which) {
+   case 4: return h;                          /* hue */
+   case 5: return mx <= 0 ? 0 : d / mx;        /* saturation */
+   case 6: return mx;                          /* brightness */
+   default: return 0.0;
+   }
+}
+static double compat_redComponent(id s, SEL c)        { (void)c; return color_component_via_cgcolor(s, 0); }
+static double compat_greenComponent(id s, SEL c)      { (void)c; return color_component_via_cgcolor(s, 1); }
+static double compat_blueComponent(id s, SEL c)       { (void)c; return color_component_via_cgcolor(s, 2); }
+static double compat_whiteComponent(id s, SEL c)      { (void)c; return color_component_via_cgcolor(s, 3); }
+static double compat_hueComponent(id s, SEL c)        { (void)c; return color_component_via_cgcolor(s, 4); }
+static double compat_saturationComponent(id s, SEL c) { (void)c; return color_component_via_cgcolor(s, 5); }
+static double compat_brightnessComponent(id s, SEL c) { (void)c; return color_component_via_cgcolor(s, 6); }
+
 static const struct { const char *sel; IMP imp; } g_color_swz[COLOR_SWZ_SELS] = {
    { "getRed:green:blue:alpha:",            (IMP)compat_getRGBA  },
    { "getHue:saturation:brightness:alpha:", (IMP)compat_getHSBA  },
@@ -2187,7 +2244,20 @@ static void prokit_color_neutralize(void) {
    /* Process-wide guard: the patch edits shared ProKit code, so once ANY copy
     * has done it the others must not re-walk the symtab every reverse entry. */
    if (getenv("ABICONV_GETRGBA_PATCHED")) { done = 1; return; }
-   void *fn = find_image_symbol("/ProKit", "_getRGBAImp");
+   /* getRGBAImp + each single-component getter ProKit overrides; all raise the
+    * same color-space exception for extended/HDR colors. Patch every one whose
+    * symbol resolves; require at least getRGBAImp before declaring success. */
+   static const struct { const char *sym; void *dest; } patches[] = {
+      { "_getRGBAImp",             (void *)compat_getRGBA            },
+      { "_redComponentImp",        (void *)compat_redComponent       },
+      { "_greenComponentImp",      (void *)compat_greenComponent     },
+      { "_blueComponentImp",       (void *)compat_blueComponent      },
+      { "_whiteComponentImp",      (void *)compat_whiteComponent     },
+      { "_hueComponentImp",        (void *)compat_hueComponent       },
+      { "_saturationComponentImp", (void *)compat_saturationComponent},
+      { "_brightnessComponentImp", (void *)compat_brightnessComponent},
+   };
+   void *fn = find_image_symbol("/ProKit", patches[0].sym);
    if (!fn) {
       static int traced;
       if (!traced && getenv("OBJC_BRIDGE_TRACE")) {
@@ -2204,13 +2274,18 @@ static void prokit_color_neutralize(void) {
       }
       return;                              /* ProKit not loaded yet: retry */
    }
-   int ok = patch_tailjmp(fn, (void *)compat_getRGBA);
-   if (ok) { setenv("ABICONV_GETRGBA_PATCHED", "1", 1); done = 1; }
-   if (getenv("OBJC_BRIDGE_TRACE")) {
-      fprintf(stderr, "[compat] getRGBAImp @%p patch %s -> compat\n",
-              fn, ok ? "OK" : "FAILED");
-      fflush(stderr);
+   int rgba_ok = 0;
+   for (unsigned i = 0; i < sizeof patches / sizeof patches[0]; ++i) {
+      void *p = (i == 0) ? fn : find_image_symbol("/ProKit", patches[i].sym);
+      int ok = p ? patch_tailjmp(p, patches[i].dest) : 0;
+      if (i == 0) { rgba_ok = ok; }
+      if (getenv("OBJC_BRIDGE_TRACE")) {
+         fprintf(stderr, "[compat] %s @%p patch %s -> compat\n",
+                 patches[i].sym, p, ok ? "OK" : (p ? "FAILED" : "absent"));
+         fflush(stderr);
+      }
    }
+   if (rgba_ok) { setenv("ABICONV_GETRGBA_PATCHED", "1", 1); done = 1; }
 }
 
 /* ProKit (bundled 2010 pro-apps framework, runs NATIVE) installs its OWN
