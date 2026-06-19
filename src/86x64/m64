@@ -1,0 +1,634 @@
+#!/usr/bin/env python3
+"""m64 — unified driver for the 86x64 i386→x86_64 translator.
+
+A single front-end over the translation pipeline. The low-level Mach-O surgery
+still lives in the C++ `macho-tool` engine and the per-binary `86x64.sh` /
+`translate-bundle` scripts; m64 ties them together with auto-discovery and
+sensible defaults so whole apps can be translated, shimmed, signed, and run
+with one command each.
+
+Common flows:
+    m64 translate iWeb.app            # translate every i386 binary, then shim+sign
+    m64 translate iWeb.app/Contents/MacOS/iWeb   # just one binary, in place
+    m64 retranslate iPhoto.app        # re-run after a translator fix
+    m64 build abiconv && m64 resync iPhoto.app   # rebuild libabiconv, push to a bundle
+    m64 run iPhoto.app --exc          # launch under lldb, trap ObjC exceptions
+    m64 macho print iWeb.dylib        # passthrough to the low-level engine
+
+Run `m64 <command> -h` for per-command help.
+"""
+import argparse
+import concurrent.futures
+import hashlib
+import os
+import plistlib
+import shutil
+import struct
+import subprocess
+import sys
+from pathlib import Path
+
+# ---- locations -------------------------------------------------------------
+SCRIPT_DIR = Path(__file__).resolve().parent          # src/86x64
+PROJ_ROOT  = SCRIPT_DIR.parent.parent                 # repo root
+BUILD      = PROJ_ROOT / "build"
+MACHO_TOOL = BUILD / "src" / "macho-tool" / "macho-tool"
+LIBABICONV = BUILD / "src" / "abiconv" / "libabiconv.dylib"
+
+TRANSLATE_BUNDLE = SCRIPT_DIR / "translate-bundle"
+PIPELINE_SH      = SCRIPT_DIR / "86x64.sh"
+RPATH_SWEEP      = SCRIPT_DIR / "_rpath_sweep.py"
+SHIMGEN          = SCRIPT_DIR / "shimgen.py"
+FIX_SIGNING      = SCRIPT_DIR / "_fix_bundle_signing.py"
+DEPLOY_SH        = SCRIPT_DIR / "_deploy_app.sh"
+LLDB_EXC         = SCRIPT_DIR / "_lldb_exc_trace.py"
+BACKUP_BASE      = Path.home() / ".86x64-backups"
+
+BUNDLE_SUFFIXES = (".app", ".framework", ".bundle", ".plugin", ".kext")
+# Our own runtime support libraries that get co-located in bundles — never
+# themselves translation targets (libabiconv's install-name even self-matches
+# the "links our runtime" probe).
+OUR_RUNTIME_LIBS = {"libabiconv.dylib", "libinterpose.dylib"}
+
+
+# ---- small utilities -------------------------------------------------------
+class Die(Exception):
+    pass
+
+
+def info(msg):  print(f"\033[1;36m==>\033[0m {msg}")
+def good(msg):  print(f"\033[1;32m  ok\033[0m {msg}")
+def warn(msg):  print(f"\033[1;33m  !!\033[0m {msg}", file=sys.stderr)
+
+
+def run(cmd, *, dry=False, check=True, env=None, cwd=None, quiet=False):
+    """Run a command (list of str/Path). Returns the CompletedProcess."""
+    cmd = [str(c) for c in cmd]
+    if dry:
+        print("  dry-run:", " ".join(cmd))
+        return None
+    if not quiet:
+        print("  $", " ".join(cmd))
+    return subprocess.run(cmd, check=check, env=env, cwd=cwd)
+
+
+def macho_magic(path):
+    """Return True if `path` starts with a Mach-O (thin or fat) magic number."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except OSError:
+        return False
+    if len(head) < 4:
+        return False
+    val = struct.unpack(">I", head)[0]
+    # feedface/feedfacf (thin be/le either order), cafebabe/bebafeca (fat)
+    return val in (0xFEEDFACE, 0xFEEDFACF, 0xCEFAEDFE, 0xCFFAEDFE,
+                   0xCAFEBABE, 0xBEBAFECA)
+
+
+def archs_of(path):
+    """List of architectures in a Mach-O via `lipo -archs`, [] on failure."""
+    try:
+        out = subprocess.run(["lipo", "-archs", str(path)],
+                             capture_output=True, text=True)
+        if out.returncode == 0:
+            return out.stdout.split()
+    except OSError:
+        pass
+    return []
+
+
+def require(*paths):
+    for p in paths:
+        if not Path(p).exists():
+            raise Die(f"required artifact missing: {p}\n"
+                      f"    (try `m64 build` first)")
+
+
+def find_bundle(path):
+    """Walk up from `path` to the outermost enclosing bundle dir, or None."""
+    path = Path(path).resolve()
+    outer = None
+    for p in [path, *path.parents]:
+        if p.suffix in BUNDLE_SUFFIXES:
+            outer = p
+    return outer
+
+
+def backup_root(bundle):
+    # Must match translate-bundle's `echo "$path" | shasum -a 256 | cut -c1-16`,
+    # which hashes the path WITH echo's trailing newline.
+    path = str(Path(bundle).resolve())
+    h = hashlib.sha256((path + "\n").encode()).hexdigest()[:16]
+    return BACKUP_BASE / h
+
+
+def bundle_executable(app):
+    """The main exec relpath (Contents/MacOS/<CFBundleExecutable>) or None."""
+    plist = Path(app) / "Contents" / "Info.plist"
+    if not plist.exists():
+        return None
+    try:
+        with open(plist, "rb") as f:
+            d = plistlib.load(f)
+    except Exception:
+        return None
+    exe = d.get("CFBundleExecutable")
+    return f"Contents/MacOS/{exe}" if exe else None
+
+
+def bundle_identifier(app):
+    plist = Path(app) / "Contents" / "Info.plist"
+    if plist.exists():
+        try:
+            with open(plist, "rb") as f:
+                return plistlib.load(f).get("CFBundleIdentifier")
+        except Exception:
+            pass
+    return None
+
+
+def iter_machos(bundle):
+    """Yield absolute paths of every Mach-O file inside a bundle."""
+    for dirpath, _dirs, files in os.walk(bundle):
+        for name in files:
+            fp = Path(dirpath) / name
+            if fp.is_symlink() or not fp.is_file():
+                continue
+            if fp.suffix == ".bak":          # stray pre-translation backups
+                continue
+            if name in OUR_RUNTIME_LIBS:     # our own support libs, not targets
+                continue
+            if macho_magic(fp):
+                yield fp
+
+
+def links_our_runtime(macho):
+    """True if a binary is one of OUR translation outputs — a translated dylib
+    links @loader_path/libabiconv.dylib; a wrapper exec links libinterpose."""
+    try:
+        o = subprocess.run(["otool", "-L", str(macho)], capture_output=True,
+                           text=True)
+    except OSError:
+        return False
+    return "libabiconv.dylib" in o.stdout or "libinterpose.dylib" in o.stdout
+
+
+def classify(bundle, macho):
+    """Decide how to treat a Mach-O, architecture-first.
+
+    A native x86_64 slice is ALWAYS preferred over translating i386: it runs
+    directly under Rosetta and (unlike a libabiconv-linked translation) can
+    still export its ObjC classes to native frameworks. So we only translate
+    when there is no usable native x86_64.
+
+    returns (status, relpath) with status in:
+        "fresh"       — i386-only original, never translated → translate
+        "retranslate" — our own x86_64 output → re-translate (pick up fixes)
+        "native"      — has a real native x86_64 slice → leave it alone
+    """
+    rel = str(Path(macho).resolve().relative_to(Path(bundle).resolve()))
+    archs = archs_of(macho)
+    if "x86_64" in archs:
+        # Our output AND an i386 backup to re-translate from → retranslate.
+        # (A wrapper's paired <name>.dylib output links our runtime too but has
+        # no backup of its own — it's regenerated with the exec, so: native.)
+        if links_our_runtime(macho) and (backup_root(bundle) / rel).exists():
+            return ("retranslate", rel)
+        return ("native", rel)
+    if "i386" in archs:
+        return ("fresh", rel)
+    return ("native", rel)               # arm64 / ppc / unknown → leave alone
+
+
+# ---- commands --------------------------------------------------------------
+def cmd_translate(args):
+    require(MACHO_TOOL, LIBABICONV, TRANSLATE_BUNDLE)
+    target = Path(args.target)
+    if not target.exists():
+        raise Die(f"no such path: {target}")
+
+    # Bundle vs single binary.
+    if target.is_dir():
+        if target.suffix not in BUNDLE_SUFFIXES:
+            raise Die(f"{target} is a directory but not a bundle "
+                      f"({'/'.join(BUNDLE_SUFFIXES)})")
+        return translate_bundle(target, args)
+
+    # A file: if it lives inside a bundle, translate it in place; else stand-alone.
+    enclosing = find_bundle(target)
+    if enclosing:
+        rel = str(target.resolve().relative_to(enclosing.resolve()))
+        return translate_one(enclosing, rel, args)
+    return translate_standalone(target, args)
+
+
+def translate_one(bundle, rel, args):
+    info(f"translate {rel}  (in {Path(bundle).name})")
+    cmd = ["bash", TRANSLATE_BUNDLE]
+    if args.dry_run: cmd.append("-n")
+    if args.keep:    cmd.append("-k")
+    cmd += [str(bundle), rel]
+    run(cmd, dry=False)   # translate-bundle echoes its own steps
+
+
+def translate_standalone(binary, args):
+    require(PIPELINE_SH)
+    out = Path(args.output) if args.output else binary.with_suffix(".x64")
+    info(f"translate (standalone) {binary} -> {out}")
+    cmd = ["bash", PIPELINE_SH, "-m", MACHO_TOOL, "-l", LIBABICONV]
+    if args.keep: cmd.append("-k")
+    libw = BUILD / "src" / "86x64" / "libwrapper.a"
+    libi = BUILD / "src" / "86x64" / "libinterpose.dylib"
+    if libw.exists(): cmd += ["-w", libw]
+    if libi.exists(): cmd += ["-i", libi]
+    cmd += ["-o", out, binary]
+    run(cmd, dry=args.dry_run)
+
+
+def translate_bundle(bundle, args):
+    skip = set(args.skip or [])
+    only = set(args.only or [])
+    info(f"scanning {Path(bundle).name} for translatable binaries…")
+    fresh, retrans, plan_native = [], [], []
+    for m in iter_machos(bundle):
+        status, rel = classify(bundle, m)
+        (fresh if status == "fresh" else
+         retrans if status == "retranslate" else plan_native).append(rel)
+
+    # `retranslate` only re-does our own previous outputs; `translate` also
+    # picks up i386-only binaries never done before.
+    plan_translate = sorted(retrans) if args.retranslate_only \
+        else sorted(fresh + retrans)
+
+    # Order: main executable first (it's the debugging anchor).
+    main = bundle_executable(bundle)
+    if main and main in plan_translate:
+        plan_translate.remove(main)
+        plan_translate.insert(0, main)
+
+    if only:
+        plan_translate = [r for r in plan_translate if r in only]
+    if skip:
+        for r in list(plan_translate):
+            if r in skip:
+                plan_translate.remove(r)
+                plan_native.append(r)
+
+    print(f"  {len(fresh)} new i386 · {len(retrans)} re-translatable · "
+          f"{len(plan_native)} native  →  {len(plan_translate)} selected")
+    for r in plan_translate:
+        tag = "re" if r in retrans else "new"
+        print(f"      • [{tag}] {r}")
+    if args.list:
+        print("  native (untouched):")
+        for r in sorted(plan_native):
+            print(f"      - {r}")
+        return
+    if not plan_translate:
+        warn("nothing to translate")
+        return
+
+    # Run translate-bundle for each (optionally in parallel).
+    failures = []
+
+    def do(rel):
+        cmd = ["bash", TRANSLATE_BUNDLE]
+        if args.keep: cmd.append("-k")
+        cmd += [str(bundle), rel]
+        if args.dry_run:
+            print("  dry-run:", " ".join(str(c) for c in cmd))
+            return rel, 0, ""
+        p = subprocess.run(cmd, capture_output=True, text=True)
+        return rel, p.returncode, (p.stdout + p.stderr)
+
+    if args.jobs > 1 and not args.dry_run:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=args.jobs) as ex:
+            results = list(ex.map(do, plan_translate))
+    else:
+        results = [do(r) for r in plan_translate]
+
+    for rel, rc, out in results:
+        if rc == 0:
+            good(rel)
+        else:
+            failures.append(rel)
+            warn(f"FAILED {rel}")
+            print("\n".join("      " + l for l in out.splitlines()[-8:]))
+
+    if failures:
+        raise Die(f"{len(failures)} binary(ies) failed to translate: "
+                  + ", ".join(failures))
+    info(f"translated {len(plan_translate)} binaries")
+
+    # Post steps unless suppressed.
+    if not args.no_shim:
+        cmd_shim(argparse.Namespace(app=str(bundle), targets=plan_translate,
+                                    dry_run=args.dry_run))
+    if not args.no_sign:
+        cmd_sign(argparse.Namespace(app=str(bundle), dry_run=args.dry_run))
+    info("done. try:  m64 run %s --exc" % Path(bundle).name)
+
+
+def cmd_retranslate(args):
+    args.retranslate_only = True
+    args.target = args.app
+    cmd_translate(args)
+
+
+def cmd_resync(args):
+    """Copy the freshly-built libabiconv.dylib over every copy in a bundle."""
+    require(LIBABICONV)
+    app = Path(args.app)
+    copies = list(app.rglob("libabiconv.dylib"))
+    info(f"resync libabiconv -> {len(copies)} copies in {app.name}")
+    for c in copies:
+        if args.dry_run:
+            print("  dry-run: cp", LIBABICONV, c)
+            continue
+        shutil.copy2(LIBABICONV, c)
+        subprocess.run(["codesign", "-f", "-s", "-", str(c)],
+                       capture_output=True)
+    if not args.dry_run:
+        good(f"{len(copies)} copies synced + ad-hoc signed")
+
+
+def cmd_rpath_fix(args):
+    require(RPATH_SWEEP)
+    info(f"rpath sweep {Path(args.app).name}")
+    run(["python3", RPATH_SWEEP, args.app], dry=args.dry_run)
+
+
+def cmd_shim(args):
+    require(SHIMGEN)
+    targets = list(getattr(args, "targets", None) or [])
+    if not targets:
+        # auto-discover: translated binaries link @loader_path/libabiconv.dylib
+        targets = _discover_shim_targets(args.app)
+    info(f"shimgen {Path(args.app).name}  ({len(targets)} targets)")
+    if not targets:
+        warn("no shim targets found")
+        return
+    run(["python3", SHIMGEN, args.app, *targets], dry=args.dry_run)
+
+
+def _discover_shim_targets(app):
+    """Translated binaries (those that link libabiconv) need native-symbol shims."""
+    app = Path(app)
+    out = []
+    for m in iter_machos(app):
+        if "x86_64" not in archs_of(m):
+            continue
+        try:
+            o = subprocess.run(["otool", "-L", str(m)], capture_output=True,
+                               text=True)
+        except OSError:
+            continue
+        if "libabiconv.dylib" in o.stdout:
+            out.append(str(m.resolve().relative_to(app.resolve())))
+    return sorted(out)
+
+
+def cmd_sign(args):
+    require(FIX_SIGNING)
+    app = Path(args.app)
+    ident = bundle_identifier(app) or app.stem
+    info(f"sign {app.name}  (identifier {ident})")
+    # flat-sign loose dylibs, fix nested signing, then the outer bundle.
+    if not args.dry_run:
+        for d in (app / "Contents" / "Frameworks").glob("*.dylib"):
+            subprocess.run(["codesign", "-f", "-s", "-", str(d)],
+                           capture_output=True)
+    run(["python3", FIX_SIGNING, str(app)], dry=args.dry_run, check=False)
+    run(["codesign", "-f", "-s", "-", "--identifier", ident, str(app)],
+        dry=args.dry_run, check=False)
+
+
+def cmd_deploy(args):
+    """Full post-translate deploy (rpath → shim → resync → sign → clear state)."""
+    require(DEPLOY_SH)
+    app = Path(args.app)
+    ident = args.identifier or bundle_identifier(app) or app.stem
+    savedstate = args.savedstate or bundle_identifier(app) or ""
+    # Build a transient targets file from auto-discovery unless one is given.
+    if args.targets_file:
+        targets_file = args.targets_file
+        cleanup = None
+    else:
+        import tempfile
+        tf = tempfile.NamedTemporaryFile("w", suffix=".txt", delete=False)
+        for t in _discover_shim_targets(app):
+            tf.write(t + "\n")
+        tf.close()
+        targets_file = tf.name
+        cleanup = tf.name
+    info(f"deploy {app.name}  id={ident} savedState={savedstate or '(none)'}")
+    try:
+        run(["bash", DEPLOY_SH, str(app), ident, targets_file, savedstate],
+            dry=args.dry_run, check=False)
+    finally:
+        if cleanup and not args.dry_run:
+            os.unlink(cleanup)
+
+
+def cmd_run(args):
+    app = Path(args.app)
+    rel = bundle_executable(app) if app.is_dir() else None
+    exe = (app / rel) if rel else app
+    if not exe.exists():
+        raise Die(f"executable not found: {exe}")
+    macos_dir = exe.parent
+    env = dict(os.environ)
+    if args.trace:
+        env["OBJC_BRIDGE_TRACE"] = "1"
+
+    if args.no_lldb:
+        info(f"run {exe.name}")
+        run([f"./{exe.name}"], cwd=macos_dir, env=env, check=False)
+        return
+
+    # lldb batch with a watchdog so a hung modal/event-loop can't wedge us.
+    info(f"run {exe.name} under lldb (timeout {args.timeout}s, "
+         f"{'exc-trace ' if args.exc else ''}{'bridge-trace' if args.trace else ''})")
+    lldb_cmd = ["/usr/bin/lldb", "-b"]
+    if args.exc:
+        require(LLDB_EXC)
+        lldb_cmd += ["-o", f"command script import {LLDB_EXC}"]
+    lldb_cmd += ["-o", "run",
+                 "-k", "script t=lldb.process.GetSelectedThread(); "
+                       "print('### STOP', t.GetStopDescription(400))",
+                 "-k", "bt 24", "-k", "quit", f"./{exe.name}"]
+    if args.dry_run:
+        print("  dry-run:", " ".join(lldb_cmd))
+        return
+    proc = subprocess.Popen(lldb_cmd, cwd=macos_dir, env=env)
+    try:
+        proc.wait(timeout=args.timeout)
+    except subprocess.TimeoutExpired:
+        warn(f"timeout ({args.timeout}s) — killing")
+        subprocess.run(["pkill", "-9", "-f", f"MacOS/{exe.name}"],
+                       capture_output=True)
+        proc.kill()
+
+
+def cmd_build(args):
+    require(BUILD / "CMakeCache.txt")
+    target = args.target
+    cmd = ["cmake", "--build", str(BUILD)]
+    if target and target != "all":
+        cmd += ["--target", target]
+    if args.jobs > 1:
+        cmd += ["-j", str(args.jobs)]
+    info(f"build {target or 'all'}")
+    run(cmd, dry=args.dry_run, check=True)
+    if args.resync:
+        cmd_resync(argparse.Namespace(app=args.resync, dry_run=args.dry_run))
+
+
+def cmd_macho(args):
+    require(MACHO_TOOL)
+    os.execv(str(MACHO_TOOL), [str(MACHO_TOOL), *args.rest])
+
+
+# ---- argument parser -------------------------------------------------------
+def build_parser():
+    p = argparse.ArgumentParser(
+        prog="m64", description=__doc__,
+        formatter_class=argparse.RawDescriptionHelpFormatter)
+    sub = p.add_subparsers(dest="cmd", metavar="<command>", required=True)
+
+    def common(sp):
+        sp.add_argument("-n", "--dry-run", action="store_true",
+                        help="print actions without modifying anything")
+
+    # translate
+    t = sub.add_parser("translate", help="translate a binary or a whole bundle")
+    t.add_argument("target", help="an .app/.framework bundle, or a Mach-O file")
+    t.add_argument("-o", "--output", help="output path (standalone-file mode)")
+    t.add_argument("--only", action="append", metavar="RELPATH",
+                   help="bundle mode: only translate these relpaths (repeatable)")
+    t.add_argument("--skip", action="append", metavar="RELPATH",
+                   help="bundle mode: leave these binaries native (repeatable)")
+    t.add_argument("--no-shim", action="store_true",
+                   help="skip shimgen after translating the bundle")
+    t.add_argument("--no-sign", action="store_true",
+                   help="skip code-signing after translating the bundle")
+    t.add_argument("--list", action="store_true",
+                   help="just list what would be translated vs left native")
+    t.add_argument("-j", "--jobs", type=int, default=1,
+                   help="parallel binary translations (bundle mode)")
+    t.add_argument("-k", "--keep", action="store_true",
+                   help="keep intermediate tempdirs")
+    t.set_defaults(retranslate_only=False)
+    common(t); t.set_defaults(func=cmd_translate)
+
+    # retranslate
+    r = sub.add_parser("retranslate",
+                       help="re-translate a bundle's already-translated binaries "
+                            "(after a translator fix)")
+    r.add_argument("app", help="the .app/.framework bundle")
+    r.add_argument("--only", action="append", metavar="RELPATH")
+    r.add_argument("--skip", action="append", metavar="RELPATH")
+    r.add_argument("--no-shim", action="store_true")
+    r.add_argument("--no-sign", action="store_true")
+    r.add_argument("--list", action="store_true")
+    r.add_argument("-j", "--jobs", type=int, default=1)
+    r.add_argument("-k", "--keep", action="store_true")
+    r.set_defaults(output=None)
+    common(r); r.set_defaults(func=cmd_retranslate)
+
+    # resync
+    s = sub.add_parser("resync",
+                       help="copy the freshly-built libabiconv.dylib over every "
+                            "copy inside a bundle (+ ad-hoc sign)")
+    s.add_argument("app")
+    common(s); s.set_defaults(func=cmd_resync)
+
+    # rpath-fix
+    rp = sub.add_parser("rpath-fix", help="sweep/repair @rpath load commands")
+    rp.add_argument("app")
+    common(rp); rp.set_defaults(func=cmd_rpath_fix)
+
+    # shim
+    sh = sub.add_parser("shim",
+                        help="generate native-symbol shims (shimgen) for a bundle")
+    sh.add_argument("app")
+    sh.add_argument("targets", nargs="*",
+                    help="binary relpaths to shim (default: auto-discover)")
+    common(sh); sh.set_defaults(func=cmd_shim)
+
+    # sign
+    sg = sub.add_parser("sign", help="fix nested signing + ad-hoc codesign a bundle")
+    sg.add_argument("app")
+    common(sg); sg.set_defaults(func=cmd_sign)
+
+    # deploy
+    dp = sub.add_parser("deploy",
+                        help="full post-translate deploy: rpath→shim→resync→sign"
+                             "→clear saved state")
+    dp.add_argument("app")
+    dp.add_argument("--identifier", help="codesign identifier (default: bundle id)")
+    dp.add_argument("--targets-file", help="shimgen targets file (default: auto)")
+    dp.add_argument("--savedstate", help="saved-state id to clear (default: bundle id)")
+    common(dp); dp.set_defaults(func=cmd_deploy)
+
+    # run
+    ru = sub.add_parser("run", help="launch a translated app (optionally under lldb)")
+    ru.add_argument("app")
+    ru.add_argument("--exc", action="store_true",
+                    help="import the ObjC-exception tracer under lldb")
+    ru.add_argument("--trace", action="store_true",
+                    help="set OBJC_BRIDGE_TRACE=1")
+    ru.add_argument("--no-lldb", action="store_true",
+                    help="run the binary directly, no debugger")
+    ru.add_argument("--timeout", type=int, default=120,
+                    help="watchdog timeout in seconds (default 120)")
+    common(ru); ru.set_defaults(func=cmd_run)
+
+    # debug (alias: run --exc)
+    db = sub.add_parser("debug", help="alias for `run --exc` (trap ObjC exceptions)")
+    db.add_argument("app")
+    db.add_argument("--trace", action="store_true")
+    db.add_argument("--timeout", type=int, default=120)
+    common(db)
+    db.set_defaults(func=lambda a: cmd_run(argparse.Namespace(
+        app=a.app, exc=True, trace=a.trace, no_lldb=False,
+        timeout=a.timeout, dry_run=a.dry_run)))
+
+    # build
+    b = sub.add_parser("build", help="cmake build the project / a target")
+    b.add_argument("target", nargs="?", default="all",
+                   help="all (default) | abiconv | macho-tool | …")
+    b.add_argument("-j", "--jobs", type=int, default=os.cpu_count() or 4)
+    b.add_argument("--resync", metavar="APP",
+                   help="after building, resync libabiconv into this bundle")
+    common(b); b.set_defaults(func=cmd_build)
+
+    # macho (passthrough)
+    m = sub.add_parser("macho", help="passthrough to the low-level macho-tool engine")
+    m.add_argument("rest", nargs=argparse.REMAINDER,
+                   help="arguments forwarded verbatim to macho-tool")
+    m.set_defaults(func=cmd_macho)
+
+    return p
+
+
+def main(argv=None):
+    args = build_parser().parse_args(argv)
+    try:
+        args.func(args)
+    except Die as e:
+        print(f"\033[1;31mm64: {e}\033[0m", file=sys.stderr)
+        return 1
+    except KeyboardInterrupt:
+        return 130
+    except subprocess.CalledProcessError as e:
+        print(f"\033[1;31mm64: command failed ({e.returncode}): "
+              f"{' '.join(map(str, e.cmd))}\033[0m", file=sys.stderr)
+        return e.returncode or 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
