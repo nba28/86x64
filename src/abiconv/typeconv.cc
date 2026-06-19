@@ -83,6 +83,17 @@ void record_decl::populate_fields() {
                      std::cerr << "  member kind: " << clang_getCString(ks) << std::endl;
                      clang_disposeString(ks);
                   }
+                  /* Any attribute cursor (aligned, objc_boxable, availability,
+                   * deprecated, swift_name, ...) is a hint that does NOT change
+                   * the C field layout libclang already computed for us — clang
+                   * folds alignment into the type's offsets/size. Ignore them
+                   * all, like CXCursor_UnexposedAttr above; otherwise a single
+                   * `__attribute__((aligned))` on a member (e.g. FSCatalogInfo)
+                   * made every function taking that struct unshimmable, so the
+                   * i386 caller reached the native function unmarshalled. */
+                  if (clang_isAttribute(clang_getCursorKind(c))) {
+                     break;
+                  }
                   /* This runs inside a libclang visitor callback (C frame),
                    * so we must not throw across it. Record the condition and
                    * let populate_fields() throw after the visit completes
