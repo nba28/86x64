@@ -28,8 +28,12 @@
 #include <objc/message.h>
 extern id objc_retain(id);   /* libobjc ARC entrypoint; not in runtime.h */
 #include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
+#include <mach-o/nlist.h>
+#include <sys/mman.h>
 #include <pthread.h>
 
 /* Low-4GB search window — same range the wrapper/malloc shim use. */
@@ -1989,8 +1993,44 @@ static void color_get4_common(unsigned sidx, const char *space_sel, id self,
    color_narrow_outs(outs, buf, 4);
 }
 
+/* Extract RGBA straight from the color's CGColor. This never raises, unlike
+ * -getRed:green:blue:alpha:, which modern AppKit REFUSES for an extended-sRGB /
+ * HDR system color even when its components are perfectly in-gamut — the exact
+ * s14 crash: an accent color in "sRGB IEC61966-2.1 (extended)" (components
+ * 0 0.478431 1 1) thrown deep inside a native NSView Auto Layout constraint
+ * pass, where converting to plain sRGBColorSpace first still left the original
+ * raising getter to run. Trusted only for an RGB-model CGColor with >=3
+ * components; pattern / catalog / gray colors (NULL or non-RGB CGColor) return
+ * 0 so the caller falls back to the convert+orig path. CGColor's RGB components
+ * are exactly what getRed: would report for any RGB-family color. */
+static int color_rgba_via_cgcolor(id color, double out[4]) {
+   if (!color) { return 0; }
+   CGColorRef cg = ((CGColorRef (*)(id, SEL))objc_msgSend)(
+      color, sel_registerName("CGColor"));
+   if (!cg) { return 0; }
+   CGColorSpaceRef cs = CGColorGetColorSpace(cg);
+   if (!cs || CGColorSpaceGetModel(cs) != kCGColorSpaceModelRGB) { return 0; }
+   size_t nc = CGColorGetNumberOfComponents(cg);
+   const CGFloat *comp = CGColorGetComponents(cg);
+   if (!comp || nc < 3) { return 0; }
+   out[0] = comp[0]; out[1] = comp[1]; out[2] = comp[2];
+   out[3] = (nc >= 4) ? comp[3] : 1.0;
+   return 1;
+}
+
 static void compat_getRGBA(id self, SEL _cmd, double *r, double *g,
                            double *b, double *a) {
+   double rgba[4];
+   if (color_rgba_via_cgcolor(self, rgba)) {
+      double *outs[4] = { r, g, b, a };
+      if (color_outs_legacy(outs, 4)) {
+         color_narrow_outs(outs, rgba, 4);
+      } else {
+         if (r) { *r = rgba[0]; } if (g) { *g = rgba[1]; }
+         if (b) { *b = rgba[2]; } if (a) { *a = rgba[3]; }
+      }
+      return;
+   }
    color_get4_common(0, "sRGBColorSpace", self, _cmd, r, g, b, a);
 }
 
@@ -2059,6 +2099,120 @@ static const struct { const char *sel; IMP imp; } g_color_swz[COLOR_SWZ_SELS] = 
 };
 static int g_color_installed;
 
+/* Locate symbol `sym` (mangled, i.e. with the leading '_') in the FIRST loaded
+ * image whose path contains `image_substr`, returning its runtime address or
+ * NULL. Walks LC_SYMTAB including LOCAL symbols — getRGBAImp is a non-exported
+ * ProKit function, so dlsym can't see it. */
+static void *find_image_symbol(const char *image_substr, const char *sym) {
+   uint32_t nimg = _dyld_image_count();
+   for (uint32_t i = 0; i < nimg; ++i) {
+      const char *path = _dyld_get_image_name(i);
+      if (!path || !strstr(path, image_substr)) { continue; }
+      const struct mach_header_64 *mh =
+         (const struct mach_header_64 *)_dyld_get_image_header(i);
+      if (!mh || mh->magic != MH_MAGIC_64) { return NULL; }
+      intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+      const struct load_command *lc =
+         (const struct load_command *)((const uint8_t *)mh + sizeof *mh);
+      const struct symtab_command *st = NULL;
+      uintptr_t linkedit_base = 0;
+      for (uint32_t c = 0; c < mh->ncmds; ++c) {
+         if (lc->cmd == LC_SYMTAB) {
+            st = (const struct symtab_command *)lc;
+         } else if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg =
+               (const struct segment_command_64 *)lc;
+            if (strcmp(sg->segname, "__LINKEDIT") == 0) {
+               linkedit_base = (uintptr_t)(sg->vmaddr + slide - sg->fileoff);
+            }
+         }
+         lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
+      }
+      if (!st || !linkedit_base) { return NULL; }
+      const struct nlist_64 *syms =
+         (const struct nlist_64 *)(linkedit_base + st->symoff);
+      const char *strs = (const char *)(linkedit_base + st->stroff);
+      for (uint32_t s = 0; s < st->nsyms; ++s) {
+         uint32_t strx = syms[s].n_un.n_strx;
+         if (!strx || !syms[s].n_value) { continue; }
+         if (strcmp(strs + strx, sym) == 0) {
+            return (void *)(uintptr_t)(syms[s].n_value + slide);
+         }
+      }
+      return NULL;
+   }
+   return NULL;
+}
+
+/* Overwrite the first 12 bytes of native function `fn` with an absolute
+ * tail-jump to `dest` (movabs rax,dest ; jmp rax). vm_protect with VM_PROT_COPY
+ * forces a private COW copy so the code-signed page is writable. */
+static int patch_tailjmp(void *fn, void *dest) {
+   if (!fn || !dest) { return 0; }
+   uint8_t code[12];
+   code[0] = 0x48; code[1] = 0xB8;            /* movabs rax, imm64 */
+   memcpy(code + 2, &dest, 8);
+   code[10] = 0xFF; code[11] = 0xE0;          /* jmp rax */
+   uintptr_t pg = (uintptr_t)fn & ~(uintptr_t)0xFFF;
+   size_t len = (((uintptr_t)fn + sizeof code) - pg + 0xFFF) & ~(size_t)0xFFF;
+   if (mach_vm_protect(mach_task_self(), (mach_vm_address_t)pg, len, FALSE,
+                       VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY)
+       != KERN_SUCCESS &&
+       mprotect((void *)pg, len, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
+      return 0;
+   }
+   memcpy(fn, code, sizeof code);
+   mach_vm_protect(mach_task_self(), (mach_vm_address_t)pg, len, FALSE,
+                   VM_PROT_READ | VM_PROT_EXECUTE);
+   __builtin___clear_cache((char *)fn, (char *)fn + sizeof code);
+   return 1;
+}
+
+/* ProKit (bundled 2010 pro-apps framework, runs NATIVE) replaces the NSColor
+ * -getRed:green:blue:alpha: IMP with its own getRGBAImp during native window
+ * theme init, whose __raiseColorSpaceException throws an UNCAUGHT
+ * NSInvalidArgumentException for any post-2010 (extended-sRGB / HDR) colorspace
+ * -> +[NSApplication _crashOnException:]. That steal happens MID -becomeActive:,
+ * after our last reassert and with no reverse-bridge re-entry before the raising
+ * getter runs (deep in a native NSView Auto Layout constraint pass), so neither
+ * the per-class reassert nor an own-entry sweep can win the race. Instead
+ * neutralize getRGBAImp at the SOURCE: patch the function (resolvable in ProKit's
+ * symbol table as soon as ProKit loads, BEFORE it is ever installed as an IMP)
+ * to tail-jump into our compat_getRGBA, which returns RGBA via CGColor and never
+ * raises. Once-per-process; retries until ProKit is loaded. getRGBAImp is the
+ * getRed: IMP, so it shares compat_getRGBA's (self,_cmd,r,g,b,a) signature. */
+static void prokit_color_neutralize(void) {
+   static int done;
+   if (done) { return; }
+   /* Process-wide guard: the patch edits shared ProKit code, so once ANY copy
+    * has done it the others must not re-walk the symtab every reverse entry. */
+   if (getenv("ABICONV_GETRGBA_PATCHED")) { done = 1; return; }
+   void *fn = find_image_symbol("/ProKit", "_getRGBAImp");
+   if (!fn) {
+      static int traced;
+      if (!traced && getenv("OBJC_BRIDGE_TRACE")) {
+         int pk = 0;
+         for (uint32_t i = 0, n = _dyld_image_count(); i < n; ++i) {
+            const char *p = _dyld_get_image_name(i);
+            if (p && strstr(p, "/ProKit")) { pk = 1; break; }
+         }
+         if (pk) {       /* ProKit IS loaded but symbol not found: trace once */
+            traced = 1;
+            fprintf(stderr, "[compat] getRGBAImp NOT found though ProKit loaded\n");
+            fflush(stderr);
+         }
+      }
+      return;                              /* ProKit not loaded yet: retry */
+   }
+   int ok = patch_tailjmp(fn, (void *)compat_getRGBA);
+   if (ok) { setenv("ABICONV_GETRGBA_PATCHED", "1", 1); done = 1; }
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[compat] getRGBAImp @%p patch %s -> compat\n",
+              fn, ok ? "OK" : "FAILED");
+      fflush(stderr);
+   }
+}
+
 /* ProKit (bundled 2010 pro-apps framework, runs NATIVE) installs its OWN
  * NSColor getter replacement (getRGBAImp) during theme init — AFTER our
  * install — whose __raiseColorSpaceException fires for every post-2010
@@ -2070,6 +2224,11 @@ static int g_color_installed;
 static void color_sweep(void);
 
 static void appkit_color_compat_reassert(void) {
+   /* BEFORE the g_color_installed gate: that flag is per-copy (set only in the
+    * copy that ran install), but the reverse bridge — and thus this reassert —
+    * runs in whatever copy handles the call, and the getRGBAImp patch is a
+    * process-global code edit any copy can perform. */
+   prokit_color_neutralize();   /* patch getRGBAImp once ProKit has loaded */
    if (!g_color_installed) { return; }
    for (unsigned si = 0; si < COLOR_SWZ_SELS; ++si) {
       SEL s = sel_registerName(g_color_swz[si].sel);
@@ -2081,13 +2240,21 @@ static void appkit_color_compat_reassert(void) {
          }
       }
    }
-   /* New images can register NSColor subclasses that inherit a stealable
-    * slot (ProKit). Re-sweep only when the image count moves — the sweep
-    * itself (objc_copyClassList) is far too heavy for every reverse entry. */
+   /* New images can register NSColor subclasses that inherit a stealable slot
+    * (ProKit). AppKit also realizes some concrete color classes lazily — the
+    * extended-sRGB/HDR NSColorSpaceColor for a system accent color may not
+    * exist until first painted, with NO new image load (s14, raised mid Auto
+    * Layout). So re-sweep when EITHER the image count OR the total registered
+    * class count moves. objc_getClassList(NULL,0) is a cheap count (no copy);
+    * the heavy sweep (objc_copyClassList) only runs on a real change, and the
+    * count stabilizes after startup so steady-state cost is just the count. */
    static uint32_t s_last_imgcount;
+   static int      s_last_clscount;
    uint32_t ic = _dyld_image_count();
-   if (ic != s_last_imgcount) {
+   int      cc = objc_getClassList(NULL, 0);
+   if (ic != s_last_imgcount || cc != s_last_clscount) {
       s_last_imgcount = ic;
+      s_last_clscount = cc;
       color_sweep();
    }
 }
