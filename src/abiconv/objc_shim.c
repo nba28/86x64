@@ -3796,6 +3796,10 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
          if (m) break;
       }
    }
+   /* An entry whose imp is not a plausible code address (a junk legacy method
+    * list entry, or a bad runtime class_addMethod) must not be jumped to — fall
+    * back to the no-legacy-method path (returns nil) rather than crash. */
+   if (m && m->imp < 0x1000) { m = NULL; }
    if (!m) {
       /* No legacy method. Reached two ways: a registration gap, or native code
        * invoking the shared tramp address NOT as an objc IMP (direct IMP-cache
@@ -4444,7 +4448,24 @@ static void reverse_add_methods(Class target, uint32_t methodLists) {
       if (!ptr_ok(mlp + (uint32_t)sizeof(*ml),
                   (size_t)cnt * sizeof(*meth))) { continue; }
       for (int32_t k = 0; k < cnt; ++k) {
-         if (!legacy_cstr_ok(meth[k].name) || meth[k].imp == 0) { continue; }
+         if (!legacy_cstr_ok(meth[k].name)) { continue; }
+         /* The imp must be a plausible, mapped code address. A few legacy method
+          * lists carry a junk entry whose imp is a tiny sentinel (e.g. 0xb) and
+          * whose types pointer is also bad — registering it shadows the native
+          * implementation (NSObject -description, etc.) with our reverse tramp,
+          * which then jumps straight to the junk imp. Reject it so the selector
+          * falls through to the real native superclass method. (== 0 was the old
+          * filter; ptr_ok also catches <0x1000 and unmapped.) */
+         if (!ptr_ok(meth[k].imp, 1)) {
+            if (getenv("OBJC_BRIDGE_TRACE")) {
+               fprintf(stderr, "[rt] skip junk method \"%s\" imp=0x%x (implausible)\n",
+                       legacy_cstr_ok(meth[k].name)
+                          ? (const char *)(uintptr_t)meth[k].name : "?",
+                       meth[k].imp);
+               fflush(stderr);
+            }
+            continue;
+         }
          const char *sname = (const char *)(uintptr_t)meth[k].name;
          const char *types = legacy_cstr_ok(meth[k].types)
             ? (const char *)(uintptr_t)meth[k].types : "v8@0:4";
