@@ -711,8 +711,46 @@ namespace MachO {
              && xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
             const std::size_t imm_off = instbuf.size() - sizeof(uint32_t);
             const uint32_t value = img.template at<uint32_t>(loc.offset + imm_off);
-            if (value >= 0x1000 && value < 0x80000000U
-                && env.vmaddr_in_const_section(value)) {
+            bool ptr_target = false;
+            if (value >= 0x1000 && value < 0x80000000U) {
+               ptr_target = env.vmaddr_in_const_section(value);
+               /* Pointer-table (C++ vtable / fn-ptr dispatch array) install,
+                * e.g. `movl $vtable, (%eax)` (c7 00 imm32). The imm lands in
+                * __DATA,__const, which vmaddr_in_const_section deliberately
+                * EXCLUDES (integer constants frequently alias the __const
+                * range). Discriminate by DOUBLE-INDIRECTION: a vtable/table
+                * address points to a word that is ITSELF an in-image pointer
+                * (the first table entry), whereas an integer constant aliasing
+                * __const points at scalar bytes. This relocates the legitimate
+                * vtable store without the integer-constant false positives the
+                * __const exclusion guards against. (iPhoto's C++ frameworks
+                * install vtables via this exact `movl $vtable,(%reg)` form ->
+                * un-relocated stale i386 vtable ptr -> EXC_BAD_ACCESS.) */
+               if (!ptr_target && (value & 3) == 0) {
+                  for (auto *seg : env.archive.segments()) {
+                     const auto &sc = seg->segment_command;
+                     std::string sn(sc.segname,
+                                    strnlen(sc.segname, sizeof(sc.segname)));
+                     if (sn == SEG_PAGEZERO || sn == SEG_LINKEDIT) continue;
+                     if ((sc.initprot & VM_PROT_EXECUTE) != 0) continue; /* code */
+                     if (!seg->contains_vmaddr(value)) continue;
+                     const std::size_t toff = value - sc.vmaddr + sc.fileoff;
+                     if (toff + 4 > sc.fileoff + sc.filesize) break; /* zerofill */
+                     if (toff + 4 > img.size()) break;
+                     const uint32_t tword = img.template at<uint32_t>(toff);
+                     if (tword < 0x1000 || tword >= 0x80000000U) break;
+                     for (auto *s2 : env.archive.segments()) {
+                        const auto &s2c = s2->segment_command;
+                        std::string s2n(s2c.segname,
+                                        strnlen(s2c.segname, sizeof(s2c.segname)));
+                        if (s2n == SEG_PAGEZERO || s2n == SEG_LINKEDIT) continue;
+                        if (s2->contains_vmaddr(tword)) { ptr_target = true; break; }
+                     }
+                     break;
+                  }
+               }
+            }
+            if (ptr_target) {
                imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);
             }
          }
