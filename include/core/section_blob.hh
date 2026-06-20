@@ -132,6 +132,9 @@ namespace MachO {
        * `___stderrp`) — in that case raw_data() returns 0 and dyld
        * overwrites the slot. */
       const SectionBlob<bits> *pointee = nullptr;
+      std::size_t pointee_offset = 0;  /*!< intra-blob byte offset when the slot
+                                            value is an interior pointer resolved
+                                            via the containing-blob fallback */
 
       static SectionBlob<bits> *Parse(const Image& img, const Location& loc,
                                                ParseEnv<bits>& env) {
@@ -146,7 +149,7 @@ namespace MachO {
       NonLazySymbolPointer(const NonLazySymbolPointer<opposite<bits>>& other,
                            TransformEnv<opposite<bits>>& env);
       virtual typename SymbolPointer<bits>::ptr_t raw_data() const override {
-         return pointee ? pointee->loc.vmaddr : 0x0;
+         return pointee ? pointee->loc.vmaddr + pointee_offset : 0x0;
       }
       template <Bits> friend class NonLazySymbolPointer;
    };

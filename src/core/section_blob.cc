@@ -112,6 +112,20 @@ namespace MachO {
       if (value != 0) {
          env.vmaddr_resolver.resolve(value,
                                      (const SectionBlob<bits> **) &pointee);
+         /* mid-blob fallback (mirrors Immediate's): a LOCAL indirect-symbol
+          * slot can hold an INTERIOR pointer into a multi-byte blob — e.g.
+          * the address of a single bool/char field inside __DATA,__data (read
+          * back via `movl slot,%reg; movzbl (%reg)`). Exact-key resolve misses
+          * (the blob is registered at the 4-byte-aligned start, not the odd
+          * interior address), leaving pointee null → the slot emits 0 → the
+          * translated byte-load dereferences NULL. Attach to the containing
+          * blob + offset so the slot relocates to the exact byte. Gated to
+          * writable __DATA like Immediate (the nearest-blob guess is only valid
+          * for opaque program data, not structurally-parsed __OBJC metadata). */
+         if (env.vmaddr_in_writable_data(value)) {
+            env.vmaddr_resolver.resolve_containing(
+               value, (const SectionBlob<bits> **) &pointee, &pointee_offset);
+         }
       }
    }
 
@@ -119,7 +133,8 @@ namespace MachO {
    NonLazySymbolPointer<bits>::NonLazySymbolPointer(
       const NonLazySymbolPointer<opposite<bits>>& other,
       TransformEnv<opposite<bits>>& env):
-      SymbolPointer<bits>(other, env), pointee(nullptr)
+      SymbolPointer<bits>(other, env), pointee(nullptr),
+      pointee_offset(other.pointee_offset)
    {
       if (other.pointee) {
          env.resolve(other.pointee, &pointee);
