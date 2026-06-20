@@ -1,7 +1,20 @@
 #!/usr/bin/env python3
-"""Sweep all Mach-O binaries in iPhoto.app, rewriting LC_LOAD_DYLIB
-references to bundled frameworks from /System/... or /Library/... paths
-to @rpath/... so dyld finds them in iPhoto.app/Contents/Frameworks/."""
+"""Sweep all Mach-O binaries in an app bundle, rewriting absolute LC_LOAD_DYLIB
+references to a framework/dylib that is ACTUALLY bundled in the app over to
+@rpath/... so dyld finds the in-bundle copy.
+
+Generic: there is no hard-coded list of "known" frameworks. A dependency is
+rewritten iff the matching <Name>.framework directory (or loose <name>.dylib)
+is physically present in Contents/Frameworks. That single test is also the
+safety guard the old allow-list provided — e.g. a stale reference to a
+framework that only survives as a <Name>ShimAuto.dylib (no real .framework
+dir) is left untouched, and a ShimAuto's own re-export of the real system
+framework is never swept.
+
+Versioned (Foo.framework/Versions/A/Foo) AND flat (Foo.framework/Foo)
+frameworks are handled, as are loose dylibs dropped straight into Frameworks/.
+Missing dependencies that are NOT bundled are reported (use `m64 vendor` to
+pull them in) rather than silently skipped."""
 import os, re, subprocess, sys, shutil, tempfile
 from pathlib import Path
 
@@ -31,33 +44,34 @@ def flat_sign(path):
         subprocess.run(["codesign", "--force", "--sign", "-",
                         "--identifier", os.path.basename(path), t], capture_output=True)
         shutil.copy2(t, path)
-BUNDLED = {
-    "QuickTime", "QTKit", "Python", "ProKit", "IMCore", "InstantMessage",
-    "Message", "vecLib", "CoreMediaAuthoring", "CrashReporterSupport",
-    "DiscRecording", "DiscRecordingUI", "iLifeFaceRecognition", "iLifeSQLAccess",
-    "iLifeKit", "iLifePageLayout", "iLifeSlideshow", "iLifeMediaBrowser",
-    "Tessera", "Tellus", "AccountConfigurationPlugin", "UpgradeChecker",
-    "Geode", "MediaSync", "MobileMe", "ProUtils", "ProXTCore", "RedRock",
-    "NavigationServices", "CarbonSound", "NyxAudioAnalysis",
-    # nested sub-frameworks
-    "IMFoundation", "IMUtils", "IMDaemonCore", "IMSecurityUtils", "XMPPCore",
-    "iLifeSlideshowCore", "iLifeSlideshowExporter", "iLifeSlideshowProducer",
-    "iLifeSlideshowRenderer",
-    # iWeb / iWork-shared SF* framework family + FTPKit (the .is_dir() guard
-    # below keeps these inert for bundles that don't ship them, e.g. iPhoto).
-    "SFUtility", "SFArchiving", "SFLicense", "SFApplication", "SFRendering",
-    "SFDrawables", "SFStyles", "SFControls", "SFInspectors", "SFAnimation",
-    "SFProofReader", "SFWordProcessing", "FTPKit",
-}
 
-# pattern: /path/to/<fwname>.framework/Versions/<vers>/<fwname>
-DEP_RE = re.compile(r'^\s*(?P<full>(?P<prefix>/[^@\s].*?)/(?P<fw>\w+)\.framework/Versions/(?P<vers>[^/]+)/\3)\s')
+# A dep line from `otool -L` is:   \t<install path> (compatibility version ...)
+# The path itself can contain spaces and quotes (e.g. iWork '09), so split on
+# the reliable " (compatibility version" marker rather than on whitespace.
+LINE_RE = re.compile(r'^\s+(?P<path>.*?)\s+\(compatibility version')
+# A framework leaf:  .../<Fw>.framework[/Versions/<v>]/<Fw>
+FW_RE = re.compile(r'/(?P<fw>[^/]+)\.framework/(?:Versions/[^/]+/)?(?P=fw)$')
+
+def bundled_target(path):
+    """If `path` names a framework/dylib that is physically present in the
+    bundle's Frameworks dir, return the @rpath-relative replacement, else None."""
+    m = FW_RE.search(path)
+    if m:
+        fw = m.group('fw')
+        if not (BFW / f"{fw}.framework").is_dir():
+            return None
+        # keep everything from "<Fw>.framework/" onward (versioned or flat)
+        rel = path[path.index(f"/{fw}.framework/") + 1:]
+        return f"@rpath/{rel}"
+    base = os.path.basename(path)
+    if base.endswith(".dylib") and (BFW / base).is_file():
+        return f"@rpath/{base}"
+    return None
 
 def all_binaries():
     # Main executables AND the co-located translated dylibs in MacOS/ (the
     # wrapper-exec split means the bundled-framework LC_LOAD_DYLIBs live in
-    # MacOS/<name>.dylib, not the wrapper). Earlier this only yielded the
-    # wrapper, so iPhoto.dylib's deps were never rewritten.
+    # MacOS/<name>.dylib, not the wrapper).
     for p in (APP / "Contents/MacOS").glob("*"):
         if p.is_file():
             yield p
@@ -79,25 +93,33 @@ def is_macho(p):
     except: return False
 
 patched_count = 0
+missing = {}      # framework/dylib name -> set of consumers (not bundled)
 for bin_path in all_binaries():
     if not is_macho(bin_path): continue
     out = subprocess.run(["otool", "-L", str(bin_path)], capture_output=True, text=True, errors="replace").stdout
     changes = []
     for line in out.splitlines()[1:]:  # skip first line (file path)
-        m = DEP_RE.match(line)
-        if not m: continue
-        fw = m.group('fw')
-        if fw not in BUNDLED: continue
-        # the framework must ACTUALLY be bundled: a stale BUNDLED entry whose
-        # framework only exists as a <FW>ShimAuto.dylib (DiscRecording,
-        # InstantMessage, Message...) would break the dep — and sweeping a
-        # ShimAuto's own re-export of the real system framework bricks dyld
-        if not (BFW / f"{fw}.framework").is_dir(): continue
-        old = m.group('full')
-        # don't double-patch
-        if old.startswith('@'): continue
-        new = f"@rpath/{fw}.framework/Versions/{m.group('vers')}/{fw}"
-        changes.append(('-change', old, new))
+        lm = LINE_RE.match(line)
+        if not lm: continue
+        old = lm.group('path')
+        if old.startswith('@'):          # already bundle-relative
+            continue
+        # The single test that decides everything: is this framework/dylib
+        # PHYSICALLY bundled? If so, redirect to the in-bundle copy regardless
+        # of whether the stale install path is /System/, /Library/ or elsewhere
+        # (legacy frameworks like QuickTime/QTKit are recorded with a /System/
+        # path but ship a bundled shim — they must be swept too).
+        new = bundled_target(old)
+        if new is not None:
+            changes.append(('-change', old, new))
+            continue
+        # not bundled: a genuine native host framework — leave it alone.
+        if old.startswith('/System/') or old.startswith('/usr/lib'):
+            continue
+        # an absolute, non-system dep that isn't in the bundle: surface it
+        fm = FW_RE.search(old)
+        name = (fm.group('fw') + ".framework") if fm else os.path.basename(old)
+        missing.setdefault(name, set()).add(bin_path.name)
     if changes:
         subprocess.run(["codesign", "--remove-signature", str(bin_path)],
                        capture_output=True)
@@ -116,3 +138,8 @@ for bin_path in all_binaries():
         patched_count += 1
 
 print(f"TOTAL: {patched_count} binaries patched")
+if missing:
+    print(f"\n  {len(missing)} dependency(ies) referenced by absolute path are NOT bundled")
+    print("  (run `m64 vendor <app>` to pull them in, then re-translate):")
+    for name in sorted(missing):
+        print(f"      • {name}  <- {', '.join(sorted(missing[name]))}")

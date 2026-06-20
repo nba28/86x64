@@ -38,6 +38,7 @@ LIBABICONV = BUILD / "src" / "abiconv" / "libabiconv.dylib"
 TRANSLATE_BUNDLE = SCRIPT_DIR / "translate-bundle"
 PIPELINE_SH      = SCRIPT_DIR / "86x64.sh"
 RPATH_SWEEP      = SCRIPT_DIR / "_rpath_sweep.py"
+VENDOR_DEPS      = SCRIPT_DIR / "_vendor_deps.py"
 SHIMGEN          = SCRIPT_DIR / "shimgen.py"
 FIX_SIGNING      = SCRIPT_DIR / "_fix_bundle_signing.py"
 DEPLOY_SH        = SCRIPT_DIR / "_deploy_app.sh"
@@ -250,6 +251,13 @@ def translate_standalone(binary, args):
 def translate_bundle(bundle, args):
     skip = set(args.skip or [])
     only = set(args.only or [])
+
+    # Pull in any framework dependency that lives OUTSIDE the bundle (e.g. the
+    # iWork '09 shared frameworks) so it gets translated alongside everything
+    # else. Skippable with --no-vendor; extra source roots via --source.
+    if not getattr(args, "no_vendor", False):
+        _vendor(bundle, getattr(args, "source", None) or [], args.dry_run)
+
     info(f"scanning {Path(bundle).name} for translatable binaries…")
     fresh, retrans, plan_native = [], [], []
     for m in iter_machos(bundle):
@@ -358,6 +366,21 @@ def cmd_rpath_fix(args):
     require(RPATH_SWEEP)
     info(f"rpath sweep {Path(args.app).name}")
     run(["python3", RPATH_SWEEP, args.app], dry=args.dry_run)
+
+
+def _vendor(bundle, sources, dry):
+    """Copy missing external framework deps into the bundle (best-effort)."""
+    require(VENDOR_DEPS)
+    cmd = ["python3", VENDOR_DEPS, str(bundle)]
+    for s in sources:
+        cmd += ["--source", s]
+    if dry:
+        cmd.append("--dry-run")
+    run(cmd, dry=False, check=False)   # the script prints its own steps
+
+
+def cmd_vendor(args):
+    _vendor(Path(args.app), args.source or [], args.dry_run)
 
 
 def cmd_shim(args):
@@ -510,6 +533,11 @@ def build_parser():
                    help="bundle mode: only translate these relpaths (repeatable)")
     t.add_argument("--skip", action="append", metavar="RELPATH",
                    help="bundle mode: leave these binaries native (repeatable)")
+    t.add_argument("--no-vendor", action="store_true",
+                   help="skip pulling missing external framework deps into the bundle")
+    t.add_argument("--source", action="append", metavar="DIR",
+                   help="extra dir to search for original frameworks to vendor "
+                        "(repeatable)")
     t.add_argument("--no-shim", action="store_true",
                    help="skip shimgen after translating the bundle")
     t.add_argument("--no-sign", action="store_true",
@@ -530,6 +558,8 @@ def build_parser():
     r.add_argument("app", help="the .app/.framework bundle")
     r.add_argument("--only", action="append", metavar="RELPATH")
     r.add_argument("--skip", action="append", metavar="RELPATH")
+    r.add_argument("--no-vendor", action="store_true")
+    r.add_argument("--source", action="append", metavar="DIR")
     r.add_argument("--no-shim", action="store_true")
     r.add_argument("--no-sign", action="store_true")
     r.add_argument("--list", action="store_true")
@@ -549,6 +579,16 @@ def build_parser():
     rp = sub.add_parser("rpath-fix", help="sweep/repair @rpath load commands")
     rp.add_argument("app")
     common(rp); rp.set_defaults(func=cmd_rpath_fix)
+
+    # vendor
+    ve = sub.add_parser("vendor",
+                        help="copy missing external framework deps into a bundle "
+                             "(walks the dependency closure, pulls originals from "
+                             "source roots)")
+    ve.add_argument("app")
+    ve.add_argument("--source", action="append", metavar="DIR",
+                    help="extra dir to search for original frameworks (repeatable)")
+    common(ve); ve.set_defaults(func=cmd_vendor)
 
     # shim
     sh = sub.add_parser("shim",
