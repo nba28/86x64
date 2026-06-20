@@ -51,6 +51,19 @@ record_decl::record_decl(CXType type): cursor(clang_getTypeDeclaration(type)) {
 }
 
 void record_decl::populate_fields() {
+   /* A struct may be FORWARD-DECLARED (opaque, no body) before its full
+    * definition appears later in the translation unit — extremely common in
+    * framework headers (e.g. `struct FSRef` is forward-declared in CFURL.h,
+    * then defined as `{ UInt8 hidden[80]; }` in Files.h). clang_getTypeDeclaration
+    * can hand us the forward-decl cursor, which has ZERO child FieldDecls, so we
+    * computed sizeof()==0 and emitted an empty deep-copy. A native callee then
+    * read/WROTE the real struct size (FSPathMakeRef writes 80 bytes for the FSRef
+    * out-param) into our undersized bounce buffer, smashing the shim's saved rbp
+    * and return address -> jmp to 0. Always lay out the DEFINITION cursor. */
+   CXCursor def = clang_getCursorDefinition(cursor);
+   if (!clang_Cursor_isNull(def)) {
+      cursor = def;
+   }
    for_each(cursor,
             [&] (CXCursor c, CXCursor p) {
                switch (clang_getCursorKind(c)) {
