@@ -195,6 +195,15 @@ static void fixup_translated_dylib_slots(void) {
           * don't — so the heuristic naturally skips bound
           * entries. */
          { "__DATA", "__nl_symbol_ptr", 0, 1 },
+         /* C++ vtables / fn-ptr dispatch tables and const pointer arrays the
+          * compiler emitted into __DATA,__const (RW, no mprotect). Their
+          * entries are internal pointers the translator relocated to new
+          * pre-slide vmaddrs at convert time; slide them like __data. Without
+          * this a vtable dispatch reads an un-slid __text entry and jumps to
+          * the pre-slide address -> SIGBUS/KERN_PROTECTION_FAILURE (exposed
+          * once `movl $vtable,(%reg)` installs the table correctly — the
+          * pointer-table store fix in instruction.cc). */
+         { "__DATA", "__const",         0, 1 },
          { "__TEXT", "__const",         1, 1 },
          /*
           * __text holds instructions whose disp32 immediates point at
