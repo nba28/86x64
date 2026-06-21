@@ -4714,20 +4714,49 @@ static void reverse_register_image(const struct mach_header_64 *mh,
     * methods were merely indexed for class-method lookup and stayed invisible
     * to class_getInstanceMethod / direct messaging. */
    uint32_t cats_applied = 0;
+   int cat_trace = getenv("ABICONV_CAT_TRACE") != NULL;
    for (size_t i = 0; i < nmodules; ++i) {
       const struct legacy_objc_module *mod = &modules[i];
-      if (mod->version != 7 || mod->size != sizeof(*mod)) { continue; }
-      if (!ptr_ok(mod->symtab, sizeof(struct legacy_objc_symtab))) { continue; }
+      if (mod->version != 7 || mod->size != sizeof(*mod)) {
+         if (cat_trace) {
+            fprintf(stderr, "[cat] mod[%zu] BAD-HDR version=0x%x size=0x%x symtab=0x%x\n",
+                    i, mod->version, mod->size, mod->symtab); fflush(stderr);
+         }
+         continue;
+      }
+      if (!ptr_ok(mod->symtab, sizeof(struct legacy_objc_symtab))) {
+         if (cat_trace) {
+            fprintf(stderr, "[cat] mod[%zu] BAD-SYMTAB symtab=0x%x\n", i, mod->symtab);
+            fflush(stderr);
+         }
+         continue;
+      }
       const struct legacy_objc_symtab *st =
          (const struct legacy_objc_symtab *)(uintptr_t)mod->symtab;
       const uint32_t *ddefs = (const uint32_t *)
          ((const char *)st + sizeof(struct legacy_objc_symtab));
+      if (cat_trace && st->cat_def_cnt) {
+         fprintf(stderr, "[cat] mod[%zu] symtab=0x%x cls_def_cnt=%u cat_def_cnt=%u\n",
+                 i, mod->symtab, st->cls_def_cnt, st->cat_def_cnt); fflush(stderr);
+      }
       for (uint16_t j = 0; j < st->cat_def_cnt; ++j) {
          uint32_t cref = ddefs[(uint32_t)st->cls_def_cnt + j];
-         if (!ptr_ok(cref, sizeof(struct legacy_objc_category))) { continue; }
+         if (!ptr_ok(cref, sizeof(struct legacy_objc_category))) {
+            if (cat_trace) {
+               fprintf(stderr, "[cat]   j=%u BAD-CREF cref=0x%x\n", j, cref);
+               fflush(stderr);
+            }
+            continue;
+         }
          const struct legacy_objc_category *cat =
             (const struct legacy_objc_category *)(uintptr_t)cref;
-         if (!legacy_cstr_ok(cat->class_name)) { continue; }
+         if (!legacy_cstr_ok(cat->class_name)) {
+            if (cat_trace) {
+               fprintf(stderr, "[cat]   j=%u BAD-CLSNAME cref=0x%x class_name=0x%x\n",
+                       j, cref, cat->class_name); fflush(stderr);
+            }
+            continue;
+         }
          Class tgt = objc_getClass((const char *)(uintptr_t)cat->class_name);
          if (getenv("ABICONV_CAT_TRACE")) {
             fprintf(stderr, "[cat] %s (+%s) tgt=%p imeths=0x%x\n",

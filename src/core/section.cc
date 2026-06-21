@@ -195,6 +195,29 @@ namespace MachO {
 
       const uint32_t value = img.at<uint32_t>(loc.offset);
 
+      /*
+       * Legacy ObjC __OBJC,__symbols holds the per-module objc_symtab structs
+       * { sel_ref_cnt:4, refs:4, cls_def_cnt:2, cat_def_cnt:2, defs[]:4… }.
+       * Its only pointers are `refs` (→ __OBJC,__message_refs) and the `defs[]`
+       * array (→ __class / __category structs, also in __OBJC) — never code or
+       * cstring pointers. But the packed `cls_def_cnt|cat_def_cnt` 32-bit count
+       * word is a small integer that frequently aliases a __TEXT,__text vmaddr
+       * (e.g. AppController's module: cls=1,cat=5 → 0x00050001, a valid code
+       * address). The generic heuristic below would "rebase" that count word to
+       * a translated __text address, corrupting cls_def_cnt/cat_def_cnt so the
+       * runtime category/class walk reads garbage counts and silently drops the
+       * module's categories. Since a real objc_symtab pointer NEVER targets an
+       * executable segment, reject executable targets outright in this section.
+       * Universal to every i386 ObjC binary (objc_symtab is part of the ABI).
+       */
+      bool in_objc_symbols = false;
+      if (env.current_section != nullptr) {
+         const auto& cs = env.current_section->sect;
+         in_objc_symbols =
+            strncmp(cs.segname, SEG_OBJC, sizeof(cs.segname)) == 0 &&
+            strncmp(cs.sectname, "__symbols", sizeof(cs.sectname)) == 0;
+      }
+
       bool is_pointer = false;
       /* Reject obvious non-pointers up-front so we don't waste resolver
        * traffic on integer constants or float bit patterns. */
@@ -223,6 +246,9 @@ namespace MachO {
                   (seg->segment_command.initprot & VM_PROT_EXECUTE) != 0;
                if (!exec && (value & 3) != 0) {
                   break;   /* misaligned data-range value -> treat as constant */
+               }
+               if (exec && in_objc_symbols) {
+                  break;   /* objc_symtab count word aliasing __text -> constant */
                }
                is_pointer = true;
                break;
