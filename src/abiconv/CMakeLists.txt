@@ -23,6 +23,12 @@ set(ABICONV_SYM_SOURCES
   /usr/lib/system/libsystem_info.dylib
   /usr/lib/system/libsystem_malloc.dylib
   /usr/lib/system/libsystem_pthread.dylib
+  # libsystem_platform exports the OSAtomic* / OSSpinLock primitives. Legacy
+  # iLife code calls OSAtomicAdd32/Barrier directly (i386 cdecl, stack args);
+  # unshimmed the call reaches native OSAtomicAdd32 which reads args from
+  # registers -> derefs a garbage register -> EXC_BAD_ACCESS (iPhoto Thumbnailer
+  # teardown). See includes.h (<libkern/OSAtomic.h>).
+  /usr/lib/system/libsystem_platform.dylib
   /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
   /System/Library/Frameworks/CoreServices.framework/CoreServices
   /System/Library/Frameworks/ApplicationServices.framework/ApplicationServices

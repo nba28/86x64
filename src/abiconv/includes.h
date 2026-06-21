@@ -18,6 +18,16 @@
  * whose `ret` pops 8 bytes, swallowing the adjacent arg into the high half of
  * the return address (control-flow corruption). */
 #include <pthread.h>
+/* OSAtomic* (OSAtomicAdd32 / OSAtomicAdd32Barrier / OSAtomicCompareAndSwap*,
+ * OSSpinLock, ...) live in libsystem_platform.dylib (added to ABICONV_SYM_SOURCES).
+ * Legacy i386 iLife code (e.g. Thumbnailer teardown) calls them directly via
+ * i386 cdecl (args on the stack); without a shim the call lands in the real
+ * x86_64 OSAtomicAdd32, which reads its args from REGISTERS (edi/rsi) — so it
+ * dereferences a garbage register as the address pointer -> EXC_BAD_ACCESS
+ * (timing-dependent, since the garbage register varies). OSAtomicDeprecated.h
+ * declares them extern by default (OSATOMIC_USE_INLINED is unset), so abigen
+ * emits a proper marshalling shim. */
+#include <libkern/OSAtomic.h>
 
 /* Core C frameworks legacy i386 apps call. Their exports are added to the
  * abigen "consider set" via ABICONV_SYM_SOURCES in CMakeLists.txt; abigen
