@@ -54,6 +54,31 @@ def _thin_x86_64(path):
     os.replace(tmp, str(path))
     return True
 
+def _has_x86_64(path):
+    """True iff the Mach-O at `path` carries an x86_64 slice (thin or fat).
+    A bundled framework that is still a thin i386 binary (never translated /
+    shimmed) cannot be loaded into the x86_64 translated process — rewriting a
+    dependency to @rpath then points at an unloadable image, which dyld reports
+    as a missing library. We surface that distinctly so the deploy knows to
+    translate or shim it."""
+    try:
+        r = subprocess.run(["lipo", "-archs", str(path)],
+                           capture_output=True, text=True)
+        if r.returncode == 0:
+            return "x86_64" in r.stdout.split()
+    except Exception:
+        pass
+    # lipo can choke on translated dylibs with __LINKEDIT slack; fall back to
+    # the Mach-O cputype in the header (x86_64 = 0x01000007, little-endian).
+    try:
+        with open(path, "rb") as f:
+            magic = f.read(4); cpu = f.read(4)
+        if magic in (b'\xcf\xfa\xed\xfe',):           # 64-bit LE Mach-O
+            return cpu == b'\x07\x00\x00\x01'
+    except Exception:
+        pass
+    return False
+
 def flat_sign(path):
     """Ad-hoc sign FLAT (not as a bundle): sign a copy outside any
     .framework/.app so codesign doesn't walk the bundle manifest, then move
@@ -115,15 +140,26 @@ def is_macho(p):
 
 patched_count = 0
 missing = {}      # framework/dylib name -> set of consumers (not bundled)
+wrong_arch = {}   # bundled name -> set of x86_64 consumers (target is i386-only)
 for bin_path in all_binaries():
     if not is_macho(bin_path): continue
     out = subprocess.run(["otool", "-L", str(bin_path)], capture_output=True, text=True, errors="replace").stdout
+    consumer_x64 = _has_x86_64(bin_path)
     changes = []
     for line in out.splitlines()[1:]:  # skip first line (file path)
         lm = LINE_RE.match(line)
         if not lm: continue
         old = lm.group('path')
         if old.startswith('@'):          # already bundle-relative
+            # Already @rpath/... — still validate the bundled target's arch,
+            # since a prior sweep may have pointed an x86_64 consumer at a
+            # framework that was never translated past i386.
+            if old.startswith('@rpath/'):
+                tgt = BFW / old[len('@rpath/'):]
+                if consumer_x64 and tgt.is_file() and not _has_x86_64(tgt):
+                    fm = FW_RE.search(old)
+                    nm = (fm.group('fw') + ".framework") if fm else os.path.basename(old)
+                    wrong_arch.setdefault(nm, set()).add(bin_path.name)
             continue
         # The single test that decides everything: is this framework/dylib
         # PHYSICALLY bundled? If so, redirect to the in-bundle copy regardless
@@ -133,6 +169,14 @@ for bin_path in all_binaries():
         new = bundled_target(old)
         if new is not None:
             changes.append(('-change', old, new))
+            # The path now resolves, but a bundled framework that is still a
+            # thin i386 binary (never translated/shimmed) cannot load into the
+            # x86_64 process — dyld reports it as "missing". Flag it loudly.
+            tgt = BFW / new[len('@rpath/'):]
+            if consumer_x64 and tgt.is_file() and not _has_x86_64(tgt):
+                fm = FW_RE.search(new)
+                nm = (fm.group('fw') + ".framework") if fm else os.path.basename(new)
+                wrong_arch.setdefault(nm, set()).add(bin_path.name)
             continue
         # not bundled: a genuine native host framework — leave it alone.
         if old.startswith('/System/') or old.startswith('/usr/lib'):
@@ -169,3 +213,9 @@ if missing:
     print("  (run `m64 vendor <app>` to pull them in, then re-translate):")
     for name in sorted(missing):
         print(f"      • {name}  <- {', '.join(sorted(missing[name]))}")
+if wrong_arch:
+    print(f"\n  WARNING: {len(wrong_arch)} bundled framework(s) are i386-only — they")
+    print("  resolve via @rpath but CANNOT load into the x86_64 process (dyld will")
+    print("  report them as missing). Translate or shim them (m64 translate / shimgen):")
+    for name in sorted(wrong_arch):
+        print(f"      • {name}  <- {', '.join(sorted(wrong_arch[name]))}")
