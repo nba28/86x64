@@ -92,9 +92,22 @@ while IFS= read -r SYM; do
     [ -z "$SYM" ] && continue
     REPLACEMENT="${PREFIX}${SYM}"
     if ! grep -qFx "$REPLACEMENT" "$SHIM_EXPORTS"; then
-        # No shim available — leave the bind pointing at its original framework.
-        SKIPPED=$((SKIPPED + 1))
-        continue
+        # Legacy POSIX conformance-variant symbols (_open$UNIX2003,
+        # _stat$INODE64, _opendir$INODE64$UNIX2003, _foo$1050) are the SAME
+        # function as their base name — only errno/struct-size conformance
+        # differs, which the abigen base shim already marshals. The variant
+        # form has no shim of its own, so it would otherwise fall through to
+        # NATIVE libSystem and be called with the i386 ABI (4-byte stack ret),
+        # which the native 64-bit `ret` over-pops -> fused PC crash. Strip the
+        # $… suffix(es) and retry against the base shim. Generic to any i386
+        # binary built against the 10.5-era UNIX2003/INODE64 variant symbols.
+        BASE="${SYM%%\$*}"
+        REPLACEMENT="${PREFIX}${BASE}"
+        if [ "$BASE" = "$SYM" ] || ! grep -qFx "$REPLACEMENT" "$SHIM_EXPORTS"; then
+            # No shim available — leave the bind pointing at its original framework.
+            SKIPPED=$((SKIPPED + 1))
+            continue
+        fi
     fi
     # Redirect the symbol wherever it is bound: functions live in the lazy
     # bind table, external DATA constants (e.g. NSString* consts like

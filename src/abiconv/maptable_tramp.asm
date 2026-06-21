@@ -70,6 +70,12 @@
 	MTSHIM	___sysctl,                    _shim_sysctl
 	MTSHIM	___sysctlbyname,              _shim_sysctlbyname
 
+	;; variadic POSIX primitives abigen skips (the `...` arg). Reached via the
+	;; conformance-variant import (_open$UNIX2003 -> ___open) after static-
+	;; interpose strips the $UNIX2003/$INODE64 suffix.
+	MTSHIM	___open,                      _shim_open
+	MTSHIM	___fcntl,                     _shim_fcntl
+
 	;; Carbon Process Manager: ProcessInfoRec embeds pointers (i386/x86_64
 	;; layouts differ) and is in/out — abigen can't marshal it. proc_shim.c.
 	MTSHIM	___GetProcessInformation,     _shim_GetProcessInformation
