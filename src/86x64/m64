@@ -234,18 +234,53 @@ def translate_one(bundle, rel, args):
     run(cmd, dry=False)   # translate-bundle echoes its own steps
 
 
+def is_fat(path):
+    """True if `path` is a fat/universal Mach-O wrapper (vs. a thin slice)."""
+    try:
+        with open(path, "rb") as f:
+            head = f.read(4)
+    except OSError:
+        return False
+    if len(head) < 4:
+        return False
+    return struct.unpack(">I", head)[0] in (0xCAFEBABE, 0xBEBAFECA)
+
+
+def thin_to_i386(binary):
+    """The pipeline (86x64.sh / macho-tool) consumes a THIN i386 Mach-O: its
+    LC_DYLD_INFO / segment file-offsets are slice-relative, so feeding a fat
+    wrapper makes macho-tool read linkedit at the wrong file offset (e.g.
+    `BindInfo: invalid bind opcode 0xe0` — bytes past the fat header). If
+    `binary` is a fat archive, extract its i386 slice to a temp file and return
+    (path, cleanup); otherwise return the input unchanged with a no-op cleanup."""
+    if not is_fat(binary):
+        return Path(binary), (lambda: None)
+    if "i386" not in archs_of(binary):
+        return Path(binary), (lambda: None)   # let the pipeline diagnose it
+    import tempfile
+    fd, tmp = tempfile.mkstemp(prefix="m64-thin-", suffix=".i386")
+    os.close(fd)
+    info(f"input is fat {archs_of(binary)}; thinning i386 slice -> {tmp}")
+    run(["lipo", str(binary), "-thin", "i386", "-output", tmp], dry=False)
+    return Path(tmp), (lambda: os.path.exists(tmp) and os.remove(tmp))
+
+
 def translate_standalone(binary, args):
     require(PIPELINE_SH)
     out = Path(args.output) if args.output else binary.with_suffix(".x64")
     info(f"translate (standalone) {binary} -> {out}")
-    cmd = ["bash", PIPELINE_SH, "-m", MACHO_TOOL, "-l", LIBABICONV]
-    if args.keep: cmd.append("-k")
-    libw = BUILD / "src" / "86x64" / "libwrapper.a"
-    libi = BUILD / "src" / "86x64" / "libinterpose.dylib"
-    if libw.exists(): cmd += ["-w", libw]
-    if libi.exists(): cmd += ["-i", libi]
-    cmd += ["-o", out, binary]
-    run(cmd, dry=args.dry_run)
+    binary, cleanup = thin_to_i386(binary)
+    try:
+        cmd = ["bash", PIPELINE_SH, "-m", MACHO_TOOL, "-l", LIBABICONV]
+        if args.keep: cmd.append("-k")
+        libw = BUILD / "src" / "86x64" / "libwrapper.a"
+        libi = BUILD / "src" / "86x64" / "libinterpose.dylib"
+        if libw.exists(): cmd += ["-w", libw]
+        if libi.exists(): cmd += ["-i", libi]
+        cmd += ["-o", out, binary]
+        run(cmd, dry=args.dry_run)
+    finally:
+        cleanup()
 
 
 def translate_bundle(bundle, args):
