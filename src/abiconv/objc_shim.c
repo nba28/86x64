@@ -2505,9 +2505,12 @@ static void appkit_compat_install(void) {
  *   args32[1] = _cmd (cstring ptr)
  *   args32[2..] = explicit args
  */
+void x64_refresh_data_shadows(void);
+
 void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
    appkit_compat_install();
+   x64_refresh_data_shadows();
 
    if (getenv("OBJC_BRIDGE_TRACE")) {
       fprintf(stderr, "[bp] entry: t=%x self32=0x%08x cmd32=0x%08x args[2..5]=0x%08x 0x%08x 0x%08x 0x%08x arena=[0x%lx..0x%lx)\n",
@@ -3255,6 +3258,17 @@ void _86x64_objc_index_legacy_classes(const struct mach_header_64 *mh,
 extern void    *x64_data_shadows[];      /* flat triples: [&shadow,name,info,...] */
 extern uint64_t x64_data_shadows_count;  /* number of TRIPLES */
 
+/* Object data-shadows that resolved to nil when the constructor ran are MUTABLE
+ * object globals (the canonical case is NSApp, which is nil until the app
+ * creates its NSApplication). The constructor snapshot would pin them to nil
+ * forever, so record them here and refresh lazily from the forward bridge. */
+#define X64_MAX_PENDING_SHADOWS 64
+static uint64_t   *g_ps_shadow[X64_MAX_PENDING_SHADOWS];
+static void       *g_ps_addr[X64_MAX_PENDING_SHADOWS];
+static const char *g_ps_name[X64_MAX_PENDING_SHADOWS];
+static int         g_ps_n;
+static volatile int g_ps_remaining;
+
 __attribute__((constructor))
 static void x64_init_data_shadows(void) {
    const uint64_t n = x64_data_shadows_count;
@@ -3276,15 +3290,52 @@ static void x64_init_data_shadows(void) {
       uint64_t v = *(uint64_t *)addr;           /* the object pointer */
       if (v >= 0x100000000ULL) {
          *shadow = x64_objc_wrap(v);            /* 32-bit handle, zero-extended */
-      } else {
+      } else if (v != 0) {
          *shadow = (uint32_t)v;                 /* already low; pass through */
+      } else {
+         /* nil at constructor time: a mutable object global set later (NSApp).
+          * Pinning it now would leave the i386 single-deref reading nil; record
+          * it for lazy refresh from the forward bridge. */
+         *shadow = 0;
+         if (g_ps_n < X64_MAX_PENDING_SHADOWS) {
+            g_ps_shadow[g_ps_n] = shadow;
+            g_ps_addr[g_ps_n]   = addr;
+            g_ps_name[g_ps_n]   = name;
+            g_ps_n++;
+         }
       }
    }
+   g_ps_remaining = g_ps_n;
    if (getenv("ABICONV_OBJC_SLIDE_VERBOSE")) {
       fprintf(stderr, "objc_shim: populated %llu data-constant shadows\n",
               (unsigned long long)n);
       fflush(stderr);
    }
+}
+
+/* Lazily resolve object data-shadows that were nil at constructor time (mutable
+ * object globals like NSApp, which AppKit sets only once the app's
+ * NSApplication exists). Called from the forward bridge on each translated
+ * msgSend; a single guarded load makes it a no-op once everything is resolved.
+ * x64_objc_wrap dedups via the shared map, so the handle matches the one the
+ * translated code already holds for that instance. */
+void x64_refresh_data_shadows(void) {
+   if (g_ps_remaining <= 0) { return; }
+   int rem = 0;
+   for (int i = 0; i < g_ps_n; ++i) {
+      uint64_t *shadow = g_ps_shadow[i];
+      if (!shadow) { continue; }                 /* already resolved */
+      uint64_t v = *(uint64_t *)g_ps_addr[i];
+      if (v == 0) { ++rem; continue; }           /* still nil */
+      *shadow = (v >= 0x100000000ULL) ? x64_objc_wrap(v) : (uint32_t)v;
+      g_ps_shadow[i] = NULL;                      /* mark done (benign race) */
+      if (getenv("ABICONV_SHADOW_TRACE")) {
+         fprintf(stderr, "[shadow] late-resolved %s -> 0x%x\n",
+                 g_ps_name[i], (uint32_t)*shadow);
+         fflush(stderr);
+      }
+   }
+   g_ps_remaining = rem;
 }
 
 /* ======================================================================
