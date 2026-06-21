@@ -4729,6 +4729,14 @@ static void reverse_register_image(const struct mach_header_64 *mh,
             (const struct legacy_objc_category *)(uintptr_t)cref;
          if (!legacy_cstr_ok(cat->class_name)) { continue; }
          Class tgt = objc_getClass((const char *)(uintptr_t)cat->class_name);
+         if (getenv("ABICONV_CAT_TRACE")) {
+            fprintf(stderr, "[cat] %s (+%s) tgt=%p imeths=0x%x\n",
+                    (const char *)(uintptr_t)cat->class_name,
+                    legacy_cstr_ok(cat->category_name)
+                       ? (const char *)(uintptr_t)cat->category_name : "?",
+                    (void *)tgt, cat->instance_methods);
+            fflush(stderr);
+         }
          if (!tgt) { continue; }   /* target class not present yet */
          if (cat->instance_methods) {
             reverse_add_methods(tgt, cat->instance_methods);
