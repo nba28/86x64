@@ -680,6 +680,31 @@ struct ABIGenerator {
             std::cerr << "abigen: forced object data shadow " << sym << std::endl;
          }
       }
+
+      /* Compiler-runtime SCALAR data symbols that no public header declares, so
+       * handle_var_decl never sees them. The chief one is `___stack_chk_guard`:
+       * stack-protected i386 functions read the canary via `movl slot,%reg;
+       * movl (%reg),%reg`, where the slot is dyld-bound to libSystem's 64-bit
+       * &__stack_chk_guard (high, in the shared cache). The i386 4-byte load
+       * truncates that address (e.g. 0x00007ff8`4a89b350 -> 0x4a89b350) and the
+       * second deref faults. Shadow it like any scalar extern: a low-4GB COPY of
+       * the canary bytes that x64_init_data_shadows() fills via dlsym, so the
+       * slot -> &shadow (low, fits) -> stable canary value. The exit-time
+       * re-read hits the same shadow, so the consistency check still passes.
+       * Generic: every i386 binary built with -fstack-protector imports this. */
+      static const struct { const char *sym; unsigned size; } scalars[] = {
+         { "___stack_chk_guard", 8 },
+      };
+      for (const auto& s : scalars) {
+         if (already.count(s.sym)) { continue; }
+         already.insert(s.sym);
+         data_shadow_syms.push_back(s.sym);
+         data_shadow_info.push_back(s.size);
+         if (getenv("ABIGEN_TRACE")) {
+            std::cerr << "abigen: forced scalar data shadow " << s.sym
+                      << " (" << s.size << "B)" << std::endl;
+         }
+      }
    }
 
    /* Emit the data-shadow storage + the runtime table consumed by
