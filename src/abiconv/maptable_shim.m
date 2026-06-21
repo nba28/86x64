@@ -53,6 +53,7 @@
 /* proxy arena (objc_shim.c) — handle<->real, process-shared across copies */
 extern uint32_t x64_objc_wrap(uint64_t real);
 extern uint64_t x64_objc_unwrap(uint32_t h);
+extern uint64_t _86x64_unwrap_obj_arg(uint32_t a);  /* full object resolver */
 
 #define MTBC_MAGIC 0x6d746263u   /* 'mtbc' — tags our shadow callback structs */
 
@@ -82,11 +83,16 @@ static inline uint32_t bridge_out(uint64_t real) {
    if (real >= 0x100000000ULL) { return x64_objc_wrap(real); }
    return (uint32_t)real;
 }
-/* i386 32-bit value -> real 64-bit. unwrap() returns the real id for a handle
- * and passes a non-handle through zero-extended, so this is safe for keys and
- * values of every kind. */
+/* i386 32-bit value -> real 64-bit. Uses the canonical forward-bridge resolver
+ * so that EVERY i386 object representation is mapped to its real x86_64 id:
+ * arena proxy handles, reverse-bridge R/S SHADOWS (i386-layout, ~0xc8xxxxxx —
+ * x64_objc_unwrap alone left these untouched, so Foundation's OBJECT key/value
+ * callback would objc_retain the raw i386-layout shadow and fault on its fused
+ * 4-byte isa), paired/raw legacy objects, real x86 objects, else passthrough.
+ * Non-object keys/values (small integers) match nothing and pass through, so
+ * this is safe for keys and values of every callback kind. */
 static inline const void *bridge_in(uint32_t v) {
-   return (const void *)(uintptr_t)x64_objc_unwrap(v);
+   return (const void *)(uintptr_t)_86x64_unwrap_obj_arg(v);
 }
 
 /* Fetch a real Foundation callback global by name (returns &struct or NULL). */
@@ -170,6 +176,11 @@ uint32_t shim_NSMapGet(uint32_t *a) {
    return bridge_out((uint64_t)(uintptr_t)v);
 }
 uint32_t shim_NSMapInsert(uint32_t *a) {
+   if (trace_on()) {
+      fprintf(stderr, "[mt] insert table=0x%x key=0x%x->%p val=0x%x->%p\n",
+              a[0], a[1], bridge_in(a[1]), a[2], bridge_in(a[2]));
+      fflush(stderr);
+   }
    NSMapInsert(as_map(a[0]), bridge_in(a[1]), (void *)bridge_in(a[2]));
    return 0;
 }

@@ -3578,6 +3578,13 @@ static uint32_t get_or_create_shadow(id real, Class cls) {
  * not a shadow. */
 id _86x64_shadow_real(uint32_t s) { return shadow_real(s); }
 
+/* Public: fully resolve an i386 `@`/`#` value to a real x86_64 id — the same
+ * canonical resolver the forward arg-bridge uses (arena proxy handles, R/S
+ * shadows, paired/raw legacy objects, real x86 objects, else passthrough).
+ * Used by C-API object bridges (e.g. NSMapTable/NSHashTable) so a legacy
+ * object's SHADOW is never handed to native code as the object itself. */
+uint64_t _86x64_unwrap_obj_arg(uint32_t a) { return unwrap_obj_arg(a); }
+
 /* ---------------------------------------------------------------------------
  * objc_setProperty / objc_getProperty — the modern-runtime @synthesize'd
  * accessor helpers. iPhoto's property setters/getters call them via classic
