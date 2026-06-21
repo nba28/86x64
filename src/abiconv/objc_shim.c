@@ -1025,10 +1025,25 @@ static void enc_copy3(char c, size_t isz, size_t nsz, int fp, int dir,
    }
 }
 
+/* i386 callback -> native trampoline bridge (cb_bridge.c). A `^?` (function
+ * pointer) argument or struct MEMBER is an i386 code address the native API
+ * will later CALL with the x86_64 ABI; passed raw it crashes. We bind it to a
+ * trampoline whose dispatcher marshals the native args down to an i386 cdecl
+ * word frame. The type encoding `^?` carries NO signature, so we use a generic
+ * descriptor: up to 6 GP (pointer/int) args, pointer return — correct for the
+ * overwhelming majority of C callbacks (extra words are harmless under cdecl;
+ * the rare FP-arg callback is the known limitation). */
+typedef struct { uint32_t nargs; uint32_t ret_kind; uint8_t arg_kinds[16]; }
+   x64_cb_sig_t;
+extern uint64_t x64_cb_wrap(uint32_t fn32, const x64_cb_sig_t *sig);
+/* arg kind PTR=2 ; ret kind PTR=2 (mirror cb_bridge.c) */
+static const x64_cb_sig_t g_generic_cb_sig = { 6, 2, { 2, 2, 2, 2, 2, 2 } };
+
 /* walk state: eightbyte SysV class accumulators over the NATIVE layout */
 struct enc_ew {
    int conv;
    int dir;            /* 0 dry, 1 widen i386->native, 2 narrow native->i386 */
+   int wrap_fnptr;     /* dir1: bind `^?` members to cb trampolines */
    const uint8_t *src; /* dir1: i386 base; dir2: native base */
    uint8_t *dst;       /* dir1: native base; dir2: i386 base */
    uint8_t eb_fp[8];   /* native eightbyte k contains FP scalar(s) */
@@ -1048,6 +1063,14 @@ static const char *enc_walk3(struct enc_ew *w, const char *t, int ctx,
       }
       if (w->dir == 1 && w->src && w->dst) {
          enc_copy3(c, isz, nsz, fp, 1, w->src + *i_off, w->dst + *n_off);
+         /* A `^?` member is a callback: bind the i386 fn-ptr to a native
+          * trampoline (overwriting the zero-extended copy) so native code can
+          * call it with the x86_64 ABI. */
+         if (w->wrap_fnptr && c == '^' && t[1] == '?') {
+            uint32_t fn32; memcpy(&fn32, w->src + *i_off, 4);
+            uint64_t tr = x64_cb_wrap(fn32, &g_generic_cb_sig);
+            memcpy(w->dst + *n_off, &tr, 8);
+         }
       } else if (w->dir == 2 && w->src && w->dst) {
          enc_copy3(c, isz, nsz, fp, 2, w->src + *n_off, w->dst + *i_off);
       }
@@ -1117,7 +1140,8 @@ static unsigned enc_classify(const char *t, int conv, size_t *isz_out,
 static void enc_widen(const char *t, int conv, const uint8_t *i386_src,
                       uint8_t *native_dst) {
    struct enc_ew w; memset(&w, 0, sizeof w);
-   w.conv = conv; w.dir = 1; w.src = i386_src; w.dst = native_dst;
+   w.conv = conv; w.dir = 1; w.wrap_fnptr = 1;
+   w.src = i386_src; w.dst = native_dst;
    size_t i_off = 0, n_off = 0;
    enc_walk3(&w, t, CTX_NONE, &i_off, &n_off);
 }
@@ -1311,6 +1335,10 @@ static int marshal_arg_fwd(struct objc_call_plan *plan, struct mcur *c,
       *ai += 3;                               /* i386 x87 ext = 12 bytes */
       if (trace) { fprintf(stderr, "[fma] long double arg unsupported\n"); }
       return mcur_put_xmm(plan, c, 0);
+   }
+   if (b == '^' && t[1] == '?') {             /* function pointer (callback) */
+      uint32_t fn32 = args32[(*ai)++];
+      return mcur_put_gp(plan, c, x64_cb_wrap(fn32, &g_generic_cb_sig));
    }
    /* everything else: int/char/short/BOOL/enum/pointer — one 4-byte slot, GP */
    return mcur_put_gp(plan, c, (uint64_t)args32[(*ai)++]);
@@ -4476,9 +4504,7 @@ uint32_t mt_NSDivideRect(const uint32_t *a) {
  *   a[11]     xStep  a[12] yStep   (floats)
  *   a[13]     tiling  a[14] isColored  a[15] callbacks*
  * =========================================================================== */
-typedef struct { uint32_t nargs; uint32_t ret_kind; uint8_t arg_kinds[16]; }
-   x64_cb_sig_t;
-extern uint64_t x64_cb_wrap(uint32_t fn32, const x64_cb_sig_t *sig);
+/* x64_cb_sig_t / x64_cb_wrap declared earlier (near enc_ew). */
 /* arg kinds: PTR=2 OBJ=3 ; ret: VOID=0  (mirror cb_bridge.c) */
 static const x64_cb_sig_t g_cgpat_draw_sig    = { 2, 0, { 2, 3 } };
 static const x64_cb_sig_t g_cgpat_release_sig = { 1, 0, { 2 } };
