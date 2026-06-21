@@ -33,6 +33,27 @@ def _find_int():
     return shutil.which("llvm-install-name-tool") or "install_name_tool"
 INT = _find_int()
 
+def _thin_x86_64(path):
+    """Reduce a fat binary carrying dead ppc/i386 slices to its x86_64 slice
+    in place. Old iWork frameworks (e.g. MobileMe) ship ppc/i386/x86_64 fat
+    binaries; cctools install_name_tool aborts byte-swapping the PPC slice
+    ('malformed load command') and llvm rejects classic shared libraries. We
+    only ever run x86_64, so the other slices are dead weight. Returns True if
+    the file was changed."""
+    r = subprocess.run(["lipo", "-archs", str(path)], capture_output=True, text=True)
+    if r.returncode != 0:
+        return False
+    archs = r.stdout.split()
+    if "x86_64" not in archs or archs == ["x86_64"]:
+        return False
+    tmp = str(path) + ".x86_64"
+    if subprocess.run(["lipo", str(path), "-thin", "x86_64", "-output", tmp],
+                      capture_output=True).returncode != 0:
+        return False
+    shutil.copymode(str(path), tmp)
+    os.replace(tmp, str(path))
+    return True
+
 def flat_sign(path):
     """Ad-hoc sign FLAT (not as a bundle): sign a copy outside any
     .framework/.app so codesign doesn't walk the bundle manifest, then move
@@ -130,6 +151,11 @@ for bin_path in all_binaries():
         r = subprocess.run(["install_name_tool", *flat], capture_output=True, text=True, errors="replace")
         if r.returncode != 0:
             r = subprocess.run([INT, *flat], capture_output=True, text=True, errors="replace")
+        if r.returncode != 0 and _thin_x86_64(bin_path):
+            # dead ppc/i386 slices were breaking the tools; retry on the thin x86_64
+            r = subprocess.run(["install_name_tool", *flat], capture_output=True, text=True, errors="replace")
+            if r.returncode != 0:
+                r = subprocess.run([INT, *flat], capture_output=True, text=True, errors="replace")
         if r.returncode != 0:
             print(f"  FAIL {bin_path.name}: {r.stderr.splitlines()[0] if r.stderr else 'no stderr'}")
             continue
