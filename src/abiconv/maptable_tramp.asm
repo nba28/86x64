@@ -111,6 +111,12 @@
 	MTSHIM	___CFRetain,                         _shim_CFRetain
 	MTSHIM	___CFRelease,                        _shim_CFRelease
 
+	;; OSAtomicAdd32 family: override the abigen shim to guard a near-null
+	;; (page-zero) atomic target — a nil-based garbage object ivar passed to a
+	;; refcount-Release helper during reverse-bridged teardown. osatomic_shim.c.
+	MTSHIM	___OSAtomicAdd32,        _shim_OSAtomicAdd32
+	MTSHIM	___OSAtomicAdd32Barrier, _shim_OSAtomicAdd32Barrier
+
 ;; ===========================================================================
 ;; Struct-by-value C-function shims (28th blocker): NS/CG geometry family.
 ;; The C side (objc_shim.c g_geo[]) marshals via the ObjC bridge's classifier;

@@ -154,6 +154,7 @@ add_library(abiconv SHARED
   sysctl_shim.c
   cxx_shim.c
   proc_shim.c
+  osatomic_shim.c
   cf_callback_shim.c
   cb_bridge.c
   iokit_shim.c
