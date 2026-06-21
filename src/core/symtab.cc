@@ -27,6 +27,25 @@ namespace MachO {
          strit += str->size(); // NOTE: includes null byte
       }
 
+      /* Some linkers COALESCE the string table: a symbol whose name is a
+       * suffix of another's shares storage, so its n_strx points INTO the
+       * middle of a longer string rather than at a string start. The linear
+       * walk above only recorded string starts, so such an interior offset is
+       * absent from off2str and Nlist::Parse would throw. Pre-register each
+       * referenced interior offset as its own (suffix) string. The rebuild
+       * emits every string separately (no coalescing), which is still valid —
+       * just slightly larger. (Seen in iWork's ObjC1-fragile-ABI SFUtility.) */
+      for (uint32_t i = 0; i < symtab.nsyms; ++i) {
+         const auto& nl = img.template at<nlist_t<bits>>(
+            symtab.symoff + i * Nlist<bits>::size());
+         const std::size_t sx = nl.n_un.n_strx;
+         if (off2str.find(sx) == off2str.end() && strbegin + sx < strend) {
+            String<bits> *str = String<bits>::Parse(img, strbegin + sx, strend - (strbegin + sx));
+            strs.push_back(str);
+            off2str[sx] = str;
+         }
+      }
+
       /* construct symbols */
       for (uint32_t i = 0; i < symtab.nsyms; ++i) {
          syms.insert(Nlist<bits>::Parse(img, symtab.symoff + i * Nlist<bits>::size(), env,
