@@ -429,6 +429,24 @@ namespace MachO {
       for (SectionBlob<bits> *blob : content) {
          auto *inst = dynamic_cast<Instruction<bits> *>(blob);
          if (!inst) {
+            /* A JumpTableEntry is the inline switch table emitted right after
+             * a PIC dispatch (see DetectJumpTables). It is NOT anchor-
+             * invalidating data: control-flow-flattened functions routinely
+             * place several dispatches back-to-back, each followed by its own
+             * inline table, all sharing the one PIC anchor (ebx). Clearing
+             * anchors here dropped the anchor across the first table so every
+             * LATER dispatch's table-base `lea %eax,[%ebx+disp]` went
+             * un-rewritten — it kept the stale i386 displacement and pointed
+             * past the relocated table at runtime (observed: iPhoto FairPlay
+             * white-box-crypto callees, 2nd+ dispatch per function). The
+             * entries themselves are relocated by DetectJumpTables; the anchor
+             * must survive so the dispatch that READS them is fixed too. Any
+             * OTHER non-instruction blob is genuine interleaved data and still
+             * invalidates the anchor. */
+            if (dynamic_cast<JumpTableEntry<bits> *>(blob) != nullptr) {
+               prev_inst = nullptr;
+               continue;
+            }
             /* Data interleaved in __text — clear tracking, anchors
              * almost certainly don't survive past it. */
             anchors.clear();
@@ -844,6 +862,27 @@ namespace MachO {
                              "table=0x%zx count=%zu\n",
                              (size_t)vmaddr, (size_t)anchor, (size_t)table_base,
                              (size_t)i);
+                  }
+                  /* Skip the table bytes so the linear sweep stays ALIGNED for
+                   * the rest of the function. The PIC switch idiom emits the
+                   * jump table inline immediately after the indirect jmp; if we
+                   * keep decoding those 4-byte entries as instructions the sweep
+                   * misaligns and silently drops every downstream dispatch in
+                   * the same function. This bit M64 convert harder than M32
+                   * transform (its relocated `target-anchor` entries are large
+                   * values that misdecode into longer bogus instructions), which
+                   * is exactly the 45-vs-51 detection gap. Only skip a table
+                   * that sits just after the jmp (inline) so a far rip-relative
+                   * table never causes us to step over real intervening code. */
+                  const std::size_t table_end = table_base + i * 4;
+                  if (table_base >= vmaddr && table_base - vmaddr < 64 &&
+                      table_end > vmaddr) {
+                     it = sect.offset + (table_end - sect.addr);
+                     vmaddr = table_end;
+                     tbl_addr.erase(reg0);
+                     tbl_val.erase(reg0);
+                     prev_call0 = false;
+                     continue;
                   }
                }
             }
