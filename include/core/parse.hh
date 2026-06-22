@@ -48,6 +48,14 @@ namespace MachO {
       using TodoPlaceholders = std::map<std::size_t, Placeholder<bits> *>;
       TodoPlaceholders placeholders;
 
+      /* i386 PIC relative-offset switch jump-table slots: maps each 4-byte
+       * table-entry vmaddr to its dispatch's PIC anchor vmaddr. Populated by
+       * Section::DetectJumpTables (a pre-pass before the linear sweep) and
+       * consumed by TextParser, which emits a JumpTableEntry blob (instead of
+       * decoding the entry bytes as code) for any offset whose vmaddr is a key
+       * here. See JumpTableEntry in section_blob.hh. */
+      std::map<std::size_t, std::size_t> jump_table_slots;
+
       Placeholder<bits> *add_placeholder(std::size_t vmaddr);
       void do_resolve();
 

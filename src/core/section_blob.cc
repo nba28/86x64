@@ -151,6 +151,41 @@ namespace MachO {
    }
 
    template <Bits bits>
+   JumpTableEntry<bits>::JumpTableEntry(const Image& img, const Location& loc,
+                                        ParseEnv<bits>& env, std::size_t anchor_vmaddr):
+      SectionBlob<bits>(loc, env), raw(img.template at<uint32_t>(loc.offset))
+   {
+      /* Entry value is `case_target - anchor`; recover the case target and
+       * resolve both it and the anchor to their blobs (deferred — the target
+       * case body is parsed later in the linear sweep; the anchor `pop` earlier).
+       * Emit re-derives the offset from the rebuilt vmaddrs. */
+      env.vmaddr_resolver.resolve(anchor_vmaddr + (int32_t)raw, &target);
+      env.vmaddr_resolver.resolve(anchor_vmaddr, &anchor);
+   }
+
+   template <Bits bits>
+   JumpTableEntry<bits>::JumpTableEntry(const JumpTableEntry<opposite<bits>>& other,
+                                        TransformEnv<opposite<bits>>& env):
+      SectionBlob<bits>(other, env), raw(other.raw)
+   {
+      env.resolve(other.target, &target);
+      env.resolve(other.anchor, &anchor);
+   }
+
+   template <Bits bits>
+   void JumpTableEntry<bits>::Emit(Image& img, std::size_t offset) const {
+      uint32_t value;
+      if (target && anchor) {
+         value = (uint32_t)((int64_t)target->loc.vmaddr - (int64_t)anchor->loc.vmaddr);
+      } else {
+         /* unresolved (target outside any parsed blob) — keep the original
+          * offset so behaviour is no worse than before the relocation. */
+         value = raw;
+      }
+      img.at<uint32_t>(offset) = value;
+   }
+
+   template <Bits bits>
    void Immediate<bits>::Emit(Image& img, std::size_t offset) const {
       uint32_t value;
       if (pointee) {
@@ -255,6 +290,9 @@ namespace MachO {
 
    template class Immediate<Bits::M32>;
    template class Immediate<Bits::M64>;
+
+   template class JumpTableEntry<Bits::M32>;
+   template class JumpTableEntry<Bits::M64>;
 
    template class RelocBlob<Bits::M32>;
    template class RelocBlob<Bits::M64>;

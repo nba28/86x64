@@ -272,6 +272,14 @@ namespace MachO {
        *      and let the section's parse loop advance one byte and retry.
        *      That gradually re-syncs once we walk past the data region.
        */
+      /* A recognised i386 PIC relative-offset jump-table entry (detected by
+       * DetectJumpTables): emit a relocatable 4-byte JumpTableEntry instead of
+       * decoding the table bytes as code. The linear sweep lands on each slot
+       * exactly (entries are 4 bytes and the dispatch precedes the table). */
+      auto jt = env.jump_table_slots.find(loc.vmaddr);
+      if (jt != env.jump_table_slots.end()) {
+         return JumpTableEntry<bits>::Parse(img, loc, env, jt->second);
+      }
       if (env.data_in_code.contains(loc.offset)) {
          return DataBlob<bits>::Parse(img, loc, env);
       }
@@ -300,6 +308,11 @@ namespace MachO {
       fprintf(stderr, "parse: %.16s,%.16s vmaddr=0x%zx size=%zu\n",
               sect.segname, sect.sectname,
               (size_t)sect.addr, (size_t)sect.size);
+
+      /* Recognise PIC relative-offset switch jump tables BEFORE the linear
+       * sweep so TextParser emits relocatable JumpTableEntry blobs for their
+       * slots instead of disassembling the table bytes as code. */
+      DetectJumpTables(img, env);
 
       const std::size_t begin = sect.offset;
       const std::size_t end = begin + sect.size;
@@ -662,6 +675,212 @@ namespace MachO {
          }
 
          prev_inst = inst;
+      }
+   }
+
+   /* Map a GPR to its canonical 32-bit name so 64-bit (`jmp rax`) and 32-bit
+    * (`add eax,ebx`) references to the same architectural register compare
+    * equal. Non-GPRs pass through unchanged. */
+   static xed_reg_enum_t jt_norm32(xed_reg_enum_t r) {
+      switch (r) {
+      case XED_REG_RAX: case XED_REG_EAX: return XED_REG_EAX;
+      case XED_REG_RBX: case XED_REG_EBX: return XED_REG_EBX;
+      case XED_REG_RCX: case XED_REG_ECX: return XED_REG_ECX;
+      case XED_REG_RDX: case XED_REG_EDX: return XED_REG_EDX;
+      case XED_REG_RSI: case XED_REG_ESI: return XED_REG_ESI;
+      case XED_REG_RDI: case XED_REG_EDI: return XED_REG_EDI;
+      case XED_REG_RBP: case XED_REG_EBP: return XED_REG_EBP;
+      case XED_REG_RSP: case XED_REG_ESP: return XED_REG_ESP;
+      default: return r;
+      }
+   }
+   static bool jt_is_gpr32(xed_reg_enum_t r) {
+      return r >= XED_REG_EAX && r <= XED_REG_EDI;
+   }
+
+   /* Recognise PIC relative-offset switch jump tables (see JumpTableEntry).
+    * A pre-pass over the raw section bytes (the linear sweep hasn't run yet):
+    * decode each instruction, track the PIC anchor, then match the dispatch
+    *     lea  %tbl,[anchor]            ; table base
+    *     mov  %t,[%tbl + idx*4]        ; t = table[idx]
+    *     add  %t,%anchor              ; t = case_target
+    *     jmp  %t
+    * On a match, auto-size the table (it ends at the first case body = the
+    * lowest entry target above the table base) and record each 4-byte slot's
+    * vmaddr -> anchor vmaddr in env.jump_table_slots, so TextParser emits a
+    * relocatable JumpTableEntry for it. The anchor is recovered both for the
+    * i386 input (`call $+0; pop %reg` sets %reg = the pop's vmaddr) AND for the
+    * already-translated x86_64 form the `convert` stage re-parses (the
+    * `lea r11,[rip+d]; push r11d; jmp; mov %reg,[rsp]` sequence that call_op
+    * synthesises leaves %reg = the rip-relative anchor) — so the table is kept
+    * relocatable across BOTH parses of __text. Conservative: every entry must
+    * resolve to an in-section code address or the scan stops; a partial/garbage
+    * match simply yields no slots (parse proceeds exactly as before). */
+   template <Bits bits>
+   void Section<bits>::DetectJumpTables(const Image& img, ParseEnv<bits>& env) {
+      if (parser != TextParser) {
+         return;
+      }
+
+      const std::size_t sect_lo = sect.addr;
+      const std::size_t sect_hi = sect.addr + sect.size;
+      const bool trace = std::getenv("MACHO_TRACE_JUMPTABLE") != nullptr;
+
+      std::unordered_map<xed_reg_enum_t, std::size_t> anchors;  /* reg -> anchor vmaddr */
+      std::unordered_map<xed_reg_enum_t, std::size_t> tbl_addr;  /* reg -> table base vmaddr */
+      /* reg -> (table_base, anchor); anchor 0 until the `add` resolves it */
+      std::unordered_map<xed_reg_enum_t, std::pair<std::size_t, std::size_t>> tbl_val;
+
+      bool prev_call0 = false;     /* previous insn was `call $+0` (e8 00000000) */
+      std::size_t pend_r11 = 0;    /* value of the last `lea r11,[rip+d]` (x86_64 anchor dance) */
+
+      std::size_t it = sect.offset;
+      std::size_t vmaddr = sect.addr;
+      const std::size_t end = sect.offset + sect.size;
+      while (it < end) {
+         xed_decoded_inst_t xedd;
+         xed_decoded_inst_zero_set_mode(&xedd, &Instruction<bits>::dstate());
+         xed_decoded_inst_set_input_chip(&xedd, XED_CHIP_INVALID);
+         if (xed_decode(&xedd, &img.at<uint8_t>(it), img.size() - it) != XED_ERROR_NONE) {
+            tbl_addr.clear(); tbl_val.clear(); prev_call0 = false;
+            ++it; ++vmaddr;
+            continue;
+         }
+         const unsigned len = xed_decoded_inst_get_length(&xedd);
+         const xed_iform_enum_t iform = xed_decoded_inst_get_iform_enum(&xedd);
+         const xed_category_enum_t cat = xed_decoded_inst_get_category(&xedd);
+         const xed_operand_values_t* ops = xed_decoded_inst_operands_const(&xedd);
+         const xed_reg_enum_t reg0raw = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+         const xed_reg_enum_t reg0 = jt_norm32(reg0raw);
+
+         bool sets_state = false;
+
+         /* (a-i386) PIC anchor: `pop %reg` right after `call $+0`. */
+         if (iform == XED_IFORM_POP_GPRv_58 && prev_call0 && jt_is_gpr32(reg0)) {
+            anchors[reg0] = vmaddr;
+            tbl_addr.erase(reg0); tbl_val.erase(reg0);
+            sets_state = true;
+         }
+         /* (a-x64) PIC anchor: the translated `lea r11,[rip+d]; …; mov %reg,[rsp]`
+          *         dance (call_op) leaves %reg = the rip-relative value. */
+         else if (iform == XED_IFORM_MOV_GPRv_MEMv && pend_r11 != 0 &&
+                  xed_decoded_inst_get_base_reg(ops, 0) == XED_REG_RSP &&
+                  xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID &&
+                  jt_is_gpr32(reg0)) {
+            anchors[reg0] = pend_r11;
+            tbl_addr.erase(reg0); tbl_val.erase(reg0);
+            sets_state = true;
+         }
+         /* (b) table base via lea: i386 `[anchor+disp]` or x86_64 `[rip+disp]`. */
+         else if (iform == XED_IFORM_LEA_GPRv_AGEN && jt_is_gpr32(reg0)) {
+            const xed_reg_enum_t base = xed_decoded_inst_get_base_reg(ops, 0);
+            const xed_reg_enum_t index = xed_decoded_inst_get_index_reg(ops, 0);
+            const ssize_t disp = xed_decoded_inst_get_memory_displacement(ops, 0);
+            if (index == XED_REG_INVALID && base == XED_REG_RIP) {
+               tbl_addr[reg0] = vmaddr + len + disp;     /* rip-relative */
+               tbl_val.erase(reg0);
+               sets_state = true;
+            } else if (index == XED_REG_INVALID) {
+               auto a = anchors.find(jt_norm32(base));
+               if (a != anchors.end()) {
+                  tbl_addr[reg0] = a->second + disp;      /* anchor-relative */
+                  tbl_val.erase(reg0);
+                  sets_state = true;
+               }
+            }
+         }
+         /* (c) mov %reg,[%tblbase + idx*scale] -> reg holds a table entry. */
+         else if (iform == XED_IFORM_MOV_GPRv_MEMv && jt_is_gpr32(reg0)) {
+            const xed_reg_enum_t base = jt_norm32(xed_decoded_inst_get_base_reg(ops, 0));
+            const xed_reg_enum_t index = jt_norm32(xed_decoded_inst_get_index_reg(ops, 0));
+            auto tb = tbl_addr.find(base);
+            if (tb == tbl_addr.end()) { tb = tbl_addr.find(index); }
+            if (tb != tbl_addr.end()) {
+               tbl_val[reg0] = { tb->second, 0 };
+               tbl_addr.erase(reg0);
+               sets_state = true;
+            }
+         }
+         /* (d) add %reg,%anchor where reg holds a table entry -> reg = target.
+          *     The anchor register's value resolves the table's anchor. */
+         else if (iform == XED_IFORM_ADD_GPRv_GPRv_01 ||
+                  iform == XED_IFORM_ADD_GPRv_GPRv_03) {
+            const xed_reg_enum_t src =
+               jt_norm32(xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1));
+            auto tv = tbl_val.find(reg0);
+            auto a = anchors.find(src);
+            if (tv != tbl_val.end() && a != anchors.end()) {
+               tv->second.second = a->second;   /* fill anchor; keep for the jmp */
+               sets_state = true;
+            }
+         }
+         /* (e) jmp %reg where reg = a relocated table target -> a jump table. */
+         else if (iform == XED_IFORM_JMP_GPRv) {
+            auto tv = tbl_val.find(reg0);
+            if (tv != tbl_val.end() && tv->second.second != 0) {
+               const std::size_t table_base = tv->second.first;
+               const std::size_t anchor = tv->second.second;
+               /* Auto-size: the table ends at the lowest entry target above the
+                * base (= first case body). Stop on any out-of-section target. */
+               std::size_t min_target = sect_hi;
+               std::size_t i = 0;
+               for (; ; ++i) {
+                  const std::size_t slot = table_base + i * 4;
+                  if (slot + 4 > sect_hi || slot >= min_target) { break; }
+                  const std::size_t slot_off = sect.offset + (slot - sect.addr);
+                  const int32_t raw = (int32_t)img.at<uint32_t>(slot_off);
+                  const std::size_t target = anchor + raw;
+                  if (target < sect_lo || target >= sect_hi) { break; }
+                  if (target > table_base && target < min_target) {
+                     min_target = target;
+                  }
+               }
+               if (i >= 2) {
+                  for (std::size_t k = 0; k < i; ++k) {
+                     env.jump_table_slots[table_base + k * 4] = anchor;
+                  }
+                  if (trace) {
+                     fprintf(stderr, "[jumptable] dispatch@0x%zx anchor=0x%zx "
+                             "table=0x%zx count=%zu\n",
+                             (size_t)vmaddr, (size_t)anchor, (size_t)table_base,
+                             (size_t)i);
+                  }
+               }
+            }
+         }
+
+         /* Drop stale table state for a register this insn overwrote but didn't
+          * redefine (keeps the lea->mov->add->jmp chain tight). */
+         if (!sets_state && jt_is_gpr32(reg0)) {
+            tbl_addr.erase(reg0);
+            tbl_val.erase(reg0);
+         }
+
+         /* Anchor lifetime: clear on RET / system transitions; a real CALL
+          * clobbers caller-saved regs. Table-pointer state is purely local. */
+         const bool is_pic_call0 =
+            iform == XED_IFORM_CALL_NEAR_RELBRz &&
+            xed_decoded_inst_get_branch_displacement(&xedd) == 0;
+         if (cat == XED_CATEGORY_RET || cat == XED_CATEGORY_INTERRUPT ||
+             cat == XED_CATEGORY_SYSCALL || cat == XED_CATEGORY_SYSRET) {
+            anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
+         } else if (cat == XED_CATEGORY_CALL && !is_pic_call0) {
+            anchors.erase(XED_REG_EAX);
+            anchors.erase(XED_REG_ECX);
+            anchors.erase(XED_REG_EDX);
+            tbl_addr.clear(); tbl_val.clear();
+         }
+
+         prev_call0 = (iform == XED_IFORM_CALL_NEAR_RELBRz && len == 5 &&
+                       xed_decoded_inst_get_branch_displacement(&xedd) == 0);
+         /* Remember the x86_64 anchor-dance `lea r11,[rip+d]` for the following
+          * `mov %reg,[rsp]`. */
+         if (iform == XED_IFORM_LEA_GPRv_AGEN && reg0raw == XED_REG_R11 &&
+             xed_decoded_inst_get_base_reg(ops, 0) == XED_REG_RIP) {
+            pend_r11 = vmaddr + len + xed_decoded_inst_get_memory_displacement(ops, 0);
+         }
+         it += len;
+         vmaddr += len;
       }
    }
 

@@ -182,6 +182,47 @@ namespace MachO {
    };
 
    /*
+    * One entry of an i386 PIC relative-offset switch jump table. GCC/Clang
+    * i386 -fPIC switch dispatch is `mov reg,[table + idx*4]; add reg, anchor;
+    * jmp reg`, where `anchor` is the PIC base (`call $+0; pop reg`) and each
+    * 4-byte table entry holds `(case_target_vmaddr - anchor_vmaddr)`. Linear
+    * sweep would disassemble the table bytes AS CODE, and the raw i386 offsets
+    * are meaningless in the translated (non-linear) layout — so the first
+    * indirect jmp lands in garbage. Section::DetectJumpTables recognises the
+    * dispatch and the section's parse emits these blobs for the table range
+    * instead. Each resolves its case-body target and the anchor blob; Emit
+    * writes `(target_vmaddr - anchor_vmaddr)` in the NEW layout, so at runtime
+    * `entry + reg(anchor)` again lands on the translated case body — the
+    * load-time slide cancels because both terms carry it. Always 4 bytes (the
+    * dispatch strides idx*4 and reads 4-byte entries in both M32 and M64).
+    */
+   template <Bits bits>
+   class JumpTableEntry: public SectionBlob<bits> {
+   public:
+      const SectionBlob<bits> *target = nullptr; /*!< case-body blob (anchor+raw) */
+      const SectionBlob<bits> *anchor = nullptr; /*!< PIC base blob (== runtime reg) */
+      uint32_t raw = 0;                          /*!< original i386 offset (fallback) */
+
+      virtual std::size_t size() const override { return sizeof(uint32_t); }
+      virtual void Emit(Image& img, std::size_t offset) const override;
+
+      static JumpTableEntry<bits> *Parse(const Image& img, const Location& loc,
+                                         ParseEnv<bits>& env, std::size_t anchor_vmaddr)
+      { return new JumpTableEntry(img, loc, env, anchor_vmaddr); }
+
+      virtual JumpTableEntry<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
+         return new JumpTableEntry<opposite<bits>>(*this, env);
+      }
+
+   private:
+      JumpTableEntry(const Image& img, const Location& loc, ParseEnv<bits>& env,
+                     std::size_t anchor_vmaddr);
+      JumpTableEntry(const JumpTableEntry<opposite<bits>>& other,
+                     TransformEnv<opposite<bits>>& env);
+      template <Bits> friend class JumpTableEntry;
+   };
+
+   /*
     * One CFConstantString record from __DATA,__cfstring (the @"..." literals
     * the compiler bakes in). The i386 record is 16 bytes
     * {isa:4, flags:4, str:4, length:4}; the x86_64 record is 32 bytes

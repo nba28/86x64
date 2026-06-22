@@ -54,6 +54,15 @@ namespace MachO {
        * rip-relative load. No-op on non-text sections. Idempotent. */
       void DetectPicAnchoredDisps(ParseEnv<bits>& env);
 
+      /* Pre-pass (before the linear sweep) over a __text section: decode
+       * instructions, track i386 PIC anchors, and recognise relative-offset
+       * switch jump-table dispatches (`lea reg,[anchor+disp]; mov r,[reg+idx*4];
+       * add r,anchor; jmp r`). For each table found, record its entry-slot
+       * vmaddrs -> anchor vmaddr in env.jump_table_slots so TextParser emits a
+       * relocatable JumpTableEntry per slot instead of disassembling the table
+       * bytes as code. No-op on non-text sections. */
+      void DetectJumpTables(const Image& img, ParseEnv<bits>& env);
+
       void AssignID(BuildEnv<bits>& env);
       void Build(BuildEnv<bits>& env);
       // std::size_t content_size() const;
