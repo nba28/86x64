@@ -35,6 +35,7 @@ extern id objc_retain(id);   /* libobjc ARC entrypoint; not in runtime.h */
 #include <mach-o/nlist.h>
 #include <sys/mman.h>
 #include <pthread.h>
+#include <os/lock.h>
 
 /* Low-4GB search window — same range the wrapper/malloc shim use. */
 #define LOW_REGION_BASE 0x080000000UL
@@ -128,6 +129,22 @@ struct objc_shared_ctrl {
     * -> "library missing"). Only the winner of this CAS swizzles, so it captures
     * the REAL Foundation IMP. */
    uint32_t        locale_ofk_done;
+   /* Guards the open-addressed real->handle dedup table `map`. The arena slot
+    * cursor (`arena_used`) bumps atomically, but the map probe+insert is a
+    * read-modify-write that two threads (RedRock spins up DB threads while the
+    * main thread inits) can interleave: a hash collision between two concurrent
+    * inserts tears an entry (one thread's `real` paired with the other's
+    * `handle`), so a later wrap returns a handle that unwraps to the WRONG
+    * object — intermittently faulting deep in native code. MUST be cross-copy
+    * (lives in the shared ctrl): threads in different libabiconv copies share
+    * the one `map`. os_unfair_lock is valid in shared memory (mach-port owner).
+    * Zero-initialized by the calloc of the ctrl == OS_UNFAIR_LOCK_INIT. */
+   os_unfair_lock  map_lock;
+   /* Cross-copy count of native->translated callbacks currently executing
+    * (cb_bridge x64_cb_dispatch, cf_callback cb_call, reverse-IMP). Per-copy
+    * counters miss a callback running through a DIFFERENT libabiconv copy than
+    * the one a crash handler dumps. */
+   int             cb_active_depth;
 };
 #define SUPER_HINT_SLOTS 64
 #define OBJC_CTRL_MAGIC 0x3836583634415243ULL  /* "86X64ARC" */
@@ -292,9 +309,17 @@ uint32_t x64_objc_wrap(uint64_t real) {
    if (real == 0) { return 0; }
    arena_init();
 
+   /* The probe+insert is a read-modify-write on the shared `map`: serialize it
+    * (see map_lock). Without this, two concurrent inserts that hash-collide
+    * tear an entry and a later wrap returns a handle bound to the wrong real. */
+   os_unfair_lock_lock(&g_ctrl->map_lock);
    uint32_t i = hash64(real) & (MAP_CAP - 1);
    while (g_map[i].handle != 0) {
-      if (g_map[i].real == real) { return g_map[i].handle; }
+      if (g_map[i].real == real) {
+         uint32_t h = g_map[i].handle;
+         os_unfair_lock_unlock(&g_ctrl->map_lock);
+         return h;
+      }
       i = (i + 1) & (MAP_CAP - 1);
    }
 
@@ -312,6 +337,7 @@ uint32_t x64_objc_wrap(uint64_t real) {
 
    g_map[i].real   = real;
    g_map[i].handle = handle;
+   os_unfair_lock_unlock(&g_ctrl->map_lock);
    /* Diagnostic: a "real" that is neither a tagged pointer (high bit / low
     * bit per platform) nor a plausible mapped address (0x6000…/0x7ff8…/low)
     * is almost certainly a clobbered register being wrapped — the source of
@@ -2535,6 +2561,19 @@ static void appkit_compat_install(void) {
  */
 void x64_refresh_data_shadows(void);
 
+/* Forward objc_msgSend breadcrumb ring (dump fn defined later): records each
+ * translated->native send with the i386 caller's return address (args32[-1] =
+ * [rbp+8]) and the current stack pointer, plus a global low-water SP mark. The
+ * return-to-0 crash is a frame whose pushed return address is 0; if recent
+ * forward sends already show caller_ra==0 the corruption precedes them; a
+ * marching-down min_sp means the shared low-4GB stack is overflowing. */
+struct fwd_crumb { uint32_t self32; uint64_t sel; uint32_t caller_ra;
+                   uint64_t sp; uint32_t tid; uint32_t valid; };
+#define FWD_RING 128
+static struct fwd_crumb g_fwd_ring[FWD_RING];
+static uint32_t         g_fwd_pos;
+static uint64_t         g_fwd_min_sp = ~0ULL;
+
 void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
    appkit_compat_install();
@@ -2551,6 +2590,19 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    id real_self = resolve_self(args32[0]);
    SEL sel = resolve_sel(args32[1]);
 
+   /* breadcrumb (zero-I/O): record the send + i386 caller RA + stack pointer */
+   {
+      uint64_t sp = (uint64_t)(uintptr_t)__builtin_frame_address(0);
+      uint64_t prev = g_fwd_min_sp;
+      while (sp < prev &&
+             !__atomic_compare_exchange_n(&g_fwd_min_sp, &prev, sp, 0,
+                                          __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {}
+      uint32_t ri = __atomic_fetch_add(&g_fwd_pos, 1, __ATOMIC_SEQ_CST) & (FWD_RING - 1);
+      struct fwd_crumb *c = &g_fwd_ring[ri];
+      c->self32 = args32[0]; c->sel = (uint64_t)(uintptr_t)sel;
+      c->caller_ra = args32[-1]; c->sp = sp;
+      c->tid = pthread_mach_thread_np(pthread_self()); c->valid = 1;
+   }
 
    if (getenv("OBJC_BRIDGE_TRACE")) {
       const char *cls_name = "(nil)";
@@ -3922,6 +3974,68 @@ static const char *enc_skip_digits(const char *t) {
 /* ---- the C prep called by _86x64_reverse_imp ---- */
 #define REV_STACK_SZ (512u * 1024u)
 
+/* Zero-I/O reverse-IMP breadcrumb ring (mirror of cb_bridge's). reverse_prep
+ * records each legacy IMP it is about to dispatch (no fprintf — preserves the
+ * thread timing the return-to-0 crash depends on); a crash handler dumps it via
+ * dlsym("x64_rev_dump_ring"). depth = current native->legacy nesting. */
+struct rev_crumb {
+   uint64_t self_; uint64_t sel; uint64_t imp;
+   uint64_t lowstack_base; uint64_t lowstack_top;
+   uint32_t tid; uint32_t depth; uint32_t frame_words; uint32_t valid;
+};
+#define REV_RING 64
+static struct rev_crumb g_rev_ring[REV_RING];
+static uint32_t         g_rev_pos;
+static int              g_rev_depth;
+
+/* Cross-copy callback-depth (shared ctrl). All native->translated entry paths
+ * call enter/leave so any copy's crash handler sees the true global nesting. */
+int  x64_cb_active(void);
+void x64_cb_enter(void);
+void x64_cb_leave(void);
+int  x64_cb_active(void) { arena_init(); return g_ctrl ? __atomic_load_n(&g_ctrl->cb_active_depth, __ATOMIC_SEQ_CST) : -1; }
+void x64_cb_enter(void)  { arena_init(); if (g_ctrl) __atomic_add_fetch(&g_ctrl->cb_active_depth, 1, __ATOMIC_SEQ_CST); }
+void x64_cb_leave(void)  { if (g_ctrl) __atomic_sub_fetch(&g_ctrl->cb_active_depth, 1, __ATOMIC_SEQ_CST); }
+
+void x64_fwd_dump_ring(void);
+void x64_fwd_dump_ring(void) {
+   fprintf(stderr, "[xdepth] cross-copy callback depth = %d\n", x64_cb_active());
+   uint32_t pos = __atomic_load_n(&g_fwd_pos, __ATOMIC_SEQ_CST);
+   fprintf(stderr, "[fwd-ring] last objc sends (newest first), min_sp=0x%llx:\n",
+           (unsigned long long)g_fwd_min_sp);
+   for (int i = 0; i < 24; ++i) {
+      uint32_t idx = (pos - 1 - i) & (FWD_RING - 1);
+      struct fwd_crumb *c = &g_fwd_ring[idx];
+      if (!c->valid) continue;
+      const char *sn = (c->sel && mem_readable((uintptr_t)c->sel, 1))
+                       ? sel_getName((SEL)(uintptr_t)c->sel) : "?";
+      fprintf(stderr, "  [%2d] self32=0x%-8x sel=%-28s caller_ra=0x%-8x sp=0x%llx t=%x\n",
+              i, c->self32, sn, c->caller_ra, (unsigned long long)c->sp, c->tid);
+   }
+   fflush(stderr);
+}
+
+void x64_rev_dump_ring(void);
+void x64_rev_dump_ring(void) {
+   uint32_t pos = __atomic_load_n(&g_rev_pos, __ATOMIC_SEQ_CST);
+   fprintf(stderr, "[rev-ring] last legacy IMPs (newest first), depth=%d:\n",
+           __atomic_load_n(&g_rev_depth, __ATOMIC_SEQ_CST));
+   for (int i = 0; i < REV_RING; ++i) {
+      uint32_t idx = (pos - 1 - i) & (REV_RING - 1);
+      struct rev_crumb *c = &g_rev_ring[idx];
+      if (!c->valid) continue;
+      const char *sn = (c->sel && mem_readable((uintptr_t)c->sel, 1))
+                       ? sel_getName((SEL)(uintptr_t)c->sel) : "?";
+      fprintf(stderr, "  [%2d] imp=0x%-8llx self=0x%-11llx sel=%s t=%x d=%u "
+              "fw=%u stk=[0x%llx..0x%llx]\n",
+              i, (unsigned long long)c->imp, (unsigned long long)c->self_, sn,
+              c->tid, c->depth, c->frame_words,
+              (unsigned long long)c->lowstack_base,
+              (unsigned long long)c->lowstack_top);
+   }
+   fflush(stderr);
+}
+
 void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
                          uint32_t is_stret) {
    /* objc_msgSend_stret shifts the register file by one: rdi is the hidden
@@ -4149,6 +4263,18 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
 #undef REV_XMM
    plan->frame_words = w;
 
+   /* breadcrumb (zero-I/O): a valid legacy IMP is about to run on lowstack */
+   {
+      uint32_t depth = (uint32_t)__atomic_add_fetch(&g_rev_depth, 1, __ATOMIC_SEQ_CST);
+      uint32_t ri = __atomic_fetch_add(&g_rev_pos, 1, __ATOMIC_SEQ_CST) & (REV_RING - 1);
+      struct rev_crumb *c = &g_rev_ring[ri];
+      c->self_ = (uint64_t)(uintptr_t)self_; c->sel = (uint64_t)(uintptr_t)sel;
+      c->imp = m->imp; c->lowstack_base = plan->lowstack_base;
+      c->lowstack_top = plan->lowstack_top; c->tid = pthread_mach_thread_np(pthread_self());
+      c->depth = depth; c->frame_words = w; c->valid = 1;
+   }
+   x64_cb_enter();   /* a legacy IMP is about to run (balanced in reverse_ret) */
+
    if (getenv("OBJC_BRIDGE_TRACE")) {
       fprintf(stderr, "[rev] t=%x %s[%s] imp=0x%llx self32=0x%x words=%u kind=%d "
               "%splan=%p lowstack=0x%llx tramp=%p\n",
@@ -4164,6 +4290,11 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
 
 unsigned __int128 _86x64_reverse_ret(struct reverse_plan *plan,
                                      uint32_t eax, uint32_t edx) {
+   /* balance the breadcrumb depth (only the valid-IMP path incremented it) */
+   if (plan->legacy_imp != 0) {
+      __atomic_sub_fetch(&g_rev_depth, 1, __ATOMIC_SEQ_CST);
+      x64_cb_leave();
+   }
    unsigned __int128 r;
    if (plan->ret_kind == 1) { r = unwrap_obj_arg(eax); }    /* object */
    else if (plan->ret_kind == 2) { r = 0; }                 /* void */

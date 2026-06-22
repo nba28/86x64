@@ -43,6 +43,8 @@ uint32_t _86x64_call_i386(uint64_t fn, uint64_t nwords,
                           const uint32_t *words, uint64_t lowstack_top);
 uint32_t x64_objc_wrap(uint64_t real);     /* objc_shim.c */
 uint64_t x64_objc_unwrap(uint32_t h);      /* objc_shim.c */
+void     x64_cb_enter(void);               /* objc_shim.c: cross-copy depth */
+void     x64_cb_leave(void);
 
 extern const uint64_t x64_cb_tramp_table[];  /* cb_tramp.asm */
 extern const uint64_t x64_cb_nslots;
@@ -62,6 +64,45 @@ static int cb_trace(void) {
    static int t = -1;
    if (t < 0) { t = getenv("CB_BRIDGE_TRACE") != NULL; }
    return t;
+}
+
+/* Zero-I/O crash breadcrumb ring. cb_dispatch records each invocation here with
+ * plain stores (no fprintf/lock/syscall), so it does NOT perturb the thread
+ * timing that the callback-return-to-0 race depends on. A crash handler
+ * (geoshim, via dlsym of x64_cb_dump_ring) prints the last entries to identify
+ * which callback/stack was live. depth = current native->translated nesting. */
+typedef struct {
+   uint32_t fn32;
+   uint32_t tid;
+   uint32_t nargs;
+   uint32_t ret_kind;
+   uint64_t stk_lo;     /* malloc'd low stack base */
+   uint64_t stk_hi;     /* top (frame carve start) */
+   uint32_t w;          /* words marshalled */
+   uint32_t depth;      /* nesting at entry */
+   uint32_t done;       /* 0 = still inside the callback, 1 = returned */
+} cb_crumb;
+#define CB_RING 64
+static cb_crumb       g_ring[CB_RING];
+static uint32_t       g_ring_pos;
+static int            g_cb_depth;
+
+void x64_cb_dump_ring(void);   /* exported; called from a crash handler */
+void x64_cb_dump_ring(void) {
+   uint32_t pos = __atomic_load_n(&g_ring_pos, __ATOMIC_SEQ_CST);
+   fprintf(stderr, "[cb-ring] last callbacks (newest first), depth=%d:\n",
+           __atomic_load_n(&g_cb_depth, __ATOMIC_SEQ_CST));
+   for (int i = 0; i < CB_RING; ++i) {
+      uint32_t idx = (pos - 1 - i) & (CB_RING - 1);
+      cb_crumb *c = &g_ring[idx];
+      if (c->fn32 == 0 && c->stk_lo == 0) continue;
+      fprintf(stderr, "  [%2d] fn=0x%-8x t=%x d=%u %s nargs=%u ret=%u w=%u "
+              "stk=[0x%llx..0x%llx]\n",
+              i, c->fn32, c->tid, c->depth, c->done ? "ret " : "IN  ",
+              c->nargs, c->ret_kind, c->w,
+              (unsigned long long)c->stk_lo, (unsigned long long)c->stk_hi);
+   }
+   fflush(stderr);
 }
 
 /* Bind an i386 callback to a native trampoline. Bindings are immutable and
@@ -153,7 +194,22 @@ uint64_t x64_cb_dispatch(uint64_t slot, const uint64_t *gp, const uint64_t *fp,
    if (!stkbuf) { return 0; }
    const uint64_t top =
       ((uint64_t)(uintptr_t)stkbuf + CB_LOWSTACK_SZ) & ~0xfULL;
+
+   /* breadcrumb: zero-I/O record before entering the translated callback */
+   uint32_t depth = (uint32_t)__atomic_add_fetch(&g_cb_depth, 1, __ATOMIC_SEQ_CST);
+   uint32_t ri = __atomic_fetch_add(&g_ring_pos, 1, __ATOMIC_SEQ_CST) & (CB_RING - 1);
+   cb_crumb *cr = &g_ring[ri];
+   cr->fn32 = b.fn32; cr->tid = pthread_mach_thread_np(pthread_self());
+   cr->nargs = sig->nargs; cr->ret_kind = sig->ret_kind; cr->w = w;
+   cr->stk_lo = (uint64_t)(uintptr_t)stkbuf; cr->stk_hi = top;
+   cr->depth = depth; cr->done = 0;
+
+   x64_cb_enter();
    const uint32_t eax = _86x64_call_i386(b.fn32, w, words, top);
+   x64_cb_leave();
+
+   cr->done = 1;
+   __atomic_sub_fetch(&g_cb_depth, 1, __ATOMIC_SEQ_CST);
    free(stkbuf);
    if (cb_trace()) {
       fprintf(stderr, "[cbret] t=%x slot %llu fn 0x%x eax=0x%x\n",

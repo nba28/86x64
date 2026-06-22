@@ -23,6 +23,16 @@
 
 #include <stdint.h>
 #include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <errno.h>
+#include <string.h>
+
+static int posix_trace(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("POSIX_TRACE") ? 1 : 0; }
+   return t;
+}
 
 /* open(const char *path, int oflag, ...):
  *   a[0] = path (low-4GB char*), a[1] = oflag, a[2] = mode (used iff O_CREAT). */
@@ -30,7 +40,14 @@ int32_t shim_open(uint32_t *a) {
    const char *path = (const char *)(uintptr_t)a[0];
    int   oflag = (int)a[1];
    int   mode  = (int)a[2];   /* ignored by open() unless O_CREAT/O_TMPFILE */
-   return (int32_t)open(path, oflag, mode);
+   int r = open(path, oflag, mode);
+   if (posix_trace()) {
+      fprintf(stderr, "[posix] open(\"%s\", 0x%x, 0%o) = %d%s\n",
+              path ? path : "(null)", oflag, mode, r,
+              r < 0 ? strerror(errno) : "");
+      fflush(stderr);
+   }
+   return (int32_t)r;
 }
 
 /* fcntl(int fd, int cmd, ...):
@@ -41,5 +58,11 @@ int32_t shim_fcntl(uint32_t *a) {
    /* Pass the third slot as a pointer-width value: it carries either a small
     * integer (F_SETFD/F_SETFL/F_DUPFD) or a low-4GB struct pointer
     * (F_GETLK/F_SETLK flock*), both correct zero-extended. */
-   return (int32_t)fcntl(fd, cmd, (void *)(uintptr_t)a[2]);
+   int r = fcntl(fd, cmd, (void *)(uintptr_t)a[2]);
+   if (posix_trace()) {
+      fprintf(stderr, "[posix] fcntl(fd=%d, cmd=%d, arg=0x%x) = %d%s\n",
+              fd, cmd, a[2], r, r < 0 ? strerror(errno) : "");
+      fflush(stderr);
+   }
+   return (int32_t)r;
 }

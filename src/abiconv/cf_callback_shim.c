@@ -35,13 +35,17 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <os/lock.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <pthread.h>
 
 uint32_t _86x64_call_i386(uint64_t fn, uint64_t nwords,
                           const uint32_t *words, uint64_t lowstack_top);
 uint64_t x64_objc_unwrap(uint32_t h);   /* objc_shim.c: handle -> real ptr */
 uint32_t x64_objc_wrap(uint64_t real);  /* objc_shim.c: real ptr -> handle */
+void     x64_cb_enter(void);            /* objc_shim.c: cross-copy depth */
+void     x64_cb_leave(void);
 
 #define CB_MAX_SLOTS 64
 #define CB_STACK_SZ  (256u * 1024u)
@@ -83,6 +87,34 @@ static void cb_slot_release_by_ref(CFTypeRef ref) {
    os_unfair_lock_unlock(&g_cb_lock);
 }
 
+/* Zero-I/O breadcrumb ring for CF run-loop callouts (observers/timers). This
+ * path enters translated code via _86x64_call_i386 just like cb_bridge, but is
+ * NOT counted in cb_bridge's depth — instrument it separately so a crash inside
+ * a CF callout is visible. */
+struct cf_crumb { uint32_t callout32; uint32_t kind; uint64_t stk_lo;
+                  uint64_t stk_hi; uint32_t tid; uint32_t depth; uint32_t done; };
+#define CF_RING 64
+static struct cf_crumb g_cf_ring[CF_RING];
+static uint32_t        g_cf_pos;
+static int             g_cf_depth;
+
+void x64_cf_dump_ring(void);
+void x64_cf_dump_ring(void) {
+   uint32_t pos = __atomic_load_n(&g_cf_pos, __ATOMIC_SEQ_CST);
+   fprintf(stderr, "[cf-ring] last CF callouts (newest first), depth=%d:\n",
+           __atomic_load_n(&g_cf_depth, __ATOMIC_SEQ_CST));
+   for (int i = 0; i < CF_RING; ++i) {
+      uint32_t idx = (pos - 1 - i) & (CF_RING - 1);
+      struct cf_crumb *c = &g_cf_ring[idx];
+      if (!c->callout32 && !c->stk_lo) continue;
+      fprintf(stderr, "  [%2d] callout=0x%-8x kind=%s d=%u %s t=%x stk=[0x%llx..0x%llx]\n",
+              i, c->callout32, c->kind ? "timer" : "observer", c->depth,
+              c->done ? "ret" : "IN ", c->tid,
+              (unsigned long long)c->stk_lo, (unsigned long long)c->stk_hi);
+   }
+   fflush(stderr);
+}
+
 /* A fresh low-4GB stack PER INVOCATION: a repeating timer/observer callout
  * that pumps the run loop re-enters the same slot's callout before the outer
  * call returns — a shared per-slot stack would be smashed (the reverse ObjC
@@ -91,7 +123,20 @@ static uint32_t cb_call(cb_slot_t *s, uint32_t nwords, const uint32_t *words) {
    void *stk = malloc(CB_STACK_SZ);
    if (!stk) { return 0; }
    uint64_t top = ((uint64_t)(uintptr_t)stk + CB_STACK_SZ) & ~0xfULL;
+
+   uint32_t depth = (uint32_t)__atomic_add_fetch(&g_cf_depth, 1, __ATOMIC_SEQ_CST);
+   uint32_t ri = __atomic_fetch_add(&g_cf_pos, 1, __ATOMIC_SEQ_CST) & (CF_RING - 1);
+   struct cf_crumb *c = &g_cf_ring[ri];
+   c->callout32 = s->callout32; c->kind = (nwords == 2);
+   c->stk_lo = (uint64_t)(uintptr_t)stk; c->stk_hi = top;
+   c->tid = pthread_mach_thread_np(pthread_self()); c->depth = depth; c->done = 0;
+
+   x64_cb_enter();
    uint32_t r = _86x64_call_i386(s->callout32, nwords, words, top);
+   x64_cb_leave();
+
+   c->done = 1;
+   __atomic_sub_fetch(&g_cf_depth, 1, __ATOMIC_SEQ_CST);
    free(stk);
    return r;
 }
