@@ -2473,7 +2473,17 @@ namespace MachO {
             (other.memdisp == nullptr) &&
             (other.brdisp == nullptr) &&
             imm_unresolved;
-         if (no_live_operands && !instbuf.empty()) {
+         /* Far call/jmp (ptr16:32, opcode 0x9A/0xEA) has no flat-64-bit form,
+          * and its segmented far pointer is meaningless in the flat model — it
+          * is ALWAYS misdecoded data-in-code here (a real far transfer can't
+          * work in a flat i386 dylib either). Unlike the no-operand junk
+          * opcodes the parser gave it a brdisp/imm for the far target, so it
+          * misses the no_live_operands gate; NOP-substitute it anyway and drop
+          * the bogus operand so Emit writes pure NOPs. (Portal 2 libcef.dylib.) */
+         const bool far_transfer =
+            !instbuf.empty() &&
+            (instbuf.front() == 0xEA || instbuf.front() == 0x9A);
+         if ((no_live_operands || far_transfer) && !instbuf.empty()) {
             fprintf(stderr,
                     "warning: M%d->M%d copyctor: substituting %zu NOP(s) "
                     "for untranslatable bytes (%s) at src vmaddr 0x%zx\n",
@@ -2481,10 +2491,12 @@ namespace MachO {
                     bits == Bits::M32 ? 32 : 64,
                     instbuf.size(), hex, other.loc.vmaddr);
             std::fill(instbuf.begin(), instbuf.end(), (uint8_t)0x90);
-            /* Clear any imm that the ctor body set from other.imm — our
-             * NOPs already fill the entire instbuf, so Emit must not try
-             * to overwrite trailing bytes with the imm value. */
+            /* Clear any imm/brdisp the ctor body set from other.imm/brdisp —
+             * our NOPs already fill the entire instbuf, so Emit must not try
+             * to overwrite trailing bytes with an operand value (the far
+             * transfer's bogus pointer in particular). */
             this->imm = nullptr;
+            this->brdisp = nullptr;
             /* Re-decode: a buffer of 0x90 NOPs decodes to a 1-byte NOP
              * (xedd reflects only the first byte); the remaining bytes
              * are emitted verbatim via instbuf at Emit time, since
