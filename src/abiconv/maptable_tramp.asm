@@ -391,6 +391,7 @@ _x64_exc_longjmp:
 	MTSHIM	_____cxa_guard_acquire, _shim_cxa_guard_acquire
 	MTSHIM	_____cxa_guard_release, _shim_cxa_guard_release
 	MTSHIM	_____cxa_guard_abort,   _shim_cxa_guard_abort
+	MTSHIM	_____cxa_atexit,        _shim_cxa_atexit
 	MTSHIM	____Znwm,               _shim_Znwm
 	MTSHIM	____Znam,               _shim_Znam
 	MTSHIM	____ZnwmRKSt9nothrow_t, _shim_Znwm_nothrow

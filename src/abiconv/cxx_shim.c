@@ -13,6 +13,11 @@
  *    process-wide recursive mutex. Not forwarded: native libc++abi treats
  *    the guard's tail bytes as its own lock words sized for x86_64.
  *
+ *  - __cxa_atexit: forwarded to native __cxa_atexit with the i386 destructor
+ *    wrapped as a native callback (x64_cb_wrap) so it can fire at exit on a
+ *    low-4GB stack. MUST be interposed so its classic lazy symbol pointer
+ *    binds to libabiconv instead of the broken translated stub_helper path.
+ *
  *  - operator new/delete (__Znwm/__Znam/__ZdlPv/__ZdaPv + nothrow forms):
  *    libabiconv's malloc/free, which IS the low-4GB heap the i386 code
  *    lives on. All paired forms are interposed together, so allocations
@@ -68,6 +73,41 @@ uint32_t shim_cxa_guard_abort(uint32_t *a) {
    (void)a;
    pthread_mutex_unlock(&g_guard_mu);
    return 0;
+}
+
+/* ---------------- __cxa_atexit ---------------- */
+/*
+ * int __cxa_atexit(void (*func)(void*), void* arg, void* dso) — register a
+ * C++ destructor (Itanium ABI). Reached from translated static initializers
+ * (e.g. Source-engine libtier0's GetGlobalLoggingSystem registering
+ * ~CLoggingSystem). `func` is TRANSLATED i386 code, so we cannot hand its raw
+ * 4-byte address to the native libc++abi __cxa_atexit: at exit the native
+ * runtime would call it with the x86_64 ABI on a >4GB stack and fault. Wrap it
+ * as a native callback (x64_cb_wrap, 1 pointer arg, void return — the SysV
+ * shape of `void dtor(void*)`); the trampoline marshals back to the i386 cdecl
+ * frame on a low-4GB stack when the runtime fires it. `arg` and `dso` are
+ * opaque low-4GB cookies passed straight through.
+ *
+ * This is the C++-runtime analogue of the __cxa_guard_* shims: an i386 import
+ * that MUST be interposed (not bound to native) so its classic lazy symbol
+ * pointer resolves to libabiconv. (Without the shim the slot never binds — on
+ * modern dyld a classic LAZY pointer is only serviced by the original i386
+ * stub_helper/dyld_stub_binder path, which translation breaks.)
+ */
+struct cxa_cb_sig { uint32_t nargs; uint32_t ret_kind; uint8_t arg_kinds[16]; };
+extern uint64_t x64_cb_wrap(uint32_t fn32, const struct cxa_cb_sig *sig);
+extern int __cxa_atexit(void (*func)(void *), void *arg, void *dso);
+
+uint32_t shim_cxa_atexit(uint32_t *a) {
+   const uint32_t func32 = a[0], arg32 = a[1], dso32 = a[2];
+   if (!func32) { return 0; }
+   /* CBA_PTR=2, CBR_VOID=0 (see cb_bridge.c). */
+   static const struct cxa_cb_sig sig = { 1, 0, { 2 } };
+   uint64_t tramp = x64_cb_wrap(func32, &sig);
+   if (!tramp) { return 0; }   /* slots exhausted -> skip (no crash at exit) */
+   return (uint32_t) __cxa_atexit((void (*)(void *))(uintptr_t) tramp,
+                                  (void *)(uintptr_t) arg32,
+                                  (void *)(uintptr_t) dso32);
 }
 
 /* ---------------- operator new / delete ---------------- */
