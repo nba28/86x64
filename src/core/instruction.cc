@@ -606,12 +606,27 @@ namespace MachO {
              * risk of this heuristic, already accepted for memory operands.)
              */
             bool imm_is_ptr = false;
+            /* GATE: only a FIXED-load-address image (non-PIE MH_EXECUTE) ever
+             * references its own globals/code by a bare absolute immediate. A
+             * dylib (MH_DYLIB) and a PIE executable are position-independent —
+             * they reach their data via PIC (get_pc_thunk / rip-relative), never
+             * a hardcoded absolute immediate. Applying this heuristic to them
+             * mis-relocates ordinary integer constants that merely alias a
+             * vmaddr: e.g. libtier0's `mov $0x3400,%eax` (a loop count) became
+             * `lea eax,[rip+disp]`, so the array-zeroing loop ran on a giant
+             * pointer and stomped past __DATA into __LINKEDIT (SIGBUS in
+             * GetGlobalLoggingSystem_Internal). Non-PIE execs (Portal 2's
+             * portal2_osx, the original use case) keep the heuristic. */
+            const bool fixed_load_addr =
+               env.archive.header.filetype == MH_EXECUTE &&
+               (env.archive.header.flags & MH_PIE) == 0;
             /* Only a full 32-bit immediate can hold a pointer. `*_IMMv`/`IMMz`
              * also cover the 16-bit-operand forms (`66`-prefixed, e.g.
              * `mov di, imm16`); there imm_idx would mis-read into the opcode
              * bytes and the M32->M64 transform (lea r32) would reject the
              * 16-bit dest reg. Skip those — a 16-bit immediate is never a ptr. */
-            if (xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
+            if (fixed_load_addr &&
+                xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
                const uint32_t imm_val =
                   img.template at<uint32_t>(loc.offset + imm_idx);
                if (imm_val >= 0x1000 && imm_val < 0x80000000U) {
