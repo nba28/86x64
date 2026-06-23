@@ -514,7 +514,9 @@ namespace MachO {
                         &this->memdisp_offset);
                   }
                }
-            } else if (basereg != XED_REG_INVALID &&
+            } else if (env.archive.header.filetype == MH_EXECUTE &&
+                       (env.archive.header.flags & MH_PIE) == 0 &&
+                       basereg != XED_REG_INVALID &&
                        basereg != select_value(bits, XED_REG_EIP, XED_REG_RIP) &&
                        basereg != select_value(bits, XED_REG_ESP, XED_REG_RSP) &&
                        basereg != select_value(bits, XED_REG_EBP, XED_REG_RBP) &&
@@ -529,6 +531,19 @@ namespace MachO {
                 * absolute vmaddr. Our transform shifts that table, so
                 * the disp32 has to be relocated — capture it in
                 * `memdisp` so the transform can rewrite it.
+                *
+                * GATE: only a FIXED-load-address image (non-PIE
+                * MH_EXECUTE) references a global table this way. A PIC
+                * dylib / PIE exec ALWAYS reaches globals through its PIC
+                * anchor (ebx+disp) or rip-relative, so for those a
+                * `[base + disp32]` is ALWAYS an ordinary struct-field
+                * access where disp32 is a member offset — NOT an
+                * absolute address. (Observed: libtier0's
+                * `movl 0x7410(%edi),%eax` field load became
+                * `lea r11,[rip+sym]; mov (%rdi,%r11),%eax`, adding a
+                * relocated pointer to `this` → EXC_BAD_ACCESS in
+                * CLoggingSystem::RegisterLoggingListener.) Same gate as
+                * the bare-immediate heuristic below.
                 *
                 * Guard: only when disp32 lands inside a real
                 * (non-pagezero/linkedit) segment; otherwise this is an
