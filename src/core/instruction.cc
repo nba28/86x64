@@ -198,18 +198,6 @@ namespace MachO {
       instbuf = std::vector<uint8_t>(&img.at<uint8_t>(loc.offset),
                                      &img.at<uint8_t>(loc.offset + xed_decoded_inst_get_length(&xedd)));
 
-      /* DBG_CTORB: log every Instruction ctor at vmaddr 0x3fd4b6 (obj/offset/iform/
-       * first bytes) to catch where the duplicate object is born. Temporary. */
-      if (std::getenv("DBG_CTORB") && loc.vmaddr == 0x3fd4b6) {
-         std::fprintf(stderr,
-            "[ctorb] PARSE-CTOR obj=%p loc.offset=0x%zx loc.vmaddr=0x%zx iform=%s len=%u b0=%02x b1=%02x add_to_map=%d\n",
-            (const void *)this, (std::size_t)loc.offset, (std::size_t)loc.vmaddr,
-            xed_iform_enum_t2str(xed_decoded_inst_get_iform_enum(&xedd)),
-            (unsigned)xed_decoded_inst_get_length(&xedd),
-            instbuf.size()>0?instbuf[0]:0, instbuf.size()>1?instbuf[1]:0,
-            (int)add_to_map);
-      }
-
       /* special transformations */
       // parse_handle_relbr();
 
@@ -854,38 +842,6 @@ namespace MachO {
       const
    {
       assert(bits == Bits::M32);
-
-      /* DBG_SMALLIMM2: targeted probe for the two movb $imm,[0xf602d1] stores
-       * (i386 0x3fd46c and 0x3fd4b6) that crash iPhoto. Fires at Transform entry
-       * (post-do_resolve) regardless of which switch case the iform takes, so it
-       * captures the FINAL resolved memdisp even when the default-rule diag is
-       * bypassed. Prints memdisp ptr, memdisp_absolute, imm-ness, and resolved
-       * section/vmaddr. Temporary; env-gated. */
-      if (std::getenv("DBG_SMALLIMM2") &&
-          (this->loc.vmaddr == 0x3fd4b6 || this->loc.vmaddr == 0x3fd46c)) {
-         std::fprintf(stderr,
-            "[smallimm2] i386_vmaddr=0x%zx iform=%s memdisp=%p memdisp_absolute=%d imm=%p",
-            (std::size_t)this->loc.vmaddr,
-            xed_iform_enum_t2str(xed_decoded_inst_get_iform_enum(&xedd)),
-            (const void *)this->memdisp, (int)memdisp_absolute, (const void *)imm);
-         if (this->memdisp && this->memdisp->section) {
-            std::fprintf(stderr, " resolved_seg=%.16s resolved_sect=%.16s resolved_vmaddr=0x%zx",
-               (this->memdisp->section->segment
-                  ? this->memdisp->section->segment->segment_command.segname : "(null)"),
-               this->memdisp->section->sect.sectname,
-               (std::size_t)this->memdisp->loc.vmaddr);
-         } else if (this->memdisp) {
-            std::fprintf(stderr, " (section==null) resolved_vmaddr=0x%zx",
-               (std::size_t)this->memdisp->loc.vmaddr);
-         } else {
-            std::fprintf(stderr, " (memdisp NULL)");
-         }
-         std::fprintf(stderr, " obj=%p &memdisp=%p bits=%d loc.offset=0x%zx instbuf=",
-                      (const void *)this, (const void *)&this->memdisp, (int)bits,
-                      (std::size_t)this->loc.offset);
-         for (uint8_t b : instbuf) std::fprintf(stderr, "%02x ", b);
-         std::fprintf(stderr, "\n");
-      }
 
       if (imm && imm->pointee) {
          assert(bits == Bits::M32);
@@ -2393,13 +2349,6 @@ namespace MachO {
       memdisp_offset(other.memdisp_offset),
       imm(nullptr), brdisp(nullptr), dbg_orig_md(other.dbg_orig_md)
    {
-      if (std::getenv("DBG_CTORB") && this->loc.vmaddr == 0x3fd4b6) {
-         std::fprintf(stderr,
-            "[ctorb] COPY-CTOR this=%p bits=%d loc.vmaddr=0x%zx other=%p other.memdisp=%p other.imm=%p other.memdisp_absolute=%d\n",
-            (const void *)this, (int)bits, (std::size_t)this->loc.vmaddr,
-            (const void *)&other, (const void *)other.memdisp,
-            (const void *)other.imm, (int)other.memdisp_absolute);
-      }
       if (other.memdisp) {
          env.resolve(other.memdisp, &memdisp);
       }

@@ -1102,27 +1102,6 @@ namespace MachO {
       env(other.sect, sect);
       env.resolve(other.segment, &segment);
 
-      /* DBG_CONTENT: dump M32 content entries near the crash vmaddr 0x3fd4b6
-       * right before transform, to see what object actually occupies that
-       * slot in the content list (object A movb vs object B mov-edx). */
-      if (std::getenv("DBG_CONTENT")) {
-         for (const auto elem : other.content) {
-            if (elem->loc.vmaddr >= 0x3fd4a0 && elem->loc.vmaddr <= 0x3fd4d0) {
-               std::fprintf(stderr, "[content] obj=%p loc.offset=0x%zx loc.vmaddr=0x%zx",
-                            (const void *)elem, (std::size_t)elem->loc.offset,
-                            (std::size_t)elem->loc.vmaddr);
-               auto *inst = dynamic_cast<const Instruction<opposite<bits>> *>(elem);
-               if (inst) {
-                  std::fprintf(stderr, " bytes=");
-                  for (uint8_t b : inst->instbuf) std::fprintf(stderr, "%02x ", b);
-               } else {
-                  std::fprintf(stderr, " (not an Instruction: %s)", typeid(*elem).name());
-               }
-               std::fprintf(stderr, "\n");
-            }
-         }
-      }
-
       /* transform content */
       for (const auto elem : other.content) {
          auto new_blobs = elem->Transform(env);
