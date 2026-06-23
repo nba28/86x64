@@ -425,6 +425,46 @@ namespace MachO {
        * fast-path JE around it. */
       std::set<std::size_t> pending_forward_targets;
 
+      /* (0) Pre-scan for GCC-style PIC thunks. `___i686.get_pc_thunk.<r>` is the
+       *     two-instruction leaf `mov %reg,(%esp); ret` — it copies the return
+       *     address (the caller's PC) into %reg. A `call` to such a thunk is the
+       *     SEPARATE-thunk form of the PIC anchor (vs the inline `call $+0;
+       *     pop %reg` clang form): after the call, %reg holds the vmaddr of the
+       *     instruction following the call. Portal 2's i386 binaries use this
+       *     form, which the inline-only detector above missed — leaving every
+       *     `disp(%reg)` PIC data ref carrying its stale i386 displacement
+       *     (observed: portal2_osx main's dlopen path `lea eax,[ebx+0xd0]`
+       *     pointing into __text instead of the relocated __cstring). Map each
+       *     thunk's entry vmaddr -> destination register for the call sites. */
+      std::unordered_map<std::size_t, xed_reg_enum_t> pic_thunks;
+      {
+         Instruction<bits> *mov = nullptr;   /* candidate `mov %reg,(%esp)` */
+         for (SectionBlob<bits> *blob : content) {
+            auto *cur = dynamic_cast<Instruction<bits> *>(blob);
+            if (mov && cur &&
+                xed_decoded_inst_get_category(&cur->xedd) == XED_CATEGORY_RET) {
+               const xed_reg_enum_t dst =
+                  xed_decoded_inst_get_reg(&mov->xedd, XED_OPERAND_REG0);
+               if (dst >= XED_REG_EAX && dst <= XED_REG_EDI) {
+                  pic_thunks[mov->loc.vmaddr] = dst;
+               }
+            }
+            /* Is `cur` a `mov %reg,(%esp)` (the thunk's first instruction)? */
+            mov = nullptr;
+            if (cur &&
+                xed_decoded_inst_get_iform_enum(&cur->xedd) == XED_IFORM_MOV_GPRv_MEMv) {
+               const xed_operand_values_t* mops =
+                  xed_decoded_inst_operands_const(&cur->xedd);
+               if (xed_decoded_inst_number_of_memory_operands(&cur->xedd) == 1 &&
+                   xed_decoded_inst_get_base_reg(mops, 0) == XED_REG_ESP &&
+                   xed_decoded_inst_get_index_reg(mops, 0) == XED_REG_INVALID &&
+                   xed_decoded_inst_get_memory_displacement(mops, 0) == 0) {
+                  mov = cur;
+               }
+            }
+         }
+      }
+
       Instruction<bits> *prev_inst = nullptr;
       for (SectionBlob<bits> *blob : content) {
          auto *inst = dynamic_cast<Instruction<bits> *>(blob);
@@ -488,6 +528,27 @@ namespace MachO {
                anchor_slots.clear();
                anchors[reg] = inst->loc.vmaddr;
                is_anchor_pop = true;
+            }
+         }
+
+         /* (1b) Separate-thunk PIC anchor: `call ___i686.get_pc_thunk.<r>`
+          *      leaves %r = the return address = the following instruction's
+          *      vmaddr. Apply the anchor AFTER the step-6 call-clobber clear
+          *      (which erases EAX/ECX/EDX on any CALL) so it survives even for
+          *      a caller-saved target register. */
+         xed_reg_enum_t thunk_anchor_reg = XED_REG_INVALID;
+         std::size_t thunk_anchor_vm = 0;
+         if (xed_decoded_inst_get_category(&xedd) == XED_CATEGORY_CALL) {
+            const ssize_t brdisp =
+               xed_decoded_inst_get_branch_displacement(&xedd);
+            if (brdisp != 0) {
+               const std::size_t after =
+                  inst->loc.vmaddr + xed_decoded_inst_get_length(&xedd);
+               auto t = pic_thunks.find(after + brdisp);
+               if (t != pic_thunks.end()) {
+                  thunk_anchor_reg = t->second;
+                  thunk_anchor_vm = after;
+               }
             }
          }
 
@@ -690,6 +751,11 @@ namespace MachO {
             anchors.erase(XED_REG_EAX);
             anchors.erase(XED_REG_ECX);
             anchors.erase(XED_REG_EDX);
+         }
+
+         /* Establish a separate-thunk anchor now (post call-clobber clear). */
+         if (thunk_anchor_reg != XED_REG_INVALID) {
+            anchors[thunk_anchor_reg] = thunk_anchor_vm;
          }
 
          prev_inst = inst;
