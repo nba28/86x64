@@ -162,7 +162,13 @@ void ModifyCommand::Update::BindNode::workT(MachO::Archive<b> *archive) {
    /* find bind node */
    auto dyldinfo = archive->template subcommand<MachO::DyldInfo>();
    if (dyldinfo == nullptr) {
-      throw MachO::error("LC_DYLDINFO command missing");
+      /* Classic Mach-O: no bind opcode stream. Redirect via the symbol
+       * table instead. The lazy/non-lazy distinction is meaningless here
+       * (both pointer arrays index the same undefined nlist), so a single
+       * rewrite covers both — the caller's duplicate lazy/non-lazy updates
+       * are idempotent (the second finds old_sym already renamed). */
+      classic_symbind<b>(archive);
+      return;
    }
 
    MachO::BindInfo<b, l> *bindinfo;
@@ -184,6 +190,43 @@ void ModifyCommand::Update::BindNode::workT(MachO::Archive<b> *archive) {
    if (new_dylib_ord) { bindee->dylib = load_dylibs[*new_dylib_ord - 1]; }
    if (new_sym) { bindee->sym = *new_sym; }
    if (new_flags) { bindee->flags = *new_flags; }
+}
+
+template <MachO::Bits b>
+void ModifyCommand::Update::BindNode::classic_symbind(MachO::Archive<b> *archive) {
+   auto symtab = archive->template subcommand<MachO::Symtab>();
+   if (symtab == nullptr) {
+      if (optional) { return; }
+      throw MachO::error("classic interpose: LC_SYMTAB missing");
+   }
+
+   /* Locate the undefined external nlist for old_sym. */
+   MachO::Nlist<b> *target = nullptr;
+   for (auto sym : symtab->syms) {
+      if (sym->kind() == MachO::Nlist<b>::Kind::UNDEF &&
+          sym->string != nullptr && sym->string->str == *old_sym) {
+         target = sym;
+         break;
+      }
+   }
+   if (target == nullptr) {
+      if (optional) { return; }
+      throw MachO::error("classic interpose: undefined symbol `%s' not found",
+                         old_sym->c_str());
+   }
+
+   /* Rename: point the nlist at a freshly-synthesized string in the table. */
+   if (new_sym) {
+      auto *str = MachO::String<b>::Create(*new_sym);
+      symtab->strs.push_back(str);
+      target->string = str;
+   }
+
+   /* Retarget the two-level namespace library ordinal (high byte of n_desc),
+    * preserving the low-byte reference-type flags. */
+   if (new_dylib_ord) {
+      SET_LIBRARY_ORDINAL(target->nlist.n_desc, *new_dylib_ord);
+   }
 }
 
 int ModifyCommand::Update::StripBind::subopthandler(int index, char *value) {

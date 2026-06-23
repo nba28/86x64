@@ -63,8 +63,17 @@ struct ModifyCommand::Update::BindNode: Operation {
    }
    virtual int subopthandler(int index, char *value) override;
    virtual void validate() const override;
-   virtual void operator()(MachO::MachO *macho) override;   
+   virtual void operator()(MachO::MachO *macho) override;
    template <MachO::Bits b, bool lazy> void workT(MachO::Archive<b> *archive);
+
+   /* Classic (pre-10.6, LC_DYSYMTAB-only) Mach-O has no dyld_info bind
+    * opcode stream — undefined imports are resolved by dyld from the symbol
+    * table + indirect symbol table, keyed by (name, two-level library
+    * ordinal). Redirect such a bind by renaming the undefined nlist to
+    * `new_sym` and retargeting its library ordinal to `new_dylib_ord`;
+    * every la/nl_symbol_ptr slot indexing that nlist then binds to the
+    * shim. Used when no DyldInfo is present. */
+   template <MachO::Bits b> void classic_symbind(MachO::Archive<b> *archive);
 };
 
 struct ModifyCommand::Update::StripBind: Operation {

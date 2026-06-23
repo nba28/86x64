@@ -148,13 +148,18 @@ v "$MACHO_TOOL" modify --update strip-bind,suffix='$UNIX2003' "$ABI64" "$DOLLAR6
 
 # Detect whether this binary uses modern (LC_DYLD_INFO) or classic
 # (LC_DYSYMTAB-only) binding. The classic path predates Snow Leopard; iWeb's
-# MobileMe.framework is the only known instance in the iLife '11 set, but the
-# branch lets the pipeline survive any pre-10.6 binary that lands as input.
-# Classic binaries have no lazy-bind opcode stream to walk, so the
-# static-interpose / dyld_stub_binder rebind steps are skipped — runtime
-# lazy resolution falls back to the classic indirect-symbol-table mechanism
-# in dyld, which still works for x86_64 dylibs (libSystem calls without ABI
-# conversion may misbehave; that's a known scope limit).
+# MobileMe.framework and the entire Source-engine (Portal 2) dylib set land
+# here. BOTH paths interpose to libabiconv — they only differ in how the
+# import symbol list is gathered and how the bind is rewritten:
+#   modern : symbols come from the dyld_info lazy/non-lazy bind opcode stream;
+#            static-interpose rewrites the bind opcode (old_sym -> __sym).
+#   classic: there is no bind opcode stream — imports are resolved by dyld
+#            from the symbol + indirect symbol tables, keyed by (name, library
+#            ordinal). Symbols come from nm; static-interpose (via macho-tool's
+#            classic_symbind fallback) renames the undefined nlist + retargets
+#            its library ordinal so the la/nl_symbol_ptr slot binds to the shim.
+# WITHOUT this, classic binaries call native libSystem with the i386 ABI and
+# crash at the first cross-ABI call (e.g. dlopen in the Portal 2 launcher).
 HAS_DYLD_INFO=$(otool -l "$DOLLAR64" 2>/dev/null | grep -c "cmd LC_DYLD_INFO" || true)
 
 if [ "$HAS_DYLD_INFO" -gt 0 ]; then
@@ -169,16 +174,26 @@ if [ "$HAS_DYLD_INFO" -gt 0 ]; then
     SYMS=$( { "$MACHO_TOOL" print --lazy-bind "$DOLLAR64" | tail +2;
               "$MACHO_TOOL" print --bind "$DOLLAR64" | tail +2; } \
             | cut -d" " -f5 | grep -vx 'dyld_stub_binder' | sort -u )
+else
+    # classic Mach-O: the import set is the undefined external symbols. nm
+    # prints them with the leading underscore (e.g. `_dlopen`), exactly the
+    # form static-interpose expects (it prepends `__` -> `___dlopen`, the
+    # libabiconv shim export). Classic binaries reference dyld's internal
+    # lazy-binding helper, not the dyld_stub_binder symbol, so there is no
+    # separate dyld_stub_binder rebind step.
+    SYMS=$( nm -u "$DOLLAR64" 2>/dev/null | awk '{print $NF}' \
+            | grep -vx 'dyld_stub_binder' | sort -u )
+fi
 
-    # statically interpose lazily bound symbols to libabiconv
-    v "$ROOTDIR"/static-interpose.sh -l "$LIBABICONV" -n "$LIBABICONV_NAME" -p "__" -o "$INTERPOSE64" "$DOLLAR64" $SYMS || error
+# statically interpose imported symbols to libabiconv (both binding flavors)
+v "$ROOTDIR"/static-interpose.sh -l "$LIBABICONV" -n "$LIBABICONV_NAME" -p "__" -o "$INTERPOSE64" "$DOLLAR64" $SYMS || error
 
-    # interpose dyld_stub_binder
+if [ "$HAS_DYLD_INFO" -gt 0 ]; then
+    # interpose dyld_stub_binder (modern lazy-binding entry point)
     DYLD_ORD=$("$MACHO_TOOL" translate --load-dylib "$LIBABICONV_NAME" "$INTERPOSE64")
     v "$MACHO_TOOL" modify --update bind,old_sym="dyld_stub_binder",new_sym="__dyld_stub_binder",new_dylib="$DYLD_ORD" "$INTERPOSE64" "$DYLD64" || error
 else
-    echo "86x64: input has no LC_DYLD_INFO (classic Mach-O); skipping lazy-bind interposition" >&2
-    DYLD64="$DOLLAR64"
+    DYLD64="$INTERPOSE64"
 fi
 
 # convert result to dylib (final output)
