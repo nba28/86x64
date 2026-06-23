@@ -818,6 +818,47 @@ namespace MachO {
       bool prev_call0 = false;     /* previous insn was `call $+0` (e8 00000000) */
       std::size_t pend_r11 = 0;    /* value of the last `lea r11,[rip+d]` (x86_64 anchor dance) */
 
+      /* Pre-sweep for GCC PIC thunks (`mov %reg,(%esp); ret`): a `call` to one
+       * is the separate-thunk PIC anchor (vs inline `call $+0; pop`). The thunk
+       * usually sits AFTER its callers, so a forward pre-sweep is needed to
+       * recognise the call when we reach it. Without this, GCC-built switch
+       * dispatches anchored through get_pc_thunk keep their stale i386 table-
+       * relative displacements and jump to garbage. (i386 input only; the M64
+       * convert re-parse uses the lea-r11/mov-[rsp] dance, no `mov reg,[esp]`.) */
+      std::unordered_map<std::size_t, xed_reg_enum_t> pic_thunks;
+      {
+         std::size_t pit = sect.offset, pvm = sect.addr;
+         const std::size_t pend = sect.offset + sect.size;
+         std::size_t mvm = 0; xed_reg_enum_t mreg = XED_REG_INVALID;
+         while (pit < pend) {
+            xed_decoded_inst_t xd;
+            xed_decoded_inst_zero_set_mode(&xd, &Instruction<bits>::dstate());
+            xed_decoded_inst_set_input_chip(&xd, XED_CHIP_INVALID);
+            if (xed_decode(&xd, &img.at<uint8_t>(pit), img.size() - pit)
+                != XED_ERROR_NONE) {
+               mreg = XED_REG_INVALID; ++pit; ++pvm; continue;
+            }
+            const unsigned l = xed_decoded_inst_get_length(&xd);
+            if (mreg != XED_REG_INVALID &&
+                xed_decoded_inst_get_category(&xd) == XED_CATEGORY_RET) {
+               pic_thunks[mvm] = mreg;
+            }
+            mreg = XED_REG_INVALID;
+            if (xed_decoded_inst_get_iform_enum(&xd) == XED_IFORM_MOV_GPRv_MEMv) {
+               const xed_operand_values_t* o = xed_decoded_inst_operands_const(&xd);
+               if (xed_decoded_inst_number_of_memory_operands(&xd) == 1 &&
+                   xed_decoded_inst_get_base_reg(o, 0) == XED_REG_ESP &&
+                   xed_decoded_inst_get_index_reg(o, 0) == XED_REG_INVALID &&
+                   xed_decoded_inst_get_memory_displacement(o, 0) == 0) {
+                  const xed_reg_enum_t d =
+                     xed_decoded_inst_get_reg(&xd, XED_OPERAND_REG0);
+                  if (d >= XED_REG_EAX && d <= XED_REG_EDI) { mvm = pvm; mreg = d; }
+               }
+            }
+            pit += l; pvm += l;
+         }
+      }
+
       std::size_t it = sect.offset;
       std::size_t vmaddr = sect.addr;
       const std::size_t end = sect.offset + sect.size;
@@ -974,6 +1015,17 @@ namespace MachO {
             anchors.erase(XED_REG_ECX);
             anchors.erase(XED_REG_EDX);
             tbl_addr.clear(); tbl_val.clear();
+         }
+
+         /* Separate-thunk PIC anchor: `call ___i686.get_pc_thunk.<r>` leaves
+          * %r = the return address. Apply after the call-clobber clear so it
+          * survives for any target register. */
+         if (cat == XED_CATEGORY_CALL) {
+            const ssize_t bd = xed_decoded_inst_get_branch_displacement(&xedd);
+            if (bd != 0) {
+               auto t = pic_thunks.find(vmaddr + len + bd);
+               if (t != pic_thunks.end()) { anchors[t->second] = vmaddr + len; }
+            }
          }
 
          prev_call0 = (iform == XED_IFORM_CALL_NEAR_RELBRz && len == 5 &&
