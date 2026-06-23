@@ -76,6 +76,14 @@
 	MTSHIM	___open,                      _shim_open
 	MTSHIM	___fcntl,                     _shim_fcntl
 
+	;; dynamic loader: abigen gives these no shim, so a translated i386
+	;; `call dlopen` hits NATIVE dlopen with the i386 cdecl ABI -> garbage
+	;; args -> fault. Bridge the handle/symbol across the 32/64-bit boundary.
+	MTSHIM	___dlopen,                    _shim_dlopen
+	MTSHIM	___dlsym,                     _shim_dlsym
+	MTSHIM	___dlclose,                   _shim_dlclose
+	MTSHIM	___dlerror,                   _shim_dlerror
+
 	;; Carbon Process Manager: ProcessInfoRec embeds pointers (i386/x86_64
 	;; layouts differ) and is in/out — abigen can't marshal it. proc_shim.c.
 	MTSHIM	___GetProcessInformation,     _shim_GetProcessInformation

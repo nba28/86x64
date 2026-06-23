@@ -17,6 +17,11 @@ _waitid
 
 _execvp
 
+_dlopen
+_dlsym
+_dlclose
+_dlerror
+
 __sprintf_chk
 
 _NSNextMapEnumeratorPair
