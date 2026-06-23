@@ -218,8 +218,17 @@ namespace MachO {
           {XED_IFORM_JBE_RELBRz, 2},
           {XED_IFORM_JB_RELBRz, 2},
           {XED_IFORM_JNB_RELBRz, 2},
+          /* sign / parity / overflow conditionals — same 2-byte (0F 8x)
+           * opcode layout as the rest, so the rel32 starts at offset 2.
+           * Rare to carry a reloc in a fully-linked image, but completes
+           * the Jcc-RELBRz family so none is silently missed. */
+          {XED_IFORM_JS_RELBRz, 2},
+          {XED_IFORM_JNS_RELBRz, 2},
+          {XED_IFORM_JP_RELBRz, 2},
+          {XED_IFORM_JNP_RELBRz, 2},
+          {XED_IFORM_JO_RELBRz, 2},
+          {XED_IFORM_JNO_RELBRz, 2},
           {XED_IFORM_LEA_GPRv_AGEN, 3},
-          /* TODO -- probably missing a few */
          };
 
       auto reloc_index_map_it = reloc_index_map.find(xed_decoded_inst_get_iform_enum(&xedd));
@@ -243,10 +252,14 @@ namespace MachO {
                 indexreg == XED_REG_INVALID)
                {
                   if (memdisp) {
-                     fprintf(stderr,
-                             "warning: %s: duplicate memdisp at offset 0x%jx, vmaddr 0x%jx\n",
-                             __FUNCTION__, loc.offset, loc.vmaddr);
-                     abort();
+                     /* Two rip/eip-relative memory operands on one
+                      * instruction — we only track a single memdisp. Throw
+                      * a located, catchable error instead of a raw abort()
+                      * so the driver can report which input tripped it. */
+                     throw error("%s: duplicate rip-relative memdisp at "
+                                 "offset 0x%jx, vmaddr 0x%jx",
+                                 __FUNCTION__, (uintmax_t) loc.offset,
+                                 (uintmax_t) loc.vmaddr);
                   }
 
                   memidx = i;
@@ -1600,15 +1613,17 @@ namespace MachO {
                }
 
             case XED_IFORM_CALL_NEAR_RELBRz:
+            case XED_IFORM_CALL_NEAR_RELBRd:
                {
+                  /* `call rel32` (E8 cd). RELBRz is the i386 default; RELBRd
+                   * is the fixed-doubleword variant — same E8+rel32 layout,
+                   * so both lower to a 32-bit relative branch wrapped in
+                   * call_op (which restores the i386 4-byte ret-addr push). */
                   auto jmp_inst = new Instruction<Bits::M64>({0xe9, 0x00, 0x00, 0x00, 0x00});
                   env.resolve(memdisp, &jmp_inst->memdisp);
                   env.resolve(brdisp, &jmp_inst->brdisp);
                   return call_op(jmp_inst);
                }
-               
-            case XED_IFORM_CALL_NEAR_RELBRd:
-               throw error("%s: don't know how to handle `XED_IFORM_CALL_NEAR_RELBRz' at vmaddr 0x%zx", __FUNCTION__, this->loc.vmaddr);
                
             case XED_IFORM_RET_NEAR:
                {
