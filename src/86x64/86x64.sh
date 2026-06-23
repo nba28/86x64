@@ -90,6 +90,17 @@ ARCHIVE32="$1"
 shift 1
 [ "$ARCHIVE32" ] || abort "missing positional parameter 'archive32'"
 
+# A dylib/bundle input can never produce an executable wrapper (it has no
+# `_main`), so force dylib-only mode regardless of -w. Without this, callers
+# that always pass -w (m64's standalone path) try to link an exec wrapper
+# against the translated dylib and fail with `ld: _main undefined` — even
+# though the translated dylib itself was already produced. Detected on the
+# thin i386 input (m64 thins fat wrappers before calling us).
+if file "$ARCHIVE32" 2>/dev/null | grep -qi "shared library\|bundle"; then
+    [ "$VERBOSE" ] && echo "86x64: dylib/bundle input -> dylib-only mode (no exec wrapper)"
+    WRAPPER_OBJ=""
+fi
+
 v() {
     [ "$VERBOSE" ] && echo "$@"
     "$@"

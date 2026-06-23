@@ -265,19 +265,43 @@ def thin_to_i386(binary):
     return Path(tmp), (lambda: os.path.exists(tmp) and os.remove(tmp))
 
 
+def is_macho_dylib(path):
+    """True if `path` is a Mach-O dynamic library/bundle (thin OR fat). A dylib
+    has no `_main`, so the standalone pipeline must run dylib-only (no exec
+    wrapper). `file` reports "shared library" for both thin and fat (the latter
+    embeds the slice description)."""
+    try:
+        o = subprocess.run(["file", "-b", str(path)], capture_output=True,
+                           text=True)
+        return "shared library" in o.stdout or "bundle" in o.stdout.lower()
+    except OSError:
+        return False
+
+
 def translate_standalone(binary, args):
     require(PIPELINE_SH)
-    out = Path(args.output) if args.output else binary.with_suffix(".x64")
-    info(f"translate (standalone) {binary} -> {out}")
+    dylib = is_macho_dylib(binary)
+    if args.output:
+        out = Path(args.output)
+    else:
+        # dylib -> <name>.x64.dylib (keeps a .dylib extension); exec -> <name>.x64
+        out = binary.with_suffix(".x64.dylib") if dylib else binary.with_suffix(".x64")
+    info(f"translate (standalone{'/dylib' if dylib else ''}) {binary} -> {out}")
     binary, cleanup = thin_to_i386(binary)
     try:
         cmd = ["bash", PIPELINE_SH, "-m", MACHO_TOOL, "-l", LIBABICONV]
         if args.keep: cmd.append("-k")
         libw = BUILD / "src" / "86x64" / "libwrapper.a"
         libi = BUILD / "src" / "86x64" / "libinterpose.dylib"
-        if libw.exists(): cmd += ["-w", libw]
-        if libi.exists(): cmd += ["-i", libi]
-        cmd += ["-o", out, binary]
+        if dylib:
+            # dylib-only: -a sets the dylib output path directly (no exec
+            # wrapper, no `_main` link). 86x64.sh also auto-detects this, but
+            # passing -a gives the exact output name (avoids a double .dylib).
+            cmd += ["-a", out, binary]
+        else:
+            if libw.exists(): cmd += ["-w", libw]
+            if libi.exists(): cmd += ["-i", libi]
+            cmd += ["-o", out, binary]
         run(cmd, dry=args.dry_run)
     finally:
         cleanup()
