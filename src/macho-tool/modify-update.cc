@@ -223,9 +223,42 @@ void ModifyCommand::Update::BindNode::classic_symbind(MachO::Archive<b> *archive
    }
 
    /* Retarget the two-level namespace library ordinal (high byte of n_desc),
-    * preserving the low-byte reference-type flags. */
+    * preserving the low-byte reference-type flags.
+    *
+    * new_dylib_ord is the 1-based index among LC_LOAD_DYLIB commands (what
+    * `translate --load-dylib` returns, matching the modern path's
+    * load_dylibs[ord-1]). But dyld's two-level library ordinal counts ALL
+    * dylib-loading commands (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB,
+    * LC_REEXPORT_DYLIB, LC_LOAD_UPWARD_DYLIB, LC_LAZY_LOAD_DYLIB) in
+    * load-command order. The modern path is immune because it stores the
+    * DylibCommand pointer and emits dylib->id (assigned over all of them at
+    * Build); here we write the raw ordinal, so resolve the LC_LOAD_DYLIB index
+    * to its DylibCommand and recompute the true ordinal. (No-op shift for
+    * binaries with only LC_LOAD_DYLIB, e.g. most games; correct for any that
+    * also link weak/reexported frameworks.) */
    if (new_dylib_ord) {
-      SET_LIBRARY_ORDINAL(target->nlist.n_desc, *new_dylib_ord);
+      auto load_dylibs =
+         archive->template subcommands<MachO::DylibCommand, LC_LOAD_DYLIB>();
+      if (*new_dylib_ord < 1 || *new_dylib_ord > load_dylibs.size()) {
+         throw MachO::error("classic interpose: dylib ordinal %u out of range",
+                            *new_dylib_ord);
+      }
+      const MachO::DylibCommand<b> *want = load_dylibs[*new_dylib_ord - 1];
+      unsigned ordinal = 0, count = 0;
+      for (auto *lc : archive->load_commands) {
+         auto *dc = dynamic_cast<MachO::DylibCommand<b> *>(lc);
+         if (dc == nullptr) { continue; }
+         switch (dc->cmd()) {
+         case LC_LOAD_DYLIB: case LC_LOAD_WEAK_DYLIB: case LC_REEXPORT_DYLIB:
+         case LC_LOAD_UPWARD_DYLIB: case LC_LAZY_LOAD_DYLIB:
+            ++count;
+            if (dc == want) { ordinal = count; }
+            break;
+         default: break;   /* LC_ID_DYLIB et al. don't count */
+         }
+         if (ordinal) { break; }
+      }
+      SET_LIBRARY_ORDINAL(target->nlist.n_desc, ordinal);
    }
 }
 
