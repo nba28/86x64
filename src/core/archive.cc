@@ -28,7 +28,7 @@ namespace MachO {
          const auto& lc_hdr = img.at<load_command>(lc_start);
          const std::size_t lc_cmdsize = lc_hdr.cmdsize;
          LoadCommand<b> *cmd = LoadCommand<b>::Parse(img, offset, env);
-         load_commands.push_back(cmd);
+         if (cmd) { load_commands.push_back(cmd); }   /* nullptr = intentionally dropped (e.g. LC_TWOLEVEL_HINTS) */
          offset = lc_start + lc_cmdsize;
       }
 

@@ -100,6 +100,16 @@ namespace MachO {
           * since none of it references vmaddrs that the M32→M64 transform shifts. */
          return LinkeditData<bits>::Parse(img, offset, env);
          
+      case LC_TWOLEVEL_HINTS:
+         /* Two-level namespace hint table: a pure dyld lookup-speed OPTIMIZATION
+          * (an array of (isub_image, itoc) hints parallel to the undefined
+          * symbols). Its `offset` points into __LINKEDIT, which the M32->M64
+          * transform relays out — preserving the command would leave a stale
+          * offset. dyld binds correctly without it, so drop it (nullptr =
+          * skipped by the archive's LC loop). Seen on older i386 dylibs built
+          * with -twolevel_namespace_hints (e.g. Portal 2 libbinkmachox86). */
+         return nullptr;
+
       default:
          throw error("load command 0x%x not supported", lc.cmd);
       }
