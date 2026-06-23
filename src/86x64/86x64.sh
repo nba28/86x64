@@ -3,6 +3,16 @@
 LINKDST="$(readlink "$0")"
 export ROOTDIR="$(dirname "${LINKDST:-"$0"}")"
 
+# Reserve header slack between the load commands and the first __TEXT section.
+# Every pipeline output is codesigned (deploy) and path-patched (install_name_tool
+# rpath-fix) downstream — both GROW the load-command region. With zero slack the
+# first section (__text, holding the entry point) starts immediately after the
+# LCs, so codesign's appended LC_CODE_SIGNATURE (+16B) overwrites the entry and
+# the binary SIGILLs on launch (seen on small dylibs like Portal 2's
+# portal2_osx.dylib, whose __text began exactly where the LCs ended). 1024 matches
+# Apple's ld -headerpad_max_install_names. Honor an explicit override if set.
+export MACHO_HEADERPAD="${MACHO_HEADERPAD:-1024}"
+
 usage() {
     cat<<EOF
 usage: 86x64 [-hv] [-k] [-o archive64] [-r root] [-l libabiconv] [-w wrapper] [-i libinterpose] [-a archive64.dylib] [-m macho-tool] archive32
