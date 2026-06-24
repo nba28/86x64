@@ -37,6 +37,8 @@
 ;;           2 char* -> low-4GB bounce          3 stret narrow (C finisher)
 ;;           4 fp double: xmm0 -> st0           5 small struct -> eax:edx (C)
 ;;           6 reg-return struct -> i386 buf (C) 7 fp float: xmm0 -> st0
+;;           8 int64: remap NSNotFound sentinel   9 64-bit token -> wrap handle
+;;             (NSTrackingRectTag/NSToolTipTag round-trip; plain x64_objc_wrap)
 ;;
 ;; Trampoline stack frame after prologue:
 ;;   [rbp +  0]  saved rbp
@@ -174,6 +176,10 @@
    je %%fpd
    cmp ecx, 7
    je %%fpf
+   cmp ecx, 8
+   je %%satnarrow
+   cmp ecx, 9
+   je %%tokwrap
    ;; kinds 3/5/6: struct-return finisher. xmm0/xmm1 still hold the callee's
    ;; FP return payload and bind to the finisher's double params.
    mov rdi, rbx                    ; &plan
@@ -189,9 +195,23 @@
    movss [rbx + 440], xmm0         ; native float -> x87 st0
    fld dword [rbx + 440]
    jmp %%ret
+%%satnarrow:
+   ;; 64-bit int return: remap the NSNotFound sentinel (NSIntegerMax_64) to the
+   ;; i386 NSIntegerMax_32 so 32-bit `cmp eax,0x7fffffff` termination tests fire
+   ;; (NSIndexSet/NSArray enumeration). Every other value passes through with
+   ;; rax/rdx preserved, so genuine int64 edx:eax returns are unaffected.
+   mov rcx, 0x7fffffffffffffff
+   cmp rax, rcx
+   jne %%ret
+   mov eax, 0x7fffffff
+   jmp %%ret
 %%bounce:
    mov rdi, rax                    ; char* return -> low-4GB bounce buffer
    call _x64_objc_bounce_cstr      ; result in eax
+   jmp %%ret
+%%tokwrap:
+   mov rdi, rax                    ; 64-bit NSTrackingRectTag/NSToolTipTag token ->
+   call _x64_objc_wrap             ; 32-bit arena handle (plain wrap, no object deref)
    jmp %%ret
 %%wrap:
    mov rdi, rax                    ; object return -> 32-bit handle

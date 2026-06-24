@@ -1874,7 +1874,11 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
     *   5 = small struct  (native rax/rdx/xmm0/xmm1 -> narrowed 8-byte i386
     *                      struct returned in eax:edx)
     *   6 = reg-return struct into i386 stret buffer (set by stret preps)
-    *   7 = fp float      (native xmm0 single -> x87 st0) */
+    *   7 = fp float      (native xmm0 single -> x87 st0)
+    *   8 = 64-bit int    (remap the NSNotFound sentinel: native NSIntegerMax
+    *                      0x7fffffffffffffff -> i386 NSIntegerMax 0x7fffffff so
+    *                      32-bit `cmp eax,0x7fffffff` NSNotFound termination tests
+    *                      fire; all other values pass through rax/rdx unchanged) */
    char *rt = m ? method_copyReturnType(m) : NULL;
    const int rconv = method_is_legacy(m) ? CONV_I386 : CONV_NATIVE;
    char rb = rt ? *enc_skip_quals(rt) : 0;
@@ -1903,6 +1907,15 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
       } else {
          plan->ret_is_obj = 0;
       }
+   } else if (rb == 'q' || rb == 'Q' || rb == 'l' || rb == 'L') {
+      /* 64-bit integer return (NSInteger/NSUInteger/long/long long). The native
+       * value is truncated to eax by the i386 caller; the ONLY value that breaks
+       * is the NSNotFound sentinel (NSIntegerMax = 0x7fffffffffffffff on x86_64
+       * vs 0x7fffffff on i386), whose truncation (0xffffffff) never matches the
+       * i386's `cmp eax,0x7fffffff` -> infinite loops in NSIndexSet /
+       * NSArray indexOfObject: enumeration. Kind 8 remaps just that sentinel in
+       * the asm; every other value (incl. genuine int64 edx:eax) passes through. */
+      plan->ret_is_obj = 8;
    } else {
       plan->ret_is_obj = 0;
    }
@@ -2725,6 +2738,56 @@ static int bp_fast_enum(struct objc_call_plan *plan, const uint32_t *args32,
    return 1;
 }
 
+/* NSTrackingRectTag / NSToolTipTag round-trip (the remove side). These tags are
+ * 64-bit NSIntegers on x86_64 but 32-bit on i386: -[NSView addTrackingRect:owner:
+ * userData:assumeInside:] / -[NSView addToolTipRect:owner:userData:] RETURN a tag
+ * the i386 caller stores in 32 bits and later hands back to -[NSView
+ * removeTrackingRect:] / -[NSView removeToolTipRect:]. Truncating the 64-bit tag
+ * to the caller's eax loses the high bits, so AppKit aborts ("0x0 is an invalid
+ * NSTrackingRectTag ... Truncated the NSTrackingRectTag to 32bit"). objc_bridge_prep
+ * therefore WRAPS the tag return into a low-4GB arena handle (return KIND 9, plain
+ * x64_objc_wrap) — exactly as a 64-bit object/pointer is wrapped for i386. Here we
+ * UNWRAP that handle back to the real 64-bit tag for the remove* call. This is
+ * keyed on the selectors because the ObjC type encoding ERASES the tag typedef
+ * (it is plain 'q', indistinguishable from a numeric NSInteger), so only the API
+ * contract identifies a token — the same reason bp_fast_enum keys on
+ * countByEnumeratingWithState:. Universal: any app using NSView tracking/tooltip
+ * rects. */
+static int bp_track_tag(struct objc_call_plan *plan, const uint32_t *args32,
+                        id real_self, SEL sel) {
+   static SEL rm_track, rm_tip;
+   if (!rm_track) {
+      rm_track = sel_registerName("removeTrackingRect:");
+      rm_tip   = sel_registerName("removeToolTipRect:");
+   }
+   if (!real_self || (sel != rm_track && sel != rm_tip)) return 0;
+   /* A legacy reverse-registered view OVERRIDING remove* keeps i386 tags
+    * end-to-end -> normal (legacy) path; don't intercept. */
+   if (method_is_legacy(class_getInstanceMethod(object_getClass(real_self), sel)))
+      return 0;
+   long tag = (long)x64_objc_unwrap(args32[2]);   /* 32-bit handle -> real 64-bit tag */
+   if (getenv("ABICONV_TAG_TRACE")) {
+      fprintf(stderr, "[tag] remove sel=%s handle=0x%x -> tag=0x%lx self=%p\n",
+              sel_getName(sel), args32[2], (unsigned long)tag, (void *)real_self);
+      fflush(stderr);
+   }
+   /* Old macOS (the i386 era) silently IGNORED removeTrackingRect:/removeToolTipRect:
+    * with an invalid tag; tag 0 = "none", the uninitialized-ivar "remove the old
+    * one before adding a new one" idiom legacy views use. Modern AppKit instead
+    * THROWS NSInternalInconsistencyException ("0x0 is an invalid NSTrackingRectTag"),
+    * which aborts the app before it ever reaches the matching addTrackingRect:.
+    * No-op the 0 tag to restore the leniency the legacy code depends on. Nonzero
+    * tags round-trip through the arena (wrapped on the add* return, kind 9). */
+   if (tag != 0)
+      ((void (*)(id, SEL, long))objc_msgSend)(real_self, sel, tag);
+   plan->reg[0] = plan->reg[1] = plan->reg[2] = 0;
+   plan->reg[3] = plan->reg[4] = plan->reg[5] = 0;
+   plan->nreg = 1;
+   plan->ret_is_obj = 0;                            /* void return */
+   plan->target = (uint64_t)(uintptr_t)x64_ret_identity;
+   return 1;
+}
+
 void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
    appkit_compat_install();
@@ -2767,6 +2830,12 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    /* NSFastEnumeration: convert the by-pointer state struct (x86_64 layout from
     * native Foundation) into the i386 layout the caller reads. */
    if (bp_fast_enum(plan, args32, real_self, sel))
+      return;
+
+   /* NSTrackingRectTag/NSToolTipTag removal: unwrap the 32-bit tag handle back to
+    * the real 64-bit tag and call native (see bp_track_tag). The matching add*
+    * side wraps the tag return below (kind 9). */
+   if (bp_track_tag(plan, args32, real_self, sel))
       return;
 
    /* Legacy class-method dispatch fallback. Two distinct cases need it, both
@@ -2815,6 +2884,33 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
 
    fill_args_and_return(plan, args32, /*arg_base_idx=*/2, /*reg_base=*/2,
                         real_self ? object_getClass(real_self) : NULL, sel);
+
+   /* NSTrackingRectTag/NSToolTipTag creation: the 64-bit tag return must round-trip
+    * through the i386 caller's 32-bit slot (it is later passed back to
+    * removeTrackingRect:/removeToolTipRect:, see bp_track_tag). Truncating it to eax
+    * (kind 8) loses the high bits -> AppKit's "invalid NSTrackingRectTag / truncated
+    * to 32bit" abort. Wrap the tag into an arena handle instead (kind 9, plain
+    * x64_objc_wrap). Keyed on the add* selectors: the 'q' return encoding erases the
+    * tag typedef, so only the API names the token. The == 8 guard keeps this to the
+    * native 64-bit-int return (a legacy i386 override returns via legacy_imp above). */
+   {
+      static SEL add_track, add_tip;
+      if (!add_track) {
+         add_track = sel_registerName("addTrackingRect:owner:userData:assumeInside:");
+         add_tip   = sel_registerName("addToolTipRect:owner:userData:");
+      }
+      if (sel == add_track || sel == add_tip) {
+         if (getenv("ABICONV_TAG_TRACE")) {
+            fprintf(stderr, "[tag] add sel=%s ret_kind=%d (m=%p) self=%p\n",
+                    sel_getName(sel), plan->ret_is_obj,
+                    (void *)class_getInstanceMethod(
+                        real_self ? object_getClass(real_self) : NULL, sel),
+                    (void *)real_self);
+            fflush(stderr);
+         }
+         if (plan->ret_is_obj == 8) plan->ret_is_obj = 9;
+      }
+   }
 }
 
 /*
@@ -3957,6 +4053,140 @@ uint32_t x64_objc_wrap_ret(uint64_t real) {
    }
    return x64_objc_wrap(real);
 }
+
+/* ---------------------------------------------------------------------------
+ * NIB IBOutlet connection bridge: object_set/getInstanceVariable for legacy
+ * reverse-registered classes.
+ *
+ * AppKit's NIB loader connects an IBOutlet that has NO `set<Outlet>:` setter via
+ * `object_setInstanceVariable(owner, "<ivarName>", target)` — a raw runtime ivar
+ * write keyed by NAME (verified by disassembling -[NSNibOutletConnector
+ * establishConnection]: it builds set<Label>:, performSelector:s it if the
+ * object respondsToSelector:, else falls back to object_setInstanceVariable).
+ * Our reverse-registered legacy classes carry NO named ivars in the modern
+ * runtime — their ivars live in the i386 SHADOW at hardcoded i386 offsets (see
+ * reverse_register_image) — so the native call finds no ivar and SILENTLY
+ * no-ops, leaving the outlet nil. The translated code then derefs the nil outlet
+ * and crashes (iPhoto: -[InfoController dataChanged:] derefs nil mSuperInfo@0x40).
+ *
+ * Fix: interpose both calls. For a legacy instance, resolve the ivar NAME to its
+ * absolute i386 offset via the legacy __OBJC ivar metadata and read/write the
+ * i386 shadow slot (the same slot the translated IMPs access as [self+off]);
+ * otherwise fall through to the real libobjc function. Universal: every no-setter
+ * IBOutlet of every legacy class (setter outlets already connect through the
+ * reverse bridge), plus any other native object_set/getInstanceVariable on a
+ * legacy object. ------------------------------------------------------------- */
+#include <dlfcn.h>
+#include <objc/runtime.h>
+
+/* Absolute i386 ivar offset for `name` on `cls` or any registered legacy
+ * ancestor (fragile-ABI ivar offsets are already absolute). Returns 1 on hit. */
+static int legacy_ivar_offset(Class cls, const char *name, uint32_t *off_out) {
+   for (Class c = cls; c; c = class_getSuperclass(c)) {
+      struct rcls_ent *ce = rcls_lookup(c);
+      if (!ce || !ce->legacy_addr) { continue; }
+      if (!ptr_ok(ce->legacy_addr, sizeof(struct legacy_objc_class))) { continue; }
+      const struct legacy_objc_class *lc =
+         (const struct legacy_objc_class *)(uintptr_t)ce->legacy_addr;
+      if (!lc->ivars || !ptr_ok(lc->ivars, sizeof(struct legacy_objc_ivar_list))) {
+         continue;
+      }
+      const struct legacy_objc_ivar_list *il =
+         (const struct legacy_objc_ivar_list *)(uintptr_t)lc->ivars;
+      if (!ptr_ok(lc->ivars, sizeof(struct legacy_objc_ivar_list) +
+                  (size_t)(il->ivar_count > 0 ? il->ivar_count : 0) *
+                  sizeof(struct legacy_objc_ivar))) {
+         continue;
+      }
+      const struct legacy_objc_ivar *iv =
+         (const struct legacy_objc_ivar *)(il + 1);
+      for (int i = 0; i < il->ivar_count; ++i) {
+         const char *inm = (const char *)(uintptr_t)iv[i].name;
+         if (inm && mem_readable((uintptr_t)inm, 1) && strcmp(inm, name) == 0) {
+            *off_out = (uint32_t)iv[i].offset;
+            return 1;
+         }
+      }
+   }
+   return 0;
+}
+
+/* Is `cls` (or an ancestor) one of our reverse-registered legacy classes? */
+static int class_is_legacy(Class cls) {
+   for (Class c = cls; c; c = class_getSuperclass(c)) {
+      if (rcls_lookup(c)) { return 1; }
+   }
+   return 0;
+}
+
+typedef Ivar (*objc_setiv_fn)(id, const char *, void *);
+typedef Ivar (*objc_getiv_fn)(id, const char *, void **);
+
+static Ivar real_object_setInstanceVariable(id o, const char *n, void *v) {
+   static objc_setiv_fn fn;
+   if (!fn) {
+      fn = (objc_setiv_fn)dlsym(RTLD_NEXT, "object_setInstanceVariable");
+      if (!fn) { fn = (objc_setiv_fn)dlsym(RTLD_DEFAULT, "object_setInstanceVariable"); }
+   }
+   return fn ? fn(o, n, v) : NULL;
+}
+static Ivar real_object_getInstanceVariable(id o, const char *n, void **v) {
+   static objc_getiv_fn fn;
+   if (!fn) {
+      fn = (objc_getiv_fn)dlsym(RTLD_NEXT, "object_getInstanceVariable");
+      if (!fn) { fn = (objc_getiv_fn)dlsym(RTLD_DEFAULT, "object_getInstanceVariable"); }
+   }
+   return fn ? fn(o, n, v) : NULL;
+}
+
+static Ivar x64_object_setInstanceVariable(id obj, const char *name, void *value) {
+   if (obj && name && class_is_legacy(object_getClass(obj))) {
+      Class cls = object_getClass(obj);
+      uint32_t off;
+      if (legacy_ivar_offset(cls, name, &off)) {
+         uint32_t sh = get_or_create_shadow(obj, cls);
+         uint32_t *slot = prop_ivar_slot(sh, off);
+         if (slot) {
+            /* store the outlet target in the i386 representation the translated
+             * code expects: a SHADOW for a legacy object, a proxy handle for a
+             * native one. Raw store (no retain), matching native semantics —
+             * the nib retains its top-level objects / view hierarchy. */
+            *slot = value ? x64_objc_wrap_ret((uint64_t)(uintptr_t)value) : 0;
+         }
+         if (getenv("ABICONV_OUTLET_TRACE")) {
+            fprintf(stderr, "[outlet] -[%s set ivar %s @0x%x] = %p (slot=%p)\n",
+                    class_getName(cls), name, off, value, (void *)slot);
+         }
+      }
+      return NULL;   /* return value is ignored by AppKit's connector */
+   }
+   return real_object_setInstanceVariable(obj, name, value);
+}
+
+static Ivar x64_object_getInstanceVariable(id obj, const char *name, void **outValue) {
+   if (obj && name && class_is_legacy(object_getClass(obj))) {
+      Class cls = object_getClass(obj);
+      uint32_t off;
+      if (legacy_ivar_offset(cls, name, &off)) {
+         uint32_t sh = get_or_create_shadow(obj, cls);
+         uint32_t *slot = prop_ivar_slot(sh, off);
+         if (outValue) { *outValue = slot ? (void *)resolve_self(*slot) : NULL; }
+      } else if (outValue) {
+         *outValue = NULL;
+      }
+      return NULL;
+   }
+   return real_object_getInstanceVariable(obj, name, outValue);
+}
+
+typedef struct { const void *replacement; const void *replacee; } objc_iv_interpose_t;
+__attribute__((used)) static const objc_iv_interpose_t __objc_iv_interposers[]
+__attribute__((section("__DATA,__interpose"))) = {
+   { (const void *)x64_object_setInstanceVariable,
+     (const void *)object_setInstanceVariable },
+   { (const void *)x64_object_getInstanceVariable,
+     (const void *)object_getInstanceVariable },
+};
 
 /* ---------------------------------------------------------------------------
  * Legacy i386 object -> real modern object bridge (14th iPhoto blocker).
