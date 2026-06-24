@@ -358,3 +358,145 @@ extern "C" unsigned fscanf_conversion_f(const void *args32, void *args64, reg_wi
    convert_arg<ptr32_t, ptr64_t>(args32, args64, argtypes, arg_count); /* FILE * */
    return scanf_conversion_f(args32, args64, argtypes) + 1;
 }
+
+/* ===================================================================
+ * v-printf family (vsnprintf, vsprintf, vfprintf, vprintf, vasprintf,
+ * __vsnprintf_chk) — the va_list variants.
+ *
+ * THE BUG these replace: an i386 `va_list` is a plain `char *` pointing
+ * directly at the first variadic argument on the i386 stack (4-byte slots).
+ * An x86_64 `va_list` is a 4-field `__va_list_tag` struct
+ * {gp_offset, fp_offset, overflow_arg_area, reg_save_area}. The two are NOT
+ * interchangeable, yet abigen's auto-generated v-shim copied the i386 va_list
+ * bytes into an x86_64 tag as though they had the same shape — so native
+ * vfprintf read *ap (the first vararg value) as gp_offset and dereferenced a
+ * fused-garbage `overflow_arg_area` -> SIGSEGV (Portal 2 boot).
+ *
+ * THE FIX: drive the existing printf conversion machinery from the i386
+ * va_list to build a flat x86_64 overflow buffer (one 8-byte slot per
+ * conversion, exactly what `convert_arg` already produces), then synthesize a
+ * real x86_64 va_list pointing at it with the register areas marked exhausted
+ * (gp_offset/fp_offset past their reg-save windows) so native va_arg pulls
+ * every argument from our buffer. The leading FIXED args (str/size/stream/fmt)
+ * are passed directly. Universal: fixes any i386 binary calling a v* printf.
+ * =================================================================== */
+
+#include <cstdio>
+#include <cstdarg>
+
+/* Not always exposed by <cstdio> depending on feature macros. */
+extern "C" int vasprintf(char **, const char *, va_list);
+extern "C" int __vsnprintf_chk(char *, size_t, int, size_t, const char *, va_list);
+
+namespace {
+   /* x86_64 System V va_list element — layout-compatible with __va_list_tag. */
+   struct sysv_va_list_tag {
+      unsigned int gp_offset;
+      unsigned int fp_offset;
+      void        *overflow_arg_area;
+      void        *reg_save_area;
+   };
+
+   /* Plenty for any sane format string; one 8-byte slot per conversion. */
+   constexpr unsigned VA_SLOTS_MAX = 128;
+
+   /* Walk `format`, converting the i386 varargs at `ap` (a flat array of
+    * 4-byte i386 stack slots — the i386 va_list value) into the caller's
+    * 8-byte-slot overflow buffer, and populate `va` to read from it. The
+    * buffers must outlive the native call. */
+   void build_native_va_list(const char *format, const uint32_t *ap,
+                             sysv_va_list_tag *va,
+                             uint64_t *args64, reg_width_t *argtypes) {
+      unsigned arg_count = 0;
+      const void *a32 = (const void *) ap;
+      void *a64 = (void *) args64;
+      reg_width_t *at = argtypes;
+      char c;
+      while ((c = *format++)) {
+         if (c == '%') {
+            printf_parse_directive(a32, a64, at, format, arg_count);
+         }
+      }
+      /* GP regs (6*8=48 bytes) and XMM regs (8*16, fp window ends at 176) are
+       * both marked exhausted, so every va_arg falls through to the overflow
+       * area we built. reg_save_area is never consulted but must be non-null. */
+      va->gp_offset       = 48;
+      va->fp_offset       = 176;
+      va->overflow_arg_area = args64;
+      va->reg_save_area     = args64;
+   }
+}
+
+extern "C" {
+
+int vsnprintf_vshim(const uint32_t *a) {
+   char        *str  = (char *)(uintptr_t)a[0];
+   size_t       size = (size_t)a[1];
+   const char  *fmt  = (const char *)(uintptr_t)a[2];
+   const uint32_t *ap = (const uint32_t *)(uintptr_t)a[3];
+   alignas(16) uint64_t args64[VA_SLOTS_MAX];
+   reg_width_t argtypes[VA_SLOTS_MAX];
+   va_list va;
+   build_native_va_list(fmt, ap, (sysv_va_list_tag *)(void *)va, args64, argtypes);
+   return vsnprintf(str, size, fmt, va);
+}
+
+int vsprintf_vshim(const uint32_t *a) {
+   char        *str = (char *)(uintptr_t)a[0];
+   const char  *fmt = (const char *)(uintptr_t)a[1];
+   const uint32_t *ap = (const uint32_t *)(uintptr_t)a[2];
+   alignas(16) uint64_t args64[VA_SLOTS_MAX];
+   reg_width_t argtypes[VA_SLOTS_MAX];
+   va_list va;
+   build_native_va_list(fmt, ap, (sysv_va_list_tag *)(void *)va, args64, argtypes);
+   return vsprintf(str, fmt, va);
+}
+
+int vfprintf_vshim(const uint32_t *a) {
+   FILE        *stream = (FILE *)(uintptr_t)a[0];
+   const char  *fmt    = (const char *)(uintptr_t)a[1];
+   const uint32_t *ap   = (const uint32_t *)(uintptr_t)a[2];
+   alignas(16) uint64_t args64[VA_SLOTS_MAX];
+   reg_width_t argtypes[VA_SLOTS_MAX];
+   va_list va;
+   build_native_va_list(fmt, ap, (sysv_va_list_tag *)(void *)va, args64, argtypes);
+   return vfprintf(stream, fmt, va);
+}
+
+int vprintf_vshim(const uint32_t *a) {
+   const char  *fmt = (const char *)(uintptr_t)a[0];
+   const uint32_t *ap = (const uint32_t *)(uintptr_t)a[1];
+   alignas(16) uint64_t args64[VA_SLOTS_MAX];
+   reg_width_t argtypes[VA_SLOTS_MAX];
+   va_list va;
+   build_native_va_list(fmt, ap, (sysv_va_list_tag *)(void *)va, args64, argtypes);
+   return vprintf(fmt, va);
+}
+
+int vasprintf_vshim(const uint32_t *a) {
+   char       **strp = (char **)(uintptr_t)a[0];
+   const char  *fmt  = (const char *)(uintptr_t)a[1];
+   const uint32_t *ap = (const uint32_t *)(uintptr_t)a[2];
+   alignas(16) uint64_t args64[VA_SLOTS_MAX];
+   reg_width_t argtypes[VA_SLOTS_MAX];
+   va_list va;
+   build_native_va_list(fmt, ap, (sysv_va_list_tag *)(void *)va, args64, argtypes);
+   return vasprintf(strp, fmt, va);
+}
+
+/* __vsnprintf_chk(str, size, flag, slen, fmt, ap) */
+int __vsnprintf_chk_vshim(const uint32_t *a) {
+   char        *str  = (char *)(uintptr_t)a[0];
+   size_t       size = (size_t)a[1];
+   int          flag = (int)a[2];
+   size_t       slen = (size_t)a[3];
+   const char  *fmt  = (const char *)(uintptr_t)a[4];
+   const uint32_t *ap = (const uint32_t *)(uintptr_t)a[5];
+   alignas(16) uint64_t args64[VA_SLOTS_MAX];
+   reg_width_t argtypes[VA_SLOTS_MAX];
+   va_list va;
+   build_native_va_list(fmt, ap, (sysv_va_list_tag *)(void *)va, args64, argtypes);
+   return __vsnprintf_chk(str, size, flag, slen, fmt, va);
+}
+
+} /* extern "C" */

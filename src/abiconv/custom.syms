@@ -6,6 +6,13 @@ _snprintf
 _asprintf
 _dprintf
 
+_vsnprintf
+_vsprintf
+_vfprintf
+_vprintf
+_vasprintf
+___vsnprintf_chk
+
 _getloadavg
 _getgroups
 

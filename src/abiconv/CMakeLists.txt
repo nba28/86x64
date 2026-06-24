@@ -130,6 +130,11 @@ endmacro()
 
 create_custom_conv_template(exec.asm execvp)
 
+# v-printf family: the va_list variants. Each instantiates vva-conv-t.asm with
+# its symbol; the C shims live in printf-conv.cc.
+create_custom_conv_template(vva-conv-t.asm
+  vsnprintf vsprintf vfprintf vprintf vasprintf __vsnprintf_chk)
+
 add_library(abiconv SHARED
   abiconv.asm
   $<TARGET_OBJECTS:vararg_conv_printf>
@@ -146,6 +151,12 @@ add_library(abiconv SHARED
   $<TARGET_OBJECTS:custom_conv_sigaction>
   $<TARGET_OBJECTS:custom_conv_libgcc_shim>
   $<TARGET_OBJECTS:custom_conv_execvp>
+  $<TARGET_OBJECTS:custom_conv_vsnprintf>
+  $<TARGET_OBJECTS:custom_conv_vsprintf>
+  $<TARGET_OBJECTS:custom_conv_vfprintf>
+  $<TARGET_OBJECTS:custom_conv_vprintf>
+  $<TARGET_OBJECTS:custom_conv_vasprintf>
+  $<TARGET_OBJECTS:custom_conv___vsnprintf_chk>
   printf-conv.cc
   prefs_shim.c
   file_shim.c
