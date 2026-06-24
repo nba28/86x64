@@ -647,9 +647,24 @@ namespace MachO {
                   auto s = anchor_slots.find(slot);
                   const xed_reg_enum_t dst =
                      xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
-                  if (s != anchor_slots.end() &&
-                      dst >= XED_REG_EAX && dst <= XED_REG_EDI) {
-                     anchors[dst] = s->second;
+                  if (dst >= XED_REG_EAX && dst <= XED_REG_EDI) {
+                     if (s != anchor_slots.end()) {
+                        anchors[dst] = s->second;    /* reload of a spilled anchor */
+                     } else {
+                        /* Loading NON-anchor data (e.g. a function argument
+                         * `mov %esi, 0x8(%ebp)` = `this`) into the register
+                         * overwrites whatever it held — including a STALE anchor
+                         * leaked from a prior function (anchors live until RET,
+                         * and a suppressed RET-clear can leak one across the
+                         * function boundary). Without this, the leaked anchor
+                         * makes a subsequent object-field store `disp(%esi)`
+                         * (esi=this) get misrewritten as a rip-relative GLOBAL
+                         * store into __TEXT -> SIGBUS (Portal 2 CVProfile ctor).
+                         * A genuine spilled anchor is reloaded via the
+                         * anchor_slots branch above, so clearing here only
+                         * affects non-anchor loads. */
+                        anchors.erase(dst);
+                     }
                   }
                }
             }
