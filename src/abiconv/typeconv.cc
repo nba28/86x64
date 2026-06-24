@@ -1026,6 +1026,18 @@ static size_t sizeof_struct(CXType type, arch a) {
       if (!decl.packed) {
          const size_t field_align = alignof_type(field_type, a);
          size = align_up(size, field_align) + field_size;
+      } else {
+         /* packed record (e.g. Carbon `#pragma pack` structs such as
+          * HFSUniStr255 {UInt16 length; UniChar unicode[255];}): no inter-field
+          * padding. This branch previously did NOTHING, so EVERY packed struct
+          * sized as 0. A by-pointer packed-struct arg (FSGetDataForkName's
+          * HFSUniStr255* out-param) then reserved 0 scratch bytes in the shim
+          * frame (`sub rsp, 0`), and the native callee's struct write (512 zero
+          * bytes for an empty data-fork name) overflowed UP the stack, zeroing
+          * the shim's saved return address -> the i386-style epilogue did
+          * `jmp r11` with r11=0 -> rip=0. Accumulate field sizes (matches the
+          * conversion code's own field-by-field, padding-free scratch layout). */
+         size += field_size;
       }
    }
 
@@ -1033,7 +1045,7 @@ static size_t sizeof_struct(CXType type, arch a) {
       const size_t align = alignof_type(type, a);
       size = align_up(size, align);
    }
-   
+
    return size;
 }
 

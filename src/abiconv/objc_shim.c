@@ -1406,12 +1406,31 @@ static int marshal_arg_fwd(struct objc_call_plan *plan, struct mcur *c,
  * registry knows the selector, the legacy i386 encoding wins (it
  * disambiguates CGFloat vs double and NSInteger vs long long). Returns the
  * method-arg count (incl. self+_cmd). */
+/* Explicit-argument count of a selector = number of ':' in its name (keyword
+ * selectors); a no-colon selector takes 0 explicit args. Used when the runtime
+ * has NO Method for the selector (message-forwarding proxies, dynamically
+ * resolved methods) so the bridge still knows how many i386 args to marshal. */
+static unsigned sel_arg_count(SEL sel) {
+   const char *s = sel ? sel_getName(sel) : NULL;
+   unsigned n = 0;
+   for (; s && *s; ++s) if (*s == ':') ++n;
+   return n;
+}
+
 static unsigned fill_method_args(struct objc_call_plan *plan,
                                  const uint32_t *args32,
                                  unsigned *ai,
                                  Method m, SEL sel,
                                  struct mcur *cur) {
-   unsigned nargs = m ? method_getNumberOfArguments(m) : 2;
+   /* No Method (m==NULL): the receiver forwards this selector (RKInvoker /
+    * NSProxy / NSInvocation-style) or it was resolved dynamically. Without a
+    * type encoding we previously marshalled ZERO explicit args, so every
+    * forwarded message silently lost its arguments (e.g. RKInvoker forwarding
+    * -[NSNotificationCenter postNotification:] delivered a NIL notification ->
+    * NSInvalidArgumentException). Derive the count from the selector so the args
+    * survive; each is marshalled as an object below (forwarded sends are object
+    * messages — see the !enc path). Universal: any forwarding proxy in any app. */
+   unsigned nargs = m ? method_getNumberOfArguments(m) : (2 + sel_arg_count(sel));
    const int trace = getenv("OBJC_BRIDGE_TRACE") != NULL;
    const int conv = method_is_legacy(m) ? CONV_I386 : CONV_NATIVE;
    /* legacy-registry override only matters for native methods */
@@ -1438,8 +1457,16 @@ static unsigned fill_method_args(struct objc_call_plan *plan,
          const char *le = enc_nth_arg(lt, i - 2);
          if (le) { enc = le; aconv = CONV_I386; }
       }
-      if (!enc || !*enc) {                    /* no type info: raw GP slot */
-         mcur_put_gp(plan, cur, (uint64_t)args32[(*ai)++]);
+      if (!enc || !*enc) {
+         if (!m) {
+            /* Forwarded/dynamic selector with no type info: marshal as an
+             * object so an i386 proxy handle resolves to the real object the
+             * forwarding target expects (a non-object int/BOOL resolves to
+             * itself). Without this the arg is dropped -> nil at the target. */
+            marshal_arg_fwd(plan, cur, "@", CONV_I386, args32, ai);
+         } else {                              /* no type info: raw GP slot */
+            mcur_put_gp(plan, cur, (uint64_t)args32[(*ai)++]);
+         }
          free(rt_alloc);
          continue;
       }
@@ -2602,6 +2629,102 @@ static struct fwd_crumb g_fwd_ring[FWD_RING];
 static uint32_t         g_fwd_pos;
 static uint64_t         g_fwd_min_sp = ~0ULL;
 
+/* ── NSFastEnumeration bridging ──────────────────────────────────────────────
+ * `-[X countByEnumeratingWithState:objects:count:]` (the `for (x in coll)`
+ * primitive) fills a caller-provided NSFastEnumerationState THROUGH A POINTER.
+ * The i386 layout {ulong state; id*itemsPtr; ulong*mutationsPtr; ulong extra[5]}
+ * has 4-byte fields; native Foundation writes the x86_64 layout (8-byte fields)
+ * into it, so the i386 caller reads itemsPtr/mutationsPtr at the wrong offsets
+ * AND truncates the 64-bit pointers -> wild deref (iPhoto library load:
+ * recursivelyInitChildrenOfFolder: -> arrangedChildren -> countByEnumerating).
+ * objc_msgSend is untyped, so the generic bridge can't catch this by type.
+ * FIX: drive the real enumeration through a per-(thread,state-ptr) shadow x86_64
+ * state, then publish results the i386 caller CAN read — wrap each returned
+ * object into a 4-byte proxy handle inside the caller's `objects` buffer, point
+ * i386 state.itemsPtr at that buffer, and give state.mutationsPtr a STABLE
+ * low-4GB sentinel parked in the caller's own state.extra[] (a __thread shadow
+ * address would be >4GB and re-truncate). Only for NATIVE collections — a legacy
+ * reverse-registered collection uses i386 layout end-to-end, so the normal
+ * passthrough already works for it. Universal: any i386 binary using fast enum. */
+struct ns_fast_enum_state_x64 {     /* the real x86_64 NSFastEnumerationState */
+   unsigned long  state;
+   id            *itemsPtr;
+   unsigned long *mutationsPtr;
+   unsigned long  extra[5];
+};
+struct fe_shadow {
+   uint32_t state32;        /* i386 state ptr this shadow serves (key)        */
+   uint32_t inuse;
+   struct ns_fast_enum_state_x64 ns;   /* the real x86_64 state native fills   */
+   id       buf[64];        /* native object scratch (the objects: argument)   */
+};
+#define FE_SHADOW_MAX 16
+static __thread struct fe_shadow g_fe_shadow[FE_SHADOW_MAX];
+
+uint64_t x64_ret_identity(uint64_t v);
+uint64_t x64_ret_identity(uint64_t v) { return v; }  /* plan.target: yield the precomputed count */
+
+static struct fe_shadow *fe_shadow_for(uint32_t state32) {
+   struct fe_shadow *freeslot = NULL;
+   for (int i = 0; i < FE_SHADOW_MAX; ++i) {
+      if (g_fe_shadow[i].inuse && g_fe_shadow[i].state32 == state32)
+         return &g_fe_shadow[i];
+      if (!g_fe_shadow[i].inuse && !freeslot) freeslot = &g_fe_shadow[i];
+   }
+   if (freeslot) { memset(freeslot, 0, sizeof(*freeslot));
+                   freeslot->state32 = state32; freeslot->inuse = 1; }
+   return freeslot;         /* NULL if >16 nested enumerations -> caller falls through */
+}
+
+/* Returns 1 if handled (plan set to return the count via x64_ret_identity); 0 to
+ * fall through to the normal dispatch. */
+static int bp_fast_enum(struct objc_call_plan *plan, const uint32_t *args32,
+                        id real_self, SEL sel) {
+   static SEL fe_sel;
+   if (!fe_sel) fe_sel = sel_registerName("countByEnumeratingWithState:objects:count:");
+   if (sel != fe_sel || !real_self) return 0;
+   /* legacy reverse-registered collection: i386 layout end-to-end, normal path. */
+   if (method_is_legacy(class_getInstanceMethod(object_getClass(real_self), sel)))
+      return 0;
+
+   uint32_t state32 = args32[2];        /* NSFastEnumerationState* (low-4GB)   */
+   uint32_t buf32   = args32[3];        /* id objects[] buffer    (low-4GB)    */
+   uint32_t cap     = args32[4];        /* count: capacity                     */
+   if (!state32 || !buf32 || !cap) return 0;
+
+   struct fe_shadow *sh = fe_shadow_for(state32);
+   if (!sh) return 0;
+   if (cap > 64) cap = 64;              /* clamp to the native scratch buffer  */
+
+   typedef unsigned long (*fe_fn)(id, SEL, struct ns_fast_enum_state_x64 *,
+                                  id *, unsigned long);
+   unsigned long n = ((fe_fn)objc_msgSend)(real_self, sel, &sh->ns, sh->buf, cap);
+
+   if (n == 0) {
+      sh->inuse = 0;                    /* enumeration finished -> recycle slot */
+   } else {
+      uint32_t *dst   = (uint32_t *)(uintptr_t)buf32;        /* i386 objects[] */
+      uint32_t *st    = (uint32_t *)(uintptr_t)state32;      /* i386 state     */
+      id       *items = sh->ns.itemsPtr;
+      for (unsigned long i = 0; i < n; ++i)
+         dst[i] = items ? x64_objc_wrap((uint64_t)(uintptr_t)items[i]) : 0;
+      /* Park the mutation sentinel in the caller's own state.extra[0] (low-4GB)
+       * and point mutationsPtr at it — stable across batches so the compiler's
+       * `*mutationsPtr != saved` guard never false-trips. */
+      st[3] = sh->ns.mutationsPtr ? (uint32_t)*sh->ns.mutationsPtr : 0; /* extra[0] */
+      st[0] = (uint32_t)sh->ns.state;                  /* state.state          */
+      st[1] = buf32;                                   /* state.itemsPtr       */
+      st[2] = state32 + 12;                            /* state.mutationsPtr -> &extra[0] */
+   }
+
+   plan->reg[0] = (uint64_t)n;
+   plan->reg[1] = plan->reg[2] = plan->reg[3] = plan->reg[4] = plan->reg[5] = 0;
+   plan->nreg = 1;
+   plan->ret_is_obj = 0;                /* scalar: count travels in eax        */
+   plan->target = (uint64_t)(uintptr_t)x64_ret_identity;
+   return 1;
+}
+
 void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
    appkit_compat_install();
@@ -2640,6 +2763,11 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
       }
       trace_args("send", cls_name, sel, args32);
    }
+
+   /* NSFastEnumeration: convert the by-pointer state struct (x86_64 layout from
+    * native Foundation) into the i386 layout the caller reads. */
+   if (bp_fast_enum(plan, args32, real_self, sel))
+      return;
 
    /* Legacy class-method dispatch fallback. Two distinct cases need it, both
     * resolved by jumping straight into the translated i386 IMP:
@@ -3793,7 +3921,17 @@ uint32_t shim_DeclineVolumeNotification(const uint32_t *a) { (void)a; return 0; 
  * mints a proxy handle exactly as before, so only our own legacy instances
  * change behavior. Tagged pointers have no association -> proxy path, unchanged. */
 uint32_t x64_objc_wrap_ret(uint64_t real) {
-   if (real >= 0x100000000ULL && g_ctrl) {
+   /* Only walk the class chain if `real` is genuinely a readable object. A
+    * method whose return-type ENCODING is misclassified as object (ret_is_obj=1
+    * for a plain struct-pointer matched by enc_is_objptr_struct/enc_is_cfptr, or
+    * a stale/garbage 64-bit value) would otherwise make object_getClass /
+    * class_getSuperclass deref a non-isa -> SIGSEGV (iPhoto album load:
+    * representedAlbum/versionsResult/moveToSQL path crashed here). Guard every
+    * deref; on a non-object, fall straight through to x64_objc_wrap (a proxy
+    * handle, no dereference) — the i386 caller reads only a 4-byte value either
+    * way. Universal hardening: wrap_ret must never fault on a non-object. */
+   if (real >= 0x100000000ULL && g_ctrl &&
+       mem_readable((uintptr_t)real, sizeof(void *))) {
       uint32_t s = (uint32_t)(uintptr_t)objc_getAssociatedObject(
                       (id)(uintptr_t)real, shadow_assoc_key());
       if (s) { return s; }
@@ -3808,7 +3946,8 @@ uint32_t x64_objc_wrap_ret(uint64_t real) {
        * are never in rcls, so they keep the proxy-handle path; tagged pointers
        * resolve to a tagged class that isn't ours -> proxy path too. */
       Class cls = object_getClass((id)(uintptr_t)real);
-      for (Class c = cls; c; c = class_getSuperclass(c)) {
+      for (Class c = cls; c && mem_readable((uintptr_t)c, sizeof(void *) * 2);
+           c = class_getSuperclass(c)) {
          if (rcls_lookup(c)) {
             uint32_t sh = get_or_create_shadow((id)(uintptr_t)real, cls);
             if (sh) { return sh; }   /* 0 == shadow arena exhausted: fall back */
@@ -4071,6 +4210,49 @@ void x64_fwd_dump_ring(void) {
                        ? sel_getName((SEL)(uintptr_t)c->sel) : "?";
       fprintf(stderr, "  [%2d] self32=0x%-8x sel=%-28s caller_ra=0x%-8x sp=0x%llx t=%x\n",
               i, c->self32, sn, c->caller_ra, (unsigned long long)c->sp, c->tid);
+   }
+   fflush(stderr);
+}
+
+/* ── native-callee breadcrumb ───────────────────────────────────────────────
+ * Records which abigen-generated shim a thread last entered (the shim's own
+ * address, which dladdr resolves to the bridged native fn's name) plus the i386
+ * caller's return address. Lets a crash handler (geoshim) name the native
+ * function a faulting thread was executing when the low-4GB stack is unwalkable
+ * — the durable fix for iPhoto's "native code through 0 on a worker thread"
+ * (s42) and a native-call trace for Portal 2's silent launcher early-exit.
+ *
+ * Per-copy static ring, exactly like g_fwd_ring; geoshim already enumerates
+ * every libabiconv copy and calls each copy's x64_*_dump_ring. The writer is
+ * called from a shim's prologue ONLY when abiconv.asm was generated with
+ * ABICONV_GEN_NATIVE_CRUMB (default build never calls it → ring stays empty and
+ * x64_native_dump_ring is a no-op), so it is zero-cost unless built to diagnose. */
+struct native_crumb { uint64_t shim; uint32_t caller_ra; uint32_t tid; uint32_t valid; };
+#define NATIVE_RING 256
+static struct native_crumb g_native_ring[NATIVE_RING];
+static uint32_t            g_native_pos;
+
+void abiconv_native_crumb(uint64_t shim, uint64_t caller_ra);
+void abiconv_native_crumb(uint64_t shim, uint64_t caller_ra) {
+   uint32_t ri = __atomic_fetch_add(&g_native_pos, 1, __ATOMIC_SEQ_CST) & (NATIVE_RING - 1);
+   struct native_crumb *c = &g_native_ring[ri];
+   c->shim = shim; c->caller_ra = (uint32_t)caller_ra;
+   c->tid = pthread_mach_thread_np(pthread_self()); c->valid = 1;
+}
+
+void x64_native_dump_ring(void);
+void x64_native_dump_ring(void) {
+   uint32_t pos = __atomic_load_n(&g_native_pos, __ATOMIC_SEQ_CST);
+   if (!pos && !g_native_ring[0].valid) return;   /* built without the crumb */
+   fprintf(stderr, "[native-ring] last native shims entered (newest first):\n");
+   for (int i = 0; i < 24; ++i) {
+      uint32_t idx = (pos - 1 - i) & (NATIVE_RING - 1);
+      struct native_crumb *c = &g_native_ring[idx];
+      if (!c->valid) continue;
+      Dl_info info; const char *nm = "?";
+      if (dladdr((void *)(uintptr_t)c->shim, &info) && info.dli_sname) nm = info.dli_sname;
+      fprintf(stderr, "  [%2d] shim=%-30s (0x%llx) caller_ra=0x%-8x t=%x\n",
+              i, nm, (unsigned long long)c->shim, c->caller_ra, c->tid);
    }
    fflush(stderr);
 }

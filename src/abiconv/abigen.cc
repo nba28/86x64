@@ -5,6 +5,7 @@
 #include <fstream>
 #include <sstream>
 #include <getopt.h>
+#include <cstdlib>
 #include <clang-c/Index.h>
 
 #include "emit.hh"
@@ -14,6 +15,19 @@
 #include "typeconv.hh"
 
 bool force_all = false;
+
+/* Generation-time gate (mirrors the translator's MACHO_NULL_TRAP): when
+ * ABICONV_GEN_NATIVE_CRUMB is set in abigen's env, every generated shim records
+ * a "last native callee entered" breadcrumb (shim addr + i386 caller RA) so a
+ * crash handler can name the native function a faulting thread was inside — the
+ * durable answer to "native code through 0, low-4GB stack unwalkable" (iPhoto)
+ * and a native-call trace for Portal 2's silent launcher exit. Default build is
+ * byte-identical (emits nothing). Toggling requires regenerating abiconv.asm. */
+static bool gen_native_crumb() {
+   static int v = -1;
+   if (v < 0) v = std::getenv("ABICONV_GEN_NATIVE_CRUMB") ? 1 : 0;
+   return v != 0;
+}
 
 template <typename RegIt>
 struct param_info {
@@ -224,6 +238,16 @@ struct ABIConversion {
 
       /* align stack */
       emit_inst(os, "and", "rsp", "~0xf");
+
+      /* native-callee breadcrumb (gen-gated, diagnostic). Here rsp is
+       * 16-aligned, rbp valid ([rbp+8]=i386 caller RA), rdi/rsi already saved,
+       * and arg regs not yet marshalled (args load from [rbp+12]) — so rdi/rsi
+       * and the call clobber are all safe, and rsp is restored by the call. */
+      if (gen_native_crumb()) {
+         emit_inst(os, "lea", "rdi", "[rel " + override_prefix + sym + "]");
+         emit_inst(os, "mov", "rsi", "qword [rbp+8]");
+         emit_inst(os, "call", "_abiconv_native_crumb");
+      }
 
       /* make space on stack */
       MemoryLocation stack_args(rsp, 0);
@@ -479,6 +503,9 @@ struct ABIGenerator {
       os << "\textern _x64_objc_unwrap" << std::endl;
       os << "\textern _x64_objc_sel_unwrap" << std::endl;
       os << "\textern _x64_objc_sel_wrap" << std::endl;
+      /* native-callee breadcrumb writer (objc_shim.c); gated, diagnostic. */
+      if (gen_native_crumb())
+         os << "\textern _abiconv_native_crumb" << std::endl;
    }
 
    void handle_file(const std::string& path) {
