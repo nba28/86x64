@@ -800,8 +800,15 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
          emit_inst(os, "lea", "r11", data.op());
          data += sizeof_type(pointee, to_arch);
 
-         /* load reg_dst to dst */
-         convert_int(os, CXType_Pointer, reg_dst, dst);
+         /* Hand the bounce buffer to the native callee at FULL 64-bit width.
+          * r11 holds a genuine native stack address (lea r11,[rsp+..]) which on
+          * macOS lives above 4GB; convert_int(Pointer,..) would marshal it with
+          * the i386 pointer width (`mov edi,r11d`) and TRUNCATE the high half,
+          * so the callee writes its out-param to a low garbage address while our
+          * buffer stays uninitialised. (Portal 2 CThreadLocalBase:
+          * pthread_key_create then reads the key back as 0 -> garbage TLS index.)
+          * dst is always the x86_64 side here (allocate => i386->x86_64). */
+         emit_inst(os, "mov", dst.op(reg_width::Q), reg_dst.reg.reg_q);
 
          /* load src pointer into reg_src */
          RegisterLocation reg_src(r12);
