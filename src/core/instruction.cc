@@ -1674,6 +1674,30 @@ namespace MachO {
                   return trap;
                }
 
+            case XED_IFORM_JMP_GPRv: // jmp r32 — tail call / computed jump
+               {
+                  /* The unguarded sibling of `call reg` / `jmp [mem]`: a
+                   * register-indirect `jmp` whose target register is 0 lands
+                   * at rip=0 with NO other signal (no pushed return addr, no
+                   * faulting load) — indistinguishable from a wild jump. This
+                   * is the one indirect-transfer form MACHO_NULL_TRAP did not
+                   * cover, so a translated `jmp reg`-through-0 (an ObjC/C++
+                   * tail-call dispatch through a null fn-ptr) presents only as
+                   * the bare rip=0 the iPhoto worker-thread crash shows.
+                   * ENTIRELY env-gated: the default build `break`s to the
+                   * generic copy (byte-identical `jmp r64`); only with
+                   * MACHO_NULL_TRAP=1 do we prepend `test reg,reg; jnz +2; ud2`
+                   * so a jump-through-0 SIGILLs AT the dispatch site. */
+                  if (effective_width == 32 && std::getenv("MACHO_NULL_TRAP")) {
+                     const xed_reg_enum_t tgt = opcode::r32_to_r64(reg0);
+                     auto trap = null_trap(tgt);
+                     trap.push_back(
+                        new Instruction<Bits::M64>(opcode::jmp_r64(tgt)));
+                     return trap;
+                  }
+                  break;
+               }
+
             case XED_IFORM_CALL_NEAR_RELBRz:
             case XED_IFORM_CALL_NEAR_RELBRd:
                {
