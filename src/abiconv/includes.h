@@ -28,6 +28,16 @@
  * declares them extern by default (OSATOMIC_USE_INLINED is unset), so abigen
  * emits a proper marshalling shim. */
 #include <libkern/OSAtomic.h>
+/* libm single/double-precision math (floorf/ceilf/roundf/sqrtf/sinf/...,
+ * floor/ceil/round/pow/...) lives in libsystem_m.dylib (added to
+ * ABICONV_SYM_SOURCES). Legacy i386 code calls these via cdecl (float arg on
+ * the stack, result in st0); unshimmed the call lands in the native x86_64 fn
+ * (arg in xmm0, result in xmm0, 8-byte `ret`) — wrong arg, wrong result, and
+ * the 8-byte ret OVER-POPS the i386 4-byte return push, fusing it with an
+ * adjacent stack value into a bogus PC (iPhoto -[MWLoadingView
+ * _updateProgressOrigin] -> floorf). abigen's float/double-return conversion
+ * (xmm0 -> st0) makes the generated shim correct. */
+#include <math.h>
 
 /* Core C frameworks legacy i386 apps call. Their exports are added to the
  * abigen "consider set" via ABICONV_SYM_SOURCES in CMakeLists.txt; abigen
@@ -62,6 +72,20 @@
  * plain C functions it can marshal; ObjC methods/classes are ignored. */
 #import <Foundation/Foundation.h>
 #import <AppKit/AppKit.h>
+
+/* OpenGL C API — in ABICONV_SYM_SOURCES (OpenGL.framework). CGL context
+ * management (<OpenGL/OpenGL.h>: CGLChoosePixelFormat/CreateContext/...), the
+ * classic GL 1.x rendering API (<OpenGL/gl.h>: glBegin/glTexImage2D/...) and GLU
+ * (<OpenGL/glu.h>). Legacy i386 apps call these via cdecl (scalar/pointer args
+ * on the stack, GLfloat coords too); the native x86_64 entries read args from
+ * GP/SSE registers, so unshimmed every call mismarshals — iPhoto's photo-grid
+ * GL setup crashes in CGLChoosePixelFormat (garbage attribs ptr -> near-null
+ * deref). Float coord args (glVertex3f, glColor4f) marshal through the REAL
+ * domain; pointer/array data (glTexImage2D pixels, glGenTextures ids) pass as
+ * widened pointers into the i386 caller's low-4GB buffer. */
+#include <OpenGL/gl.h>
+#include <OpenGL/glu.h>
+#include <OpenGL/OpenGL.h>
 
 /* in_addr / inet_aton now come from the system headers pulled in by the
  * frameworks above (<netinet/in.h>, <arpa/inet.h>); a manual redefinition

@@ -3,6 +3,8 @@
 
 static void shim_note(const char *s) { fprintf(stderr, "[shimauto:%s] %s\n", "CoreServices", s); }
 
+long BlockMoveData(long a, long b, long c_, long d, long e, long f) { shim_note("BlockMoveData called (auto-stub)"); return 0; }
+
 long FSMakeFSSpec(long a, long b, long c_, long d, long e, long f) { shim_note("FSMakeFSSpec called (auto-stub)"); return 0; }
 
 long FSMatchAliasNoUI(long a, long b, long c_, long d, long e, long f) { shim_note("FSMatchAliasNoUI called (auto-stub)"); return 0; }

@@ -349,6 +349,28 @@ struct ABIConversion {
       /* call */
       emit_call(os);
 
+      /* Scalar float/double return: the native x86_64 callee returns the value
+       * in xmm0, but the i386 caller (cdecl) expects it on the x87 stack (st0).
+       * Bounce xmm0 -> st0 through the red zone ([rsp-8]; no further call on a
+       * float/double-return path, and captured here before any out-param
+       * copy-back could clobber xmm0). long double already returns in st0 on
+       * BOTH ABIs (no conversion). Universal: every float/double-returning C
+       * function (libm floorf/ceilf/sqrtf/..., CGFloat getters, CFAbsoluteTime,
+       * ...) needs this; without it the i386 caller reads garbage from st0
+       * (and an UNSHIMMED libm fn's native 8-byte ret over-pops the i386 frame
+       * -> fused PC). */
+      {
+         const CXType rret =
+            clang_getCanonicalType(clang_getResultType(function_type));
+         if (rret.kind == CXType_Float) {
+            emit_inst(os, "movss", "[rsp - 8]", "xmm0");
+            emit_inst(os, "fld", "dword [rsp - 8]");
+         } else if (rret.kind == CXType_Double) {
+            emit_inst(os, "movsd", "[rsp - 8]", "xmm0");
+            emit_inst(os, "fld", "qword [rsp - 8]");
+         }
+      }
+
       /* convert from x86_64 to i386 */
       os << from_ss.str();
 

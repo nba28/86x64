@@ -23,6 +23,10 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_BlockMoveData": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_CC_MD5": {
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"

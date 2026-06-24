@@ -23,6 +23,13 @@ set(ABICONV_SYM_SOURCES
   /usr/lib/system/libsystem_info.dylib
   /usr/lib/system/libsystem_malloc.dylib
   /usr/lib/system/libsystem_pthread.dylib
+  # libsystem_m exports the libm math family (floorf/ceilf/roundf/sqrtf/sinf/...,
+  # floor/ceil/round/pow/...). Legacy i386 code calls these via cdecl (float arg
+  # on the stack, result in st0); unshimmed they bind to NATIVE libSystem (xmm0
+  # arg/result, 8-byte `ret`) -> the 8-byte ret over-pops the i386 4-byte return
+  # push, fusing it with an adjacent stack value into a bogus PC (iPhoto
+  # -[MWLoadingView _updateProgressOrigin] -> floorf). See includes.h (<math.h>).
+  /usr/lib/system/libsystem_m.dylib
   # libsystem_platform exports the OSAtomic* / OSSpinLock primitives. Legacy
   # iLife code calls OSAtomicAdd32/Barrier directly (i386 cdecl, stack args);
   # unshimmed the call reaches native OSAtomicAdd32 which reads args from
@@ -52,6 +59,17 @@ set(ABICONV_SYM_SOURCES
   /System/Library/Frameworks/SystemConfiguration.framework/SystemConfiguration
   /System/Library/Frameworks/Foundation.framework/Foundation
   /System/Library/Frameworks/AppKit.framework/AppKit
+  # OpenGL: the CGL context API (CGLChoosePixelFormat / CGLCreateContext /
+  # CGLSetParameter / CGLFlushDrawable ...) PLUS the classic GL 1.x rendering API
+  # (glBegin / glBindTexture / glTexImage2D ...) and GLU (gluPerspective ...,
+  # bundled in OpenGL.framework). Legacy i386 apps drive OpenGL directly — the
+  # photo-grid / slideshow GL rendering in iPhoto, and games / screensavers /
+  # media apps generally. Unshimmed, an i386 cdecl `CGLChoosePixelFormat(attribs,
+  # &pix, &n)` (args on the stack) reaches the native x86_64 entry that reads
+  # args from registers -> attribs = garbage register -> near-null deref inside
+  # OpenGL (the iPhoto CGLChoosePixelFormat crash). Generic: benefits every
+  # OpenGL-using target, not just iPhoto. See includes.h (<OpenGL/*>).
+  /System/Library/Frameworks/OpenGL.framework/OpenGL
   )
 
 add_custom_command(OUTPUT abiconv.syms
@@ -195,6 +213,7 @@ target_link_libraries(abiconv System objc
   "-framework CoreServices"
   "-framework ApplicationServices"
   "-framework IOKit"
+  "-framework OpenGL"
   )
 add_dependencies(abiconv abiconv_asm)
 
