@@ -226,3 +226,12 @@ __ZSt28_Rb_tree_rebalance_for_erasePSt18_Rb_tree_node_baseRS_
 
 _OSAtomicAdd32
 _OSAtomicAdd32Barrier
+
+___udivdi3
+___umoddi3
+___divdi3
+___moddi3
+___fixdfdi
+___fixsfdi
+___fixunsdfdi
+___fixunssfdi

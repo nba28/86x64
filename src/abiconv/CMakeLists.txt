@@ -119,6 +119,7 @@ endmacro()
 
 create_custom_conv(getopt.asm)
 create_custom_conv(sigaction.asm)
+create_custom_conv(libgcc_shim.asm)
 
 macro(create_custom_conv_template SOURCE)
   foreach(SYMBOL ${ARGN})
@@ -143,6 +144,7 @@ add_library(abiconv SHARED
   $<TARGET_OBJECTS:vararg_conv_fscanf>
   $<TARGET_OBJECTS:custom_conv_getopt>
   $<TARGET_OBJECTS:custom_conv_sigaction>
+  $<TARGET_OBJECTS:custom_conv_libgcc_shim>
   $<TARGET_OBJECTS:custom_conv_execvp>
   printf-conv.cc
   prefs_shim.c
