@@ -4856,6 +4856,23 @@ static void reverse_add_methods(Class target, uint32_t methodLists) {
          const char *types = legacy_cstr_ok(meth[k].types)
             ? (const char *)(uintptr_t)meth[k].types : "v8@0:4";
          SEL sel = sel_registerName(sname);
+         /* ABICONV_REV_REG_TRACE: log every reverse-registration, and loudly flag
+          * any entry with a 0/implausible legacy imp (should be caught by ptr_ok
+          * above, but trace defensively). */
+         if (getenv("ABICONV_REV_REG_TRACE")) {
+            const char *cn = class_getName(target);
+            if (meth[k].imp == 0) {
+               fprintf(stderr, "[REV_REG] imp=0 ZERO-IMP class=%s sel=%s types=%s\n",
+                       cn ? cn : "?", sname, types);
+            } else if (meth[k].imp < 0x1000) {
+               fprintf(stderr, "[REV_REG] imp=0x%x JUNK-IMP class=%s sel=%s types=%s\n",
+                       meth[k].imp, cn ? cn : "?", sname, types);
+            } else {
+               fprintf(stderr, "[REV_REG] imp=0x%x class=%s sel=%s types=%s\n",
+                       meth[k].imp, cn ? cn : "?", sname, types);
+            }
+            fflush(stderr);
+         }
          /* A struct-by-value return (>16B, e.g. -adjustScroll: -> NSRect) is
           * dispatched by native callers through objc_msgSend_stret, whose ABI
           * puts a hidden return-buffer pointer in rdi. Register the stret-aware
