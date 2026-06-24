@@ -425,6 +425,40 @@ namespace MachO {
        * fast-path JE around it. */
       std::set<std::size_t> pending_forward_targets;
 
+      /* Anchor-map snapshots captured at forward-branch SOURCES, keyed by the
+       * branch TARGET vmaddr. A caller-saved PIC anchor (e.g. ECX from an inline
+       * `call $+0; pop %ecx`) can be CLOBBERED on the linear fall-through path by
+       * a CALL (step 6 erases EAX/ECX/EDX) or a register write, yet a slow-path
+       * block reached by an earlier forward branch (taken BEFORE that clobber)
+       * still holds the anchor at runtime. The linear walk would then carry the
+       * clobbered state into that block and fail to rewrite its anchored
+       * `disp(%reg)` ref. Observed: Portal 2 CUtlMemory<int,int>::Grow — the
+       * fresh-alloc `je` slow path's `movl 0x22f1e(%ecx),%eax` was left
+       * un-rewritten after the realloc fast path's `call *0x4(%edi)` erased ECX,
+       * so at runtime it read [stale_i386_disp] → garbage ptr → SIGSEGV. On
+       * reaching a target we restore/JOIN this snapshot so the anchor is
+       * recognized on the branch path too. The JOIN is an INTERSECTION (an entry
+       * survives only if every recorded predecessor agrees on the same anchor
+       * vmaddr), so it can never INTRODUCE a spurious anchor — only recover one
+       * the linear walk dropped. */
+      std::map<std::size_t, std::unordered_map<xed_reg_enum_t, std::size_t>>
+         branch_anchor_snap;
+
+      /* Intersect `dst` with `src` in place: keep only entries present in both
+       * and mapping to the same anchor vmaddr. */
+      auto anchor_intersect =
+         [](std::unordered_map<xed_reg_enum_t, std::size_t>& dst,
+            const std::unordered_map<xed_reg_enum_t, std::size_t>& src) {
+         for (auto it = dst.begin(); it != dst.end(); ) {
+            auto s = src.find(it->first);
+            if (s == src.end() || s->second != it->second) {
+               it = dst.erase(it);
+            } else {
+               ++it;
+            }
+         }
+      };
+
       /* (0) Pre-scan for GCC-style PIC thunks. `___i686.get_pc_thunk.<r>` is the
        *     two-instruction leaf `mov %reg,(%esp); ret` — it copies the return
        *     address (the caller's PC) into %reg. A `call` to such a thunk is the
@@ -497,6 +531,37 @@ namespace MachO {
 
          const xed_decoded_inst_t& xedd = inst->xedd;
          const xed_iform_enum_t iform = xed_decoded_inst_get_iform_enum(&xedd);
+
+         /* (0b) Restore/JOIN any anchor snapshot recorded by a forward branch
+          *      that targets this instruction (see branch_anchor_snap). If the
+          *      previous instruction was an unconditional transfer (RET or
+          *      unconditional JMP) there is NO fall-through predecessor, so the
+          *      linear-carried state is dead code — adopt the snapshot (the JOIN
+          *      of all branch predecessors) outright. Otherwise JOIN the snapshot
+          *      with the carried fall-through state by intersection. This is what
+          *      lets a caller-saved anchor survive into a slow-path block whose
+          *      fast-path sibling clobbered it (Portal 2 Grow). For the common
+          *      case (a target whose only predecessor is the immediately
+          *      preceding instruction) the snapshot equals the carried state, so
+          *      this is a no-op. */
+         {
+            auto snap_it = branch_anchor_snap.find(inst->loc.vmaddr);
+            if (snap_it != branch_anchor_snap.end()) {
+               bool no_fallthrough = false;
+               if (prev_inst != nullptr) {
+                  const xed_category_enum_t pcat =
+                     xed_decoded_inst_get_category(&prev_inst->xedd);
+                  no_fallthrough = (pcat == XED_CATEGORY_RET ||
+                                    pcat == XED_CATEGORY_UNCOND_BR);
+               }
+               if (no_fallthrough) {
+                  anchors = snap_it->second;
+               } else {
+                  anchor_intersect(anchors, snap_it->second);
+               }
+               branch_anchor_snap.erase(snap_it);
+            }
+         }
 
          /* (1) Detect the anchor: pop %reg immediately after `call $+0`.
           *     The call sets a candidate; the pop completes the pattern. */
@@ -736,6 +801,17 @@ namespace MachO {
                if (tgt > inst->loc.vmaddr && tgt < sect_end &&
                    tgt - inst->loc.vmaddr <= MAX_FUNC_SPAN) {
                   pending_forward_targets.insert(tgt);
+                  /* Snapshot the live anchor state at this branch SOURCE for the
+                   * target's JOIN (see branch_anchor_snap). `anchors` here is the
+                   * pre-branch state (a COND/UNCOND branch neither pops an anchor
+                   * nor clobbers a reg). If another branch already targets `tgt`,
+                   * intersect so only anchors agreed on by ALL sources survive. */
+                  auto sit = branch_anchor_snap.find(tgt);
+                  if (sit == branch_anchor_snap.end()) {
+                     branch_anchor_snap[tgt] = anchors;
+                  } else {
+                     anchor_intersect(sit->second, anchors);
+                  }
                }
             }
          }
