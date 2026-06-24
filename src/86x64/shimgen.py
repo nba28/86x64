@@ -10,20 +10,25 @@ provides on the RUNNING system:
   * on-disk deps are probed via `nm -gU` static export parsing: never dlopen
     a bundled binary (a broken one aborts the prober).
 
-Missing symbols are looked up in the shimdb (curated implementations); any
-unknown symbol gets an auto-stub (ObjC class -> empty NSObject/NSView
-subclass; function -> log-and-return-0; data -> zeroed pointer slot) and is
-recorded in shimdb/observed.json for later curation.
+The real implementations of removed symbols are written ONCE, by hand, as
+ordinary compilable source under shimdb/impl/ (e.g. memory.c -> BlockMoveData,
+appkit.m -> NSFlippableView). shimgen compiles that pool, then for each app
+links only the objects that provide a symbol the app actually binds and
+-dead_strips the rest, so each shim carries solely the required impls. A
+removed symbol with no curated impl YET gets a LOUD last-resort stub (function
+-> log-once + optional SHIMGEN_STUB_ABORT trap, never a silent return-0 that
+corrupts; class -> empty NSObject subclass; data -> zeroed slot) and is
+recorded in shimdb/observed.json as the curation queue.
 
-One shim dylib is generated per deficient framework: <FW>ShimAuto.dylib,
-which defines the missing symbols and RE-EXPORTS the real framework (or the
-existing handwritten <FW>Shim.dylib, which itself re-exports the framework),
-so a single dependency swap covers both missing and present symbols. The
-dependent binary's load command is then rewritten to @rpath/<FW>ShimAuto.dylib
-and both files are flat-signed.
+One shim dylib is generated per deficient framework: <FW>ShimAuto.dylib, which
+defines the app's missing symbols and RE-EXPORTS the real framework (or the
+existing handwritten <FW>Shim.dylib, which itself re-exports the framework), so
+a single dependency swap covers both missing and present symbols. The dependent
+binary's load command is rewritten to @rpath/<FW>ShimAuto.dylib and flat-signed.
 
 usage: shimgen.py <App.app> <binary-relpath> [<binary-relpath> ...]
-       shimgen.py --scan-only <App.app> <binary-relpath> ...
+       shimgen.py <binary>            # a loose Mach-O: shims land beside it
+       shimgen.py --scan-only <App.app|binary> [<binary-relpath> ...]
 """
 import ctypes, json, os, platform, re, shutil, subprocess, sys, tempfile
 
@@ -234,61 +239,138 @@ def classify(sym):
         return ("data", sym)
     return ("unknown", sym)
 
-def gen_source(fw_name, missing, index, observed):
-    """Build the shim .m source for one framework's missing symbols."""
-    classes, funcs, data = {}, [], []
-    for sym in sorted(missing):
-        entry = index.get(sym, {})
-        kind, name = classify(sym)
-        if kind == "objc_metaclass":
-            kind, sym_cls = "objc_class", name
-            classes.setdefault(name, entry)   # class def covers metaclass
+# function stubs whose name looks like a memory/data primitive: a silent
+# no-op there is never "missing API tolerated" -- it is silent corruption
+# (BlockMoveData = memmove). These MUST get a curated body, not a 0-stub.
+DANGEROUS_STUB_RE = re.compile(r"(?i)(block(move|zero)|mem(cpy|move|set)|"
+                               r"\bbcopy\b|copybits)")
+
+IMPL_DIR = os.path.join(SHIMDB_DIR, "impl")
+
+def build_impl_index(fw_dir):
+    """Compile every curated implementation under shimdb/impl/ (real .c/.m
+    source a human writes ONCE for a removed symbol) to an object file and map
+    each symbol it defines -> that object. A per-app shim then links ONLY the
+    objects that provide a symbol that app actually binds, and -dead_strips the
+    rest, so each shim carries solely the required implementations. This is the
+    model: hand-written impls live here; shimgen just selects + compiles them.
+    Returns {symbol: obj_path}; an impl that fails to compile is skipped loudly.
+    """
+    provided = {}
+    if not os.path.isdir(IMPL_DIR):
+        return provided
+    obj_dir = os.path.join(SHIMDB_DIR, "generated", "impl_obj")
+    os.makedirs(obj_dir, exist_ok=True)
+    for fn in sorted(os.listdir(IMPL_DIR)):
+        if not fn.endswith((".c", ".m")):
             continue
-        if kind == "objc_class":
-            classes.setdefault(name, entry)
-            continue
-        ekind = entry.get("kind")
-        if ekind == "objc_class":
-            classes.setdefault(name, entry)
+        src = os.path.join(IMPL_DIR, fn)
+        obj = os.path.join(obj_dir, fn + ".o")
+        if (not os.path.exists(obj) or
+                os.path.getmtime(obj) < os.path.getmtime(src)):
+            r = run(["clang", "-c", "-arch", "x86_64", "-O1", "-fno-common",
+                     "-fvisibility=default", "-F", fw_dir, "-o", obj, src])
+            if r.returncode != 0:
+                tail = (r.stderr.strip().splitlines()[-1]
+                        if r.stderr.strip() else "")
+                print(f"WARN impl/{fn}: compile failed, skipping ({tail})")
+                continue
+        for line in run(["nm", "-gU", obj]).stdout.splitlines():
+            parts = line.split()
+            if len(parts) >= 3:
+                provided.setdefault(parts[2], obj)
+    return provided
+
+
+def gen_stub_source(fw_name, uncovered, index, observed):
+    """Loud LAST-RESORT stubs for symbols an app needs that are NOT in the
+    curated impl pool -- a removed symbol nobody has written an implementation
+    for yet. Each is recorded in observed.json (the curation queue). Function
+    stubs log once on first call and trap under SHIMGEN_STUB_ABORT (never a
+    silent 0 -- that is what broke frameworks); a removed class becomes an
+    empty NSObject subclass; data becomes a zeroed slot. Symbols are de-duped
+    by emitted C identifier so two binds that collapse to one name can't
+    double-define and fail the compile, and a non-identifier data symbol
+    (".objc_*"/"$") keeps its exact export via __asm."""
+    classes, funcs, data = [], [], []
+    for sym in sorted(uncovered):
+        kind, _ = classify(sym)
+        ekind = index.get(sym, {}).get("kind")
+        if kind in ("objc_class", "objc_metaclass"):
+            classes.append(classify(sym)[1])
         elif ekind == "data" or kind == "data":
             data.append(sym)
         else:
-            funcs.append(sym)        # default: function stub
-        if sym not in index:
-            observed.setdefault(sym, {"first_seen_fw": fw_name,
-                                      "stub": kind if kind != "unknown"
-                                              else "function"})
-    src = ["#import <Cocoa/Cocoa.h>", "#include <stdio.h>", ""]
-    src.append('static void shim_note(const char *s) '
-               '{ fprintf(stderr, "[shimauto:%s] %s\\n", "' + fw_name +
-               '", s); }')
-    for cls, entry in sorted(classes.items()):
-        sup = entry.get("superclass", "NSObject")
-        methods = entry.get("methods", "")
-        src += ["", f"@interface {cls} : {sup}", "@end",
-                f"@implementation {cls}", methods, "@end"]
-    for sym in funcs:
+            funcs.append(sym)
+        observed.setdefault(sym, {"first_seen_fw": fw_name,
+                                  "stub": kind if kind != "unknown"
+                                          else "function"})
+    src = ["#import <Cocoa/Cocoa.h>", "#include <stdio.h>",
+           "#include <stdlib.h>", "#include <pthread.h>", ""]
+    src.append(
+        'static void shim_note(const char *sym) {\n'
+        '  static const char *seen[2048]; static int n;\n'
+        '  static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;\n'
+        '  pthread_mutex_lock(&mtx);\n'
+        '  for (int i = 0; i < n; i++)\n'
+        '    if (seen[i] == sym) { pthread_mutex_unlock(&mtx); return; }\n'
+        '  if (n < 2048) seen[n++] = sym;\n'
+        '  fprintf(stderr, "[shimauto:%s] %s: removed-OS symbol CALLED with no '
+        'curated impl -- returning 0 (write one in shimdb/impl/ if its '
+        'behavior matters)\\n", "' + fw_name + '", sym);\n'
+        '  if (getenv("SHIMGEN_STUB_ABORT")) abort();\n'
+        '  pthread_mutex_unlock(&mtx);\n'
+        '}')
+    emitted = set()
+    for name in sorted(set(classes)):
+        if name in emitted:
+            continue
+        emitted.add(name)
+        src += ["", f"@interface {name} : NSObject", "@end",
+                f"@implementation {name}", "@end"]
+    for sym in sorted(funcs):
         c = sym.lstrip("_")
-        src += ["", f"long {c}(long a, long b, long c_, long d, long e, "
-                    f"long f) {{ shim_note(\"{c} called (auto-stub)\"); "
-                    f"return 0; }}"]
-    for sym in data:
-        c = sym.lstrip("_")
-        # exported zeroed pointer-sized slot; asm label keeps exact name
+        if c in emitted:
+            continue
+        emitted.add(c)
+        if DANGEROUS_STUB_RE.search(c):
+            print(f"WARN {fw_name}: stubbing memory primitive {sym} as a "
+                  f"NO-OP -- write a real impl in shimdb/impl/ (e.g. memmove).")
+        src += ["", f'long {c}(long a, long b, long c_, long d, long e, '
+                    f'long f) {{ shim_note("{c}"); return 0; }}']
+    for sym in sorted(data):
+        base = re.sub(r"[^A-Za-z0-9_]", "_", sym.lstrip("_")) or "datasym"
+        if base[0].isdigit():
+            base = "_" + base
+        cname, i = base, 1
+        while cname in emitted:          # collision-safe: exports stay exact
+            cname, i = f"{base}_{i}", i + 1
+        emitted.add(cname)
         src += ["", f'__attribute__((visibility("default"))) '
-                    f'long {c.replace("$", "_DOLLAR_")} '
-                    f'__asm("{sym}") = 0;']
+                    f'long {cname} __asm("{sym}") = 0;']
     return "\n".join(src) + "\n"
 
 def main():
     args = sys.argv[1:]
     scan_only = "--scan-only" in args
     args = [a for a in args if a != "--scan-only"]
-    if len(args) < 2:
+    if not args:
         sys.exit(__doc__)
-    app = os.path.abspath(args[0])
-    targets = args[1:]
-    fw_dir = os.path.join(app, "Contents", "Frameworks")
+    root = os.path.abspath(args[0])
+    # Accept a BUNDLE, a loose DIRECTORY, or a single Mach-O BINARY. A bundle
+    # keeps its shims in Contents/Frameworks referenced via @rpath; a loose
+    # binary/dir keeps them BESIDE the binary referenced via @loader_path (a
+    # loose binary has no Frameworks rpath for @rpath to resolve against).
+    if os.path.isfile(root):
+        app, targets = os.path.dirname(root), [os.path.basename(root)]
+        fw_dir, ref_prefix = app, "@loader_path/"
+    else:
+        app, targets = root, args[1:]
+        cf = os.path.join(app, "Contents", "Frameworks")
+        fw_dir, ref_prefix = ((cf, "@rpath/") if os.path.isdir(cf)
+                              else (app, "@loader_path/"))
+        if not targets:
+            sys.exit(__doc__)
     index = load_index()
     observed = {}
     if os.path.exists(OBSERVED_PATH):
@@ -374,7 +456,7 @@ def main():
                           f"{os.path.basename(dep)}")
                     if not scan_only:
                         redirect_dep(app, binary, dep,
-                                     f"@rpath/{os.path.basename(hand)}")
+                                     f"{ref_prefix}{os.path.basename(hand)}")
                     continue
             if not missing:
                 continue
@@ -386,20 +468,50 @@ def main():
             ent["missing"] |= missing
             ent["dependents"].append((binary, dep))
 
+    # Build the curated-impl pool (shimdb/impl/*) once: symbol -> object file.
+    impl_provided = build_impl_index(fw_dir)
+    # Coverage report: each per-app shim is assembled from that pool for exactly
+    # the symbols THIS app needs that are absent on THIS macOS; anything with no
+    # curated impl yet is a loud stub queued into observed.json. A growing
+    # 'impl' column means fewer silent behavioural holes.
+    if plan:
+        tot = {"impl": 0, "class": 0, "data": 0, "stub": 0}
+        print("shim coverage (impl <- shimdb/impl pool; stub <- needs curation):")
+        for fw, ent in sorted(plan.items()):
+            c = {"impl": 0, "class": 0, "data": 0, "stub": 0}
+            for s in ent["missing"]:
+                if s in impl_provided:
+                    c["impl"] += 1
+                    continue
+                k, _ = classify(s)
+                if k in ("objc_class", "objc_metaclass"):
+                    c["class"] += 1
+                elif k == "data" or index.get(s, {}).get("kind") == "data":
+                    c["data"] += 1
+                else:
+                    c["stub"] += 1
+            for kk in tot:
+                tot[kk] += c[kk]
+            print(f"  {fw:30} {c['impl']:3} impl  {c['class']:3} class  "
+                  f"{c['data']:3} data  {c['stub']:3} stub")
+        print(f"  {'TOTAL':30} {tot['impl']:3} impl  {tot['class']:3} class  "
+              f"{tot['data']:3} data  {tot['stub']:3} stub")
+
     if scan_only or not plan:
         print("scan complete; nothing to generate" if not plan else
               "scan-only mode; no shims written")
         return
 
     os.makedirs(SHIMDB_DIR, exist_ok=True)
+    gen_dir = os.path.join(SHIMDB_DIR, "generated")
+    os.makedirs(gen_dir, exist_ok=True)
     for fw, ent in plan.items():
         shim_name = f"{fw}ShimAuto.dylib"
         shim_path = os.path.join(fw_dir, shim_name)
-        # regeneration REPLACES the dylib: keep the stubs a previous run
-        # generated for other dependents (their load commands still point
-        # here), or they vanish and dyld aborts at their next launch. Seed
-        # the index with nm's section type so data slots stay data slots
-        # (classify() can't tell from the bare name).
+        # regeneration REPLACES the dylib: keep symbols a previous run provided
+        # for OTHER dependents (their load commands still point here) or they
+        # vanish and dyld aborts at their next launch. nm's section type marks
+        # data slots (classify() can't tell from the bare name).
         if os.path.exists(shim_path):
             for line in run(["nm", "-gU", shim_path]).stdout.splitlines():
                 parts = line.split()
@@ -408,48 +520,53 @@ def main():
                 ent["missing"].add(parts[2])
                 if parts[1] in ("D", "S", "B", "C"):
                     index.setdefault(parts[2], {"kind": "data"})
-        src = gen_source(fw, ent["missing"], index, observed)
-        gen_dir = os.path.join(SHIMDB_DIR, "generated")
-        os.makedirs(gen_dir, exist_ok=True)
+        M = ent["missing"]
+        covered = sorted(s for s in M if s in impl_provided)
+        uncovered = M - set(covered)
+        impl_objs = sorted({impl_provided[s] for s in covered})
+        # generated source provides ONLY the uncovered remainder (loud stubs)
         srcf = os.path.join(gen_dir, f"{fw}ShimAuto.m")
-        open(srcf, "w").write(src)
-        if True:
-            # translated apps run x86_64 under Rosetta — never host arch
-            cmd = ["clang", "-dynamiclib", "-arch", "x86_64",
-                   "-o", shim_path, srcf,
-                   "-framework", "Cocoa",
-                   "-F", fw_dir,  # bundled frameworks (iLifeSlideshow etc.)
-                   "-install_name", f"@rpath/{shim_name}"]
-            # Re-export the handwritten shim if one exists (it re-exports
-            # the real framework); else re-export the real framework when
-            # it still exists on this system.
-            # NOTE: pass ONLY the reexport flag — also listing the library
-            # as a plain input makes ld link it as a regular LC_LOAD_DYLIB
-            # and silently drop the re-export.
-            hand = os.path.join(fw_dir, f"{fw}Shim.dylib")
-            if os.path.exists(hand):
-                cmd += ["-Wl,-reexport_library," + hand]
-            else:
-                dp = ent["dep_path"]
-                probe = provider_symbols(dp, fw_dir)
-                if probe[0] != "missing":
-                    cmd += ["-Wl,-reexport_framework," + fw]
+        open(srcf, "w").write(gen_stub_source(fw, uncovered, index, observed))
+        # export EXACTLY this app's missing set: a curated .o shared with other
+        # apps may define more symbols, but only M is exported and the rest is
+        # dead-stripped, so the shim carries solely the required symbols.
+        expf = os.path.join(gen_dir, f"{fw}ShimAuto.exp")
+        open(expf, "w").write("".join(s + "\n" for s in sorted(M)))
+        cmd = ["clang", "-dynamiclib", "-arch", "x86_64",
+               "-o", shim_path, srcf, *impl_objs,
+               "-framework", "Cocoa",
+               "-F", fw_dir,  # bundled frameworks (iLifeSlideshow etc.)
+               "-install_name", f"{ref_prefix}{shim_name}",
+               "-Wl,-dead_strip",
+               "-Wl,-exported_symbols_list," + expf]
+        # Re-export the handwritten shim if one exists (it re-exports the real
+        # framework); else re-export the real framework when it still exists.
+        # NOTE: pass ONLY the reexport flag — also listing the library as a
+        # plain input makes ld link it as LC_LOAD_DYLIB and drop the re-export.
+        hand = os.path.join(fw_dir, f"{fw}Shim.dylib")
+        if os.path.exists(hand):
+            cmd += ["-Wl,-reexport_library," + hand]
+        else:
+            probe = provider_symbols(ent["dep_path"], fw_dir)
+            if probe[0] != "missing":
+                cmd += ["-Wl,-reexport_framework," + fw]
+        r = run(cmd)
+        if r.returncode != 0 and any(a.startswith("-Wl,-reexport") for a in cmd):
+            # SDK may lack the tbd (framework gone) or refuse direct linkage
+            # (sub-framework): fall back to stubs-only, loudly — symbols
+            # reachable only via the re-export become missing.
+            print(f"WARN {shim_name}: re-export link failed, retrying "
+                  f"stubs-only:\n{r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ''}")
+            cmd = [a for a in cmd if not a.startswith("-Wl,-reexport")]
             r = run(cmd)
-            if r.returncode != 0 and any(a.startswith("-Wl,-reexport") for a in cmd):
-                # SDK may lack the tbd (framework gone) or refuse direct
-                # linkage (sub-framework): fall back to stubs-only, loudly —
-                # symbols reachable only via the re-export become missing.
-                print(f"WARN {shim_name}: re-export link failed, retrying "
-                      f"stubs-only:\n{r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ''}")
-                cmd = [a for a in cmd if not a.startswith("-Wl,-reexport")]
-                r = run(cmd)
-            if r.returncode != 0:
-                print(f"FAIL compile {shim_name}:\n{r.stderr[-2000:]}")
-                continue
+        if r.returncode != 0:
+            print(f"FAIL compile {shim_name}:\n{r.stderr[-2000:]}")
+            continue
         flat_sign(shim_path)
-        print(f"generated {shim_name} ({len(ent['missing'])} symbols)")
+        print(f"generated {shim_name}: {len(covered)} impl + "
+              f"{len(uncovered)} stub = {len(M)} symbols")
         for binary, dep in ent["dependents"]:
-            redirect_dep(app, binary, dep, f"@rpath/{shim_name}")
+            redirect_dep(app, binary, dep, f"{ref_prefix}{shim_name}")
 
     with open(OBSERVED_PATH, "w") as f:
         json.dump(observed, f, indent=1, sort_keys=True)

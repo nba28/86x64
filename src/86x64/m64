@@ -582,31 +582,40 @@ def cmd_vendor(args):
 
 def cmd_shim(args):
     require(SHIMGEN)
+    target = Path(args.app)
+    if not target.exists():
+        raise Die(f"no such path: {target}")
+    extra = ["--scan-only"] if getattr(args, "scan_only", False) else []
+    # A loose Mach-O binary: shimgen shims it directly (shims land beside it).
+    if target.is_file():
+        info(f"shimgen {target.name}  (standalone binary)")
+        run(["python3", SHIMGEN, *extra, str(target)], dry=args.dry_run)
+        return
+    translated_only = getattr(args, "translated_only", False)
     targets = list(getattr(args, "targets", None) or [])
     if not targets:
-        # auto-discover: translated binaries link @loader_path/libabiconv.dylib
-        targets = _discover_shim_targets(args.app)
-    info(f"shimgen {Path(args.app).name}  ({len(targets)} targets)")
+        targets = _discover_shim_targets(target, translated_only=translated_only)
+    info(f"shimgen {target.name}  ({len(targets)} "
+         f"{'translated' if translated_only else 'x86_64'} target(s))")
     if not targets:
         warn("no shim targets found")
         return
-    run(["python3", SHIMGEN, args.app, *targets], dry=args.dry_run)
+    run(["python3", SHIMGEN, *extra, str(target), *targets], dry=args.dry_run)
 
 
-def _discover_shim_targets(app):
-    """Translated binaries (those that link libabiconv) need native-symbol shims."""
+def _discover_shim_targets(app, translated_only=False):
+    """Bundle binaries that may need native-symbol shims. By DEFAULT every
+    x86_64 Mach-O — a NATIVE app built against an older SDK binds AppKit (etc.)
+    symbols deleted since, not just our translated outputs. `translated_only`
+    restricts to our libabiconv-linked translations (the post-translate path)."""
     app = Path(app)
     out = []
     for m in iter_machos(app):
         if "x86_64" not in archs_of(m):
             continue
-        try:
-            o = subprocess.run(["otool", "-L", str(m)], capture_output=True,
-                               text=True, errors="replace")
-        except OSError:
+        if translated_only and not links_our_runtime(m):
             continue
-        if "libabiconv.dylib" in o.stdout:
-            out.append(str(m.resolve().relative_to(app.resolve())))
+        out.append(str(m.resolve().relative_to(app.resolve())))
     return sorted(out)
 
 
@@ -815,11 +824,19 @@ def build_parser():
     common(ve); ve.set_defaults(func=cmd_vendor)
 
     # shim
-    sh = sub.add_parser("shim",
-                        help="generate native-symbol shims (shimgen) for a bundle")
-    sh.add_argument("app")
+    sh = sub.add_parser(
+        "shim",
+        help="shim missing native symbols (shimgen) for a bundle OR a loose "
+             "binary — e.g. AppKit symbols deleted since the app's SDK")
+    sh.add_argument("app", help="an .app/.framework bundle, or a single Mach-O binary")
     sh.add_argument("targets", nargs="*",
-                    help="binary relpaths to shim (default: auto-discover)")
+                    help="bundle mode: binary relpaths to shim "
+                         "(default: every x86_64 binary)")
+    sh.add_argument("--translated-only", action="store_true",
+                    help="bundle mode: only shim our libabiconv-linked "
+                         "translations, not native binaries")
+    sh.add_argument("--scan-only", action="store_true",
+                    help="report missing symbols + coverage; write nothing")
     common(sh); sh.set_defaults(func=cmd_shim)
 
     # sign

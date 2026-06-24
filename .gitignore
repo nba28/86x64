@@ -21,6 +21,7 @@ install_manifest.txt
 _deps/
 CTestTestfile.cmake
 Testing/.DS_Store
+.DS_Store
 __pycache__/
 build/
 references/
