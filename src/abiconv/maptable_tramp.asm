@@ -84,6 +84,14 @@
 	MTSHIM	___dlclose,                   _shim_dlclose
 	MTSHIM	___dlerror,                   _shim_dlerror
 
+	;; pthread TSD: abigen forwards straight to native, but macOS keys start
+	;; at 258 so key 0 means an UNCONSTRUCTED thread-local. getspecific(0)
+	;; must return NULL (not TSD slot 0 = pthread_self) and setspecific(0,..)
+	;; must be a no-op (not clobber slot 0). tls_shim.c. Universal: key 0 is
+	;; never a valid pthread key for any binary.
+	MTSHIM	___pthread_getspecific,       _shim_pthread_getspecific
+	MTSHIM	___pthread_setspecific,       _shim_pthread_setspecific
+
 	;; Carbon Process Manager: ProcessInfoRec embeds pointers (i386/x86_64
 	;; layouts differ) and is in/out — abigen can't marshal it. proc_shim.c.
 	MTSHIM	___GetProcessInformation,     _shim_GetProcessInformation

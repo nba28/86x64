@@ -22,6 +22,9 @@ _dlsym
 _dlclose
 _dlerror
 
+_pthread_getspecific
+_pthread_setspecific
+
 __sprintf_chk
 
 _NSNextMapEnumeratorPair

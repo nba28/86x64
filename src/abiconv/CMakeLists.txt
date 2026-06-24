@@ -153,6 +153,7 @@ add_library(abiconv SHARED
   maptable_shim.m
   sysctl_shim.c
   posix_shim.c
+  tls_shim.c
   cxx_shim.c
   proc_shim.c
   osatomic_shim.c
