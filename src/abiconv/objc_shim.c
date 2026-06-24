@@ -304,6 +304,21 @@ struct rsp_stash_pair _86x64_rsp_unstash(void) {
    return g_rstash[--g_rstash_n];     /* 16-byte POD: returned in rax:rdx */
 }
 
+/* Reverse-stash depth capture/restore for the ObjC1 setjmp/longjmp bridge.
+ * A longjmp (objc_exception_throw) jumps straight back to the setjmp point,
+ * abandoning every reverse-IMP frame in between WITHOUT running their %%back
+ * epilogues — so the rsp/rbp pairs those frames pushed onto g_rstash are never
+ * popped. The next reverse-IMP to return then unstashes a STALE pair and lands
+ * on a wrong rsp -> a translated `ret` into a 0 slot (rip=0). The exception
+ * machinery captures this depth at try_enter and rewinds it at throw, exactly
+ * like restoring a stack pointer. (Per libabiconv copy: the legacy class whose
+ * reverse-IMPs nest here registers + dispatches through one copy, the same one
+ * that interposes try_enter/throw for the faulting image.) */
+uint32_t x64_rstash_depth(void) { return g_rstash_n; }
+void x64_rstash_set_depth(uint32_t n) {
+   if (n <= g_rstash_n) { g_rstash_n = n; }   /* only ever rewind, never grow */
+}
+
 /* real 64-bit object -> 32-bit handle the translated code can store. */
 uint32_t x64_objc_wrap(uint64_t real) {
    if (real == 0) { return 0; }
@@ -767,11 +782,24 @@ uint32_t x64_objc_sel_wrap(uint64_t s) {
  * (==2 for self+cmd already-placed methods) up through `cap_regs`,
  * pulling 4-byte slots out of args32 and writing 8-byte slots into plan.
  * Slot-i of args32 maps to plan->reg[reg_base + (i - arg_start)]. */
+/* ObjC type-encoding qualifier/modifier prefix chars that precede the real
+ * type letter. Legacy fragile-ABI set (r const, n in, N inout, o out, O bycopy,
+ * R byref, V oneway) PLUS the modern modifiers the native runtime can emit on
+ * the CONV_NATIVE path: j (complex), A (atomic), + (GNU register). Verified
+ * against references/objc4/runtime/runtime.h (_C_CONST.._C_GNUREGISTER). An
+ * unhandled prefix here is not benign: enc_skip_type would consume the prefix
+ * but leave the real type unread, desyncing the entire remaining arg list and
+ * mis-marshalling the call. (NOTE: `j` doubles the underlying type's size for a
+ * true complex value; complex never occurs in this AppKit/Foundation surface,
+ * so it is skipped as a plain prefix — robust against desync, size-approximate
+ * in the impossible case it appears.) */
+#define ENC_QUALS "rnNoORVAj+"
+
 /* Strip ObjC type-encoding qualifier prefixes (const/in/out/byref/...) so we
  * see the underlying type letter. */
 static char encoding_base_type(const char *t) {
    if (!t) { return 0; }
-   while (*t && strchr("rnNoORV", *t)) { ++t; }
+   while (*t && strchr(ENC_QUALS, *t)) { ++t; }
    return *t;
 }
 
@@ -786,10 +814,10 @@ static char encoding_base_type(const char *t) {
  * struct pointers keep their raw-pointer behavior. */
 static int enc_is_objptr_struct(const char *t) {
    if (!t) { return 0; }
-   while (*t && strchr("rnNoORV", *t)) { ++t; }   /* qualifiers */
+   while (*t && strchr(ENC_QUALS, *t)) { ++t; }   /* qualifiers */
    if (*t != '^') { return 0; }
    ++t;
-   while (*t && strchr("rnNoORV", *t)) { ++t; }
+   while (*t && strchr(ENC_QUALS, *t)) { ++t; }
    if (*t != '{') { return 0; }
    ++t;
    while (*t && *t != '=' && *t != '}') { ++t; }  /* struct tag */
@@ -809,10 +837,10 @@ static int enc_is_objptr_struct(const char *t) {
  * callers check first; its body is non-empty so it is not matched here. */
 static int enc_is_cfptr(const char *t) {
    if (!t) { return 0; }
-   while (*t && strchr("rnNoORV", *t)) { ++t; }
+   while (*t && strchr(ENC_QUALS, *t)) { ++t; }
    if (*t != '^') { return 0; }
    ++t;
-   while (*t && strchr("rnNoORV", *t)) { ++t; }
+   while (*t && strchr(ENC_QUALS, *t)) { ++t; }
    if (*t != '{') { return 0; }
    ++t;
    while (*t && *t != '=' && *t != '}') { ++t; }  /* struct tag */
@@ -872,7 +900,7 @@ static void enc_copy_scalar(char c, const uint8_t *s, uint8_t *d) {
  * Returns the encoding cursor just past the type (not trailing digits). */
 static const char *enc_walk(const char *t, const uint8_t *src, uint8_t *dst,
                             size_t *i_off, size_t *n_off) {
-   while (*t && strchr("rnNoORV", *t)) { ++t; }   /* qualifiers */
+   while (*t && strchr(ENC_QUALS, *t)) { ++t; }   /* qualifiers */
    char c = *t;
    size_t isz, ial, nsz, nal;
    if (enc_scalar(c, &isz, &ial, &nsz, &nal)) {
@@ -938,7 +966,7 @@ static size_t enc_native_size(const char *t) {
 static int enc_ret_is_stret(const char *types) {
    if (!types) { return 0; }
    const char *t = types;
-   while (*t && strchr("rnNoORV", *t)) { ++t; }
+   while (*t && strchr(ENC_QUALS, *t)) { ++t; }
    if (*t != '{' && *t != '(' && *t != '[') { return 0; }
    return enc_native_size(t) > 16;
 }
@@ -3945,7 +3973,7 @@ static uint64_t unwrap_obj_arg(uint32_t a) {
 
 /* ---- ObjC type-encoding scanners ---- */
 static const char *enc_skip_quals(const char *t) {
-   while (*t && strchr("rnNoORV", *t)) { ++t; }
+   while (*t && strchr(ENC_QUALS, *t)) { ++t; }
    return t;
 }
 /* Advance past ONE complete type (handles ^ptr, {struct}, [array], (union),
@@ -3973,6 +4001,38 @@ static const char *enc_skip_digits(const char *t) {
 
 /* ---- the C prep called by _86x64_reverse_imp ---- */
 #define REV_STACK_SZ (512u * 1024u)
+
+/* Per-thread pool of retired reverse-IMP low stacks.
+ *
+ * A reverse-IMP runs the translated legacy IMP on a private low-4GB stack and,
+ * on return, used to free() that stack straight back to the shared low-4GB
+ * heap (malloc_shim). But a just-returned IMP frame can still be referenced for
+ * an instant: a forward C-shim called from the IMP writes its out-parameter
+ * (e.g. FSGetDataForkName -> *HFSUniStr255) back into a buffer on that frame, a
+ * method returns a pointer into its frame, etc. If the block has gone back to
+ * the general heap, an unrelated allocation repurposes it and the lingering
+ * access reads/writes foreign data — read back as 0 it became a translated
+ * `ret` to 0 (rip=0); the deep library-open reverse-IMP nesting hit exactly
+ * this. Keeping retired stacks in a reverse-stack-ONLY per-thread LIFO pool
+ * (never handed to general malloc) closes the window: the memory is only ever
+ * reused by another reverse-IMP, LIFO, after the referencing frame is dead. It
+ * also removes the malloc/free churn the nesting generates. Per-thread + per
+ * libabiconv-copy: each copy frees what it allocated, so the pool is consistent
+ * with the stash/LIFO discipline. */
+#define REV_POOL_MAX 128
+static __thread void *g_rev_pool[REV_POOL_MAX];
+static __thread uint32_t g_rev_pool_n;
+
+static void *rev_stack_alloc(void) {
+   if (g_rev_pool_n) { return g_rev_pool[--g_rev_pool_n]; }
+   return malloc(REV_STACK_SZ);
+}
+static void rev_stack_free(void *p) {
+   if (!p) { return; }
+   if (getenv("ABICONV_REVSTACK_LEAK")) { return; }   /* diagnostic: never reuse */
+   if (g_rev_pool_n < REV_POOL_MAX) { g_rev_pool[g_rev_pool_n++] = p; return; }
+   free(p);
+}
 
 /* Zero-I/O reverse-IMP breadcrumb ring (mirror of cb_bridge's). reverse_prep
  * records each legacy IMP it is about to dispatch (no fprintf — preserves the
@@ -4052,8 +4112,14 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
    appkit_color_compat_reassert();
 
    plan->ret_kind = 2;          /* default void */
-   plan->lowstack_base = (uint64_t)(uintptr_t)malloc(REV_STACK_SZ);  /* low-4GB */
+   plan->lowstack_base = (uint64_t)(uintptr_t)rev_stack_alloc();     /* low-4GB pool */
    plan->lowstack_top  = (plan->lowstack_base + REV_STACK_SZ) & ~(uint64_t)0xf;
+   if (getenv("ABICONV_HEAP_TRACE")) {
+      fprintf(stderr, "[rstk] ALLOC base=0x%llx t=%x\n",
+              (unsigned long long)plan->lowstack_base,
+              pthread_mach_thread_np(pthread_self()));
+      fflush(stderr);
+   }
    plan->stret_dst = 0;
    plan->stret_src = 0;
    plan->stret_types = NULL;
@@ -4346,7 +4412,15 @@ unsigned __int128 _86x64_reverse_ret(struct reverse_plan *plan,
               (unsigned long long)(uint64_t)r);
       fflush(stderr);
    }
-   if (plan->lowstack_base) { free((void *)(uintptr_t)plan->lowstack_base); }
+   if (plan->lowstack_base) {
+      if (getenv("ABICONV_HEAP_TRACE")) {
+         fprintf(stderr, "[rstk] FREE base=0x%llx t=%x\n",
+                 (unsigned long long)plan->lowstack_base,
+                 pthread_mach_thread_np(pthread_self()));
+         fflush(stderr);
+      }
+      rev_stack_free((void *)(uintptr_t)plan->lowstack_base);
+   }
    return r;
 }
 
@@ -4973,8 +5047,12 @@ static void reverse_register_image(const struct mach_header_64 *mh,
  * Known limits (traced loudly when hit):
  *  - an exception raised by NATIVE code (e.g. +[NSException raise:...] deep
  *    in Foundation) unwinds as a C++ exception and never reaches this chain;
- *  - a longjmp across reverse-bridge re-entries does not unwind their
- *    per-thread rsp stashes (g_rstash) or other translator bookkeeping.
+ *  - a longjmp across reverse-bridge re-entries abandons their native frames;
+ *    their per-thread rsp stash (g_rstash) is now rewound at throw (try_enter
+ *    snapshots the depth, throw restores it — without this the next reverse-IMP
+ *    unstashed a stale rsp and `ret`'d to 0). Other per-copy/cross-copy
+ *    bookkeeping pushed by abandoned frames (cb_active_depth, super hints) is
+ *    still not unwound, but is not rsp-critical.
  * ====================================================================== */
 
 #define EXC32_MAGIC      0x36346a62u
@@ -5020,6 +5098,11 @@ uint32_t shim_objc_exception_try_enter(uint32_t *a) {
    struct exc_data32 *d = (struct exc_data32 *)(uintptr_t)a[0];
    uint32_t *top = exc_top_slot();
    if (!d || !top) { return 0; }
+   /* Snapshot the reverse-stash depth NOW (immediately before the matching
+    * _setjmp; no reverse-IMP runs in between). A throw that longjmps back here
+    * rewinds the stash to this depth — see x64_rstash_set_depth. Stored in a
+    * free buf[18] slot that ____setjmp does not overwrite. */
+   d->pad[0] = x64_rstash_depth();
    d->pointers[1] = *top;
    *top = a[0];
    return 0;
@@ -5060,9 +5143,14 @@ uint32_t shim_objc_exception_throw(uint32_t *a) {
       *top = d->pointers[1];                /* pop: handler runs un-entered */
       d->pointers[0] = exc32;
       if (d->magic == EXC32_MAGIC) {
+         /* Rewind the reverse-stash to its depth at the handler's try_enter:
+          * the longjmp abandons every reverse-IMP frame pushed since, none of
+          * which will run its %%back/unstash, so their stale stash pairs must
+          * be dropped here or the next unstash returns onto a wrong rsp. */
+         x64_rstash_set_depth(d->pad[0]);
          if (trace) {
-            fprintf(stderr, "[exc1] throw exc32=0x%08x -> longjmp data=%p\n",
-                    exc32, (void *)d);
+            fprintf(stderr, "[exc1] throw exc32=0x%08x -> longjmp data=%p "
+                    "(rstash rewind -> %u)\n", exc32, (void *)d, d->pad[0]);
             fflush(stderr);
          }
          x64_exc_longjmp(d->regs, 1);       /* noreturn */

@@ -49,7 +49,19 @@
 #define MAX_REGIONS   16
 
 /* 16-byte block header; payload (returned to caller) follows, 16-aligned.
- * `size` is the payload capacity. `next` links free blocks. */
+ * `size` is the payload capacity. `next` links free blocks.
+ *
+ * The top bit of `size` is a FREED marker. A live block has it clear; free()
+ * sets it and malloc() clears it on reuse. This makes a double-free O(1)
+ * detectable: without it, free() pushes an already-free block onto the list a
+ * second time, so two later malloc()s hand back the SAME block — two live
+ * allocations aliasing one region. With reverse-IMP low-4GB stacks (512 KB
+ * each) flowing through this same heap, that aliasing let one frame's carve
+ * zero another frame's translated return slot -> a `ret` to 0 (rip=0). Real
+ * apps double-free occasionally; the system allocator tolerates some, this one
+ * must too. Capacities are <=768 MB so bit 63 is always free for the flag. */
+#define BLK_FREED_BIT (1ULL << 63)
+#define BLK_CAP(b)    ((b)->size & ~BLK_FREED_BIT)
 struct block {
    uint64_t size;
    struct block *next;
@@ -214,9 +226,10 @@ void *malloc(size_t n) {
    }
    /* first-fit reuse (16-aligned blocks always satisfy default alignment) */
    for (struct block **pp = &g_hc->free_list; *pp != NULL; pp = &(*pp)->next) {
-      if ((*pp)->size >= cap) {
+      if (BLK_CAP(*pp) >= cap) {
          struct block *b = *pp;
          *pp = b->next;
+         b->size = BLK_CAP(b);          /* clear FREED: block is live again */
          os_unfair_lock_unlock(&g_hc->lock);
          return (char *)b + sizeof(struct block);
       }
@@ -239,6 +252,25 @@ void free(void *p) {
       return;
    }
    struct block *b = (struct block *)((char *)p - sizeof(struct block));
+   /* Double-free guard: a block already on the free list carries FREED.
+    * Pushing it again would alias it out to two callers (see BLK_FREED_BIT).
+    * Ignore the second free, exactly as a hardened allocator would. */
+   if (b->size & BLK_FREED_BIT) {
+      static _Atomic unsigned warned;
+      if (getenv("ABICONV_HEAP_TRACE") &&
+          __c11_atomic_fetch_add(&warned, 1, __ATOMIC_RELAXED) < 32) {
+         fprintf(stderr, "[heap] double-free ignored: p=%p cap=%llu\n",
+                 p, (unsigned long long)BLK_CAP(b));
+      }
+      os_unfair_lock_unlock(&g_hc->lock);
+      return;
+   }
+   b->size |= BLK_FREED_BIT;
+   /* Diagnostic poison: stamp freed payload (header is before p, untouched) so
+    * a use-after-free read shows 0xCD bytes instead of stale/zero data — this
+    * distinguishes UAF from an explicit zero write at the fault site. Off
+    * unless ABICONV_HEAP_TRACE is set. */
+   if (getenv("ABICONV_HEAP_TRACE")) { memset(p, 0xCD, BLK_CAP(b)); }
    b->next = g_hc->free_list;
    g_hc->free_list = b;
    os_unfair_lock_unlock(&g_hc->lock);
@@ -273,7 +305,7 @@ void *realloc(void *p, size_t n) {
    os_unfair_lock_lock(&g_hc->lock);
    int mine = owned(p);
    uint64_t oldcap = 0;
-   if (mine) oldcap = ((struct block *)((char *)p - sizeof(struct block)))->size;
+   if (mine) oldcap = BLK_CAP((struct block *)((char *)p - sizeof(struct block)));
    os_unfair_lock_unlock(&g_hc->lock);
 
    if (mine && oldcap >= round_up(n, 16)) {
