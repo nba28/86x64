@@ -2,6 +2,7 @@
 
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
+#include <mach-o/reloc.h>
 #include <set>
 
 #include "lc.hh"
@@ -145,6 +146,11 @@ namespace MachO {
    public:
       dysymtab_command dysymtab;
       std::vector<uint32_t> indirectsyms;
+      /* Regenerated classic local relocations (rebases) for the x86_64 output
+       * of a no-LC_DYLD_INFO (classic) image. Populated in Build_LINKEDIT,
+       * written by Emit. Empty (and locrel zeroed) for modern images whose
+       * rebases live in the LC_DYLD_INFO rebase stream. */
+      std::vector<relocation_info> local_relocs;
 
       virtual uint32_t cmd() const override { return dysymtab.cmd; }      
       virtual std::size_t size() const override { return sizeof(dysymtab_command); }
@@ -158,6 +164,10 @@ namespace MachO {
       virtual void Build_LINKEDIT(BuildEnv<bits>& env) override;
       virtual void Emit(Image& img, std::size_t offset) const override;
       virtual std::size_t content_size() const override;
+
+      /* Regenerate classic VANILLA local relocations (rebases) for a no-
+       * LC_DYLD_INFO image; populates local_relocs. */
+      void regenerate_local_relocs(BuildEnv<bits>& env);
       
       virtual Dysymtab<opposite<bits>> *Transform(TransformEnv<bits>& env) const override {
          return new Dysymtab<opposite<bits>>(*this, env);

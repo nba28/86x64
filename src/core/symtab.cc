@@ -1,4 +1,5 @@
 #include <set>
+#include <cstring>
 #include <mach-o/stab.h>
 
 #include "symtab.hh"
@@ -6,6 +7,7 @@
 #include "transform.hh"
 #include "section_blob.hh" // SectionBlob
 #include "archive.hh" // Archive
+#include "dyldinfo.hh" // DyldInfo (subcommand<> needs the complete type)
 
 namespace MachO {
 
@@ -158,29 +160,119 @@ namespace MachO {
       dysymtab.indirectsymoff = env.allocate(align<bits>(sizeof(uint32_t) * indirectsyms.size()));
       dysymtab.nindirectsyms = indirectsyms.size();
 
-      /* Zero the five classic-linker dysymtab tables (toc, modtab, extrefsyms,
-       * extrel, locrel). The parser preserves their *off/n* fields from the
-       * i386 input, but the translator doesn't relocate the actual data into
-       * the new LINKEDIT layout — so the original offsets point into garbage
-       * after transform, and install_name_tool's validator reports them as
-       * "table of contents at offset X overlaps section contents at Y".
+      /* Zero the classic-linker static-metadata tables (toc, modtab,
+       * extrefsyms) and the external relocation table. The parser preserves
+       * their *off/n* fields from the i386 input, but the translator doesn't
+       * relocate the actual data into the new LINKEDIT layout — so the
+       * original offsets point into garbage after transform, and
+       * install_name_tool's validator reports them as "table of contents at
+       * offset X overlaps section contents at Y".
        *
        * Safe to drop: dyld doesn't use any of these for image loading. toc/
-       * modtab/extrefsyms are static-linker / nm metadata. extrel/locrel are
-       * legacy relocation tables — superseded by LC_DYLD_INFO_ONLY's compact
-       * bind/rebase opcodes, which every modern dylib (including everything
-       * iPhoto ships) has. Setting count=0 + off=0 declares "no table" and
-       * stops install_name_tool / dyld_info from probing stale ranges. */
+       * modtab/extrefsyms are static-linker / nm metadata. External relocs are
+       * binds — for classic images we handle those by renaming the undefined
+       * nlist + retargeting its library ordinal (macho-tool classic_symbind),
+       * so dyld binds the symbol-pointer slots via the indirect symbol table;
+       * no external reloc entries are needed. */
       dysymtab.tocoff = 0;          dysymtab.ntoc = 0;
       dysymtab.modtaboff = 0;       dysymtab.nmodtab = 0;
       dysymtab.extrefsymoff = 0;    dysymtab.nextrefsyms = 0;
       dysymtab.extreloff = 0;       dysymtab.nextrel = 0;
-      dysymtab.locreloff = 0;       dysymtab.nlocrel = 0;
+
+      /* LOCAL relocations = rebases. For a MODERN image (LC_DYLD_INFO present)
+       * the rebase stream's opcodes carry these, so the classic locrel table
+       * is redundant — drop it (the layout shift would strand the original
+       * offsets anyway). But for a CLASSIC image (LC_DYSYMTAB only, NO
+       * LC_DYLD_INFO — e.g. GCC-built game dylibs like Portal 2's libtier0),
+       * the local relocations are the ONLY rebase mechanism. Dropping them
+       * left every absolute __DATA pointer (notably the __mod_init_func
+       * constructor pointers) un-rebased: dyld never slid them, so the C++
+       * static initializers never ran (CThreadLocalBase's pthread_key_create
+       * never fired -> garbage TLS). REGENERATE them here from the already-
+       * transformed pointer blobs so dyld rebases the x86_64 output when it
+       * slides. dyld's x86_64 SUPPORT_CLASSIC_RELOCS path handles VANILLA
+       * pointer-sized local relocs. */
+      local_relocs.clear();
+      if (env.archive->template subcommand<DyldInfo>() == nullptr) {
+         regenerate_local_relocs(env);
+      }
+      if (local_relocs.empty()) {
+         dysymtab.locreloff = 0;    dysymtab.nlocrel = 0;
+      } else {
+         dysymtab.nlocrel = local_relocs.size();
+         dysymtab.locreloff =
+            env.allocate(align<bits>(local_relocs.size() * sizeof(relocation_info)));
+      }
+   }
+
+   /* Build classic VANILLA local relocations (rebases) for every absolute,
+    * pointer-sized __DATA pointer in the (classic) x86_64 output. The pointer
+    * VALUES are already correct — DataParser / NonLazySymbolPointer detected,
+    * widened (4->8) and re-resolved each to the new preferred vmaddr; the only
+    * missing piece is telling dyld to add the load slide, which a local reloc
+    * does. Enumerate the transformed pointer blobs (NonLazySymbolPointer with a
+    * resolved internal pointee = __mod_init_func / __mod_term_func entries and
+    * baked compile-time data pointers); SKIP the indirect-pointer sections
+    * (S_*_SYMBOL_POINTERS), which dyld rebases/binds via the indirect symbol
+    * table — a locrel there would double-rebase. */
+   template <Bits bits>
+   void Dysymtab<bits>::regenerate_local_relocs(BuildEnv<bits>& env) {
+      /* r_address is an offset from the reloc base. dyld bases 64-bit classic
+       * local relocs on the FIRST WRITABLE segment (not __TEXT) — text relocs
+       * aren't permitted in 64-bit, so the base is the first __DATA-like
+       * segment (see dyld ImageLoaderMachOClassic::getRelocBase /
+       * MachOAnalyzer::relocBaseAddress). Using __TEXT yields r_address values
+       * dyld rejects as "out of range". */
+      std::size_t base = 0;
+      bool have_base = false;
+      for (Segment<bits> *seg : env.archive->segments()) {
+         const std::string sn(seg->segment_command.segname,
+                              strnlen(seg->segment_command.segname,
+                                      sizeof(seg->segment_command.segname)));
+         if (sn == SEG_LINKEDIT) { continue; }
+         if (seg->segment_command.initprot & VM_PROT_WRITE) {
+            base = seg->segment_command.vmaddr;
+            have_base = true;
+            break;
+         }
+      }
+      if (!have_base) { return; }
+
+      for (Segment<bits> *seg : env.archive->segments()) {
+         const std::string segname(seg->segment_command.segname,
+                                   strnlen(seg->segment_command.segname,
+                                           sizeof(seg->segment_command.segname)));
+         if (segname == SEG_PAGEZERO || segname == SEG_LINKEDIT) { continue; }
+
+         for (Section<bits> *sect : seg->sections) {
+            const uint32_t stype = sect->sect.flags & SECTION_TYPE;
+            if (stype == S_NON_LAZY_SYMBOL_POINTERS ||
+                stype == S_LAZY_SYMBOL_POINTERS) {
+               continue; /* dyld rebases these via the indirect symbol table */
+            }
+
+            for (SectionBlob<bits> *blob : sect->content) {
+               auto *nlp = dynamic_cast<NonLazySymbolPointer<bits> *>(blob);
+               if (nlp == nullptr || nlp->pointee == nullptr) { continue; }
+
+               relocation_info ri;
+               std::memset(&ri, 0, sizeof ri);
+               ri.r_address = static_cast<int32_t>(blob->loc.vmaddr - base);
+               ri.r_symbolnum = 0;
+               ri.r_pcrel = 0;
+               ri.r_length = (bits == Bits::M64) ? 3 : 2; /* pointer size */
+               ri.r_extern = 0;
+               ri.r_type = GENERIC_RELOC_VANILLA; /* == X86_64_RELOC_UNSIGNED == 0 */
+               local_relocs.push_back(ri);
+            }
+         }
+      }
    }
 
    template <Bits bits>
    std::size_t Dysymtab<bits>::content_size() const {
-      return align<bits>(indirectsyms.size() * sizeof(uint32_t));
+      return align<bits>(indirectsyms.size() * sizeof(uint32_t)) +
+             align<bits>(local_relocs.size() * sizeof(relocation_info));
    }
 
    template <Bits bits>
@@ -254,6 +346,9 @@ namespace MachO {
    void Dysymtab<bits>::Emit(Image& img, std::size_t offset) const {
       img.at<dysymtab_command>(offset) = dysymtab;
       img.copy(dysymtab.indirectsymoff, indirectsyms.begin(), indirectsyms.size());
+      if (!local_relocs.empty()) {
+         img.copy(dysymtab.locreloff, local_relocs.begin(), local_relocs.size());
+      }
    }
 
    template <Bits bits>
