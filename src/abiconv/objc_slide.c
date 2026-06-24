@@ -69,6 +69,10 @@ extern void _86x64_objc_register_classes(const struct mach_header_64 *mh,
 uint64_t g_init_shadow_sp     = 0;   /* grows down; 64 bytes per nesting level */
 uint64_t g_init_low_stack_top = 0;   /* 16-aligned top of the low-4GB init stack */
 extern void abiconv_init_trampoline(void);
+/* Run one translated __mod_init_func on the low-4GB init stack and return (see
+ * init_trampoline.asm). Used by the ABICONV_RUN_INITS path below. */
+extern void abiconv_call_init(void *target, long argc, char **argv,
+                              char **envp, char **apple);
 
 /* The init stack lives at a FIXED low address shared by every co-located
  * libabiconv copy, allocated with mach_vm_allocate (NOT the shim malloc).
@@ -232,14 +236,37 @@ static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
             }
             void **slots = (void **)base;
             size_t wrapped = 0;
+            /* Two strategies (see the Portal 2 translation notes s3b):
+             *  - DEFAULT: rewrite each slot to a low-stack JIT stub and let dyld
+             *    call it. Works on the dyld that shipped with the iPhoto-era
+             *    macOS, but dyld4 VALIDATES __mod_init_func entries are in-image
+             *    and SILENTLY SKIPS our out-of-image stubs → the initializers
+             *    never run.
+             *  - ABICONV_RUN_INITS: run each init OURSELVES right here (the
+             *    add-image callback fires before dyld's init pass), on the
+             *    low-4GB init stack, then NULL the slot so dyld skips it. This
+             *    sidesteps dyld4's in-image validation entirely. Per-image, in
+             *    image-load (≈bottom-up dependency) order; nested dlopen during
+             *    an init re-enters here and the trampoline's shadow stack keeps
+             *    nesting LIFO-correct. */
+            const int run_now = getenv("ABICONV_RUN_INITS") != NULL;
             for (size_t j = 0; j < n; j++) {
                if (!slots[j]) { continue; }
-               void *stub = make_init_stub(slots[j]);
-               if (stub) { slots[j] = stub; ++wrapped; }
+               if (run_now) {
+                  void *t = slots[j];
+                  slots[j] = NULL;          /* null FIRST: dyld (and a nested
+                                             * re-entry) must not also run it */
+                  abiconv_call_init(t, 0, NULL, NULL, NULL);
+                  ++wrapped;
+               } else {
+                  void *stub = make_init_stub(slots[j]);
+                  if (stub) { slots[j] = stub; ++wrapped; }
+               }
             }
             if (g_verbose) {
-               fprintf(stderr, "abiconv init_stack: wrapped %zu/%zu init funcs "
-                       "in %s\n", wrapped, n, imgname);
+               fprintf(stderr, "abiconv init_stack: %s %zu/%zu init funcs "
+                       "in %s\n", run_now ? "RAN" : "wrapped",
+                       wrapped, n, imgname);
             }
          }
       }

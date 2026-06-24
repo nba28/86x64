@@ -29,8 +29,26 @@
 
    segment .text
    global _abiconv_init_trampoline
+   global _abiconv_call_init
    extern _g_init_shadow_sp        ; uint64_t: grows DOWN; 64 bytes per nesting level
    extern _g_init_low_stack_top    ; uint64_t: 16-aligned top of the dedicated low-4GB init stack
+
+;; void abiconv_call_init(void *target, long argc, char **argv, char **envp, char **apple)
+;; Run a translated __mod_init_func OURSELVES (from objc_slide.c's add-image
+;; callback) instead of leaving it for dyld — dyld4 SKIPS our rewritten
+;; out-of-image __mod_init_func stubs (it validates init entries are in-image),
+;; so the wrapped initializers never ran. This sets r11=target + the dyld init
+;; ABI regs and falls into the trampoline body, which switches to the low-4GB
+;; init stack, builds the i386 frame, runs the init, and `ret`s back to OUR
+;; caller (the trampoline's .landing restores the saved rsp then `ret`).
+_abiconv_call_init:
+   ;; SysV in: rdi=target rsi=argc rdx=argv rcx=envp r8=apple
+   mov r11, rdi                    ; target i386 init func
+   mov rdi, rsi                    ; argc
+   mov rsi, rdx                    ; argv
+   mov rdx, rcx                    ; envp
+   mov rcx, r8                     ; apple
+   ;; fall through into the trampoline (it ends in `ret` -> returns to our caller)
 
 _abiconv_init_trampoline:
    ;; inputs: r11 = target i386 init func (set by the per-slot stub)
