@@ -421,6 +421,144 @@ def cmd_resync(args):
         good(f"{len(copies)} copies synced + ad-hoc signed")
 
 
+def _find_libinterpose():
+    """The runtime interpose helper, wherever the build put it."""
+    for c in (BUILD / "src" / "abiconv" / "libinterpose.dylib",
+              BUILD / "src" / "86x64" / "libinterpose.dylib"):
+        if c.exists():
+            return c
+    return None
+
+
+def cmd_tree(args):
+    """Translate a NON-bundle directory tree of i386 binaries (e.g. a Source-
+    engine game like Portal 2) into x86_64.
+
+    Trees differ from .app bundles in two ways the bundle path can't model:
+    there is no Info.plist, and the common Source layout keeps the i386 build in
+    one dir (`bin/osx32`) while expecting the x86_64 build in a sibling
+    (`bin/osx64`), with the embedded runtime module paths byte-patched
+    osx32->osx64. This command captures that workflow generically — nothing here
+    is Source-specific beyond the path strings you pass:
+
+        m64 tree "<gameroot>" --src bin/osx32 --out bin/osx64 \\
+                 --exec portal2_osx --skip libcef.dylib --patch
+
+    With no --src/--out it simply translates every i386 Mach-O under <root> in
+    place (the plain-directory case). Each binary goes through the same
+    standalone pipeline as `m64 translate <file> -o <out>`.
+    """
+    require(PIPELINE_SH, LIBABICONV)
+    root = Path(args.root).resolve()
+    if not root.is_dir():
+        sys.exit(f"m64 tree: {root} is not a directory")
+    src_dir = (root / args.src) if args.src else root
+    out_dir = (root / args.out) if args.out else src_dir
+    if not src_dir.is_dir():
+        sys.exit(f"m64 tree: source dir {src_dir} does not exist")
+    skip = set(args.skip or [])
+
+    # Targets: every i386 Mach-O under src_dir (relative layout preserved into
+    # out_dir), plus any explicit root-level executables (--exec).
+    targets = []                                   # [(input, output)]
+    for m in sorted(src_dir.rglob("*")):
+        if m.is_symlink() or not m.is_file() or not macho_magic(m):
+            continue
+        if m.name in skip or m.name in OUR_RUNTIME_LIBS:
+            continue
+        if "i386" not in archs_of(m):
+            continue                               # native/other → leave alone
+        targets.append((m, out_dir / m.relative_to(src_dir)))
+    for name in (args.exec or []):
+        e = root / name
+        if not (e.is_file() and macho_magic(e)):
+            warn(f"--exec {name}: not a Mach-O at {e}")
+            continue
+        targets.append((e, out_dir / name))
+
+    if args.list:
+        info(f"tree {root.name}: {len(targets)} i386 binaries → {out_dir}")
+        for i, o in targets:
+            print(f"  {i.relative_to(root)} → {o.relative_to(root)}")
+        return
+
+    info(f"tree {root.name}: translating {len(targets)} i386 binaries  "
+         f"{src_dir.relative_to(root) if src_dir != root else '.'} → "
+         f"{out_dir.relative_to(root) if out_dir != root else '.'}")
+    if not args.dry_run:
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    ok = 0
+    failures = []
+    for inp, outp in targets:
+        if not args.dry_run:
+            outp.parent.mkdir(parents=True, exist_ok=True)
+        ns = argparse.Namespace(output=str(outp), keep=args.keep,
+                                dry_run=args.dry_run)
+        try:
+            translate_standalone(inp, ns)
+            ok += 1
+        except Exception as e:                     # keep going; report at the end
+            failures.append((inp.name, e))
+            warn(f"FAIL {inp.name}: {e}")
+    info(f"translated ok={ok} fail={len(failures)}")
+    if args.dry_run:
+        return
+
+    # Runtime support libs alongside the outputs (translated binaries load
+    # libabiconv via @loader_path / leafname).
+    if not args.no_runtime:
+        libs = [LIBABICONV]
+        li = _find_libinterpose()
+        if li:
+            libs.append(li)
+        for lib in libs:
+            dst = out_dir / Path(lib).name
+            shutil.copy2(lib, dst)
+            subprocess.run(["codesign", "-f", "-s", "-", str(dst)],
+                           capture_output=True)
+        good(f"copied {len(libs)} runtime lib(s) → {out_dir.relative_to(root)}")
+
+    # Equal-length path byte-patch (Source binaries build absolute module paths
+    # from the embedded literal — rewrite bin/osx32 → bin/osx64 in place).
+    if args.patch:
+        if not (args.src and args.out):
+            warn("--patch needs both --src and --out; skipping")
+        elif len(args.src) != len(args.out):
+            warn(f"--patch needs equal-length --src/--out "
+                 f"({args.src!r} vs {args.out!r}); skipping")
+        else:
+            a, b = args.src.encode(), args.out.encode()
+            n = 0
+            for f in sorted(out_dir.rglob("*")):
+                if not f.is_file() or f.is_symlink() or not macho_magic(f):
+                    continue
+                data = f.read_bytes()
+                if a in data:
+                    f.write_bytes(data.replace(a, b))
+                    n += 1
+            good(f"byte-patched {args.src} → {args.out} in {n} binaries")
+
+    # Ad-hoc re-sign every output (MACHO_HEADERPAD reserves header room so the
+    # signature can't clobber __text). Patching/copying invalidated them.
+    nsign = 0
+    for f in sorted(out_dir.rglob("*")):
+        if f.is_file() and not f.is_symlink() and macho_magic(f):
+            subprocess.run(["codesign", "-f", "-s", "-", str(f)],
+                           capture_output=True)
+            nsign += 1
+    good(f"ad-hoc signed {nsign} binaries in {out_dir.relative_to(root)}")
+
+    if failures:
+        warn(f"{len(failures)} translation failure(s): "
+             + ", ".join(n for n, _ in failures))
+    exe = (args.exec or [None])[0]
+    if exe:
+        rel = (out_dir / exe).relative_to(root)
+        info(f"run:  cd {str(root)!r} ; "
+             f'DYLD_LIBRARY_PATH="$PWD/{out_dir.relative_to(root)}" ./{rel}')
+
+
 def cmd_rpath_fix(args):
     require(RPATH_SWEEP)
     info(f"rpath sweep {Path(args.app).name}")
@@ -633,6 +771,33 @@ def build_parser():
                             "copy inside a bundle (+ ad-hoc sign)")
     s.add_argument("app")
     common(s); s.set_defaults(func=cmd_resync)
+
+    # tree (non-bundle directory trees, e.g. Source-engine games)
+    tr = sub.add_parser(
+        "tree",
+        help="translate a non-bundle directory tree (e.g. a Source-engine game "
+             "like Portal 2): out-of-place src→out, runtime copy, path patch, sign")
+    tr.add_argument("root", help="the project root directory (e.g. the gameroot)")
+    tr.add_argument("--src", metavar="SUBDIR",
+                    help="subdir of i386 inputs, relative to root (e.g. bin/osx32). "
+                         "Default: translate in place under root.")
+    tr.add_argument("--out", metavar="SUBDIR",
+                    help="subdir for x86_64 outputs (e.g. bin/osx64). "
+                         "Default: same as --src (in place).")
+    tr.add_argument("--exec", action="append", metavar="NAME",
+                    help="a root-level executable to also translate (repeatable)")
+    tr.add_argument("--skip", action="append", metavar="NAME",
+                    help="leaf names to leave untranslated (repeatable)")
+    tr.add_argument("--patch", action="store_true",
+                    help="equal-length byte-patch of the --src string → the --out "
+                         "string in outputs (Source binaries embed bin/osx32 paths)")
+    tr.add_argument("--no-runtime", action="store_true",
+                    help="don't copy libabiconv/libinterpose into the out dir")
+    tr.add_argument("--list", action="store_true",
+                    help="just list what would be translated")
+    tr.add_argument("-k", "--keep", action="store_true",
+                    help="keep intermediate tempdirs")
+    common(tr); tr.set_defaults(func=cmd_tree)
 
     # rpath-fix
     rp = sub.add_parser("rpath-fix", help="sweep/repair @rpath load commands")

@@ -23,3 +23,4 @@ CTestTestfile.cmake
 Testing/.DS_Store
 __pycache__/
 build/
+references/
