@@ -500,6 +500,17 @@ namespace MachO {
       }
 
       Instruction<bits> *prev_inst = nullptr;
+      /* Category of the last NON-nop instruction on the linear walk. Block (0b)
+       * uses it (not prev_inst alone) to tell whether a branch target has a LIVE
+       * fall-through predecessor: a slow-path target frequently sits after
+       * `ret` + alignment nops, so prev_inst is a nop while the real predecessor
+       * (the RET) ends control flow. Seeing through the nops lets the target
+       * ADOPT its branch anchor snapshot instead of intersecting it with the
+       * dead post-RET state — which otherwise dropped the PIC anchor and left a
+       * `disp(%ebx)` data store carrying its stale i386 displacement (iPhoto
+       * UpgradeChecker +[checkOSVersion:] `osVersion = SystemVersion()` -> store
+       * into read-only __TEXT -> SIGBUS). */
+      xed_category_enum_t last_flow_cat = XED_CATEGORY_INVALID;
       for (SectionBlob<bits> *blob : content) {
          auto *inst = dynamic_cast<Instruction<bits> *>(blob);
          if (!inst) {
@@ -547,12 +558,19 @@ namespace MachO {
          {
             auto snap_it = branch_anchor_snap.find(inst->loc.vmaddr);
             if (snap_it != branch_anchor_snap.end()) {
+               /* Is the linear fall-through into here DEAD? Consult the last
+                * NON-nop instruction (last_flow_cat), not just prev_inst: a
+                * branch target commonly sits after `ret` + alignment nops, so
+                * prev_inst is a nop and the carried `anchors` is the dead
+                * post-RET state. If the real predecessor ended flow (RET /
+                * uncond JMP) the only way in is the branch -> ADOPT its snapshot
+                * outright; otherwise the target also has a live fall-through ->
+                * JOIN by intersection. (prev_inst==nullptr after interleaved
+                * data keeps the old conservative intersect.) */
                bool no_fallthrough = false;
                if (prev_inst != nullptr) {
-                  const xed_category_enum_t pcat =
-                     xed_decoded_inst_get_category(&prev_inst->xedd);
-                  no_fallthrough = (pcat == XED_CATEGORY_RET ||
-                                    pcat == XED_CATEGORY_UNCOND_BR);
+                  no_fallthrough = (last_flow_cat == XED_CATEGORY_RET ||
+                                    last_flow_cat == XED_CATEGORY_UNCOND_BR);
                }
                if (no_fallthrough) {
                   anchors = snap_it->second;
@@ -849,6 +867,13 @@ namespace MachO {
             anchors[thunk_anchor_reg] = thunk_anchor_vm;
          }
 
+         /* Track the last non-nop category for block (0b)'s dead-fall-through
+          * test. Alignment nops between a RET/uncond-JMP and a branch target are
+          * transparent: skip them so the target still sees the RET that precedes
+          * the padding. */
+         if (cat != XED_CATEGORY_NOP && cat != XED_CATEGORY_WIDENOP) {
+            last_flow_cat = cat;
+         }
          prev_inst = inst;
       }
    }
