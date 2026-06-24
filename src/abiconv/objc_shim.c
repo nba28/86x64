@@ -504,6 +504,11 @@ static id shadow_real(uint32_t s);
 static id       legacy_obj_to_real(uint32_t p);
 static id       lpair_lookup(uint32_t p);
 static uint64_t unwrap_obj_arg(uint32_t a);
+/* The i386 IMP of a legacy instance method on `c` (walking superclasses), or 0
+ * if the legacy-method map has none / it is implausible. Lets the forward bridge
+ * route [self legacyOnlyMethod] back to the i386 code when the modern class
+ * never registered it (defined after rmeth_lookup). */
+static uint64_t legacy_instance_method_imp(Class c, SEL s);
 
 /* i386 layout of struct objc_super: two 4-byte pointers. The translated
  * code passes a pointer to this struct as the first arg of msgSendSuper. */
@@ -2788,6 +2793,56 @@ static int bp_track_tag(struct objc_call_plan *plan, const uint32_t *args32,
    return 1;
 }
 
+/* conformsToProtocol: with a LEGACY i386 Protocol argument. The app's own
+ * @protocol(...) objects live in its i386 __OBJC with the fragile-ABI layout
+ * { Class isa; const char *name; struct protocol_list*; method_desc_list*
+ *   instance_methods, *class_methods } — name at +4 — NOT the modern opaque
+ * Protocol object. Passing one straight to native -[NSObject conformsToProtocol:]
+ * makes libobjc strcmp a garbage name pointer -> crash (iPhoto AlbumView/AVSection
+ * data-source wiring). Resolve it to the modern Protocol by NAME
+ * (objc_getProtocol) and ask natively; an app-private protocol the modern runtime
+ * never registered yields NO (safe: a reverse-registered class adopts no native
+ * protocols anyway, and NO beats a crash). A protocol passed as an arena handle
+ * (a wrapped native Protocol) unwraps directly. Universal: any i386 app calling
+ * conformsToProtocol:. Keyed on the selector like bp_track_tag/bp_fast_enum. */
+static int bp_conforms_protocol(struct objc_call_plan *plan, const uint32_t *args32,
+                                id real_self, SEL sel) {
+   static SEL s_conforms;
+   if (!s_conforms) s_conforms = sel_registerName("conformsToProtocol:");
+   if (sel != s_conforms) return 0;
+   /* A legacy class overriding conformsToProtocol: keeps the i386 path. */
+   if (real_self &&
+       method_is_legacy(class_getInstanceMethod(object_getClass(real_self), sel)))
+      return 0;
+
+   uint32_t prot32 = args32[2];
+   Protocol *p = NULL;
+   uint64_t r = x64_objc_unwrap(prot32);            /* arena handle -> native ptr */
+   if (r > 0xFFFFFFFFULL) {
+      p = (Protocol *)(uintptr_t)r;                 /* already a modern Protocol */
+   } else if (prot32 && mem_readable((uintptr_t)prot32 + 4, 4)) {
+      uint32_t name_ptr = *(const uint32_t *)(uintptr_t)(prot32 + 4);
+      if (name_ptr && mem_readable(name_ptr, 1))
+         p = objc_getProtocol((const char *)(uintptr_t)name_ptr);
+   }
+
+   int conforms = 0;
+   if (p && real_self)
+      conforms = ((BOOL (*)(id, SEL, Protocol *))objc_msgSend)(real_self, sel, p) ? 1 : 0;
+
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[bp] conformsToProtocol: prot32=0x%x -> %p (%s) = %d\n",
+              prot32, (void *)p, p ? protocol_getName(p) : "(unresolved)", conforms);
+      fflush(stderr);
+   }
+   plan->nreg = 1;
+   plan->reg[0] = (uint64_t)conforms;
+   plan->reg[1] = plan->reg[2] = plan->reg[3] = plan->reg[4] = plan->reg[5] = 0;
+   plan->ret_is_obj = 0;
+   plan->target = (uint64_t)(uintptr_t)x64_ret_identity;
+   return 1;
+}
+
 void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
    appkit_compat_install();
@@ -2838,6 +2893,12 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    if (bp_track_tag(plan, args32, real_self, sel))
       return;
 
+   /* conformsToProtocol: with a legacy i386 Protocol argument — translate it to
+    * the modern Protocol by name before asking natively (else libobjc strcmps a
+    * garbage protocol-name pointer and crashes). */
+   if (bp_conforms_protocol(plan, args32, real_self, sel))
+      return;
+
    /* Legacy class-method dispatch fallback. Two distinct cases need it, both
     * resolved by jumping straight into the translated i386 IMP:
     *   (a) real_self == nil: a class message to one of our binary's OWN legacy
@@ -2870,6 +2931,33 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
       if (imp) {
          if (getenv("OBJC_BRIDGE_TRACE")) {
             fprintf(stderr, "[bp] legacy class-method dispatch \"%s\" -> imp 0x%llx\n",
+                    sel_getName(sel), (unsigned long long)imp);
+            fflush(stderr);
+         }
+         plan->legacy_imp = imp;
+         return;
+      }
+   }
+
+   /* Legacy INSTANCE-method dispatch fallback (the instance analogue of the
+    * class-method case above). A reverse-bridged legacy instance can be sent a
+    * selector that exists only in the app's i386 class metadata and was never
+    * landed on the modern class by class_addMethod (a registration gap, or a
+    * method list a later override re-add rejected) — the modern runtime then has
+    * NO method, so the native dispatch below would raise "unrecognized selector"
+    * and abort (iWeb -[BLCapabilitiesSingleton pSetOperationalLicenseState:],
+    * sent from inside the class's own reverse-bridged -init). When the receiver's
+    * class has no method for the selector on the modern runtime but the
+    * legacy-method map does (walking the superclass chain, as reverse_prep does),
+    * jump straight to the i386 IMP, reusing the i386 frame (args32[0] is already
+    * the shadow the IMP expects). Precise: fires only where native dispatch would
+    * otherwise crash; rmeth is keyed by our own legacy classes. Universal. */
+   if (sel && real_self && !object_isClass(real_self) &&
+       class_getInstanceMethod(object_getClass(real_self), sel) == NULL) {
+      uint64_t imp = legacy_instance_method_imp(object_getClass(real_self), sel);
+      if (imp) {
+         if (getenv("OBJC_BRIDGE_TRACE")) {
+            fprintf(stderr, "[bp] legacy instance-method dispatch \"%s\" -> imp 0x%llx\n",
                     sel_getName(sel), (unsigned long long)imp);
             fflush(stderr);
          }
@@ -3302,6 +3390,30 @@ find_module_info(const struct mach_header_64 *mh, intptr_t slide, size_t *size_o
    return NULL;
 }
 
+/* Locate an arbitrary __OBJC section (e.g. __category, __class) by name;
+ * returns its slid runtime base + byte size, or NULL. */
+static const void *find_objc_section(const struct mach_header_64 *mh,
+                                     intptr_t slide, const char *sectname,
+                                     size_t *size_out) {
+   *size_out = 0;
+   const uint8_t *cmd_ptr = (const uint8_t *)(mh + 1);
+   for (uint32_t c = 0; c < mh->ncmds; ++c) {
+      const struct load_command *lc = (const struct load_command *)cmd_ptr;
+      cmd_ptr += lc->cmdsize;
+      if (lc->cmd != LC_SEGMENT_64) continue;
+      const struct segment_command_64 *seg = (const struct segment_command_64 *)lc;
+      if (strcmp(seg->segname, "__OBJC") != 0) continue;
+      const struct section_64 *sects = (const struct section_64 *)(seg + 1);
+      for (uint32_t s = 0; s < seg->nsects; ++s) {
+         if (strcmp(sects[s].sectname, sectname) == 0) {
+            *size_out = sects[s].size;
+            return (const void *)((uintptr_t)sects[s].addr + slide);
+         }
+      }
+   }
+   return NULL;
+}
+
 /* Public entry: register this image's legacy __OBJC classes with the modern
  * runtime so AppKit/Foundation can message them (principal class, delegates,
  * NSClassFromString, …). The real work lives in reverse_register_image() at
@@ -3339,7 +3451,12 @@ struct legacy_reg_ent {
 static struct legacy_reg_ent g_legacy_reg[LEGACY_REG_CAP];
 static uint32_t g_legacy_reg_cnt = 0;   /* distinct classes indexed (for tracing) */
 
-#define LEGACY_CAT_CAP 4096u
+/* Must exceed the TOTAL legacy category count across all images a single
+ * libabiconv copy indexes. Direct __category enumeration (see the indexer)
+ * surfaces ALL categories, not just the ~8% reachable via garbled symtabs
+ * (iWeb.dylib alone has 581), so this is far larger than the old symtab-only
+ * count needed. */
+#define LEGACY_CAT_CAP 32768u
 static const struct legacy_objc_category *g_legacy_cats[LEGACY_CAT_CAP];
 static uint32_t g_legacy_cat_cnt = 0;
 
@@ -3454,7 +3571,7 @@ static uint64_t find_category_class_method(const char *clsname, const char *sel_
 
 static uint64_t legacy_class_method_imp_byname(const char *clsname,
                                                const char *sel_name) {
-   if (!clsname || !sel_name) { return 0; }
+   if (!clsname || !sel_name || clsname[0] == '\0') { return 0; }
 
    /* Walk the class and its legacy-superclass chain, checking each level's
     * metaclass method lists (class methods live in the metaclass) and any
@@ -3485,6 +3602,50 @@ static uint64_t legacy_class_method_imp_byname(const char *clsname,
          if (imp) { return imp; }
       }
       uint64_t cimp = find_category_class_method(cur, sel_name);
+      if (cimp) { return cimp; }
+      if (!c || !ptr_ok(c->super_class, 1)) { return 0; }
+      cur = (const char *)(uintptr_t)c->super_class;
+      c = legacy_registry_lookup(cur);
+      if (!c) { return 0; }
+   }
+   return 0;
+}
+
+/* Instance methods added to a class via a legacy category. */
+static uint64_t find_category_instance_method(const char *clsname, const char *sel_name) {
+   if (!clsname) { return 0; }
+   for (uint32_t i = 0; i < g_legacy_cat_cnt; ++i) {
+      const struct legacy_objc_category *cat = g_legacy_cats[i];
+      if (!ptr_ok(cat->class_name, 1)) { continue; }
+      const char *cn = (const char *)(uintptr_t)cat->class_name;
+      if (strcmp(cn, clsname) == 0) {
+         uint64_t imp = find_method_in_lists(cat->instance_methods, sel_name);
+         if (imp) { return imp; }
+      }
+   }
+   return 0;
+}
+
+/* The i386 IMP of a legacy INSTANCE method on `clsname` (walking the legacy
+ * super_class chain + category instance methods), or 0. The instance analogue of
+ * legacy_class_method_imp_byname; like it, this resolves through the RAW __OBJC
+ * metadata indexed in EVERY libabiconv copy (legacy_registry_lookup / g_legacy_reg)
+ * — NOT the per-copy g_rmeth table, which is populated only in the single copy
+ * that won the reverse-registration race. The forward bridge runs in the caller's
+ * copy, so it must use this cross-copy path (iWeb -[BLCapabilitiesSingleton
+ * pSetOperationalLicenseState:] was registered in the SFLicense copy but called
+ * from the iWeb-main copy). */
+static uint64_t legacy_instance_method_imp_byname(const char *clsname,
+                                                  const char *sel_name) {
+   if (!clsname || !sel_name || clsname[0] == '\0') { return 0; }
+   const struct legacy_objc_class *c = legacy_registry_lookup(clsname);
+   const char *cur = clsname;
+   for (int depth = 0; depth < 256; ++depth) {
+      if (c) {
+         uint64_t imp = find_method_in_lists(c->methodLists, sel_name);
+         if (imp) { return imp; }
+      }
+      uint64_t cimp = find_category_instance_method(cur, sel_name);
       if (cimp) { return cimp; }
       if (!c || !ptr_ok(c->super_class, 1)) { return 0; }
       cur = (const char *)(uintptr_t)c->super_class;
@@ -3547,6 +3708,44 @@ void _86x64_objc_index_legacy_classes(const struct mach_header_64 *mh,
          const struct legacy_objc_category *cat =
             (const struct legacy_objc_category *)(uintptr_t)cref;
          /* dedup by pointer (idempotent across repeated callbacks) */
+         int seen = 0;
+         for (uint32_t k = 0; k < g_legacy_cat_cnt; ++k) {
+            if (g_legacy_cats[k] == cat) { seen = 1; break; }
+         }
+         if (!seen && g_legacy_cat_cnt < LEGACY_CAT_CAP) {
+            g_legacy_cats[g_legacy_cat_cnt++] = cat;
+         }
+      }
+   }
+
+   /* Directly enumerate the __OBJC,__category section: translated __module_info
+    * symtabs are frequently garbled/truncated, so the cat_def walk above reaches
+    * only a fraction of an image's categories (iWeb.dylib: 44 of 581) — silently
+    * dropping categories that carry methods the forward bridge must dispatch
+    * (iWeb's Private category on BLCapabilitiesSingleton holds
+    * pSetOperationalLicenseState:). The __category section holds every
+    * legacy_objc_category struct (20 bytes) contiguously, independent of symtab
+    * integrity. Universal: catches all categories in any image; dedup-by-pointer
+    * keeps it idempotent across repeated callbacks and overlap with the cat_def
+    * walk. (The legacy metadata model is low-4GB; bail if the section loaded high.) */
+   size_t catsec_size = 0;
+   const struct legacy_objc_category *cats =
+      (const struct legacy_objc_category *)
+         find_objc_section(mh, slide, "__category", &catsec_size);
+   if (cats && (uintptr_t)cats <= 0xFFFFFFFFu) {
+      const size_t ncats = catsec_size / sizeof(struct legacy_objc_category);
+      for (size_t i = 0; i < ncats; ++i) {
+         const struct legacy_objc_category *cat = &cats[i];
+         if (!ptr_ok((uint32_t)(uintptr_t)cat, sizeof(*cat))) { continue; }
+         /* A real category names a NON-EMPTY class AND category. The __category
+          * section carries zero/garbage-named padding entries (iWeb.dylib: 168 of
+          * 581) that the symtab cat_def path skipped — an empty class_name would
+          * later strcmp-match an empty receiver name in find_category_* and walk a
+          * garbage class_methods pointer (SIGSEGV in scan_one_list). ptr_ok alone
+          * accepts a 0-length cstring, so check the first byte too. */
+         if (!legacy_cstr_ok(cat->class_name) ||
+             !legacy_cstr_ok(cat->category_name)) { continue; }
+         if (*(const char *)(uintptr_t)cat->class_name == '\0') { continue; }
          int seen = 0;
          for (uint32_t k = 0; k < g_legacy_cat_cnt; ++k) {
             if (g_legacy_cats[k] == cat) { seen = 1; break; }
@@ -3741,6 +3940,14 @@ static struct rmeth_ent *rmeth_lookup(Class c, SEL s) {
       i = (i + 1) & (RMETH_CAP - 1);
    }
    return NULL;
+}
+
+static uint64_t legacy_instance_method_imp(Class c, SEL s) {
+   /* Resolve through the raw __OBJC metadata (indexed in EVERY libabiconv copy),
+    * NOT the per-copy g_rmeth table: the forward bridge runs in the caller's copy,
+    * whose g_rmeth is empty for a class some OTHER copy reverse-registered. */
+   const char *cn = class_getName(c);
+   return cn ? legacy_instance_method_imp_byname(cn, sel_getName(s)) : 0;
 }
 
 /* ---- thread-local super-dispatch hint (see objc_bridge_prep_super) ----
@@ -4119,24 +4326,27 @@ static int class_is_legacy(Class cls) {
    return 0;
 }
 
-typedef Ivar (*objc_setiv_fn)(id, const char *, void *);
-typedef Ivar (*objc_getiv_fn)(id, const char *, void **);
-
+/* The REAL object_[sg]etInstanceVariable, reimplemented INLINE. We must NOT call
+ * the libobjc symbol here: x64_object_[sg]etInstanceVariable interpose it via
+ * __DATA,__interpose, and dyld redirects EVERY bind to that symbol process-wide —
+ * including dlsym(RTLD_NEXT/RTLD_DEFAULT, "object_setInstanceVariable"), which
+ * resolves back to our own interposer → unbounded self-recursion → stack overflow
+ * (iWeb's NSSpellChecker NIB outlet connection on a NON-legacy owner takes this
+ * fall-through). class_getInstanceVariable + a raw write at ivar_getOffset
+ * reproduces object_setInstanceVariable's exact (non-retaining) semantics without
+ * touching the interposed symbol (class_getInstanceVariable/ivar_getOffset are not
+ * interposed). Universal. */
 static Ivar real_object_setInstanceVariable(id o, const char *n, void *v) {
-   static objc_setiv_fn fn;
-   if (!fn) {
-      fn = (objc_setiv_fn)dlsym(RTLD_NEXT, "object_setInstanceVariable");
-      if (!fn) { fn = (objc_setiv_fn)dlsym(RTLD_DEFAULT, "object_setInstanceVariable"); }
-   }
-   return fn ? fn(o, n, v) : NULL;
+   if (!o || !n) { return NULL; }
+   Ivar iv = class_getInstanceVariable(object_getClass(o), n);
+   if (iv) { *(void **)((char *)o + ivar_getOffset(iv)) = v; }
+   return iv;
 }
 static Ivar real_object_getInstanceVariable(id o, const char *n, void **v) {
-   static objc_getiv_fn fn;
-   if (!fn) {
-      fn = (objc_getiv_fn)dlsym(RTLD_NEXT, "object_getInstanceVariable");
-      if (!fn) { fn = (objc_getiv_fn)dlsym(RTLD_DEFAULT, "object_getInstanceVariable"); }
-   }
-   return fn ? fn(o, n, v) : NULL;
+   if (!o || !n) { if (v) { *v = NULL; } return NULL; }
+   Ivar iv = class_getInstanceVariable(object_getClass(o), n);
+   if (v) { *v = iv ? *(void **)((char *)o + ivar_getOffset(iv)) : NULL; }
+   return iv;
 }
 
 static Ivar x64_object_setInstanceVariable(id obj, const char *name, void *value) {
@@ -4259,10 +4469,43 @@ static id legacy_instance_pair(uint32_t p, Class c) {
    return r;
 }
 
+/* True iff `p` points to a short, NUL-terminated printable C identifier that
+ * objc_getClass() resolves to a REAL class -- i.e. p is a class-name cstring
+ * (an ObjC class-message receiver from __cls_refs/__cstring), not a legacy
+ * object whose first word we should dereference as an isa. Bounded scan so
+ * objc_getClass never reads past mapped memory. A genuine legacy object's
+ * first bytes are an isa pointer, essentially never a printable string that
+ * names a live class, so this discriminates structurally, not by app. */
+static int cstring_names_real_class(uint32_t p) {
+   const char *s = (const char *)(uintptr_t)p;
+   char buf[160];
+   size_t i = 0;
+   for (;;) {
+      if (i >= sizeof(buf) - 1) { return 0; }      /* too long for a class name */
+      if (!mem_readable((uintptr_t)p + i, 1)) { return 0; }
+      char ch = s[i];
+      if (ch == '\0') { break; }
+      int ident = (ch == '_') ||
+                  (ch >= 'A' && ch <= 'Z') || (ch >= 'a' && ch <= 'z') ||
+                  (i > 0 && ch >= '0' && ch <= '9');
+      if (!ident) { return 0; }                     /* not an identifier char */
+      buf[i++] = ch;
+   }
+   if (i == 0) { return 0; }
+   buf[i] = '\0';
+   return objc_getClass(buf) != NULL;
+}
+
 /* If `p` is a raw legacy i386 object or class object in the translated image,
  * return the real modern object/Class the runtime can safely use; else 0. */
 static id legacy_obj_to_real(uint32_t p) {
    if (!ptr_ok(p, 4)) { return (id)0; }
+   /* A class-name cstring (e.g. "QTMovie") can have its leading bytes form a
+    * coincidentally-mapped address ('QTMo' = 0x6f4d5451) that passes the isa
+    * checks below and mis-pairs the string as a bogus legacy instance. If p
+    * actually names a real class, it is such a cstring: return 0 and let the
+    * caller's objc_getClass(name) path (resolve_self) or passthrough use it. */
+   if (cstring_names_real_class(p)) { return (id)0; }
    uint32_t isa = *(const uint32_t *)(uintptr_t)p;
    if (!ptr_ok(isa, sizeof(struct legacy_objc_class))) { return (id)0; }
    const struct legacy_objc_class *k =

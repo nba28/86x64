@@ -191,6 +191,9 @@ add_library(abiconv SHARED
   cf_callback_shim.c
   cb_bridge.c
   iokit_shim.c
+  carbon_memory.c
+  carbon_component.c
+  quicktime_image.c
   lazy_bind.c
   objc_msgSend.asm
   objc_reverse.asm
@@ -214,6 +217,10 @@ target_link_libraries(abiconv System objc
   "-framework ApplicationServices"
   "-framework IOKit"
   "-framework OpenGL"
+  # quicktime_image.c reimplements the QuickTime GraphicsImporter on these:
+  # CGImageSource (decode) + CGBitmapContext/CGImage (render into the GWorld).
+  "-framework ImageIO"
+  "-framework CoreGraphics"
   )
 add_dependencies(abiconv abiconv_asm)
 

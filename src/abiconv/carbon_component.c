@@ -1,0 +1,283 @@
+/*
+ * carbon_component.c — a generic reimplementation of the classic Mac OS
+ * Component Manager (Open[A]DefaultComponent / OpenComponent / CloseComponent /
+ * FindNextComponent / CountComponents / GetComponentInfo / ...).
+ *
+ * WHY: the Component Manager was GUTTED from modern macOS along with QuickTime.
+ * Its symbols still live in CoreServices/CarbonCore's .tbd, so abigen generated
+ * ABI shims that call the dead native entry points -> null deref (iPhoto's
+ * OpenADefaultComponent('grip','JPEG',&ci) to open the JPEG GraphicsImporter).
+ *
+ * This is a real, extensible registry + dispatch, NOT a one-call patch:
+ *   - backends register a (type, subType, manufacturer) descriptor + open/close
+ *     hooks via cm_register_backend (subType/manuf 0 = wildcard);
+ *   - Open* finds a matching backend, allocates a ComponentInstance (a real
+ *     low-4GB pointer handed straight back to the i386 caller — the libabiconv
+ *     heap is < 4GB, see malloc_shim.c), and runs the backend's open hook;
+ *   - the "component methods" (e.g. GraphicsImportDraw) are plain shims that
+ *     recover their per-instance storage with cm_inst_from_i386 + cm_inst_storage
+ *     and operate on it directly, so we never need the arcane ComponentCallNow
+ *     selector-dispatch ABI.
+ *
+ * UNIVERSAL: any i386 app using the Component Manager (QuickTime importers/
+ * exporters/codecs, the Sound Manager, etc.) is served; the still-image
+ * GraphicsImporter backend is registered by quicktime_image.c.
+ *
+ * Reached via the ___OpenADefaultComponent / ___CloseComponent / ... trampolines
+ * in maptable_tramp.asm; the CoreServices originals are excluded from abigen via
+ * custom.syms so these overrides win.
+ */
+
+#include "carbon_shim.h"
+#include <string.h>
+#include <os/lock.h>
+
+extern void *malloc(size_t);
+extern void  free(void *);
+
+/* ---- registry ----------------------------------------------------------- */
+
+#define CM_MAX_COMPONENTS 64
+
+typedef struct cm_component {
+   int          in_use;
+   cm_ostype    type, subtype, manuf;
+   cm_open_fn   open;
+   cm_close_fn  close;
+   const char  *name;
+} cm_component;
+
+/* A live ComponentInstance. The pointer to this struct IS the i386 handle. */
+#define CM_INST_MAGIC 0x434d4953u       /* 'CMIS' */
+struct cm_instance {
+   uint32_t            magic;
+   cm_component       *comp;
+   cm_ostype           open_subtype;    /* subtype actually requested at open */
+   void               *storage;         /* backend per-instance state */
+   struct cm_instance *next_live;
+};
+
+static cm_component   g_components[CM_MAX_COMPONENTS];
+static int            g_ncomponents;
+static struct cm_instance *g_live;       /* singly-linked live-instance set */
+static os_unfair_lock g_lock = OS_UNFAIR_LOCK_INIT;
+
+static cm_component *find_first(cm_ostype t, cm_ostype s, cm_ostype m);
+
+/* Symmetric wildcard match: a 0 on EITHER side means "any". */
+static int field_match(cm_ostype want, cm_ostype have)
+{
+   return want == 0 || have == 0 || want == have;
+}
+static int comp_matches(const cm_component *c,
+                        cm_ostype type, cm_ostype subtype, cm_ostype manuf)
+{
+   return c->in_use && field_match(type, c->type) &&
+          field_match(subtype, c->subtype) && field_match(manuf, c->manuf);
+}
+
+void cm_register_backend(cm_ostype type, cm_ostype subtype, cm_ostype manuf,
+                         cm_open_fn open, cm_close_fn close, const char *name)
+{
+   os_unfair_lock_lock(&g_lock);
+   if (g_ncomponents < CM_MAX_COMPONENTS) {
+      cm_component *c = &g_components[g_ncomponents++];
+      c->in_use  = 1;
+      c->type    = type;
+      c->subtype = subtype;
+      c->manuf   = manuf;
+      c->open    = open;
+      c->close   = close;
+      c->name    = name;
+   }
+   os_unfair_lock_unlock(&g_lock);
+}
+
+/* ---- instance lifecycle ------------------------------------------------- */
+
+static uint32_t open_component(cm_component *c, cm_ostype subtype)
+{
+   struct cm_instance *inst = (struct cm_instance *)malloc(sizeof(*inst));
+   if (!inst)
+      return 0;
+   inst->magic        = CM_INST_MAGIC;
+   inst->comp         = c;
+   inst->open_subtype = subtype;
+   inst->storage      = NULL;
+
+   if (c->open) {
+      cm_result r = c->open(inst);
+      if (r != cmNoErr) {
+         free(inst);
+         return 0;
+      }
+   }
+
+   os_unfair_lock_lock(&g_lock);
+   inst->next_live = g_live;
+   g_live = inst;
+   os_unfair_lock_unlock(&g_lock);
+   return to_i386(inst);
+}
+
+uint32_t cm_open_default(cm_ostype type, cm_ostype subtype)
+{
+   cm_component *c = find_first(type, subtype, 0);
+   return c ? open_component(c, subtype) : 0;
+}
+
+cm_instance *cm_inst_from_i386(uint32_t h)
+{
+   if (!h)
+      return NULL;
+   /* Validate against the live set so a stale/garbage handle never gets
+    * dereferenced (we only ever touch instances we created). */
+   struct cm_instance *want = (struct cm_instance *)i386_ptr(h);
+   struct cm_instance *found = NULL;
+   os_unfair_lock_lock(&g_lock);
+   for (struct cm_instance *p = g_live; p; p = p->next_live)
+      if (p == want && p->magic == CM_INST_MAGIC) { found = p; break; }
+   os_unfair_lock_unlock(&g_lock);
+   return found;
+}
+
+void     *cm_inst_storage(cm_instance *inst)            { return inst->storage; }
+void      cm_inst_set_storage(cm_instance *inst, void *s) { inst->storage = s; }
+cm_ostype cm_inst_subtype(cm_instance *inst)            { return inst->open_subtype; }
+
+static uint32_t close_instance(uint32_t h)
+{
+   struct cm_instance *inst = cm_inst_from_i386(h);
+   if (!inst)
+      return cmNoErr;                    /* tolerate double/!ours close */
+   os_unfair_lock_lock(&g_lock);
+   for (struct cm_instance **pp = &g_live; *pp; pp = &(*pp)->next_live)
+      if (*pp == inst) { *pp = inst->next_live; break; }
+   os_unfair_lock_unlock(&g_lock);
+
+   if (inst->comp && inst->comp->close)
+      inst->comp->close(inst);
+   inst->magic = 0;
+   free(inst);
+   return cmNoErr;
+}
+
+/* ---- i386-cdecl entry points -------------------------------------------- */
+/* The Component handed to i386 is the (low-4GB) address of a g_components[]
+ * entry; that round-trips through the 4-byte slot and back to a real pointer. */
+
+static cm_component *find_first(cm_ostype t, cm_ostype s, cm_ostype m)
+{
+   for (int i = 0; i < g_ncomponents; i++)
+      if (comp_matches(&g_components[i], t, s, m))
+         return &g_components[i];
+   return NULL;
+}
+
+/* ComponentInstance OpenDefaultComponent(OSType type, OSType subType); */
+uint32_t shim_OpenDefaultComponent(uint32_t *a)
+{
+   cm_component *c = find_first(a[0], a[1], 0);
+   return c ? open_component(c, a[1]) : 0;
+}
+
+/* OSErr OpenADefaultComponent(OSType type, OSType subType, ComponentInstance *ci); */
+uint32_t shim_OpenADefaultComponent(uint32_t *a)
+{
+   cm_component *c = find_first(a[0], a[1], 0);
+   uint32_t inst = c ? open_component(c, a[1]) : 0;
+   put_u32(a[2], inst);
+   return inst ? cmNoErr : cmCantOpenErr;
+}
+
+/* ComponentInstance OpenComponent(Component aComponent); */
+uint32_t shim_OpenComponent(uint32_t *a)
+{
+   cm_component *c = (cm_component *)i386_ptr(a[0]);
+   return c ? open_component(c, c->subtype) : 0;
+}
+
+/* OSErr OpenAComponent(Component aComponent, ComponentInstance *ci); */
+uint32_t shim_OpenAComponent(uint32_t *a)
+{
+   cm_component *c = (cm_component *)i386_ptr(a[0]);
+   uint32_t inst = c ? open_component(c, c->subtype) : 0;
+   put_u32(a[1], inst);
+   return inst ? cmNoErr : cmCantOpenErr;
+}
+
+/* ComponentResult CloseComponent(ComponentInstance ci); */
+uint32_t shim_CloseComponent(uint32_t *a) { return close_instance(a[0]); }
+
+/* Component FindNextComponent(Component prev, ComponentDescription *looking);
+ * ComponentDescription (i386) = 5 x UInt32: type,subType,manuf,flags,flagsMask. */
+uint32_t shim_FindNextComponent(uint32_t *a)
+{
+   uint32_t prev = a[0];
+   uint32_t *cd  = (uint32_t *)i386_ptr(a[1]);
+   cm_ostype t = cd ? cd[0] : 0, s = cd ? cd[1] : 0, m = cd ? cd[2] : 0;
+
+   /* Resume after `prev` (a g_components[] address) if given. */
+   int start = 0;
+   if (prev) {
+      cm_component *pc = (cm_component *)i386_ptr(prev);
+      start = (int)(pc - g_components) + 1;
+      if (start < 0 || start > g_ncomponents) start = g_ncomponents;
+   }
+   for (int i = start; i < g_ncomponents; i++)
+      if (comp_matches(&g_components[i], t, s, m))
+         return to_i386(&g_components[i]);
+   return 0;
+}
+
+/* long CountComponents(ComponentDescription *looking); */
+uint32_t shim_CountComponents(uint32_t *a)
+{
+   uint32_t *cd = (uint32_t *)i386_ptr(a[0]);
+   cm_ostype t = cd ? cd[0] : 0, s = cd ? cd[1] : 0, m = cd ? cd[2] : 0;
+   uint32_t n = 0;
+   for (int i = 0; i < g_ncomponents; i++)
+      if (comp_matches(&g_components[i], t, s, m))
+         n++;
+   return n;
+}
+
+/* ComponentResult GetComponentInfo(Component c, ComponentDescription *cd,
+ *                                  Handle name, Handle info, Handle icon); */
+uint32_t shim_GetComponentInfo(uint32_t *a)
+{
+   cm_component *c = (cm_component *)i386_ptr(a[0]);
+   uint32_t *cd = (uint32_t *)i386_ptr(a[1]);
+   if (!c)
+      return cmParamErr;
+   if (cd) {
+      cd[0] = c->type;  cd[1] = c->subtype; cd[2] = c->manuf;
+      cd[3] = 0;        cd[4] = 0;
+   }
+   /* name handle (a[2]): fill with a Pascal string if requested. */
+   if (a[2] && c->name) {
+      size_t n = strlen(c->name);
+      if (n > 255) n = 255;
+      void *blk = cm_handle_block(a[2]);
+      if (blk && cm_handle_size(a[2]) >= n + 1) {
+         unsigned char *p = (unsigned char *)blk;
+         p[0] = (unsigned char)n;
+         memcpy(p + 1, c->name, n);
+      }
+   }
+   return cmNoErr;
+}
+
+/* Component ResolveComponentAlias(Component c); — no aliasing, identity. */
+uint32_t shim_ResolveComponentAlias(uint32_t *a) { return a[0]; }
+
+/* OSErr UnregisterComponent(Component c); */
+uint32_t shim_UnregisterComponent(uint32_t *a)
+{
+   cm_component *c = (cm_component *)i386_ptr(a[0]);
+   os_unfair_lock_lock(&g_lock);
+   if (c >= g_components && c < g_components + CM_MAX_COMPONENTS)
+      c->in_use = 0;
+   os_unfair_lock_unlock(&g_lock);
+   return cmNoErr;
+}

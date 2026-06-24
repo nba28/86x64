@@ -392,6 +392,76 @@ _x64_exc_longjmp:
 	MTSHIM	___object_getInstanceVariable,  _shim_object_getInstanceVariable
 
 ;; ---------------------------------------------------------------------
+;; Carbon Memory Manager (carbon_memory.c): classic Handle/Ptr on the low-4GB
+;; heap. Abigen's native shims would return >4GB pointers that truncate into
+;; the i386 4-byte Handle/Ptr slots. Excluded from abigen via custom.syms.
+	MTSHIM	___NewHandle,        _shim_NewHandle
+	MTSHIM	___NewHandleClear,   _shim_NewHandleClear
+	MTSHIM	___DisposeHandle,    _shim_DisposeHandle
+	MTSHIM	___GetHandleSize,    _shim_GetHandleSize
+	MTSHIM	___SetHandleSize,    _shim_SetHandleSize
+	MTSHIM	___NewPtr,           _shim_NewPtr
+	MTSHIM	___NewPtrClear,      _shim_NewPtrClear
+	MTSHIM	___DisposePtr,       _shim_DisposePtr
+
+;; ---------------------------------------------------------------------
+;; Carbon Component Manager (carbon_component.c): the dead-on-modern-macOS
+;; component registry/dispatch, reimplemented generically. Backends (e.g. the
+;; ImageIO GraphicsImporter) register with it. Excluded from abigen (custom.syms).
+	MTSHIM	___OpenDefaultComponent,   _shim_OpenDefaultComponent
+	MTSHIM	___OpenADefaultComponent,  _shim_OpenADefaultComponent
+	MTSHIM	___OpenComponent,          _shim_OpenComponent
+	MTSHIM	___OpenAComponent,         _shim_OpenAComponent
+	MTSHIM	___CloseComponent,         _shim_CloseComponent
+	MTSHIM	___FindNextComponent,      _shim_FindNextComponent
+	MTSHIM	___CountComponents,        _shim_CountComponents
+	MTSHIM	___GetComponentInfo,       _shim_GetComponentInfo
+	MTSHIM	___ResolveComponentAlias,  _shim_ResolveComponentAlias
+	MTSHIM	___UnregisterComponent,    _shim_UnregisterComponent
+
+;; ---------------------------------------------------------------------
+;; QuickTime GraphicsImporter (quicktime_image.c): still-image decode on
+;; ImageIO/CoreGraphics. QuickTime.framework is GONE on modern macOS, so these
+;; were unshimmed (binding to a non-existent @rpath/QuickTime). Re-translate to
+;; bind them to libabiconv.
+	MTSHIM	___GraphicsImportSetDataHandle,        _shim_GraphicsImportSetDataHandle
+	MTSHIM	___GraphicsImportSetDataReference,     _shim_GraphicsImportSetDataReference
+	MTSHIM	___GraphicsImportSetDataFile,          _shim_GraphicsImportSetDataFile
+	MTSHIM	___GraphicsImportGetNaturalBounds,     _shim_GraphicsImportGetNaturalBounds
+	MTSHIM	___GraphicsImportGetImageDescription,  _shim_GraphicsImportGetImageDescription
+	MTSHIM	___GraphicsImportSetGWorld,            _shim_GraphicsImportSetGWorld
+	MTSHIM	___GraphicsImportSetBoundsRect,        _shim_GraphicsImportSetBoundsRect
+	MTSHIM	___GraphicsImportGetBoundsRect,        _shim_GraphicsImportGetBoundsRect
+	MTSHIM	___GraphicsImportDraw,                 _shim_GraphicsImportDraw
+	MTSHIM	___GraphicsImportSetFlags,             _shim_GraphicsImportSetFlags
+	MTSHIM	___GraphicsImportSetQuality,           _shim_GraphicsImportSetQuality
+	MTSHIM	___GraphicsImportSetMatrix,            _shim_GraphicsImportSetMatrix
+	MTSHIM	___GraphicsImportGetColorSyncProfile,  _shim_GraphicsImportGetColorSyncProfile
+	MTSHIM	___GraphicsImportGetDataOffsetAndSize, _shim_GraphicsImportGetDataOffsetAndSize
+	MTSHIM	___GraphicsImportGetMetaData,          _shim_GraphicsImportGetMetaData
+	MTSHIM	___GraphicsImportReadData,             _shim_GraphicsImportReadData
+	MTSHIM	___GetGraphicsImporterForDataRef,      _shim_GetGraphicsImporterForDataRef
+	MTSHIM	___GetGraphicsImporterForFile,         _shim_GetGraphicsImporterForFile
+
+;; ---------------------------------------------------------------------
+;; QuickDraw offscreen GWorld + PixMap (quicktime_image.c). Excluded from abigen
+;; (custom.syms): the GWorld/PixMap handles are ours and opaque to the caller.
+	MTSHIM	___NewGWorld,          _shim_NewGWorld
+	MTSHIM	___NewGWorldFromPtr,   _shim_NewGWorldFromPtr
+	MTSHIM	___QTNewGWorldFromPtr, _shim_QTNewGWorldFromPtr
+	MTSHIM	___DisposeGWorld,      _shim_DisposeGWorld
+	MTSHIM	___GetGWorldPixMap,    _shim_GetGWorldPixMap
+	MTSHIM	___GetPortPixMap,      _shim_GetPortPixMap
+	MTSHIM	___GetGWorldDevice,    _shim_GetGWorldDevice
+	MTSHIM	___GetGWorld,          _shim_GetGWorld
+	MTSHIM	___SetGWorld,          _shim_SetGWorld
+	MTSHIM	___GetPixBaseAddr,     _shim_GetPixBaseAddr
+	MTSHIM	___GetPixRowBytes,     _shim_GetPixRowBytes
+	MTSHIM	___GetPixBounds,       _shim_GetPixBounds
+	MTSHIM	___LockPixels,         _shim_LockPixels
+	MTSHIM	___UnlockPixels,       _shim_UnlockPixels
+
+;; ---------------------------------------------------------------------
 ;; C++ runtime (cxx_shim.c): libstdc++.6 imports of legacy i386 binaries.
 ;; Guards are implemented locally (native libc++abi sizes its lock words
 ;; for x86_64); new/delete use the low-4GB shim heap; _Rb_tree_* are

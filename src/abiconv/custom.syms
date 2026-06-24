@@ -242,3 +242,63 @@ ___fixdfdi
 ___fixsfdi
 ___fixunsdfdi
 ___fixunssfdi
+
+# Carbon Memory Manager (carbon_memory.c) — classic Handle/Ptr on the low-4GB
+# heap; abigen's native shims would truncate >4GB pointers into i386 slots.
+_NewHandle
+_NewHandleClear
+_DisposeHandle
+_GetHandleSize
+_SetHandleSize
+_NewPtr
+_NewPtrClear
+_DisposePtr
+
+# Carbon Component Manager (carbon_component.c) — dead native; reimplemented.
+_OpenDefaultComponent
+_OpenADefaultComponent
+_OpenComponent
+_OpenAComponent
+_CloseComponent
+_FindNextComponent
+_CountComponents
+_GetComponentInfo
+_ResolveComponentAlias
+_UnregisterComponent
+
+# QuickDraw offscreen GWorld + PixMap (quicktime_image.c) — handles are ours.
+_NewGWorld
+_NewGWorldFromPtr
+_DisposeGWorld
+_GetGWorldPixMap
+_GetPortPixMap
+_GetGWorldDevice
+_GetGWorld
+_SetGWorld
+_GetPixBaseAddr
+_GetPixRowBytes
+_GetPixBounds
+_LockPixels
+_UnlockPixels
+
+# QuickTime GraphicsImporter (quicktime_image.c). QuickTime.framework is gone,
+# so abigen never generated these (listed for clarity; harmless to exclude).
+_GraphicsImportSetDataHandle
+_GraphicsImportSetDataReference
+_GraphicsImportSetDataFile
+_GraphicsImportGetNaturalBounds
+_GraphicsImportGetImageDescription
+_GraphicsImportSetGWorld
+_GraphicsImportSetBoundsRect
+_GraphicsImportGetBoundsRect
+_GraphicsImportDraw
+_GraphicsImportSetFlags
+_GraphicsImportSetQuality
+_GraphicsImportSetMatrix
+_GraphicsImportGetColorSyncProfile
+_GraphicsImportGetDataOffsetAndSize
+_GraphicsImportGetMetaData
+_GraphicsImportReadData
+_GetGraphicsImporterForDataRef
+_GetGraphicsImporterForFile
+_QTNewGWorldFromPtr
