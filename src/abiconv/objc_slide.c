@@ -205,6 +205,42 @@ static int image_links_libabiconv(const struct mach_header_64 *mh64) {
    return 0;
 }
 
+/* Per-process set of mach_headers we have already fully processed in slide_objc
+ * (slid + initialized). dyld invokes our add-image callback once per image, but
+ * in ABICONV_RUN_INITS mode we ALSO process an image's dependencies proactively
+ * (bottom-up) before running its own initializers — see process_deps below — so
+ * an image can be reached before dyld delivers its own callback. This set makes
+ * the later real callback a no-op and prevents double-init / double-register.
+ * Inert in the default (non-RUN_INITS) path: there each image is processed
+ * exactly once, by its own callback. */
+#define MAX_PROCESSED_IMAGES 8192
+static const struct mach_header *g_processed[MAX_PROCESSED_IMAGES];
+static size_t g_n_processed = 0;
+static int already_processed(const struct mach_header *mh) {
+   for (size_t i = 0; i < g_n_processed; i++) {
+      if (g_processed[i] == mh) { return 1; }
+   }
+   return 0;
+}
+static void mark_processed(const struct mach_header *mh) {
+   if (g_n_processed < MAX_PROCESSED_IMAGES) { g_processed[g_n_processed++] = mh; }
+}
+
+static const struct mach_header *find_loaded_image(const char *leaf,
+                                                   intptr_t *slide_out) {
+   for (uint32_t i = 0; i < _dyld_image_count(); i++) {
+      const char *n = _dyld_get_image_name(i);
+      if (!n) { continue; }
+      const char *b = strrchr(n, '/');
+      b = b ? b + 1 : n;
+      if (strcmp(b, leaf) == 0) {
+         if (slide_out) { *slide_out = _dyld_get_image_vmaddr_slide(i); }
+         return _dyld_get_image_header(i);
+      }
+   }
+   return NULL;
+}
+
 /* Max translated __mod_init_func pointers we collect per image in RUN_INITS
  * mode before running them at the end of slide_objc. libtier0 has 11; any real
  * image is well under this. Overflow falls back to wrapping (the default path)
@@ -479,21 +515,25 @@ static int repair_refs_from_file(const char *imgname,
  * s4). The image loads <4GB (translated dylibs map low), so a 4-byte slot CAN
  * hold the slid value — slide it here.
  *
- * Discriminator = value lands in the image's pre-slide __TEXT (executable) range
- * [text_lo,text_hi). This is FAR safer than the generic value-in-any-segment
- * heuristic: a code pointer almost never collides with a 4-byte int constant
- * (the __TEXT range is small), whereas __DATA-range collisions are common
- * (counts, sizes, hash seeds). Pure-data pointers (ptr-to-__DATA-global) are NOT
- * covered here — they need the exact macho-tool pointer list (deferred); the
- * vtable/fnptr case is what blocks C++ static init. Idempotent across the N
- * libabiconv copies' callbacks: an already-slid slot's value falls OUTSIDE the
- * pre-slide __TEXT range and is skipped. Walks WRITABLE, non-__OBJC sections,
+ * Discriminator = macho-tool's EXACT DataParser pointer predicate (section.cc):
+ * value lands in the image's pre-slide vmaddr span [vmaddr_lo,vmaddr_hi) AND,
+ * for a NON-executable (data) target, is 4-byte aligned (misaligned data-range
+ * values are integer/fixed-point constants — counts, sizes, hash seeds — not
+ * pointers); executable (__TEXT) targets need no alignment. Replicating the
+ * translate-time predicate slides exactly the set macho-tool resolved as
+ * intra-image pointers, so it covers BOTH the DATA->TEXT vtable/fnptr case AND
+ * pure DATA->DATA global pointers (ptr-to-__DATA-global, e.g. Portal 2's
+ * g_pMemAlloc = &s_StdMemAlloc) with zero divergence from translate-time and no
+ * new false positives. Idempotent across the N libabiconv copies' callbacks: an
+ * already-slid slot's value falls below vmaddr_lo and is skipped. Walks
+ * WRITABLE, non-__OBJC sections,
  * skipping dyld-managed pointer sections (symbol-pointer / mod-init-func, which
  * are 8-byte and rebased elsewhere) and __cfstring (handled by slide_cfstrings). */
 static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
                               uint64_t text_lo, uint64_t text_hi,
+                              uint64_t vmaddr_lo, uint64_t vmaddr_hi,
                               const char *imgname) {
-   if (slide == 0 || text_lo >= text_hi) { return; }
+   if (slide == 0 || vmaddr_lo >= vmaddr_hi) { return; }
    const uint8_t *p = (const uint8_t *)(mh64 + 1);
    size_t total_slid = 0;
    for (uint32_t i = 0; i < mh64->ncmds; i++) {
@@ -526,7 +566,22 @@ static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
                size_t n = (size_t)sect->size / 4;
                for (size_t k = 0; k < n; k++) {
                   uint32_t v = w[k];
-                  if (v >= text_lo && v < text_hi) {
+                  /* Match macho-tool's DataParser pointer predicate exactly
+                   * (section.cc): a 4-byte word is an intra-image pointer iff
+                   * its value lands in the image's pre-slide vmaddr span AND —
+                   * for a NON-executable (data) target — is 4-byte aligned
+                   * (misaligned data-range values are integer/fixed-point
+                   * constants, not pointers); executable (__TEXT) targets need
+                   * no alignment (function entries aren't 4-aligned). This
+                   * slides exactly the set macho-tool resolved as pointers, so
+                   * it covers DATA->DATA global-pointers (e.g. Portal 2
+                   * g_pMemAlloc = &s_StdMemAlloc) in addition to the DATA->TEXT
+                   * vtable/fnptr case, with zero divergence from translate-time
+                   * and no new false positives. Idempotent: an already-slid
+                   * value falls below vmaddr_lo (slide is large & negative for
+                   * the low-loaded translated images). */
+                  if (v >= vmaddr_lo && v < vmaddr_hi &&
+                      ((v >= text_lo && v < text_hi) || (v & 3) == 0)) {
                      w[k] = (uint32_t)((uint64_t)v + (uint64_t)slide);
                      ++total_slid;
                   }
@@ -537,13 +592,52 @@ static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
       p += lc->cmdsize;
    }
    if (g_verbose && total_slid) {
-      fprintf(stderr, "abiconv objc_slide: slid %zu __TEXT-pointing 4-byte "
-              "__DATA fnptr slots in %s\n", total_slid, imgname);
+      fprintf(stderr, "abiconv objc_slide: slid %zu intra-image 4-byte "
+              "__DATA pointer slots in %s\n", total_slid, imgname);
+   }
+}
+
+static void slide_objc(const struct mach_header *mh, intptr_t slide);
+
+/* Bottom-up dependency ordering for the run-inits path: before an image's
+ * collected static initializers run, recursively process each of its TRANSLATED
+ * (libabiconv-linked) dependencies that is already mapped but not yet processed.
+ * dyld maps a dylib's load-time dependencies before firing the dependent's
+ * add-image callback, but it does NOT guarantee it delivers the dependencies'
+ * callbacks first — so a dependent (e.g. Portal 2's launcher) can run its ctors,
+ * which dereference a dependency's globals (e.g. libtier0's g_pMemAlloc /
+ * s_StdMemAlloc vtable), before that dependency was slid+initialized. Walking
+ * the dependency edges here reproduces dyld's own bottom-up initializer order.
+ * The processed-set marks each image before recursing, so dependency cycles
+ * terminate (mirrors dyld's upward-edge handling). */
+static void process_deps(const struct mach_header_64 *mh64) {
+   const uint8_t *p = (const uint8_t *)(mh64 + 1);
+   for (uint32_t i = 0; i < mh64->ncmds; i++) {
+      const struct load_command *lc = (const struct load_command *)p;
+      if (lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB ||
+          lc->cmd == LC_REEXPORT_DYLIB || lc->cmd == LC_LOAD_UPWARD_DYLIB) {
+         const struct dylib_command *dc = (const struct dylib_command *)p;
+         const char *path = (const char *)p + dc->dylib.name.offset;
+         const char *leaf = strrchr(path, '/');
+         leaf = leaf ? leaf + 1 : path;
+         if (strstr(leaf, "libabiconv") == NULL) {
+            intptr_t dslide = 0;
+            const struct mach_header *dmh = find_loaded_image(leaf, &dslide);
+            if (dmh && !already_processed(dmh) &&
+                dmh->magic == MH_MAGIC_64 &&
+                image_links_libabiconv((const struct mach_header_64 *)dmh)) {
+               slide_objc(dmh, dslide);
+            }
+         }
+      }
+      p += lc->cmdsize;
    }
 }
 
 static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    if (mh->magic != MH_MAGIC_64) { return; }
+   if (already_processed(mh)) { return; }
+   mark_processed(mh);
    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
    const uint8_t *p = (const uint8_t *)(mh64 + 1);
    const char *imgname = "?";
@@ -599,11 +693,14 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    size_t n_init = 0;
    if (image_links_libabiconv(mh64)) {
       wrap_mod_init_funcs(mh64, slide, imgname, init_targets, &n_init);
-      /* Slide 4-byte __DATA vtable / fn-ptr slots into the slid __TEXT BEFORE
-       * the collected static initializers run (a C++ ctor stores/derefs the
-       * vtable ptr). Universal: triggers on the structural property "4-byte
-       * __DATA slot whose value is in this image's __TEXT", not on any app. */
-      slide_data_fnptrs(mh64, slide, text_lo, text_hi, imgname);
+      /* Slide 4-byte __DATA intra-image pointer slots (vtables, fn-ptr tables,
+       * AND data->data global pointers) by the load slide BEFORE the collected
+       * static initializers run (a C++ ctor stores/derefs these). Universal:
+       * triggers on the structural property "4-byte __DATA slot whose value is
+       * an intra-image pointer" (macho-tool's exact DataParser predicate), not
+       * on any app. */
+      slide_data_fnptrs(mh64, slide, text_lo, text_hi,
+                        vmaddr_lo, vmaddr_hi, imgname);
    }
 
    /* the legacy-ObjC1 fixups below are __OBJC-only, but the collected
@@ -664,6 +761,14 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    _86x64_objc_register_classes(mh64, slide);
 
    }  /* end if (objc_seg) */
+
+   /* Before running THIS image's collected initializers, make sure every
+    * translated dependency has been slid + initialized (bottom-up order). Only
+    * relevant in RUN_INITS mode (n_init>0); the default path lets dyld order the
+    * wrapped-stub initializers and never populates init_targets. */
+   if (n_init > 0) {
+      process_deps(mh64);
+   }
 
    /* Run the collected translated static initializers LAST — after every
     * per-image fixup (the future 4-byte __DATA pointer slide, the __OBJC slide,
