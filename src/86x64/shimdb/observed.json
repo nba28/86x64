@@ -7,6 +7,14 @@
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
  },
+ "_ATSFontActivateFromFileSpecification": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_ATSFontGetFileSpecification": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_AddIconToSuite": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
@@ -39,6 +47,10 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_CGSTentBlur8": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_CMEmbedImage": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
@@ -68,6 +80,10 @@
   "stub": "function"
  },
  "_CreateNewPort": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_DCMShowDictionaryServiceWindow": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -175,7 +191,47 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_FMCreateFontFamilyIterator": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FMDisposeFontFamilyIterator": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FMGetFontFamilyFromName": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FMGetFontFamilyInstanceFromFont": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FMGetFontFamilyName": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FMGetFontFamilyTextEncoding": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FMGetFontFromFontFamilyInstance": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FMGetFontTable": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FMGetNextFontFamily": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_FSMakeFSSpec": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_FSMatchAliasNoUI": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -687,6 +743,10 @@
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
  },
+ "_NSReadThemeImageFromRsrc": {
+  "first_seen_fw": "AppKit",
+  "stub": "function"
+ },
  "_NSVersionOfLinkTimeLibrary": {
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
@@ -903,6 +963,10 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_PBCatSearchSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_PBDTGetIconSync": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
@@ -927,11 +991,19 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
+ "_PBHGetFInfoSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_PBHGetVInfoSync": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_PBHGetVolParmsSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBHGetVolSync": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -1011,6 +1083,22 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_QDPictCreateWithProvider": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_QDPictDrawToCGContext": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_QDPictGetBounds": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_QDPictRelease": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_RFExportCreateCopy": {
   "first_seen_fw": "CoreMediaAuthoring",
   "stub": "function"
@@ -1036,6 +1124,10 @@
   "stub": "function"
  },
  "_RegisterIconRefFromResource": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_ResolveAlias": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -1157,6 +1249,10 @@
  },
  "__NSConcreteStackBlock": {
   "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__NSReadThemeImageFromRsrc": {
+  "first_seen_fw": "AppKit",
   "stub": "function"
  },
  "__Unwind_Resume": {
