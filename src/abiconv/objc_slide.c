@@ -205,11 +205,26 @@ static int image_links_libabiconv(const struct mach_header_64 *mh64) {
    return 0;
 }
 
+/* Max translated __mod_init_func pointers we collect per image in RUN_INITS
+ * mode before running them at the end of slide_objc. libtier0 has 11; any real
+ * image is well under this. Overflow falls back to wrapping (the default path)
+ * so nothing is silently dropped. */
+#define INIT_COLLECT_MAX 1024
+
 /* Rewrite every __DATA,__mod_init_func 8-byte pointer in a translated image to
  * a stack-switching stub. Runs from the add-image callback, BEFORE dyld reads
- * __mod_init_func to run the initializers. */
+ * __mod_init_func to run the initializers.
+ *
+ * In ABICONV_RUN_INITS mode we do NOT run the initializers here — running them
+ * mid-walk is too early (the image's other per-image fixups, esp. the 4-byte
+ * __DATA pointer relocation and __OBJC slide, haven't happened yet, so a C++
+ * static ctor would dereference an unslid pointer — see the Portal 2 translation notes
+ * s3b/s4). Instead we COLLECT the target addresses into `collect[]` and NULL
+ * the slots (so neither dyld nor a nested re-entry runs them); slide_objc runs
+ * the collected targets at its very END, after all fixups. */
 static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
-                                intptr_t slide, const char *imgname) {
+                                intptr_t slide, const char *imgname,
+                                void **collect, size_t *n_collect) {
    if (getenv("ABICONV_NO_INIT_STACKSWITCH")) { return; }
    if (init_stack_setup() != 0) { return; }
 
@@ -249,14 +264,16 @@ static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
              *    image-load (≈bottom-up dependency) order; nested dlopen during
              *    an init re-enters here and the trampoline's shadow stack keeps
              *    nesting LIFO-correct. */
-            const int run_now = getenv("ABICONV_RUN_INITS") != NULL;
+            const int run_now =
+               collect != NULL && getenv("ABICONV_RUN_INITS") != NULL;
             for (size_t j = 0; j < n; j++) {
                if (!slots[j]) { continue; }
-               if (run_now) {
-                  void *t = slots[j];
-                  slots[j] = NULL;          /* null FIRST: dyld (and a nested
-                                             * re-entry) must not also run it */
-                  abiconv_call_init(t, 0, NULL, NULL, NULL);
+               if (run_now && *n_collect < INIT_COLLECT_MAX) {
+                  /* Collect the target + NULL the slot FIRST so dyld (and a
+                   * nested dlopen re-entry) won't also run it; slide_objc runs
+                   * the collected list after all per-image fixups. */
+                  collect[(*n_collect)++] = slots[j];
+                  slots[j] = NULL;
                   ++wrapped;
                } else {
                   void *stub = make_init_stub(slots[j]);
@@ -265,7 +282,7 @@ static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
             }
             if (g_verbose) {
                fprintf(stderr, "abiconv init_stack: %s %zu/%zu init funcs "
-                       "in %s\n", run_now ? "RAN" : "wrapped",
+                       "in %s\n", run_now ? "collected" : "wrapped",
                        wrapped, n, imgname);
             }
          }
@@ -450,6 +467,81 @@ static int repair_refs_from_file(const char *imgname,
    return 1;
 }
 
+/* Slide 4-byte __DATA pointer slots that point into this image's own __TEXT —
+ * i.e. C++ vtable entries and function-pointer tables (and switch/PIC fnptr
+ * arrays). macho-tool emits these as 4-byte `Immediate` blobs holding the new
+ * preferred vmaddr; dyld CANNOT rebase a 4-byte slot (both classic dyld and
+ * dyld4 reject 64-bit local relocs with r_length!=3 — "bad local relocation
+ * length"), and we can't widen 4->8 because the translated code reads them with
+ * a 4-byte load on baked-in i386 struct layouts. So they're left at the unslid
+ * preferred vmaddr → a C++ static ctor that stores/derefs a vtable ptr jumps to
+ * a wild low-4GB address (Portal 2's libtier0 g_CmdLine, the Portal 2 translation notes
+ * s4). The image loads <4GB (translated dylibs map low), so a 4-byte slot CAN
+ * hold the slid value — slide it here.
+ *
+ * Discriminator = value lands in the image's pre-slide __TEXT (executable) range
+ * [text_lo,text_hi). This is FAR safer than the generic value-in-any-segment
+ * heuristic: a code pointer almost never collides with a 4-byte int constant
+ * (the __TEXT range is small), whereas __DATA-range collisions are common
+ * (counts, sizes, hash seeds). Pure-data pointers (ptr-to-__DATA-global) are NOT
+ * covered here — they need the exact macho-tool pointer list (deferred); the
+ * vtable/fnptr case is what blocks C++ static init. Idempotent across the N
+ * libabiconv copies' callbacks: an already-slid slot's value falls OUTSIDE the
+ * pre-slide __TEXT range and is skipped. Walks WRITABLE, non-__OBJC sections,
+ * skipping dyld-managed pointer sections (symbol-pointer / mod-init-func, which
+ * are 8-byte and rebased elsewhere) and __cfstring (handled by slide_cfstrings). */
+static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
+                              uint64_t text_lo, uint64_t text_hi,
+                              const char *imgname) {
+   if (slide == 0 || text_lo >= text_hi) { return; }
+   const uint8_t *p = (const uint8_t *)(mh64 + 1);
+   size_t total_slid = 0;
+   for (uint32_t i = 0; i < mh64->ncmds; i++) {
+      const struct load_command *lc = (const struct load_command *)p;
+      if (lc->cmd == LC_SEGMENT_64) {
+         const struct segment_command_64 *seg =
+            (const struct segment_command_64 *)p;
+         if ((seg->initprot & VM_PROT_WRITE) &&
+             strncmp(seg->segname, "__OBJC", 16) != 0 &&
+             strcmp(seg->segname, "__LINKEDIT") != 0) {
+            const struct section_64 *sect =
+               (const struct section_64 *)(seg + 1);
+            for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
+               const uint32_t type = sect->flags & SECTION_TYPE;
+               if (type == S_NON_LAZY_SYMBOL_POINTERS ||
+                   type == S_LAZY_SYMBOL_POINTERS ||
+                   type == S_MOD_INIT_FUNC_POINTERS ||
+                   type == S_MOD_TERM_FUNC_POINTERS) { continue; }
+               if (strncmp(sect->sectname, "__cfstring", 16) == 0) { continue; }
+               if (sect->size < 4) { continue; }
+               void *base = (void *)(uintptr_t)(sect->addr + slide);
+               const size_t page = 4096;
+               uintptr_t a = (uintptr_t)base, e = a + sect->size;
+               uintptr_t aa = a & ~(uintptr_t)(page - 1);
+               size_t la = ((e + page - 1) & ~(uintptr_t)(page - 1)) - aa;
+               if (mprotect((void *)aa, la, PROT_READ | PROT_WRITE) != 0) {
+                  continue;
+               }
+               uint32_t *w = (uint32_t *)base;
+               size_t n = (size_t)sect->size / 4;
+               for (size_t k = 0; k < n; k++) {
+                  uint32_t v = w[k];
+                  if (v >= text_lo && v < text_hi) {
+                     w[k] = (uint32_t)((uint64_t)v + (uint64_t)slide);
+                     ++total_slid;
+                  }
+               }
+            }
+         }
+      }
+      p += lc->cmdsize;
+   }
+   if (g_verbose && total_slid) {
+      fprintf(stderr, "abiconv objc_slide: slid %zu __TEXT-pointing 4-byte "
+              "__DATA fnptr slots in %s\n", total_slid, imgname);
+   }
+}
+
 static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    if (mh->magic != MH_MAGIC_64) { return; }
    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
@@ -465,6 +557,8 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    const struct segment_command_64 *objc_seg = NULL;
    uint64_t vmaddr_lo = ~(uint64_t)0;
    uint64_t vmaddr_hi = 0;
+   uint64_t text_lo = ~(uint64_t)0;       /* pre-slide executable vmaddr range */
+   uint64_t text_hi = 0;
    for (uint32_t i = 0; i < mh64->ncmds; i++) {
       const struct load_command *lc = (const struct load_command *)p;
       if (lc->cmd == LC_SEGMENT_64) {
@@ -472,6 +566,11 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
             (const struct segment_command_64 *)p;
          if (strncmp(seg->segname, "__OBJC", 16) == 0) {
             objc_seg = seg;
+         }
+         if ((seg->initprot & VM_PROT_EXECUTE) && seg->vmsize > 0) {
+            if (seg->vmaddr < text_lo) text_lo = seg->vmaddr;
+            if (seg->vmaddr + seg->vmsize > text_hi)
+               text_hi = seg->vmaddr + seg->vmsize;
          }
          /* Accumulate the image's pre-slide vmaddr span (the range that an
           * intra-image pointer can fall in), skipping __PAGEZERO/__LINKEDIT
@@ -496,11 +595,22 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
     * directly with a 64-bit return address, which the translated `ret`
     * (pop r11d; jmp r11) truncates to a wild low-4GB target. Gate on "is
     * translated" (links libabiconv), NOT on objc_seg. See the init high-stack bug. */
+   void *init_targets[INIT_COLLECT_MAX];
+   size_t n_init = 0;
    if (image_links_libabiconv(mh64)) {
-      wrap_mod_init_funcs(mh64, slide, imgname);
+      wrap_mod_init_funcs(mh64, slide, imgname, init_targets, &n_init);
+      /* Slide 4-byte __DATA vtable / fn-ptr slots into the slid __TEXT BEFORE
+       * the collected static initializers run (a C++ ctor stores/derefs the
+       * vtable ptr). Universal: triggers on the structural property "4-byte
+       * __DATA slot whose value is in this image's __TEXT", not on any app. */
+      slide_data_fnptrs(mh64, slide, text_lo, text_hi, imgname);
    }
 
-   if (!objc_seg) { return; }  /* the rest is legacy-ObjC1-only fixup */
+   /* the legacy-ObjC1 fixups below are __OBJC-only, but the collected
+    * static initializers (n_init>0, ABICONV_RUN_INITS mode) must still run at
+    * the END for a pure-C++ no-__OBJC image (e.g. Portal 2's libtier0), so we
+    * branch around the __OBJC work instead of returning early. */
+   if (objc_seg) {
 
    /* Slide the __OBJC/__cfstring pointer slots if the image moved. When
     * slide==0 (loaded at preferred vmaddr) the slots are already correct. */
@@ -552,6 +662,21 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    /* Then register them with the modern runtime (reverse x86_64->i386 IMP
     * bridge) so NSClassFromString / AppKit can instantiate and message them. */
    _86x64_objc_register_classes(mh64, slide);
+
+   }  /* end if (objc_seg) */
+
+   /* Run the collected translated static initializers LAST — after every
+    * per-image fixup (the future 4-byte __DATA pointer slide, the __OBJC slide,
+    * cfstring/ref repair, class registration) so a C++ static ctor or an
+    * ObjC +load never dereferences an unslid pointer. On the low-4GB init
+    * stack, in collection (≈section, bottom-up dependency) order; a nested
+    * dlopen during one of these re-enters slide_objc and runs its own inits
+    * first (the trampoline's shadow stack keeps nesting LIFO-correct).
+    * n_init>0 only in ABICONV_RUN_INITS mode; the default path wrapped the
+    * slots into dyld-called stubs instead and leaves n_init==0. */
+   for (size_t i = 0; i < n_init; i++) {
+      abiconv_call_init(init_targets[i], 0, NULL, NULL, NULL);
+   }
 }
 
 __attribute__((constructor))

@@ -164,7 +164,37 @@ namespace MachO {
          insts.push_back(ret_placeholder);
          return insts;
       }
-      
+
+      /*
+       * Optional translate-time null-branch trap (env MACHO_NULL_TRAP).
+       *
+       * Returns `{ test r64,r64 ; jnz +2 ; ud2 }` to splice right before an
+       * indirect `jmp <r64>`, so a transfer through a NULL register faults with
+       * SIGILL *at the jump site* (rip names the instruction) instead of
+       * jumping to address 0 (rip=0, rax=0 — unrecoverable, no frame). The jnz
+       * skips the 2-byte ud2 when the register is non-zero; the trap is emitted
+       * as three fixed-byte M64 blobs laid out contiguously, so the rel8 +2
+       * stays valid through convert.
+       *
+       * Empty unless MACHO_NULL_TRAP is set in the translator's environment, so
+       * production builds are byte-for-byte unchanged. This is a permanent,
+       * reusable diagnostic for the recurring "rip=0 / jmp-to-0" crash class
+       * (iPhoto callback NULL fn-ptr, Portal 2 null C++ vtable slots): retranslate
+       * the suspect binary with MACHO_NULL_TRAP=1 and the SIGILL pins the site.
+       */
+      typename SectionBlob<Bits::M32>::SectionBlobs null_trap(xed_reg_enum_t r64) {
+         typename SectionBlob<Bits::M32>::SectionBlobs out;
+         if (!std::getenv("MACHO_NULL_TRAP")) { return out; }
+         const unsigned n = (r64 - XED_REG_RAX) % 8;
+         uint8_t rex = 0x48;                 /* REX.W */
+         if (r64 >= XED_REG_R8 && r64 <= XED_REG_R15) { rex |= 0x05; } /* REX.R|REX.B */
+         const uint8_t modrm = 0xC0 | (n << 3) | n;
+         out.push_back(new Instruction<Bits::M64>(opcode_t{rex, 0x85, modrm})); /* test r64,r64 */
+         out.push_back(new Instruction<Bits::M64>(opcode_t{0x75, 0x02}));       /* jnz +2 */
+         out.push_back(new Instruction<Bits::M64>(opcode_t{0x0f, 0x0b}));       /* ud2 */
+         return out;
+      }
+
    }
 
    template <Bits bits>
@@ -1453,9 +1483,16 @@ namespace MachO {
                                  effective_width,
                                  xed_reg_enum_t2str(reg0));
                   }
-                  auto jmp_inst = new Instruction<Bits::M64>
-                     (opcode::jmp_r64(opcode::r32_to_r64(reg0)));
-                  return call_op(jmp_inst);
+                  const xed_reg_enum_t tgt = opcode::r32_to_r64(reg0);
+                  auto jmp_inst = new Instruction<Bits::M64>(opcode::jmp_r64(tgt));
+                  auto insts = call_op(jmp_inst);
+                  /* trap a `call reg` through a NULL register (env-gated). */
+                  auto trap = null_trap(tgt);
+                  if (!trap.empty()) {
+                     auto it = insts.end(); --it; --it;  /* before jmp_inst */
+                     insts.splice(it, trap);
+                  }
+                  return insts;
                }
 
             case XED_IFORM_CALL_NEAR_MEMv:
@@ -1547,6 +1584,10 @@ namespace MachO {
                   auto it = insts.end();
                   --it; --it;
                   insts.insert(it, mov_inst);
+                  /* trap a `call [mem]` through a NULL fn-ptr slot (env-gated):
+                   * after the 4-byte load into rax, before `jmp rax`. */
+                  auto trap = null_trap(XED_REG_RAX);
+                  if (!trap.empty()) { insts.splice(it, trap); }
                   return insts;
                }
 
@@ -1624,7 +1665,13 @@ namespace MachO {
 
                   auto jmp_inst = new Instruction<Bits::M64>(
                      opcode::jmp_r64(XED_REG_RAX));
-                  return {mov_inst, jmp_inst};
+                  /* trap a `jmp [mem]` (switch dispatch / tail-call fn-ptr)
+                   * through a NULL slot (env-gated). */
+                  auto trap = null_trap(XED_REG_RAX);
+                  if (trap.empty()) { return {mov_inst, jmp_inst}; }
+                  trap.push_front(mov_inst);
+                  trap.push_back(jmp_inst);
+                  return trap;
                }
 
             case XED_IFORM_CALL_NEAR_RELBRz:
@@ -1649,6 +1696,9 @@ namespace MachO {
                    */
                   auto insts = pop_r32(XED_REG_R11D);
                   auto jmp_inst = new Instruction<opposite<bits>>(opcode::jmp_r64(XED_REG_R11));
+                  /* trap a `ret` to a NULL return address (env-gated): after the
+                   * 4-byte pop into r11, before `jmp r11`. */
+                  insts.splice(insts.end(), null_trap(XED_REG_R11));
                   insts.push_back(jmp_inst);
                   return insts;
                }
@@ -1689,7 +1739,13 @@ namespace MachO {
                   auto lea_inst = new Instruction<Bits::M64>(lea_buf);
                   auto jmp_inst = new Instruction<Bits::M64>(
                      opcode::jmp_r64(XED_REG_R11));
-                  return {mov_inst, lea_inst, jmp_inst};
+                  /* trap a `ret imm` to a NULL return address (env-gated). */
+                  auto trap = null_trap(XED_REG_R11);
+                  if (trap.empty()) { return {mov_inst, lea_inst, jmp_inst}; }
+                  trap.push_front(lea_inst);
+                  trap.push_front(mov_inst);
+                  trap.push_back(jmp_inst);
+                  return trap;
                }
 
             case XED_IFORM_ENTER_IMMw_IMMb:
