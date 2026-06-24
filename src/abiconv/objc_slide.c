@@ -178,6 +178,29 @@ static void *make_init_stub(void *target) {
    return s;
 }
 
+/* Is this a TRANSLATED image (vs. a native system dylib)? Every binary the
+ * pipeline emits links libabiconv (an LC_LOAD_DYLIB is inserted); native
+ * dylibs do not, and libabiconv itself does not depend on itself. This is the
+ * "is translated" signal for images WITHOUT an __OBJC segment — pure C++ GCC
+ * dylibs (e.g. Portal 2's libtier0) — which the objc_seg gate misses. We must
+ * only wrap the init funcs of translated images: a native initializer expects
+ * the native ABI and would break if funnelled through the i386 low-stack
+ * trampoline. */
+static int image_links_libabiconv(const struct mach_header_64 *mh64) {
+   const uint8_t *p = (const uint8_t *)(mh64 + 1);
+   for (uint32_t i = 0; i < mh64->ncmds; i++) {
+      const struct load_command *lc = (const struct load_command *)p;
+      if (lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB ||
+          lc->cmd == LC_REEXPORT_DYLIB || lc->cmd == LC_LOAD_UPWARD_DYLIB) {
+         const struct dylib_command *dc = (const struct dylib_command *)p;
+         const char *name = (const char *)p + dc->dylib.name.offset;
+         if (strstr(name, "libabiconv")) { return 1; }
+      }
+      p += lc->cmdsize;
+   }
+   return 0;
+}
+
 /* Rewrite every __DATA,__mod_init_func 8-byte pointer in a translated image to
  * a stack-switching stub. Runs from the add-image callback, BEFORE dyld reads
  * __mod_init_func to run the initializers. */
@@ -438,12 +461,19 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
       }
       p += lc->cmdsize;
    }
-   if (!objc_seg) { return; }  /* not a translated binary with legacy ObjC1 */
 
    /* Run translated static initializers on a low-4GB stack. Independent of
-    * slide (the >4GB-stack bug bites even at the preferred vmaddr), and must
-    * happen before the slide==0 early-out below. See the init high-stack bug. */
-   wrap_mod_init_funcs(mh64, slide, imgname);
+    * slide (the >4GB-stack bug bites even at the preferred vmaddr) AND of
+    * __OBJC: a pure C++ translated dylib (no __OBJC segment, e.g. Portal 2's
+    * libtier0) still has __mod_init_func ctors that dyld would otherwise call
+    * directly with a 64-bit return address, which the translated `ret`
+    * (pop r11d; jmp r11) truncates to a wild low-4GB target. Gate on "is
+    * translated" (links libabiconv), NOT on objc_seg. See the init high-stack bug. */
+   if (image_links_libabiconv(mh64)) {
+      wrap_mod_init_funcs(mh64, slide, imgname);
+   }
+
+   if (!objc_seg) { return; }  /* the rest is legacy-ObjC1-only fixup */
 
    /* Slide the __OBJC/__cfstring pointer slots if the image moved. When
     * slide==0 (loaded at preferred vmaddr) the slots are already correct. */
