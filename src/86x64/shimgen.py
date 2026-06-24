@@ -239,6 +239,15 @@ def classify(sym):
         return ("data", sym)
     return ("unknown", sym)
 
+def shim_stem(dep):
+    """Base name for a <stem>ShimAuto.dylib / <stem>Shim.dylib shim, from a
+    dependency leaf. A dep that already ends in .dylib (a bundled library like
+    eOkaoPt.dylib) would otherwise yield the ugly 'eOkaoPt.dylibShimAuto.dylib';
+    strip the extension so it reads 'eOkaoPtShimAuto.dylib'. Framework leaf
+    names (e.g. CoreServices) carry no extension and pass through unchanged."""
+    base = os.path.basename(dep)
+    return base[:-len(".dylib")] if base.endswith(".dylib") else base
+
 # function stubs whose name looks like a memory/data primitive: a silent
 # no-op there is never "missing API tolerated" -- it is silent corruption
 # (BlockMoveData = memmove). These MUST get a curated body, not a 0-stub.
@@ -417,7 +426,7 @@ def main():
                 # into the plan so the shim is REGENERATED with it — without
                 # this, regenerating for one dependent silently drops the
                 # stubs every other dependent needs (RedRock/DRFile bug).
-                fw = os.path.basename(dep)[:-len("ShimAuto.dylib")]
+                fw = shim_stem(os.path.basename(dep)[:-len("ShimAuto.dylib")])
                 shim_disk = os.path.join(fw_dir, os.path.basename(dep))
                 if not os.path.exists(shim_disk):
                     print(f"!! {rel}: dep {dep} but no such shim on disk")
@@ -460,7 +469,7 @@ def main():
                     continue
             if not missing:
                 continue
-            fw = os.path.basename(dep)
+            fw = shim_stem(dep)
             print(f"{rel}: {len(missing)} missing from {fw}: "
                   f"{sorted(missing)[:6]}{'...' if len(missing) > 6 else ''}")
             ent = plan.setdefault(fw, {"dep_path": dep, "missing": set(),
