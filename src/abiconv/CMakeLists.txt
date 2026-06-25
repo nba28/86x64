@@ -30,6 +30,15 @@ set(ABICONV_SYM_SOURCES
   # push, fusing it with an adjacent stack value into a bogus PC (iPhoto
   # -[MWLoadingView _updateProgressOrigin] -> floorf). See includes.h (<math.h>).
   /usr/lib/system/libsystem_m.dylib
+  # libsqlite3 exports the SQLite C API (sqlite3_open/exec/prepare_v2/step/
+  # bind_*/column_*/finalize/close/...). Legacy i386 apps that own a SQLite DB
+  # call these via i386 cdecl (4-byte pushed return addr); unshimmed they bind
+  # to NATIVE libsqlite3 whose 8-byte `ret` over-pops the i386 4-byte frame,
+  # fusing the return addr with an adjacent stack word into a bogus PC. This is
+  # the iPhoto library-CREATE-path crash (-> sqlite3_open), which masqueraded as
+  # an NSPathStore2 fault. See includes.h (<sqlite3.h>). On macOS 11+ the dylib
+  # is cache-only, so print_exports_trie.sh falls back to the SDK .tbd.
+  /usr/lib/libsqlite3.dylib
   # libsystem_platform exports the OSAtomic* / OSSpinLock primitives. Legacy
   # iLife code calls OSAtomicAdd32/Barrier directly (i386 cdecl, stack args);
   # unshimmed the call reaches native OSAtomicAdd32 which reads args from

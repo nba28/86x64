@@ -38,6 +38,17 @@
  * _updateProgressOrigin] -> floorf). abigen's float/double-return conversion
  * (xmm0 -> st0) makes the generated shim correct. */
 #include <math.h>
+/* SQLite C API (sqlite3_open, exec, prepare_v2, step, bind_, column_, finalize,
+ * close, ...) lives in libsqlite3.dylib (added to ABICONV_SYM_SOURCES). Legacy
+ * i386 apps that own a SQLite database call these directly via i386 cdecl
+ * (4-byte pushed return address); unshimmed the call lands in the native
+ * x86_64 sqlite3_* whose `ret` pops 8 bytes, over-popping the i386 4-byte
+ * return push and fusing it with an adjacent stack value into a bogus PC.
+ * This is the iPhoto library-CREATE-path crash: -[... createDummyOldDBFiles]
+ * -> sqlite3_open, whose fused PC made it LOOK like an NSPathStore2
+ * fileSystemRepresentation fault (the char* return value was just the stack
+ * word that got fused in). Generic: any i386 app using SQLite (iLife, etc.). */
+#include <sqlite3.h>
 
 /* Core C frameworks legacy i386 apps call. Their exports are added to the
  * abigen "consider set" via ABICONV_SYM_SOURCES in CMakeLists.txt; abigen
