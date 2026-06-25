@@ -6,6 +6,7 @@
 #include <sstream>
 #include <getopt.h>
 #include <cstdlib>
+#include <algorithm>
 #include <clang-c/Index.h>
 
 #include "emit.hh"
@@ -269,6 +270,34 @@ struct ABIConversion {
       } catch (const std::exception& e) {
          std::cerr << "abigen: skipping " << sym << ": " << e.what() << std::endl;
          return;
+      }
+      /* Per-shim size cap. A struct-pointer arg/return whose i386 and x86_64
+       * layouts differ is deep-copied field-by-field; for a large, deeply nested
+       * struct (e.g. Python's PyThreadState / PyInterpreterState / PyCodeObject,
+       * or a struct holding a big inline ConstantArray) this recursion unrolls to
+       * tens of thousands of asm lines per shim and blows the .asm up to >100MB
+       * (unassemblable). Such functions are almost always internals the i386 app
+       * does not call across the boundary anyway; skip any shim over the cap (it
+       * over-pops exactly as it did before — no regression) rather than emit a
+       * pathological body. Default 1200 lines; override with ABIGEN_MAX_SHIM_LINES
+       * (0 disables the cap). */
+      {
+         static const long cap = [] {
+            const char *e = getenv("ABIGEN_MAX_SHIM_LINES");
+            return e ? std::strtol(e, nullptr, 10) : 1200;
+         }();
+         if (cap > 0) {
+            const std::string body = os.str();
+            const long nlines = std::count(body.begin(), body.end(), '\n');
+            if (nlines > cap) {
+               std::cerr << "abigen: skipping " << sym << ": shim too large ("
+                         << nlines << " lines > " << cap << " cap)" << std::endl;
+               return;
+            }
+            symbols.erase(sym);
+            final_os << body;
+            return;
+         }
       }
       symbols.erase(sym);
       final_os << os.str();

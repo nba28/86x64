@@ -55,6 +55,22 @@ def nm_defined_exports(dylib, arch):
             syms.add(p[2])
     return syms
 
+def nm_undefined_imports(binary, arch):
+    """External *undefined* symbols a target binary imports (its `call _sym`
+    references), nm -u. Used to restrict the consider set to symbols some target
+    actually calls -- 'only useful symbols' -- instead of the whole framework
+    surface (the classic 32-bit-only Carbon umbrella alone is ~5000 functions /
+    20MB of asm that no target touches)."""
+    out = subprocess.run(["nm", "-u", "-arch", arch, binary],
+                         capture_output=True, text=True).stdout
+    syms = set()
+    for line in out.splitlines():
+        s = line.split()
+        # `nm -u` lines are just the undefined name (optionally with a "(...)").
+        if s and s[0].startswith("_"):
+            syms.add(s[0])
+    return syms
+
 def nm_libabiconv_shims(libabiconv):
     out = subprocess.run(["nm", "-gU", libabiconv], capture_output=True, text=True).stdout
     return {p[2] for p in (l.split() for l in out.splitlines()) if len(p) >= 3}
@@ -89,19 +105,32 @@ def main():
                     help="modern abiconv.asm whose `global ___sym` shims to exclude. "
                          "When given, this is the authoritative exclusion source and "
                          "--libabiconv is ignored (build-order-correct).")
-    ap.add_argument("--arch", default="x86_64",
-                    help="nm slice to read 10.6 SDK exports from (the EXPORT list is "
-                         "arch-independent for our purposes; the abigen PARSE arch is "
-                         "separate and is i386 to reveal !__LP64__ Carbon APIs).")
+    ap.add_argument("--arch", default="i386,x86_64",
+                    help="comma-separated nm slices to UNION exports from. Must include "
+                         "i386: the 32-bit-only legacy symbols (QuickTime Movie Toolbox, "
+                         "classic QuickDraw/Window Mgr) live ONLY in the i386 stub slice "
+                         "-- the x86_64 slice drops them, exactly the deleted class we want "
+                         "to marshal. x86_64 is unioned in so nothing present only there is "
+                         "lost. (The abigen PARSE arch is separate and is i386.)")
     ap.add_argument("-o", "--out", default="abiconv_legacy.syms")
     ap.add_argument("--report")
+    ap.add_argument("--target", action="append", default=[],
+                    help="a target i386 binary whose imports define the 'useful' "
+                         "symbol set. Repeatable. When given, the consider set is "
+                         "restricted to (union of target imports) ∩ (legacy framework "
+                         "exports) -- only symbols some target actually calls. Missing "
+                         "target files are skipped with a warning. Omit to consider the "
+                         "whole legacy framework surface (large).")
     a = ap.parse_args()
 
     bins = framework_stub_binaries(a.sdk)
+    arches = [x.strip() for x in a.arch.split(",") if x.strip()]
     legacy = set()
     per_fw = {}
     for b in bins:
-        e = nm_defined_exports(b, a.arch)
+        e = set()
+        for arch in arches:
+            e |= nm_defined_exports(b, arch)
         if e:
             per_fw[os.path.basename(b)] = len(e)
             legacy |= e
@@ -109,6 +138,21 @@ def main():
     # $ld$hide$..., etc.): they are not C symbols, abigen never emits for them,
     # and they only bloat the consider set. Real symbols always start with '_'.
     legacy = {s for s in legacy if s.startswith("_")}
+
+    # 'only useful symbols': restrict to what our targets actually import.
+    if a.target:
+        wanted = set()
+        for t in a.target:
+            t = os.path.expanduser(t)
+            if not os.path.exists(t):
+                print("  warning: target not found, skipping: %s" % t, file=sys.stderr)
+                continue
+            for arch in arches:
+                wanted |= nm_undefined_imports(t, arch)
+        before = len(legacy)
+        legacy &= wanted
+        print("targets             : %d  (%d imports -> %d legacy-framework symbols, "
+              "from %d framework exports)" % (len(a.target), len(wanted), len(legacy), before))
 
     if a.exclude_asm:
         already_shim = set()

@@ -147,6 +147,26 @@ add_custom_target(abiconv_asm DEPENDS abiconv.asm)
 # libabiconv builds with the modern shims only.
 set(ABICONV_LEGACY_SDK "$ENV{HOME}/projects/Library/SDKs/MacOSX10.6.sdk"
     CACHE PATH "Extracted MacOSX10.6 SDK providing legacy framework headers")
+# Restrict the legacy shim pass to the symbols our TARGETS actually import
+# ("only useful symbols"): the whole legacy framework surface is ~9k functions /
+# 20MB+ of asm (the classic 32-bit-only Carbon umbrella alone is ~5k), most of
+# which no target calls and which take >10 min to assemble. Each target binary
+# listed here contributes its imports; the consider set becomes (union of target
+# imports) ∩ (legacy framework exports) - (already shimmed). Missing targets are
+# skipped, so this is portable. Extend the list (semicolon-separated) when a new
+# i386 target needs legacy coverage, or clear it to consider the full surface.
+set(ABICONV_LEGACY_TARGETS
+    "$ENV{HOME}/projects/civ4/Civilization IV.app/Contents/MacOS/Civilization IV"
+    CACHE STRING "i386 target binaries whose imports define the legacy shim set")
+set(ABICONV_LEGACY_TARGET_ARGS "")
+set(ABICONV_LEGACY_TARGET_DEPS "")
+foreach(t IN LISTS ABICONV_LEGACY_TARGETS)
+  list(APPEND ABICONV_LEGACY_TARGET_ARGS --target ${t})
+  if(EXISTS ${t})
+    list(APPEND ABICONV_LEGACY_TARGET_DEPS ${t})
+  endif()
+endforeach()
+
 set(ABICONV_LEGACY_SRC "")
 if(EXISTS ${ABICONV_LEGACY_SDK})
   add_custom_command(OUTPUT abiconv_legacy.syms
@@ -154,9 +174,11 @@ if(EXISTS ${ABICONV_LEGACY_SDK})
             --sdk ${ABICONV_LEGACY_SDK}
             --exclude-asm ${CMAKE_CURRENT_BINARY_DIR}/abiconv.asm
             --exclude-asm ${CMAKE_CURRENT_SOURCE_DIR}/maptable_tramp.asm
+            ${ABICONV_LEGACY_TARGET_ARGS}
             -o abiconv_legacy.syms
     DEPENDS abiconv.asm ${CMAKE_CURRENT_SOURCE_DIR}/maptable_tramp.asm
             ${CMAKE_SOURCE_DIR}/src/86x64/shimdb_legacy_considerset.py
+            ${ABICONV_LEGACY_TARGET_DEPS}
     )
   add_custom_command(OUTPUT abiconv_legacy.asm
     COMMAND abigen -o abiconv_legacy.asm -s abiconv_legacy.syms

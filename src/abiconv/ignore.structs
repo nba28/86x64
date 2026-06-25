@@ -5,3 +5,32 @@ const char
 void
 const void
 DIR
+# Python C-API objects are OPAQUE HANDLES: the embedding app receives a PyObject*
+# (etc.) from the interpreter and passes it back unchanged. Deep-copying them is
+# both wrong (it breaks pointer identity — Python wouldn't recognise the copy) and
+# explosive (PyObject -> PyTypeObject -> ... recursively unrolls to 80k+ asm lines
+# per shim, blowing abiconv_legacy.asm to >100MB). Treat them as pass-through
+# pointers (widen i386 4-byte -> x86_64 8-byte) instead. Matched on the as-written
+# pointee spelling (typeconv convert_pointer), so list the typedef names the API
+# uses in signatures plus the underlying struct tags used in field decls.
+PyObject
+const PyObject
+struct _object
+const struct _object
+PyVarObject
+PyTypeObject
+const PyTypeObject
+struct _typeobject
+PyThreadState
+struct _ts
+PyInterpreterState
+struct _is
+PyFrameObject
+struct _frame
+PyCodeObject
+PyCompilerFlags
+PyTryBlock
+PyMethodDef
+PyModuleDef
+PyGetSetDef
+PyMemberDef
