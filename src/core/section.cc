@@ -314,12 +314,86 @@ namespace MachO {
        * slots instead of disassembling the table bytes as code. */
       DetectJumpTables(img, env);
 
+      /* For text sections, build a cursor into the func_syms set so the
+       * sweep can cheaply check whether the NEXT symbol boundary falls inside
+       * the current decoded instruction.  An instruction that spans a symbol
+       * boundary means the bytes BEFORE the boundary are inter-function padding
+       * (e.g. a 0x00 alignment byte) that the decoder absorbed.  We truncate to
+       * a 1-byte DataBlob and retry: this re-syncs the sweep at the true entry.
+       *
+       * Applies to BOTH M32 (initial sweep) and M64 (convert re-parse): the
+       * M32 sweep emits a DataBlob for the padding byte, but the M64 re-parse
+       * still sees the raw bytes and needs the same guard to avoid absorbing
+       * the padding into a multi-byte instruction that crosses the symbol.
+       *
+       * Only active when func_syms is non-empty (i.e. the binary has a symtab
+       * AND the Symtab LC was parsed before this section's Parse1 ran). */
+      std::set<std::size_t>::const_iterator next_sym_it;
+      bool check_sym_boundary = false;
+      if (parser == TextParser && !env.func_syms.empty()) {
+         /* Advance past any symbols that are at or before the section start
+          * (they can't split an instruction decoded at the section start). */
+         next_sym_it = env.func_syms.upper_bound(sect.addr);
+         check_sym_boundary = (next_sym_it != env.func_syms.end() &&
+                               *next_sym_it < sect.addr + sect.size);
+      }
+
       const std::size_t begin = sect.offset;
       const std::size_t end = begin + sect.size;
       std::size_t it = begin;
       std::size_t vmaddr = sect.addr;
       while (it != end) {
-         SectionBlob<bits> *elem = parser(img, Location(it, vmaddr), env);
+         SectionBlob<bits> *elem;
+
+         /* Check whether the decoded instruction would STRADDLE the next known
+          * function-symbol boundary.  If so, the bytes at [vmaddr, sym) are
+          * inter-function padding — force a 1-byte DataBlob here and let the
+          * next iteration start fresh at vmaddr+1 (closer to or at the symbol).
+          * Apply only when the parser is TextParser (code sections) and only
+          * for M32 (the constexpr guard above already ensures this path is only
+          * compiled for M32 parses). */
+         if (check_sym_boundary) {
+            /* Advance next_sym_it past any symbol already consumed. */
+            while (next_sym_it != env.func_syms.end() && *next_sym_it <= vmaddr) {
+               ++next_sym_it;
+               if (next_sym_it == env.func_syms.end() ||
+                   *next_sym_it >= sect.addr + sect.size) {
+                  check_sym_boundary = false;
+                  break;
+               }
+            }
+            if (check_sym_boundary) {
+               /* Try a quick-decode to get the instruction length; if it
+                * crosses the next symbol boundary, fall back to DataBlob. */
+               xed_decoded_inst_t xd;
+               xed_decoded_inst_zero_set_mode(&xd, &Instruction<bits>::dstate());
+               xed_decoded_inst_set_input_chip(&xd, XED_CHIP_INVALID);
+               bool boundary_straddle = false;
+               if (xed_decode(&xd, &img.at<uint8_t>(it), img.size() - it) == XED_ERROR_NONE) {
+                  const unsigned len = xed_decoded_inst_get_length(&xd);
+                  /* straddles if the sym falls INSIDE [vmaddr+1, vmaddr+len) */
+                  if (len > 1 && *next_sym_it > vmaddr && *next_sym_it < vmaddr + len) {
+                     boundary_straddle = true;
+                  }
+               }
+               if (boundary_straddle) {
+                  /* Emit the padding byte as DataBlob and re-sync. */
+                  if (std::getenv("MACHO_TRACE_FUNCSYM")) {
+                     fprintf(stderr, "[funcsym-boundary] vmaddr=0x%zx sym=0x%zx len=%u -> DataBlob\n",
+                             vmaddr, (size_t)*next_sym_it,
+                             xed_decoded_inst_get_length(&xd));
+                  }
+                  elem = DataBlob<bits>::Parse(img, Location(it, vmaddr), env);
+               } else {
+                  elem = parser(img, Location(it, vmaddr), env);
+               }
+            } else {
+               elem = parser(img, Location(it, vmaddr), env);
+            }
+         } else {
+            elem = parser(img, Location(it, vmaddr), env);
+         }
+
          elem->iter = content.insert(content.end(), elem);
          const std::size_t step = elem->size();
          if (step == 0 || it + step > end) {

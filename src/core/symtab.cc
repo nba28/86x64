@@ -54,6 +54,32 @@ namespace MachO {
                                         off2str));
       }
 
+      /* Populate env.func_syms: every non-stab N_SECT symbol with n_value != 0
+       * is a guaranteed instruction boundary within its section.  The linear code
+       * sweep uses this to detect when a decoded instruction's byte span would
+       * cross one of these boundaries (i.e. inter-function padding bytes have
+       * been absorbed into the preceding instruction's decode) and forces a
+       * 1-byte DataBlob re-sync at that byte.
+       *
+       * Applies to BOTH M32 (initial sweep) and M64 (convert re-parse so the
+       * re-parse correctly handles the same padding bytes that M32 emitted as
+       * DataBlobs — without this, the M64 sweep decodes padding+next-func-bytes
+       * as a multi-byte instruction that crosses the symbol and then emits a
+       * mis-sized blob that corrupts the convert-phase parse).
+       *
+       * We scan the RAW nlist table rather than the parsed Nlist objects so the
+       * scan is correct even when called from a context that hasn't yet resolved
+       * back-pointers, and so we don't depend on parse-pass ordering. */
+      for (uint32_t i = 0; i < symtab.nsyms; ++i) {
+         const auto& nl = img.template at<nlist_t<bits>>(
+            symtab.symoff + i * Nlist<bits>::size());
+         const bool is_stab = (nl.n_type & N_STAB) != 0;
+         const bool is_sect = !is_stab && (nl.n_type & N_TYPE) == N_SECT;
+         if (is_sect && nl.n_value != 0) {
+            env.func_syms.insert(static_cast<std::size_t>(nl.n_value));
+         }
+      }
+
    }
 
    template <Bits bits>

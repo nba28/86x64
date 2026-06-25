@@ -1,6 +1,7 @@
 #pragma once
 
 #include <map>
+#include <set>
 #include <unordered_map>
 
 #include "loc.hh"
@@ -55,6 +56,23 @@ namespace MachO {
        * decoding the entry bytes as code) for any offset whose vmaddr is a key
        * here. See JumpTableEntry in section_blob.hh. */
       std::map<std::size_t, std::size_t> jump_table_slots;
+
+      /* Function-symbol vmaddrs, populated from the LC_SYMTAB nlist table
+       * (all N_SECT, non-stab entries with n_value != 0).  Used by the linear
+       * code sweep (Section::Parse1) to detect when a decoded instruction would
+       * SPAN a function boundary (i.e. a known entry point lands inside the
+       * decoded range, not at the decode start).  Such a span means the bytes
+       * preceding the entry point are inter-function padding (e.g. a 0x00 align
+       * byte) that the sweep has mistakenly absorbed into the previous decode.
+       * The sweep truncates to a 1-byte DataBlob and retries from the next byte,
+       * re-syncing cleanly at the true function boundary.
+       *
+       * Universal: the check triggers only when a symbol boundary falls
+       * STRICTLY INSIDE the decoded instruction (vmaddr < sym < vmaddr+len),
+       * which is never true for well-aligned code and exclusively fires on
+       * padding bytes before a labelled entry.  Gated on M32 only (no i386 PIC
+       * confusion in M64 re-parses). */
+      std::set<std::size_t> func_syms;
 
       Placeholder<bits> *add_placeholder(std::size_t vmaddr);
       void do_resolve();
