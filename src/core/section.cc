@@ -1041,6 +1041,29 @@ namespace MachO {
                tbl_addr.erase(reg0);
                sets_state = true;
             }
+            /* (c-combined) GCC folds the table-base LEA into the load's own
+             * addressing: `mov %reg,[%anchor + idx*4 + disp]` — the live PIC
+             * anchor IS the base register and there is no preceding
+             * `lea %tbl,[anchor+disp]` (e.g. Civ IV's inflate switch dispatch,
+             * `movl 0xf9(%ebx,%eax,4),%eax` with %ebx = get_pc_thunk anchor).
+             * tbl_addr was therefore never populated. Recognise the combined
+             * form directly from the anchor map: the table sits at anchor+disp
+             * with a 4-byte entry stride, and the following `add %reg,%anchor;
+             * jmp %reg` completes the chain. Conservative: case (e) still
+             * validates that every entry resolves to an in-section code address
+             * before recording slots, so a plain anchor-relative indexed array
+             * load (not a switch) yields nothing. */
+            else if (index != XED_REG_INVALID &&
+                     xed_operand_values_get_scale(ops) == 4) {
+               auto a = anchors.find(base);
+               if (a != anchors.end()) {
+                  const ssize_t disp =
+                     xed_decoded_inst_get_memory_displacement(ops, 0);
+                  tbl_val[reg0] = { a->second + disp, 0 };
+                  tbl_addr.erase(reg0);
+                  sets_state = true;
+               }
+            }
          }
          /* (d) add %reg,%anchor where reg holds a table entry -> reg = target.
           *     The anchor register's value resolves the table's anchor. */
