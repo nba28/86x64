@@ -21,6 +21,8 @@
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 /* int sysctl(int *name, u_int namelen, void *oldp, size_t *oldlenp,
  *            void *newp, size_t newlen);
@@ -40,6 +42,15 @@ int shim_sysctl(uint32_t *a) {
    int r = sysctl(name, namelen, oldp, oldlenp, newp, newlen);
 
    if (ol32) { *ol32 = (uint32_t)oldlen; }
+
+   if (getenv("ABICONV_SYSCTL_TRACE")) {
+      unsigned long long v = 0;
+      if (oldp && oldlen >= 4) v = (oldlen >= 8) ? *(unsigned long long *)oldp
+                                                  : *(uint32_t *)oldp;
+      fprintf(stderr, "[sysctl] mib[%u]={%d,%d} -> r=%d oldlen=%zu val=%llu\n",
+              namelen, (namelen > 0 && name) ? name[0] : -1,
+              (namelen > 1 && name) ? name[1] : -1, r, oldlen, v);
+   }
    return r;
 }
 

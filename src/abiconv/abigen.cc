@@ -84,6 +84,56 @@ struct ABIConversion {
       }
    }
 
+   /* A struct passed BY VALUE as an argument. The i386 cdecl ABI pushes it onto
+    * the stack as raw contiguous bytes; the x86_64 SysV ABI classifies it into
+    * eightbytes (an INTEGER eightbyte -> a GP register, in arg order). Field
+    * widths differ between the ABIs (long: 4 vs 8 bytes), so the struct can't be
+    * byte-copied: each field is read from its i386 offset and WIDENED into its
+    * own x86_64 eightbyte register.
+    *
+    * Handled (the common + tractable case): a struct of 1-2 plain-`long`-width
+    * integer fields, each 4 bytes on i386 and 8 on x86_64, each its own INTEGER
+    * eightbyte. That is CFRange{CFIndex,CFIndex}, NSRange{NSUInteger,NSUInteger}
+    * and any {long,long}/{ulong,ulong} struct — the range/index-struct family CF
+    * and Foundation pass by value (CFStringGetCharacters, CFStringGetBytes,
+    * CFDataGetBytes, CFArrayGetValues, -getCharacters:range:, ...). Before this,
+    * abigen SKIPPED every such function (get_type_domain threw on CXType_Record),
+    * so its bind stayed on the NATIVE callee and the i386-cdecl call reached it
+    * with the wrong registers — e.g. CFStringGetCharacters got a 32-bit proxy
+    * handle in rdi, native CF then msgSend'd the held string as that object's
+    * isa, and libobjc SIGBUS'd realizing a CFString constant as a class.
+    *
+    * Anything else (FP/SSE fields, sub-eightbyte int packing, pointer/objc fields,
+    * `long long`, >2 fields, padding, unions, packed) throws -> abigen skips that
+    * one function exactly as before. Returns the ordered field types. */
+   static record_decl::FieldTypes integer_byval_struct_fields(CXType record) {
+      record_decl decl(record);
+      if (decl.cursor.kind != CXCursor_StructDecl || decl.packed) {
+         throw std::invalid_argument("byval struct: union/packed not supported");
+      }
+      const size_t n = decl.field_types.size();
+      if (n < 1 || n > 2) {   /* >16 bytes is never register-passed (SysV) */
+         throw std::invalid_argument("byval struct: field count not in 1..2");
+      }
+      for (CXType f : decl.field_types) {
+         CXType cf = clang_getCanonicalType(f);
+         switch (cf.kind) {
+         case CXType_Long: case CXType_ULong: break;  /* CFIndex / NS[U]Integer */
+         default:
+            throw std::invalid_argument("byval struct: non-long field");
+         }
+         if (sizeof_type(cf, arch::i386) != 4 || sizeof_type(cf, arch::x86_64) != 8) {
+            throw std::invalid_argument("byval struct: field not 4/8 (i386/x86_64)");
+         }
+      }
+      /* natural contiguous layout, no padding/alignment surprises */
+      if (sizeof_type(record, arch::i386) != 4 * n ||
+          sizeof_type(record, arch::x86_64) != 8 * n) {
+         throw std::invalid_argument("byval struct: unexpected padding");
+      }
+      return decl.field_types;
+   }
+
    /* assumes stack is 16-byte aligned */
    size_t stack_args_size() const {
       size_t size = 0;
@@ -92,6 +142,18 @@ struct ABIConversion {
       
       for (unsigned argi = 0; argi < argc(); ++argi) {
          const CXType argtype = clang_getCanonicalType(clang_getArgType(function_type, argi));
+         if (argtype.kind == CXType_Record) {
+            /* by-value integer struct (CFRange/NSRange/...): n INTEGER eightbytes
+             * -> n GP regs if they all fit, else the whole struct spills (SysV
+             * all-or-nothing). Mirrors the marshalling loop. Throws -> skip fn. */
+            const size_t n = integer_byval_struct_fields(argtype).size();
+            if (reg_i + n <= max_reg_args) {
+               reg_i += n;
+            } else {
+               size += 8 * n;
+            }
+            continue;
+         }
          switch (get_type_domain(get_arg_kind(argtype.kind))) {
          case type_domain::INT:
             if (reg_i < max_reg_args) {
@@ -275,6 +337,33 @@ struct ABIConversion {
 
          CXType orig_type = clang_getArgType(function_type, param_it);
          CXType type = handle_type(orig_type);
+
+         if (type.kind == CXType_Record) {
+            /* by-value integer struct (CFRange/NSRange/...): marshal each field
+             * into its own GP register, widening the i386 4-byte field to the
+             * x86_64 8-byte eightbyte; or spill the whole struct to consecutive
+             * 8-byte stack slots when the GP regs can't hold it all (SysV
+             * all-or-nothing). No post-call copy-back (the arg is by value). */
+            record_decl::FieldTypes fields = integer_byval_struct_fields(type);
+            const size_t n = fields.size();
+            const bool in_regs =
+               static_cast<size_t>(std::distance(info.reg_it, info.reg_end)) >= n;
+            int foff = 0;
+            for (CXType ftype : fields) {
+               std::unique_ptr<Location> fdst;
+               if (in_regs) {
+                  fdst = std::make_unique<RegisterLocation>(**info.reg_it++);
+               } else {
+                  fdst = std::make_unique<MemoryLocation>(stack_args);
+                  stack_args += 8;
+               }
+               MemoryLocation fsrc = load_loc + foff;
+               to_conv.convert(to_ss, ftype, fsrc, *fdst);
+               foff += 4;                 /* i386 field width (long = 4) */
+            }
+            load_loc += align_up<size_t>(sizeof_type(type, arch::i386), 4); /* 4*n */
+            continue;
+         }
 
          std::unique_ptr<Location> src;
          std::unique_ptr<Location> dst;

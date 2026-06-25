@@ -104,9 +104,25 @@ while IFS= read -r SYM; do
         BASE="${SYM%%\$*}"
         REPLACEMENT="${PREFIX}${BASE}"
         if [ "$BASE" = "$SYM" ] || ! grep -qFx "$REPLACEMENT" "$SHIM_EXPORTS"; then
-            # No shim available — leave the bind pointing at its original framework.
-            SKIPPED=$((SKIPPED + 1))
-            continue
+            # Classic Mach-O (no LC_DYLD_INFO) binaries: nm -u emits the raw
+            # decorated symbol names exactly as they appear in the nlist table.
+            # These already carry their full underscore prefix, so for symbols
+            # like ___tolower (= C __tolower), PREFIX+SYM = _____tolower does
+            # not exist — but SYM itself (___tolower) may be a direct libabiconv
+            # export (the ABI-bridging shim for _tolower that happens to share
+            # the name). When SYM is found verbatim, retarget the nlist library
+            # ordinal to libabiconv without renaming. This is structurally gated
+            # on the symbol being absent from libabiconv under PREFIX+SYM but
+            # present directly — harmless for modern (LC_DYLD_INFO) images where
+            # the bind stream already uses 1-underscore names that the prefix
+            # maps unambiguously.
+            if grep -qFx "$SYM" "$SHIM_EXPORTS"; then
+                REPLACEMENT="$SYM"
+            else
+                # No shim available — leave the bind pointing at its original framework.
+                SKIPPED=$((SKIPPED + 1))
+                continue
+            fi
         fi
     fi
     # Redirect the symbol wherever it is bound: functions live in the lazy
