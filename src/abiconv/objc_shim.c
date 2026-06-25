@@ -502,6 +502,7 @@ static uint64_t legacy_class_method_imp_byname(const char *clsname,
 static id shadow_real(uint32_t s);
 /* legacy i386 object/class bridging (defined after the legacy __OBJC structs). */
 static id       legacy_obj_to_real(uint32_t p);
+static id       i386_cfstr_to_real(uint32_t p);
 static id       lpair_lookup(uint32_t p);
 static uint64_t unwrap_obj_arg(uint32_t a);
 /* The i386 IMP of a legacy instance method on `c` (walking superclasses), or 0
@@ -667,6 +668,22 @@ static int is_real_x86_object(uint32_t p) {
    if (isa < 0x100000000ULL || (isa & 0x7) || !mem_readable(isa, 8)) { return 0; }
    uint64_t meta = *(const uint64_t *)(uintptr_t)isa;   /* class's isa = metaclass */
    if (meta < 0x100000000ULL || (meta & 0x7) || !mem_readable(meta, 8)) { return 0; }
+   /* Distinguish "p IS an object" from "p is a slot merely HOLDING a pointer to
+    * an object". The latter is the SIGBUS bug: a 32-bit slot holding a native
+    * NSString/CFString pointer false-matched here (its *p and **p are both high
+    * readable pointers), so resolve_self returned the slot address, objc_msgSend
+    * read *slot = the held string and treated IT as the receiver's Class, and
+    * libobjc's realizeClass wrote _objc_empty_cache into a READ-ONLY class page
+    * (CoreFoundation's __DATA_CONST/__DATA_DIRTY) -> SIGBUS.
+    * Invariant that separates the two: for a REAL object, isa is a Class whose
+    * own isa (`meta`) is a METACLASS; for a slot holding an object pointer, `isa`
+    * is an INSTANCE whose isa (`meta`) is a regular CLASS, not a metaclass. So a
+    * genuine object requires `meta` to be a metaclass. Universal (any held
+    * object pointer, not just CF strings; symbol-free). (An earlier guard
+    * compared meta to &___CFConstantStringClassReference — WRONG: CF's empty
+    * constant string's isa is __NSCFConstantString, not that symbol.) */
+   if (!mem_readable(meta, 0x30)) { return 0; }
+   if (!class_isMetaClass((Class)(uintptr_t)meta)) { return 0; }
    return 1;
 }
 
@@ -674,7 +691,7 @@ static int is_real_x86_object(uint32_t p) {
  * translated binary can pass: arena proxy handle, class-name cstring
  * pointer (for class messages), or nil. An unmapped value is none of these:
  * log it and fall back to nil rather than crashing objc_getClass. */
-static id resolve_self(uint32_t self32) {
+static id resolve_self_raw(uint32_t self32) {
    uintptr_t sp = self32;
    /* A legacy instance method runs with self32 = its i386 shadow; a `[self ...]`
     * inside it must re-dispatch on the real modern object (so inherited/AppKit
@@ -697,6 +714,10 @@ static id resolve_self(uint32_t self32) {
       id lr = legacy_obj_to_real(self32);
       if (lr) { return lr; }
    }
+   {
+      id cf = i386_cfstr_to_real(self32);   /* i386 CFSTR("...") constant receiver */
+      if (cf) { return cf; }
+   }
    if (self32 != 0) {
       if (!mem_readable(sp, 1)) {
          if (getenv("OBJC_BRIDGE_TRACE")) {
@@ -715,6 +736,39 @@ static id resolve_self(uint32_t self32) {
       return cls;
    }
    return (id)0;
+}
+
+/* Reject a MALFORMED receiver whose isa is not a real Class — the realize-SIGBUS
+ * guard, applied to EVERY branch's result (not just is_real_x86_object, which
+ * the crashing object bypasses). A well-formed receiver `obj` (instance OR class)
+ * has obj->isa = a Class, and a Class's own isa is a METACLASS; so
+ * class_isMetaClass((obj->isa)->isa) must hold. A receiver whose isa is an
+ * INSTANCE (e.g. a native CFStringRef stored where a receiver was expected) fails
+ * this: messaging it makes libobjc treat the held string as the Class and
+ * realizeClass writes _objc_empty_cache into a READ-ONLY class page -> SIGBUS.
+ * Drop such a receiver to nil (a safe no-op message) instead of crashing.
+ * Tagged/low/odd isas are left untouched (can't validate, and they're not the
+ * faulting shape). Universal + structural. */
+static id resolve_self(uint32_t self32) {
+   id obj = resolve_self_raw(self32);
+   if (!obj) { return obj; }
+   uintptr_t o = (uintptr_t)obj;
+   if (!mem_readable(o, 8)) { return obj; }
+   uintptr_t isa = *(const uint64_t *)o;                 /* obj->isa (candidate Class) */
+   if (isa < 0x100000000ULL || (isa & 0x7) || !mem_readable(isa, 8)) {
+      return obj;                                        /* tagged/low/odd: not the bug shape */
+   }
+   uintptr_t meta = *(const uint64_t *)isa;              /* (obj->isa)->isa: must be a metaclass */
+   if (meta < 0x100000000ULL || (meta & 0x7) || !mem_readable(meta, 0x30) ||
+       !class_isMetaClass((Class)(uintptr_t)meta)) {
+      if (getenv("OBJC_BRIDGE_TRACE")) {
+         fprintf(stderr, "[bp] resolve_self: MALFORMED receiver self32=0x%08x obj=%p "
+                 "isa=0x%lx -> nil\n", self32, obj, (unsigned long)isa);
+         fflush(stderr);
+      }
+      return (id)0;
+   }
+   return obj;
 }
 
 /* Resolve an i386 cmd32 selector-name pointer to a real SEL, guarding against
@@ -781,6 +835,27 @@ uint32_t x64_objc_sel_wrap(uint64_t s) {
       ++g_sel_intern_n;
    }
    return (uint32_t)(uintptr_t)low;
+}
+
+/* A C function returning a C string (a pointer to char or unsigned char, e.g.
+ * glGetString's const GLubyte*, gai_strerror, ...) may return a pointer to
+ * NATIVE static data living above 4GB. The i386 caller reads only eax (the low
+ * 4 bytes), truncating it to a wild low pointer that faults the moment the
+ * bytes are read (strlen / UTF8String). Bounce a high return into a low-4GB
+ * copy the i386 caller can hold and read; a low return (the common strchr or
+ * strstr case, a pointer into a buffer the caller passed in) is already
+ * representable and passes straight through. No cache: a fresh copy is correct
+ * whether the caller owns-and-frees it (it frees our shim-malloc'd low copy) or
+ * treats it as borrowed (one small leak per high return; such functions are
+ * called a handful of times). */
+const char *x64_cstr_ret_low(const char *p);
+const char *x64_cstr_ret_low(const char *p) {
+   if (!p || (uintptr_t)p < 0x100000000ULL) { return p; }
+   const size_t n = strlen(p) + 1;
+   char *low = (char *)malloc(n);                 /* low-4GB shim heap */
+   if (!low || (uintptr_t)low >= 0x100000000UL) { return p; }
+   memcpy(low, p, n);
+   return low;
 }
 
 /* Per-method arg unwrap loop: iterates from method-arg index `arg_start`
@@ -4541,6 +4616,56 @@ static id legacy_obj_to_real(uint32_t p) {
    return (id)0;
 }
 
+/* An i386 __builtin CFString constant (CFSTR("...") / @"..." compiled into the
+ * i386 image's __DATA,__cfstring section) has the fragile 16-byte layout
+ *   { uint32_t isa; uint32_t flags; uint32_t cStr; uint32_t length; }
+ * with flags == 0x7c8 for an 8-bit (ASCII) constant. Passed raw to a native
+ * method (e.g. the key of -[NSUserDefaults objectForKey:@"requiredUpdate"]),
+ * the modern runtime reads it as the 8-byte-field x86_64 NSString layout, so
+ * -hash / -isEqual: / -UTF8String / CFStringCreateWithBytes see a garbage
+ * isa+length and SIGBUS or abort. Convert it to a real immortal NSString the
+ * runtime can message. The isa field is a load-time-bound relocation (so
+ * unreliable for detection); key on flags plus an exact NUL-terminated
+ * strlen==length match. Cached by constant address (constants are immortal). */
+#define CFSTR_FLAGS_ASCII8 0x7c8u
+static struct { uint32_t i386; id real; } g_cfstr_cache[2048];
+static unsigned       g_cfstr_cache_n;
+static os_unfair_lock g_cfstr_lock = OS_UNFAIR_LOCK_INIT;
+
+static id i386_cfstr_to_real(uint32_t p) {
+   if (!ptr_ok(p, 16)) { return (id)0; }
+   if (*(const uint32_t *)(uintptr_t)(p + 4) != CFSTR_FLAGS_ASCII8) { return (id)0; }
+   const uint32_t cstr   = *(const uint32_t *)(uintptr_t)(p + 8);
+   const uint32_t length = *(const uint32_t *)(uintptr_t)(p + 12);
+   if (length >= (1u << 24) || !ptr_ok(cstr, (size_t)length + 1)) { return (id)0; }
+   const char *s = (const char *)(uintptr_t)cstr;
+   if (strnlen(s, (size_t)length + 1) != length) { return (id)0; }  /* exact C string */
+
+   os_unfair_lock_lock(&g_cfstr_lock);
+   for (unsigned i = 0; i < g_cfstr_cache_n; ++i) {
+      if (g_cfstr_cache[i].i386 == p) {
+         id r = g_cfstr_cache[i].real;
+         os_unfair_lock_unlock(&g_cfstr_lock);
+         return r;
+      }
+   }
+   /* +1 retained, kept forever (a constant string is immortal). UTF-8 first;
+    * fall back to MacRoman so any 8-bit byte still yields a string. */
+   CFStringRef cf = CFStringCreateWithBytes(NULL, (const UInt8 *)s, length,
+                                            kCFStringEncodingUTF8, false);
+   if (!cf) {
+      cf = CFStringCreateWithBytes(NULL, (const UInt8 *)s, length,
+                                   kCFStringEncodingMacRoman, false);
+   }
+   if (cf && g_cfstr_cache_n < sizeof(g_cfstr_cache) / sizeof(g_cfstr_cache[0])) {
+      g_cfstr_cache[g_cfstr_cache_n].i386 = p;
+      g_cfstr_cache[g_cfstr_cache_n].real = (id)cf;
+      ++g_cfstr_cache_n;
+   }
+   os_unfair_lock_unlock(&g_cfstr_lock);
+   return (id)cf;
+}
+
 /* Unwrap an i386 `@`/`#` argument to a real x86_64 id for a call into the
  * modern runtime. Handles arena proxy handles, R/S shadows, paired legacy
  * objects, raw legacy objects/classes, and otherwise passes through. */
@@ -4569,6 +4694,14 @@ static uint64_t unwrap_obj_arg(uint32_t a) {
          fflush(stderr);
       }
       return (uint64_t)(uintptr_t)lr;
+   }
+   id cf = i386_cfstr_to_real(a);          /* i386 CFSTR("...") constant -> real NSString */
+   if (cf) {
+      if (utrace) {
+         fprintf(stderr, "[uo] 0x%08x i386-cfstr -> %p\n", a, (void *)cf);
+         fflush(stderr);
+      }
+      return (uint64_t)(uintptr_t)cf;
    }
    /* Diagnose silent passthrough of high pointers (candidate isa-impedance
     * crashes): show why nothing matched. */

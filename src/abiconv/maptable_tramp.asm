@@ -139,6 +139,15 @@
 	MTSHIM	___OSAtomicAdd32,        _shim_OSAtomicAdd32
 	MTSHIM	___OSAtomicAdd32Barrier, _shim_OSAtomicAdd32Barrier
 
+	;; CFAllocator allocate/reallocate/deallocate -> the low-4GB heap. abigen's
+	;; native shims hand back >4GB pointers the i386 program truncates, then
+	;; aborts when freeing the truncated value via the native default zone
+	;; (the dominant iPhoto startup malloc abort at __CFAllocatorDeallocate).
+	;; Routed through malloc_shim.c, exactly as malloc/free already are.
+	MTSHIM	___CFAllocatorAllocate,   _shim_CFAllocatorAllocate
+	MTSHIM	___CFAllocatorReallocate, _shim_CFAllocatorReallocate
+	MTSHIM	___CFAllocatorDeallocate, _shim_CFAllocatorDeallocate
+
 ;; ===========================================================================
 ;; Struct-by-value C-function shims (28th blocker): NS/CG geometry family.
 ;; The C side (objc_shim.c g_geo[]) marshals via the ObjC bridge's classifier;

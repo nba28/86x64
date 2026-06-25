@@ -71,6 +71,12 @@ _CFRunLoopAddTimer
 _CFRunLoopRemoveTimer
 _CFRunLoopTimerInvalidate
 
+# CFAllocator alloc/realloc/dealloc -> low-4GB heap (malloc_shim.c); abigen's
+# native shims truncate >4GB pointers and abort on the cross-allocator free.
+_CFAllocatorAllocate
+_CFAllocatorReallocate
+_CFAllocatorDeallocate
+
 _NSRunAlertPanel
 _NSRunCriticalAlertPanel
 _NSRunInformationalAlertPanel
