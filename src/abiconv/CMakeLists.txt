@@ -207,6 +207,7 @@ add_library(abiconv SHARED
   objc_msgSend.asm
   objc_reverse.asm
   cb_tramp.asm
+  dlsym_tramp.asm
   init_trampoline.asm
   maptable_tramp.asm
   dyld_stub_binder.asm

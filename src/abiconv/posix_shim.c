@@ -28,12 +28,24 @@
 #include <errno.h>
 #include <string.h>
 #include <dlfcn.h>
+#include <os/lock.h>
+#include <mach/vm_prot.h>
+#include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 
 /* proxy arena (objc_shim.c): bridge a 64-bit handle/ptr <-> a 32-bit token the
  * i386 caller can hold, and bounce a 64-bit C-string into low-4GB. */
 extern uint32_t x64_objc_wrap(uint64_t real);
 extern uint64_t x64_objc_unwrap(uint32_t h);
 extern uint32_t x64_objc_bounce_cstr(const char *s);
+
+/* dlsym callable-thunk pool (dlsym_tramp.asm): low-4GB i386-callable stubs that
+ * marshal an i386 cdecl call into a captured native function. g_dlsym_target[k]
+ * holds the native target for slot k (0 = free); x64_dlsym_thunk_table[k] is the
+ * stub address the i386 caller invokes; x64_dlsym_nslots is the pool size. */
+extern uint64_t g_dlsym_target[];
+extern uint64_t x64_dlsym_thunk_table[];
+extern uint64_t x64_dlsym_nslots;
 
 static int posix_trace(void) {
    static int t = -1;
@@ -75,6 +87,86 @@ static void *dl_handle(uint32_t h32) {
    return (void *)(uintptr_t)x64_objc_unwrap(h32);
 }
 
+/* True if `v` lies in an executable Mach-O segment (i.e. it is code, a function),
+ * as opposed to a data symbol. dlsym() loses the function-vs-data distinction, so
+ * we recover it from the owning segment's protection: a callable thunk is only
+ * correct for a function; a data symbol must keep the arena-handle path (it would
+ * be read, not called).
+ *
+ * We must NOT use the live VM protection (mach_vm_region): under Rosetta the
+ * native x86_64 framework pages are mapped read-only (Rosetta translates them in
+ * a separate JIT region), so they never carry VM_PROT_EXECUTE and every function
+ * would look like data. The Mach-O segment header's `initprot` carries
+ * VM_PROT_EXECUTE for __TEXT regardless of how Rosetta maps the pages. */
+static int addr_is_executable(uint64_t v) {
+   Dl_info di;
+   if (dladdr((void *)(uintptr_t)v, &di) == 0 || di.dli_fbase == NULL) { return 0; }
+   const struct mach_header_64 *mh = (const struct mach_header_64 *)di.dli_fbase;
+   if (mh->magic != MH_MAGIC_64) { return 0; }
+   const struct load_command *lc =
+      (const struct load_command *)((const char *)mh + sizeof(*mh));
+
+   /* slide = runtime header address - the __TEXT segment's link-time vmaddr */
+   intptr_t slide = 0;
+   const struct load_command *l = lc;
+   for (uint32_t i = 0; i < mh->ncmds; i++) {
+      if (l->cmd == LC_SEGMENT_64) {
+         const struct segment_command_64 *s = (const struct segment_command_64 *)l;
+         if (strcmp(s->segname, SEG_TEXT) == 0) {
+            slide = (intptr_t)mh - (intptr_t)s->vmaddr;
+            break;
+         }
+      }
+      l = (const struct load_command *)((const char *)l + l->cmdsize);
+   }
+   /* find the segment containing v; report its initprot EXECUTE bit */
+   l = lc;
+   for (uint32_t i = 0; i < mh->ncmds; i++) {
+      if (l->cmd == LC_SEGMENT_64) {
+         const struct segment_command_64 *s = (const struct segment_command_64 *)l;
+         uint64_t lo = (uint64_t)((intptr_t)s->vmaddr + slide);
+         if (v >= lo && v < lo + s->vmsize) {
+            return (s->initprot & VM_PROT_EXECUTE) != 0;
+         }
+      }
+      l = (const struct load_command *)((const char *)l + l->cmdsize);
+   }
+   return 0;
+}
+
+/* Bind a >4GB native FUNCTION to a low-4GB i386-callable thunk slot and return
+ * its stub address (a valid 32-bit pointer the i386 caller can call). Slots are
+ * reused per native target so repeated dlsym()s of the same entry share one. */
+static uint32_t dlsym_make_thunk(uint64_t native, const char *name) {
+   static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
+   uint64_t n = x64_dlsym_nslots;
+   os_unfair_lock_lock(&lk);
+   for (uint64_t i = 0; i < n; i++) {                 /* reuse existing binding */
+      if (g_dlsym_target[i] == native) {
+         os_unfair_lock_unlock(&lk);
+         return (uint32_t)x64_dlsym_thunk_table[i];
+      }
+   }
+   for (uint64_t i = 0; i < n; i++) {                 /* allocate a free slot */
+      if (g_dlsym_target[i] == 0) {
+         g_dlsym_target[i] = native;
+         uint32_t stub = (uint32_t)x64_dlsym_thunk_table[i];
+         os_unfair_lock_unlock(&lk);
+         if (posix_trace()) {
+            fprintf(stderr, "[posix] dlsym: %s native=0x%llx -> callable thunk "
+                    "slot %llu @0x%x\n", name ? name : "?",
+                    (unsigned long long)native, (unsigned long long)i, stub);
+            fflush(stderr);
+         }
+         return stub;
+      }
+   }
+   os_unfair_lock_unlock(&lk);
+   fprintf(stderr, "[posix] dlsym: thunk slots exhausted for %s\n",
+           name ? name : "?");
+   return 0;
+}
+
 int32_t shim_dlsym(uint32_t *a) {
    void *h = dl_handle(a[0]);
    const char *name = a[1] ? (const char *)(uintptr_t)a[1] : NULL;
@@ -87,11 +179,23 @@ int32_t shim_dlsym(uint32_t *a) {
    uint64_t v = (uint64_t)(uintptr_t)sym;
    if (v == 0) { return 0; }
    if (v < 0x100000000ULL) { return (int32_t)(uint32_t)v; }  /* translated/low: callable */
-   /* High native address: not directly callable by i386 code. Wrap so it at
-    * least round-trips for data symbols; a native FUNCTION target would need a
-    * callback bridge (none of Source's dlsym'd entries are native). */
-   fprintf(stderr, "[posix] dlsym: WARNING high native symbol %s=%p wrapped "
-           "(not callable by i386 if a function)\n", name ? name : "?", sym);
+   /* High native address. A FUNCTION (executable page) can't be called by i386
+    * code directly (and wrapping it as a handle made the indirect call jump into
+    * proxy-arena data -> SIGBUS, e.g. iPhoto's BackupWrapper dlsym'ing
+    * BURegisterStartTimeMachineFromDock). Hand back a low-4GB callable thunk that
+    * marshals the i386 cdecl call into the native function. A DATA symbol keeps
+    * the arena-handle path (it is dereferenced, not called). */
+   if (addr_is_executable(v)) {
+      uint32_t thunk = dlsym_make_thunk(v, name);
+      if (thunk) { return (int32_t)thunk; }
+      /* pool exhausted: fall through to the handle (better a later fault than
+       * silently returning 0 / a wrong call) */
+   }
+   if (posix_trace()) {
+      fprintf(stderr, "[posix] dlsym: high DATA symbol %s=%p wrapped as handle\n",
+              name ? name : "?", sym);
+      fflush(stderr);
+   }
    return (int32_t)x64_objc_wrap(v);
 }
 
