@@ -118,17 +118,31 @@ void ConvertCommand::archive_EXECUTE_to_DYLIB(MachO::Archive<MachO::Bits::M64> *
 
    /* Inject the synthesized `_main` symbol now that the symtab exists. We
     * pick n_sect=1 (the first section, conventionally __TEXT,__text).
-    * If a `_main` is already present we don't double-add. */
+    *
+    * The wrapper exe links `extern _main` against this dylib and needs an
+    * *external* defined `_main` at the ENTRY point. Two subtleties:
+    *   - We only treat _main as "already present" if it is N_EXT. A private
+    *     (non-external) `_main` does not satisfy the link and must not block
+    *     synthesis. (Real-world i386 execs from gcc/ld carry a private SECT
+    *     `_main` — the C `main()` — at a DIFFERENT address than the entry,
+    *     which is the crt `start` stub. The wrapper wants the entry.)
+    *   - A defined symbol named `_main` may already exist but be private and
+    *     at the wrong address; drop it so the synthesized external entry
+    *     `_main` is the sole, unambiguous one. */
    if (entry_placeholder != nullptr) {
       bool already_have_main = false;
       for (auto *sym : symtab->syms) {
          if (sym->string && sym->string->str == "_main"
-             && sym->type() == MachO::Nlist<MachO::Bits::M64>::Type::SECT) {
+             && sym->type() == MachO::Nlist<MachO::Bits::M64>::Type::SECT
+             && (sym->nlist.n_type & N_EXT)) {
             already_have_main = true;
             break;
          }
       }
       if (!already_have_main) {
+         /* Drop any pre-existing private `_main` (wrong address / not
+          * external) so we don't emit two `_main` nlists. */
+         symtab->remove("_main");
          /* Locate __TEXT,__text — the entry point lives there. */
          const MachO::Section<MachO::Bits::M64> *text_section = nullptr;
          if (auto *text_seg = archive->segment(SEG_TEXT)) {
