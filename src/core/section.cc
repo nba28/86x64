@@ -657,7 +657,22 @@ namespace MachO {
                const xed_reg_enum_t indexreg =
                   xed_decoded_inst_get_index_reg(ops, i);
                if (basereg < XED_REG_EAX || basereg > XED_REG_EDI) continue;
-               if (indexreg != XED_REG_INVALID) continue;
+               /* SIB-indexed forms `[anchor + idx*scale + disp]` are allowed
+                * when the BASE is a known PIC anchor — the instruction.cc
+                * transform will emit `lea r11,[rip+table]; op [r11+idx*scale]`
+                * replacing the anchor base with the resolved table pointer.
+                * Forms where ONLY the INDEX is in the anchor range (no base)
+                * are not PIC patterns and skip as before. */
+               if (indexreg != XED_REG_INVALID) {
+                  /* Only proceed if basereg is actually an anchor — we've
+                   * already confirmed basereg is in EAX..EDI range above. */
+                  if (anchors.find(basereg) == anchors.end()) continue;
+                  /* Index register must be a general GP (EAX..EDI) and must
+                   * NOT itself be an anchor (if it is, the two-anchor form is
+                   * ambiguous — bail and leave it unhandled). */
+                  if (indexreg < XED_REG_EAX || indexreg > XED_REG_EDI) continue;
+                  if (anchors.find(indexreg) != anchors.end()) continue;
+               }
                const unsigned dwidth =
                   xed_decoded_inst_get_memory_displacement_width(ops, i);
                if (dwidth != sizeof(uint32_t)) continue;

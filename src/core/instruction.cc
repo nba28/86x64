@@ -2170,10 +2170,80 @@ namespace MachO {
                const uint8_t mod       = modrm & 0xC0;
                const bool has_sib = (rm == 0x04);
                if (has_sib) {
-                  /* [base + idx*scale + disp] — bypassing base would
-                   * lose the index. Not handled; fall back to existing
-                   * rewrite (which preserves base+r11 addressing). */
-                  goto pic_anchor_fallthrough;
+                  /* `[anchor + idx*scale + disp]` — the PIC anchor register
+                   * provides the table BASE, `idx*scale` is a live index.
+                   * Rewrite:
+                   *
+                   *   i386 | op [anchor + idx*scale + disp32]
+                   *   -----|---------------------------------------------------
+                   *   X86  | lea  r11, [rip + disp32]    ; r11 = table base
+                   *        | op   [r11 + idx*scale]      ; index into table
+                   *
+                   * r11 (register 11, low3=011, REX.B=1) replaces the anchor
+                   * base in the SIB byte.  The live index register is
+                   * unchanged.  REX.X is 0 since i386 index fields are always
+                   * within EAX..EDI (no extended indexing needed).
+                   *
+                   * Safety checks: we only enter here when section.cc's
+                   * DetectPicAnchoredDisps confirmed that the base is a
+                   * known anchor register and the index is a plain GP reg
+                   * (not itself an anchor).  An `idx_field == 4` (ESP =
+                   * "no index") can't appear since ESP cannot be an index
+                   * in i386 SIB; bail loudly rather than silently corrupt. */
+                  if (p + 1 >= instbuf.size()) {
+                     goto pic_anchor_fallthrough; /* no SIB byte? bail */
+                  }
+                  const uint8_t sib      = instbuf.at(modrm_idx + 1);
+                  const uint8_t scale_f  = (sib >> 6) & 0x03;  /* bits 7:6 */
+                  const uint8_t idx_f    = (sib >> 3) & 0x07;  /* bits 5:3 */
+                  if (idx_f == 0x04) {
+                     /* ESP/no-index in SIB — not reachable from a real index
+                      * register; fall through to the generic rewrite. */
+                     goto pic_anchor_fallthrough;
+                  }
+                  /* Disp size: for SIB-based PIC accesses the parser always
+                   * captures a 4-byte disp (dwidth == 4 gate in section.cc);
+                   * mod must be 0x80 (disp32) or 0x40 (disp8, unusual here). */
+                  std::size_t sib_disp_bytes = 0;
+                  if (mod == 0x40) { sib_disp_bytes = 1; }
+                  else if (mod == 0x80) { sib_disp_bytes = 4; }
+                  const std::size_t sib_after =
+                     modrm_idx + 2 /* ModRM+SIB */ + sib_disp_bytes;
+                  const std::size_t sib_imm_bytes =
+                     instbuf.size() > sib_after ? instbuf.size() - sib_after : 0;
+
+                  /* lea r11, [rip+disp32] — resolves to the table base */
+                  auto* lea_sib = new Instruction<opposite<bits>>
+                     (opcode::lea_r11_mem_rip_disp32());
+                  lea_sib->memidx = 0;
+                  env.resolve(memdisp, &lea_sib->memdisp);
+
+                  /* Rebuild main instruction:
+                   *   prefixes + opcode + new ModR/M(mod=00,rm=04) +
+                   *   new SIB(scale_f, idx_f, base=r11=3) + trailing imm */
+                  opcode_t sib_buf;
+                  for (std::size_t j = 0; j < opcode_idx + opcode_len; ++j) {
+                     sib_buf.push_back(instbuf.at(j));
+                  }
+                  /* ModRM: mod=00, reg preserved, rm=04 (SIB follows) */
+                  sib_buf.push_back((uint8_t)(0x04 | reg_field));
+                  /* SIB: scale unchanged, idx unchanged, base=r11 (low3=3) */
+                  sib_buf.push_back((uint8_t)((scale_f << 6) | (idx_f << 3) | 0x03));
+                  for (std::size_t j = instbuf.size() - sib_imm_bytes;
+                       j < instbuf.size(); ++j) {
+                     sib_buf.push_back(instbuf.at(j));
+                  }
+                  /* REX.B (0x41): extends r11 as the SIB base register.
+                   * REX.X is not needed since the index is within rax..rdi.
+                   * Insert after any existing 0x66 prefix but before REX
+                   * (there should be none at this point for i386 source). */
+                  sib_buf.insert(sib_buf.begin(), (uint8_t)0x41);
+                  if (have_66) {
+                     sib_buf.insert(sib_buf.begin(), (uint8_t)0x66);
+                  }
+
+                  auto* main_sib = new Instruction<opposite<bits>>(sib_buf);
+                  return {lea_sib, main_sib};
                }
                /* Compute original disp size to find any trailing imm. */
                std::size_t disp_bytes = 0;
