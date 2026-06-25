@@ -203,6 +203,8 @@ add_library(abiconv SHARED
   carbon_memory.c
   carbon_component.c
   quicktime_image.c
+  imagecapture_shim.c
+  carbon_fsspec_shim.c
   lazy_bind.c
   objc_msgSend.asm
   objc_reverse.asm

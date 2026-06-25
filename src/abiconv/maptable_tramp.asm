@@ -495,3 +495,25 @@ _x64_exc_longjmp:
 	MTSHIM	____ZSt18_Rb_tree_decrementPKSt18_Rb_tree_node_base, _shim_rb_decrement
 	MTSHIM	____ZSt29_Rb_tree_insert_and_rebalancebPSt18_Rb_tree_node_baseS0_RS_, _shim_rb_insert_rebalance
 	MTSHIM	____ZSt28_Rb_tree_rebalance_for_erasePSt18_Rb_tree_node_baseRS_,      _shim_rb_rebalance_for_erase
+
+	; Legacy ImageCapture (ICA) Carbon host API (imagecapture_shim.c). Dead C API on
+	; modern macOS (header removed); reached via bare stubs => native 8-byte ret over-pops
+	; the 4-byte i386 frame. Graceful "no device" shims so device enumeration fails cleanly.
+	MTSHIM	___ICAGetDeviceList,                _shim_ICAGetDeviceList
+	MTSHIM	___ICAGetChildCount,                _shim_ICAGetChildCount
+	MTSHIM	___ICAGetNthChild,                  _shim_ICAGetNthChild
+	MTSHIM	___ICAGetPropertyByType,            _shim_ICAGetPropertyByType
+	MTSHIM	___ICAGetPropertyData,              _shim_ICAGetPropertyData
+	MTSHIM	___ICACopyObjectPropertyDictionary, _shim_ICACopyObjectPropertyDictionary
+	MTSHIM	___ICACopyObjectThumbnail,          _shim_ICACopyObjectThumbnail
+	MTSHIM	___ICADownloadFile,                 _shim_ICADownloadFile
+	MTSHIM	___ICAObjectSendMessage,            _shim_ICAObjectSendMessage
+	MTSHIM	___ICARegisterEventNotification,    _shim_ICARegisterEventNotification
+
+	; Dead FSSpec-based Carbon File Manager (carbon_fsspec_shim.c). The FSSpec generation was
+	; removed on modern macOS (symbols + headers gone); the FSRef generation is abigen-shimmed.
+	; A missing symbol's bare stub jumps through a null lazy pointer (rip=0 SIGSEGV); these
+	; graceful-error shims keep the caller on its "no such file/volume" path.
+	MTSHIM	___FSpMakeFSRef,    _shim_FSpMakeFSRef
+	MTSHIM	___FSMakeFSSpec,    _shim_FSMakeFSSpec
+	MTSHIM	___FSpOpenResFile,  _shim_FSpOpenResFile

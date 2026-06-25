@@ -308,3 +308,17 @@ _GraphicsImportReadData
 _GetGraphicsImporterForDataRef
 _GetGraphicsImporterForFile
 _QTNewGWorldFromPtr
+
+# Legacy ImageCapture (ICA) Carbon host API (imagecapture_shim.c). ImageCapture.h is now an
+# empty stub on modern macOS, so abigen never generated these; excluded for clarity. Graceful
+# "no device" shims (the native callees over-pop the 4-byte i386 frame via a bare stub).
+_ICAGetDeviceList
+_ICAGetChildCount
+_ICAGetNthChild
+_ICAGetPropertyByType
+_ICAGetPropertyData
+_ICACopyObjectPropertyDictionary
+_ICACopyObjectThumbnail
+_ICADownloadFile
+_ICAObjectSendMessage
+_ICARegisterEventNotification
