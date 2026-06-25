@@ -42,7 +42,18 @@ namespace MachO {
          sections.push_back(section);
          offset += section->size();
       }
-      
+
+      /* Capture the raw file payload of a sectionless segment (no Section owns
+       * these bytes). __PAGEZERO and __LINKEDIT are special-cased elsewhere and
+       * carry no verbatim payload here, so exclude them. */
+      if (segment_command.nsects == 0 && segment_command.filesize > 0 &&
+          strcmp(segment_command.segname, SEG_PAGEZERO) != 0 &&
+          strcmp(segment_command.segname, SEG_LINKEDIT) != 0) {
+         const uint8_t *src =
+            &img.template at<uint8_t>(segment_command.fileoff);
+         raw_data.assign(src, src + segment_command.filesize);
+      }
+
       env.current_segment = nullptr;
    }
 
@@ -104,7 +115,14 @@ namespace MachO {
       for (Section<bits> *sect : sections) {
          sect->Build(env);
       }
-      
+
+      /* Lay out a sectionless segment's verbatim payload so the offset/vmaddr
+       * counters advance and fileoff/filesize remain self-consistent. */
+      if (!raw_data.empty()) {
+         env.loc.offset += raw_data.size();
+         env.loc.vmaddr += raw_data.size();
+      }
+
       /* post-conditions for vmaddr */
       env.loc.vmaddr = align_up(env.loc.vmaddr, PAGESIZE);
       env.loc.offset = align_up(env.loc.offset, PAGESIZE); /* experimental! */
@@ -204,6 +222,20 @@ namespace MachO {
          ++sect_i;
       }
 
+      /* Write back a sectionless segment's verbatim payload at its fileoff,
+       * then zero-fill the page-alignment tail so the file actually spans the
+       * full declared filesize. Otherwise the file ends at the payload's real
+       * end while the load command claims a (page-rounded) larger filesize,
+       * and ld rejects it with "content extends beyond end of file". */
+      if (!raw_data.empty()) {
+         img.copy(segment_command.fileoff, raw_data.begin(), raw_data.size());
+         const std::size_t declared = segment_command.filesize;
+         if (declared > raw_data.size()) {
+            img.memset(segment_command.fileoff + raw_data.size(), 0,
+                       declared - raw_data.size());
+         }
+      }
+
       // fprintf(stderr, "[EMIT] segment={name=%s,fileoff=0x%zx,filesize=0x%zx,vmaddr=0x%zx,vmsize=0x%zx}\n", segment_command.segname, (std::size_t) segment_command.fileoff, (size_t) segment_command.filesize, (size_t) segment_command.vmaddr, (size_t) segment_command.vmsize);
    }
 
@@ -212,6 +244,11 @@ namespace MachO {
       LoadCommand<bits>(other, env), id(0)
    {
       env(other.segment_command, segment_command);
+
+      /* Carry verbatim sectionless-segment payload across the bitness change.
+       * These bytes are opaque data (no instructions / no relocations), so they
+       * pass through unchanged. */
+      raw_data = other.raw_data;
 
       for (const auto other_section : other.sections) {
          sections.push_back(other_section->Transform(env));

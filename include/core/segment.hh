@@ -18,6 +18,12 @@ namespace MachO {
 
       segment_command_t<bits> segment_command;
       Sections sections;
+      /* Raw file payload for sectionless segments (nsects == 0 && filesize > 0).
+       * Some images carry a segment that owns file bytes but declares no
+       * sections (e.g. obfuscation/data segments). Those bytes belong to no
+       * Section, so we capture them verbatim here and re-lay-them-out at Build
+       * time, keeping fileoff/filesize self-consistent. Empty otherwise. */
+      std::vector<uint8_t> raw_data;
       unsigned id; /*!< assigned during build time */
 
       virtual uint32_t cmd() const override { return segment_command.cmd; }
