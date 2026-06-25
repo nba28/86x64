@@ -120,6 +120,64 @@ add_custom_command(OUTPUT abiconv.asm
 
 add_custom_target(abiconv_asm DEPENDS abiconv.asm)
 
+# --- Legacy shim pass (see src/abiconv/includes_legacy.h, the shimdb legacy expansion) ---
+# A SECOND abigen invocation that gives abigen the PROTOTYPES for framework C
+# functions whose headers modern macOS deleted, so it emits real ABI-marshalling
+# shims for the whole legacy (Carbon/QuickTime/AGL/ICA/...) surface. Two classes
+# both get a marshalling shim and differ only in where `call _sym` resolves at
+# runtime: SURVIVED symbols (still present on modern macOS, header-deleted) call
+# the live native function; DELETED symbols (32-bit-only Carbon/QuickDraw/
+# QuickTime, gone from modern macOS) resolve to a per-target graceful stub
+# provided by shimgen/shimdb. Both directions are correct because the shim runs
+# the i386 cdecl frame -> x86_64 SysV marshalling either way.
+#
+# Parsed under the extracted MacOSX10.6 SDK as -arch i386: the legacy headers
+# gate the classic Carbon APIs behind `#if !__LP64__`, so an x86_64 parse hides
+# exactly the DELETED 32-bit-only functions we most want to marshal. abigen's
+# arg/return widths come from the type KIND + a hardcoded i386->x86_64 direction
+# (get_type_width / sizeof_type are arch-parameterized), NOT from the clang parse
+# arch, so parsing i386 is safe and strictly broadens coverage.
+#
+# The consider set (abiconv_legacy.syms) is (all 10.6 SDK framework exports)
+# MINUS (the modern pass's emitted `global ___sym` shims, read from abiconv.asm),
+# so no function-shim label collides across the two .asm files. --secondary-pass
+# suppresses the singleton data-shadow runtime tables (emitted only by the modern
+# pass) for the same reason. Hand shims (carbon_memory.c, ...) are excluded via
+# the shared -i custom.syms. If the 10.6 SDK is absent the pass is skipped and
+# libabiconv builds with the modern shims only.
+set(ABICONV_LEGACY_SDK "$ENV{HOME}/projects/Library/SDKs/MacOSX10.6.sdk"
+    CACHE PATH "Extracted MacOSX10.6 SDK providing legacy framework headers")
+set(ABICONV_LEGACY_SRC "")
+if(EXISTS ${ABICONV_LEGACY_SDK})
+  add_custom_command(OUTPUT abiconv_legacy.syms
+    COMMAND python3 ${CMAKE_SOURCE_DIR}/src/86x64/shimdb_legacy_considerset.py
+            --sdk ${ABICONV_LEGACY_SDK}
+            --exclude-asm ${CMAKE_CURRENT_BINARY_DIR}/abiconv.asm
+            --exclude-asm ${CMAKE_CURRENT_SOURCE_DIR}/maptable_tramp.asm
+            -o abiconv_legacy.syms
+    DEPENDS abiconv.asm ${CMAKE_CURRENT_SOURCE_DIR}/maptable_tramp.asm
+            ${CMAKE_SOURCE_DIR}/src/86x64/shimdb_legacy_considerset.py
+    )
+  add_custom_command(OUTPUT abiconv_legacy.asm
+    COMMAND abigen -o abiconv_legacy.asm -s abiconv_legacy.syms
+            -i ${CMAKE_CURRENT_SOURCE_DIR}/custom.syms
+            --structfile ${CMAKE_CURRENT_SOURCE_DIR}/ignore.structs
+            --secondary-pass
+            --isysroot "${ABICONV_LEGACY_SDK}"
+            -X -x -X objective-c -X -arch -X i386
+            -X -resource-dir -X "${ABICONV_CLANG_RESOURCE_DIR}"
+            ${CMAKE_CURRENT_SOURCE_DIR}/includes_legacy.h
+    DEPENDS abigen abiconv_legacy.syms
+            ${CMAKE_CURRENT_SOURCE_DIR}/custom.syms
+            ${CMAKE_CURRENT_SOURCE_DIR}/ignore.structs
+            ${CMAKE_CURRENT_SOURCE_DIR}/includes_legacy.h
+    )
+  add_custom_target(abiconv_legacy_asm DEPENDS abiconv_legacy.asm)
+  set(ABICONV_LEGACY_SRC abiconv_legacy.asm)
+else()
+  message(WARNING "10.6 SDK not found at ${ABICONV_LEGACY_SDK}; legacy shim pass disabled")
+endif()
+
 # macro(create_abiconv TARGET_NAME INCLUDE_SYMS IGNORE_SYMS IGNORE_STRUCTS)
 # endmacro()
 
@@ -164,6 +222,7 @@ create_custom_conv_template(vva-conv-t.asm
 
 add_library(abiconv SHARED
   abiconv.asm
+  ${ABICONV_LEGACY_SRC}
   $<TARGET_OBJECTS:vararg_conv_printf>
   $<TARGET_OBJECTS:vararg_conv_sprintf>
   $<TARGET_OBJECTS:vararg_conv_fprintf>
@@ -233,8 +292,22 @@ target_link_libraries(abiconv System objc
   # CGImageSource (decode) + CGBitmapContext/CGImage (render into the GWorld).
   "-framework ImageIO"
   "-framework CoreGraphics"
+  # Legacy shim pass (abiconv_legacy.asm): the SURVIVED (header-deleted but still
+  # present) framework functions it marshals resolve their `call _sym` here.
+  # Linked so the frameworks are loaded in-process and the flat dynamic_lookup
+  # finds the live entry points without relying on the translated app's own load
+  # commands. These all still link on modern macOS (AGL/QuickTime are GONE, so
+  # those resolve via app-driven loading + shimgen instead — not linked here).
+  "-framework Carbon"
+  "-framework Security"
+  "-framework AddressBook"
+  "-framework DiscRecording"
+  "-framework ICADevices"
   )
 add_dependencies(abiconv abiconv_asm)
+if(TARGET abiconv_legacy_asm)
+  add_dependencies(abiconv abiconv_legacy_asm)
+endif()
 
 install(TARGETS abiconv DESTINATION opt/86x64)
 

@@ -570,6 +570,16 @@ struct ABIGenerator {
                              * name is in here is skipped to avoid label clashes */
    enum class ABI {FUNCTION, SYSCALL} abi;
    bool force_all;
+   /* Secondary (legacy) pass: this .asm is assembled into libabiconv ALONGSIDE
+    * the primary abiconv.asm. The singleton data-shadow runtime tables
+    * (_x64_data_shadows / _x64_data_shadows_count, consumed once by
+    * x64_init_data_shadows in objc_shim.c) are emitted only by the primary pass;
+    * a second definition would be a duplicate-symbol link error. So when set we
+    * suppress data-shadow collection/emission entirely (function shims only).
+    * Function shims (global ___sym) never collide because the legacy consider
+    * set excludes everything the primary pass already shims. See
+    * the shimdb legacy expansion. */
+   bool secondary_pass = false;
    std::vector<std::string> clang_args;  /* extra args passed to libclang */
    /* External ObjC-object DATA constants (e.g. NSString* const NSArgumentDomain)
     * in the consider set. abigen emits a low-4GB shadow variable + a runtime
@@ -747,6 +757,8 @@ struct ABIGenerator {
     * object pointers (id, NSString *, Class), whose value is always an objc
     * object; a scalar/struct global mis-wrapped this way could corrupt it. */
    void handle_var_decl(CXCursor c) {
+      /* secondary pass emits no data shadows (see secondary_pass) */
+      if (secondary_pass) { return; }
       const enum CX_StorageClass sc = clang_Cursor_getStorageClass(c);
       if (sc != CX_SC_None && sc != CX_SC_Extern) {
          return; /* static / register / etc. — not an imported global */
@@ -865,6 +877,10 @@ struct ABIGenerator {
     * x64_init_data_shadows() in objc_shim.c. Always emits the table/count
     * symbols (possibly empty) so the C side links. */
    void emit_data_shadows() {
+      /* secondary pass: skip the whole table (including the singleton globals
+       * _x64_data_shadows / _x64_data_shadows_count) so it does not collide with
+       * the primary pass's. See secondary_pass. */
+      if (secondary_pass) { return; }
       const std::string override_prefix = "__";
       os << "\n\tsegment .data" << std::endl;
       for (const std::string& s : data_shadow_syms) {
@@ -960,7 +976,7 @@ int main(int argc, char *argv[]) {
    ABIGenerator::ABI abi = ABIGenerator::ABI::FUNCTION;
    std::vector<std::string> clang_args;
    const char *optstring = "ho:s:i:r:cX:";
-   enum { OPT_ISYSROOT = 1000, OPT_DATASHADOW = 1001 };
+   enum { OPT_ISYSROOT = 1000, OPT_DATASHADOW = 1001, OPT_SECONDARY = 1002 };
    const struct option longopts[] = {{"help", no_argument, nullptr, 'h'},
                                      {"output", required_argument, nullptr, 'o'},
                                      {"symfile", required_argument, nullptr, 's'},
@@ -970,9 +986,11 @@ int main(int argc, char *argv[]) {
                                      {"clang-arg", required_argument, nullptr, 'X'},
                                      {"isysroot", required_argument, nullptr, OPT_ISYSROOT},
                                      {"data-shadow-file", required_argument, nullptr, OPT_DATASHADOW},
+                                     {"secondary-pass", no_argument, nullptr, OPT_SECONDARY},
                                      {0}
    };
 
+   bool secondary_pass = false;
    int optchar;
    while ((optchar = getopt_long(argc, argv, optstring, longopts, nullptr)) >= 0) {
       switch (optchar) {
@@ -1004,6 +1022,9 @@ int main(int argc, char *argv[]) {
       case OPT_DATASHADOW:
          datashadowpath = optarg;
          break;
+      case OPT_SECONDARY:
+         secondary_pass = true;
+         break;
       case '?':
          usage(stderr);
          return 1;
@@ -1018,6 +1039,7 @@ int main(int argc, char *argv[]) {
 
    ABIGenerator abigen(os, abi);
    abigen.clang_args = std::move(clang_args);
+   abigen.secondary_pass = secondary_pass;
 
    if (sympath) {
       parse_syms(sympath, [&] (const std::string& s) { abigen.symbols.insert(s); });
