@@ -181,10 +181,20 @@ namespace MachO {
       }
       
       env.loc.vmaddr = align_up(env.loc.vmaddr, PAGESIZE);
-      
+
       this->segment_command.filesize = env.loc.offset - this->segment_command.fileoff;
       this->segment_command.vmsize = align_up<std::size_t>(this->segment_command.filesize,
                                                            PAGESIZE);
+
+      /* The Build_LINKEDIT helpers advance env.loc.offset (file) but not
+       * env.loc.vmaddr, so leave the vmaddr cursor parked past this segment's
+       * VM extent. __LINKEDIT is usually the last segment, so this is normally
+       * inert; but when another segment follows it in the load-command list
+       * (e.g. a trailing sectionless __OINK), the next segment would otherwise
+       * be assigned __LINKEDIT's own vmaddr and ld rejects the VM overlap.
+       * Maintain the same post-condition every other Segment::Build upholds. */
+      env.loc.vmaddr = align_up<std::size_t>(this->segment_command.vmaddr +
+                                             this->segment_command.vmsize, PAGESIZE);
    }
 
    template <Bits bits>
