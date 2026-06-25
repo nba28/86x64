@@ -19,8 +19,12 @@ ___sigaction:
    ;; ARGS
    movsxd rdi, dword [rbp + 12]         ; int sig
    
-   mov esi, dword [rbp + 16]    ; const struct sigaction *act
-   sub rsp, 16                          ; sizeof(struct sigaction)
+   mov esi, dword [rbp + 16]    ; const struct sigaction *act (i386 ptr, may be NULL)
+   sub rsp, 16                          ; sizeof(struct sigaction) -- reserved unconditionally
+                                        ; so the stack layout (and call alignment) is identical
+                                        ; whether or not act is NULL.
+   test esi, esi                        ; act == NULL ? (POSIX: query-only, do not deref)
+   jz .act_null                         ; -> leave rsi = 0 (NULL) for native sigaction
    mov eax, [rsi + 0]
    mov [rsp + 0], rax           ; union __sigaction_u
    mov eax, [rsi + 4]
@@ -28,6 +32,7 @@ ___sigaction:
    mov eax, [rsi + 8]
    mov [rsp + 12], eax          ; int sa_flags
    mov rsi, rsp
+.act_null:
 
    sub rsp, 16      
    mov rdx, rsp                 ; struct sigaction *oact
