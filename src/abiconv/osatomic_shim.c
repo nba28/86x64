@@ -33,6 +33,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <dlfcn.h>
 #include <libkern/OSAtomic.h>
 
@@ -91,5 +92,31 @@ static int32_t osatomic_add32_common(uint32_t *a, int barrier) {
 
 int32_t shim_OSAtomicAdd32(uint32_t *a)        { return osatomic_add32_common(a, 0); }
 int32_t shim_OSAtomicAdd32Barrier(uint32_t *a) { return osatomic_add32_common(a, 1); }
+
+/* Runtime breadcrumb for the libgcc_shim.asm 64-bit helpers, gated by
+ * ABICONV_LIBGCC_TRACE. Used to diagnose Portal 2's libtier0 CalculateCPUFreq=0
+ * (the FP/loop-context bug that no freestanding repro reproduced): logs the
+ * ___udivdi3 quotient (the eventual divsd DIVISOR, via fildll) and the
+ * ___fixunsdfdi INPUT double (the final freq before truncation = the divsd
+ * RESULT). If the quotient is 0 -> the dividend / loop accumulation is wrong; if
+ * the fixunsdfdi input is ~0.0 while the quotient is sane -> the SSE2 numerator
+ * / divsd is wrong. Inert (one getenv) when the env var is unset. which: 0 =
+ * udivdi3 (a=dividend, b=divisor, result=quotient); 1 = fixunsdfdi (a=input
+ * double bits, result=int64 out). */
+void abiconv_libgcc_log(uint64_t a, uint64_t b, uint64_t result, uint64_t which) {
+   static int on = -1;
+   if (on < 0) { on = getenv("ABICONV_LIBGCC_TRACE") ? 1 : 0; }
+   if (!on) { return; }
+   if (which == 0) {
+      fprintf(stderr, "[libgcc] udivdi3 a=%llu b=%llu -> q=%llu\n",
+              (unsigned long long)a, (unsigned long long)b,
+              (unsigned long long)result);
+   } else {
+      double d;
+      memcpy(&d, &a, sizeof d);
+      fprintf(stderr, "[libgcc] fixunsdfdi in=%.6f (bits=0x%llx) -> %llu\n",
+              d, (unsigned long long)a, (unsigned long long)result);
+   }
+}
 
 #pragma clang diagnostic pop
