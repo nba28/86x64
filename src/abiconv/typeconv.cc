@@ -713,6 +713,28 @@ void conversion::convert_objc_sel(std::ostream& os, const Location& src,
    }
 }
 
+/* A pointer whose pointee is a fixed-width scalar has IDENTICAL element layout
+ * in i386 and x86_64, so the pointer needs no deep copy — it can be passed
+ * straight through (the i386 pointer is always low-4GB, hence a valid native
+ * pointer; native code reads/writes the caller's buffer directly, in or out).
+ * EXCLUDED: long/unsigned long (4 vs 8 bytes) and long double (12 vs 16) widen
+ * across the ABIs and still need the bounce-buffer conversion, as do structs,
+ * pointers, and arrays of any of those. */
+static bool pointee_is_passthrough_scalar(CXType canon) {
+   switch (canon.kind) {
+   case CXType_Bool:
+   case CXType_UChar:  case CXType_Char_U:
+   case CXType_SChar:  case CXType_Char_S:
+   case CXType_UShort: case CXType_Short:
+   case CXType_UInt:   case CXType_Int:   case CXType_Enum:
+   case CXType_Float:  case CXType_Double:
+   case CXType_ULongLong: case CXType_LongLong:
+      return true;
+   default:
+      return false;
+   }
+}
+
 void conversion::convert_pointer(std::ostream& os, CXType pointee, const Location& src_,
                                  const Location& dst_) {
    /* a pointer-to-function is NOT data to deep-copy (the old path handed the
@@ -760,6 +782,19 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
     * exactly the pre-existing behavior. */
    if (cb_is_cf_record_ptr(pointee_canon)) {
       convert_cf_ptr(os, src_, dst_);
+      return;
+   }
+
+   /* Pointer to a fixed-width scalar (char/short/int/float/double/long long/
+    * enum/bool): no layout difference between the ABIs, so pass the i386 pointer
+    * straight through instead of bouncing the pointee through a scratch buffer.
+    * The old deep copy was both lossy — it copied only ONE element, mangling
+    * array/buffer args like CFStringCreateWithBytes's `const UInt8 *bytes` or
+    * CFDataGetBytes's out buffer — and unsafe: the post-call copy-BACK writes
+    * through the pointer, faulting (SIGBUS) when it targets read-only memory such
+    * as a constant string's character data. */
+   if (pointee_is_passthrough_scalar(pointee_canon)) {
+      convert_int(os, CXType_Pointer, src_, dst_);
       return;
    }
 
@@ -826,11 +861,17 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
             const std::string null_lbl = label();
             const std::string done_lbl = label();
             emit_inst(os, "test", reg_src.reg.reg_q, reg_src.reg.reg_q);
-            emit_inst(os, "jz", null_lbl);
+            /* force `near` (rel32): this jumps over the recursive convert()
+             * block whose size varies with the pointee, and a rel8/rel32 flip
+             * across NASM's optimization passes cumulatively shifts later shim
+             * offsets enough to trip NASM 3.01 multi-pass non-convergence
+             * ("label changed during code generation"). Fixed-size jumps remove
+             * the only forward-ref size variability so NASM converges. */
+            emit_inst(os, "jz", "near " + null_lbl);
 
             /* convert */
             convert(os, pointee, mem_src, mem_dst);
-            emit_inst(os, "jmp", done_lbl);
+            emit_inst(os, "jmp", "near " + done_lbl);
 
             os << null_lbl << ":" << std::endl;
             emit_inst(os, "xor", reg_dst.reg.reg_d, reg_dst.reg.reg_d);
@@ -861,7 +902,7 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
              * null destination would fault (mirror the allocate path). */
             const std::string done_lbl = label();
             emit_inst(os, "test", reg_dst.reg.reg_q, reg_dst.reg.reg_q);
-            emit_inst(os, "jz", done_lbl);
+            emit_inst(os, "jz", "near " + done_lbl);   /* near: see convert note above */
 
             /* convert underlying data */
             convert(os, pointee, mem_src, mem_dst);

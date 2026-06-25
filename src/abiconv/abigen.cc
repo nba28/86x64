@@ -417,6 +417,20 @@ struct ABIConversion {
             emit_inst(os, "mov", "rdi", "rax");
             emit_inst(os, "call", "_x64_objc_wrap");
             os << ".cfretlow:" << std::endl;
+         } else if (rcanon.kind == CXType_Pointer) {
+            /* C-string return such as glGetString's const GLubyte ptr (a pointer
+             * to char or unsigned char): a >4GB native static string truncates
+             * to a wild pointer in the i386 caller's eax and faults when its
+             * bytes are read (strlen / initWithUTF8String:). Bounce a high
+             * return into a low-4GB copy; a low return (a pointer into a caller
+             * buffer, the strchr/strstr case) passes through unchanged. */
+            const CXTypeKind pk =
+               clang_getCanonicalType(clang_getPointeeType(rcanon)).kind;
+            if (pk == CXType_Char_S || pk == CXType_Char_U ||
+                pk == CXType_SChar  || pk == CXType_UChar) {
+               emit_inst(os, "mov", "rdi", "rax");
+               emit_inst(os, "call", "_x64_cstr_ret_low");
+            }
          }
       }
 
@@ -525,6 +539,8 @@ struct ABIGenerator {
       os << "\textern _x64_objc_unwrap" << std::endl;
       os << "\textern _x64_objc_sel_unwrap" << std::endl;
       os << "\textern _x64_objc_sel_wrap" << std::endl;
+      /* C-string return bounce (>4GB native string -> low-4GB copy; objc_shim.c) */
+      os << "\textern _x64_cstr_ret_low" << std::endl;
       /* native-callee breadcrumb writer (objc_shim.c); gated, diagnostic. */
       if (gen_native_crumb())
          os << "\textern _abiconv_native_crumb" << std::endl;

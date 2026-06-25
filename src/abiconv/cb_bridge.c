@@ -187,6 +187,17 @@ uint64_t x64_cb_dispatch(uint64_t slot, const uint64_t *gp, const uint64_t *fp,
       fprintf(stderr, "[cb] t=%x slot %llu -> fn 0x%x (%u words)\n",
               pthread_mach_thread_np(pthread_self()),
               (unsigned long long)slot, b.fn32, w);
+      /* dump raw native args (gp/fp) + marshalled i386 words so a hang/crash in
+       * the translated callback can be traced to a mis-marshalled (e.g. >4GB ptr
+       * truncated) argument. */
+      fprintf(stderr, "[cb]   gp=%llx,%llx,%llx,%llx,%llx,%llx fp=%llx,%llx\n",
+              (unsigned long long)gp[0], (unsigned long long)gp[1],
+              (unsigned long long)gp[2], (unsigned long long)gp[3],
+              (unsigned long long)gp[4], (unsigned long long)gp[5],
+              (unsigned long long)fp[0], (unsigned long long)fp[1]);
+      fprintf(stderr, "[cb]   words=");
+      for (uint32_t k = 0; k < w; ++k) { fprintf(stderr, "%x ", words[k]); }
+      fprintf(stderr, "\n");
       fflush(stderr);
    }
 
