@@ -6016,9 +6016,33 @@ uint32_t shim_dealloc_vec(uint32_t *a) {
 extern void x64_dealloc_vec_tramp(void);
 uint32_t ___dealloc = 0;            /* exported as ____dealloc */
 
+/* AppKit/Foundation methods whose single explicit arg is a CGFloat — on i386 a
+ * 4-byte float, on x86_64 an 8-byte double. The translated app only CALLS these
+ * (it doesn't declare/override them), so the seltypes registry — which learns
+ * i386 widths from the app's own __OBJC metadata — never sees them, and the
+ * forward bridge falls back to the NATIVE 'd' encoding and reads 8 bytes off the
+ * i386 frame (a 4-byte float + 4 bytes of the next slot) -> garbage. iPhoto:
+ * -[NSTableView setRowHeight:] got -6.9e38, collapsing the main library window
+ * to 0x0. Seed the i386 encoding "v12@0:4f8" (void ret; self@0; _cmd@4; float@8)
+ * so the bridge widens the 4-byte CGFloat to a double per SysV.
+ *
+ * The registry is keyed by BARE SEL (applies to every class's same-named
+ * method), so list only selectors that are unambiguously a lone CGFloat across
+ * the frameworks — never a double/NSTimeInterval/NSInteger elsewhere. */
+static const char *const g_cgfloat_scalar_sels[] = {
+   "setRowHeight:",            /* NSTableView / NSOutlineView  (grid + source list) */
+   "setIndentationPerLevel:",  /* NSOutlineView                (source list)        */
+   "setAlphaValue:",           /* NSView / NSWindow / NSCell                         */
+   "setLineWidth:",            /* NSBezierPath                                       */
+   NULL,
+};
+
 __attribute__((constructor))
 static void x64_init_objc1_compat(void) {
    ___dealloc = (uint32_t)(uintptr_t)&x64_dealloc_vec_tramp;
+   for (const char *const *p = g_cgfloat_scalar_sels; *p; ++p) {
+      seltypes_insert(sel_registerName(*p), "v12@0:4f8");
+   }
 }
 
 /* ======================================================================

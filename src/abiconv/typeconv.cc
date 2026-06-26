@@ -799,6 +799,24 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
    }
 
    if (ignore_structs.find(to_string(pointee)) != ignore_structs.end()) {
+      /* A `void *` arg is opaque, so it may carry a PROXY-ARENA HANDLE: an i386
+       * object the bridge wrapped into a 32-bit low-4GB handle (CFTypeRef stored
+       * into a CF collection as `const void *`, e.g. CFDictionaryAddValue's key/
+       * value). If the raw handle passes through to native CF, CF later derefs it
+       * as an object (CFGetTypeID -> objc_msgSend(handle,_cfTypeID) reads
+       * arena[slot] as the isa) and crashes. Route void* through x64_objc_unwrap:
+       * the arena region is EXCLUSIVE to handles, so a genuine pointer (truncated
+       * native ptr, i386 buffer, CFAllocatorRef) is never in range and passes
+       * through untouched. Forward direction only (i386->x86_64 args); a native
+       * return must not be "unwrapped". Other ignore_structs pointees (char*,
+       * DIR*, Python opaque handles — never arena handles) keep plain passthrough. */
+      const std::string ps = to_string(pointee);
+      if (from_arch == arch::i386 && to_arch == arch::x86_64 &&
+          ps.find("void") != std::string::npos) {
+         emit_runtime_bridge_call(os, "_x64_objc_unwrap", "",
+                                  src_, reg_width::D, dst_, reg_width::Q);
+         return;
+      }
       convert_int(os, CXType_Pointer, src_, dst_);
       return;
    }
