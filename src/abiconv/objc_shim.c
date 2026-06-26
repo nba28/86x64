@@ -1118,8 +1118,20 @@ static int enc_scalar3(char c, int conv, int ctx, size_t *isz, size_t *ial,
       *nsz=8; *nal=8; return 1;
    case 'f':
       *fp = 1;
-      if (conv == CONV_NATIVE) { *isz=4; *ial=4; *nsz=4; *nal=4; } /* float */
-      else                     { *isz=4; *ial=4; *nsz=8; *nal=8; } /* CGFloat */
+      /* A bare 'f' under a NATIVE encoding is a genuine 4-byte C float — UNLESS it
+       * sits inside a CGFloat-typed struct (NSRect/NSPoint/NSSize/CG*), where the
+       * legacy i386 encoding spells CGFloat as 'f'. There it is a CGFloat and must
+       * widen to a 64-bit double, exactly like the 'd' case. Without this, a
+       * reverse-registered legacy class whose geometry method carries the i386
+       * `{_NSRect={_NSPoint=ff}{_NSSize=ff}}` encoding got its 32-byte MEMORY-class
+       * NSRect misclassified as a 16-byte register aggregate (2 SSE eightbytes ->
+       * xmm0/xmm1); native AppKit then read the rect from the stack and saw 0 ->
+       * a 0x0 window (iPhoto/iWork IWWindow setFrame:display:/initWithContentRect:). */
+      if (conv == CONV_NATIVE && ctx != CTX_CGFLOAT) {
+         *isz=4; *ial=4; *nsz=4; *nal=4;        /* genuine C float */
+      } else {
+         *isz=4; *ial=4; *nsz=8; *nal=8;        /* CGFloat -> double */
+      }
       return 1;
    case 'd':
       *fp = 1;
