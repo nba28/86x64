@@ -4647,9 +4647,31 @@ static os_unfair_lock g_cfstr_lock = OS_UNFAIR_LOCK_INIT;
 
 static id i386_cfstr_to_real(uint32_t p) {
    if (!ptr_ok(p, 16)) { return (id)0; }
-   if (*(const uint32_t *)(uintptr_t)(p + 4) != CFSTR_FLAGS_ASCII8) { return (id)0; }
-   const uint32_t cstr   = *(const uint32_t *)(uintptr_t)(p + 8);
-   const uint32_t length = *(const uint32_t *)(uintptr_t)(p + 12);
+   uint32_t cstr, length;
+   if (*(const uint32_t *)(uintptr_t)(p + 4) == CFSTR_FLAGS_ASCII8) {
+      /* i386 16-byte CFConstantString: {isa,flags,cstr,length} (4-byte fields). */
+      cstr   = *(const uint32_t *)(uintptr_t)(p + 8);
+      length = *(const uint32_t *)(uintptr_t)(p + 12);
+   } else if (ptr_ok(p, 32) &&
+              *(const uint32_t *)(uintptr_t)(p + 8)  == CFSTR_FLAGS_ASCII8 &&
+              *(const uint32_t *)(uintptr_t)(p + 12) == 0 &&     /* flags high half */
+              *(const uint32_t *)(uintptr_t)(p + 20) == 0) {     /* cstr  high half */
+      /* x86_64 32-byte CFConstantString: {isa(8),flags(8),cstr(8),length(8)}.
+       * The translator emits CFSTR("...") constants as the NATIVE 32-byte
+       * record (8-byte fields), and their isa is xrel-bound to the low-4GB
+       * WRAPPED handle of __CFConstantStringClassReference. Passing such a raw
+       * constant to a native ObjC API (e.g. +[NSDictionary
+       * dictionaryWithObject:forKey:]) makes objc read the wrapped handle as a
+       * Class -> "Attempt to use unknown class 0x800xxxxx" -> _objc_fatal. The
+       * string payload is valid x86_64 layout: flags at +8, cstr ptr at +16
+       * (low-4GB, high half 0), length at +24. Convert to a real native string
+       * below, exactly like the i386 case. (Portal2/Source; structural trigger
+       * on the 32-byte record + ASCII8 flags, not app-specific.) */
+      cstr   = *(const uint32_t *)(uintptr_t)(p + 16);
+      length = *(const uint32_t *)(uintptr_t)(p + 24);
+   } else {
+      return (id)0;
+   }
    if (length >= (1u << 24) || !ptr_ok(cstr, (size_t)length + 1)) { return (id)0; }
    const char *s = (const char *)(uintptr_t)cstr;
    if (strnlen(s, (size_t)length + 1) != length) { return (id)0; }  /* exact C string */
