@@ -82,9 +82,28 @@ static uintptr_t low4gb_stack_base(void)
 }
 
 /* Lower this thread's cached WTF::Thread stack bound to cover the low-4GB
- * stack. Defensive: validates the TLS slot + offsets before any write. */
+ * stack. Defensive: validates the TLS slot + offsets before any write.
+ *
+ * VALIDATED 2026-06-26 against the live macOS WebKit via lldb (disasm of
+ * JSC::sanitizeStackForVM(VM&)): the function does, with no intervening write
+ * in the thread-already-exists path,
+ *     movq %gs:0x2e0, %r14            ; r14 = WTF::Thread::current()
+ *     movq 0x18(%r14), %rax           ; origin (high addr / stack base)
+ *     movq 0x1f078(%rbx), %rcx        ; rcx   = VM's recorded stack pointer
+ *     cmp  %rcx, %rax ; jb  -> CRASH   ; require origin >= rcx
+ *     cmp  0x20(%r14), %rcx ; jbe -> CRASH ; require rcx > bound
+ * i.e. it RELEASE_ASSERTs  bound < rcx <= origin.  Under translation the thread
+ * runs on a low-4GB stack and rcx is that low rsp, but WTF cached a stack whose
+ * low limit (`bound`, +0x20) sits ABOVE the actual rsp (the s59b pthread
+ * interposers make WTF cache one low-4GB stack region while the translated main
+ * frame executes lower in / in a different low-4GB region) — so rcx <= bound and
+ * it traps.  Lowering `bound` to the floor of the stack region we are ACTUALLY
+ * executing on restores bound < rcx <= origin and the assert passes; the path
+ * only READS +0x20 so the patch survives.  origin (+0x18) is left intact. */
 static void patch_wtf_stack_bound(void)
 {
+	volatile int probe;
+	uintptr_t onstack = (uintptr_t)&probe;
 	uintptr_t base = low4gb_stack_base();
 	if (!base) { return; }            /* not on a low stack: nothing to do */
 
@@ -95,18 +114,27 @@ static void patch_wtf_stack_bound(void)
 	uintptr_t *origin = (uintptr_t *)((char *)wtf + 0x18);
 	uintptr_t *bound  = (uintptr_t *)((char *)wtf + 0x20);
 
-	/* Sanity-gate the offsets: origin must be a plausible HIGH native stack
-	 * address and bound a smaller positive value below it. If this fails the
-	 * %gs/offsets are wrong for this OS — do nothing rather than corrupt. */
-	if (*origin < 0x100000000UL || *bound == 0 || *bound >= *origin) { return; }
-	if (base >= *bound) { return; }   /* already covered */
+	/* Validate the object looks like a WTF::Thread carrying a [bound,origin)
+	 * stack range, so a stale %gs/field offset on a future OS degrades to a
+	 * no-op rather than corrupting an unrelated heap object.  origin may be a
+	 * HIGH native address OR a low-4GB one (the interposed case) — accept both,
+	 * but require a sane span (a real thread stack, not a wild pointer pair). */
+	if (*origin == 0 || *bound == 0 || *bound >= *origin) { return; }
+	if (*origin - *bound > 0x40000000UL) { return; }   /* span >1GB: not a stack */
+	if (*origin <= onstack) { return; }                /* origin not above our rsp */
+	if (base >= *bound) { return; }                    /* already covers our stack */
+	if (*origin - base > 0x40000000UL) { return; }     /* widening to cover us would
+	                                                    * make an insane >1GB range
+	                                                    * (the disjoint high-native-
+	                                                    * stack impedance): leave it */
 
-	uintptr_t newbound = base;        /* low-4GB region base: keep overflow
-	                                   * detection meaningful for the low stack */
-	if (getenv("JSCSTACKPATCH"))      /* opt-in trace as well */
+	uintptr_t newbound = base;        /* floor of the low-4GB stack region we are
+	                                   * actually running on; keeps overflow
+	                                   * detection meaningful for that stack */
+	if (getenv("JSCSTACKPATCH"))      /* opt-in trace */
 		fprintf(stderr,
-		        "[jscstackpatch] tid=%x wtf=%p origin=0x%lx bound 0x%lx -> 0x%lx\n",
-		        pthread_mach_thread_np(pthread_self()), wtf,
+		        "[jscstackpatch] tid=%x wtf=%p rsp~0x%lx origin=0x%lx bound 0x%lx -> 0x%lx\n",
+		        pthread_mach_thread_np(pthread_self()), wtf, (unsigned long)onstack,
 		        (unsigned long)*origin, (unsigned long)*bound,
 		        (unsigned long)newbound);
 	*bound = newbound;

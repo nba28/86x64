@@ -96,6 +96,10 @@ static id webnoop_initWithCoder(id self, SEL _cmd, id coder)
 static void try_swizzle(void)
 {
 	if (g_done) { return; }
+	/* Opt-out gate: lets the real WebView spin up (e.g. to A/B against the
+	 * jscstackpatch stack-bounds shim). Default behaviour (gate unset) is
+	 * unchanged — webnoop still suppresses the WebView. */
+	if (getenv("WEBNOOP_DISABLE")) { return; }
 	Class wv = objc_getClass("WebView");
 	if (!wv) { return; }                      /* WebKit not loaded yet */
 	SEL sel = sel_registerName("initWithCoder:");
