@@ -39,11 +39,21 @@ namespace MachO {
          return new DyldInfo(img, offset, env);
       }
 
+      /* Synthesize an LC_DYLD_INFO_ONLY from already-built stream objects. Used
+       * to manufacture a modern bind/rebase/export representation for a CLASSIC
+       * (LC_DYSYMTAB-only) image — see Archive::synthesize_dyld_info. The
+       * dataoff/size fields are filled in at Build_LINKEDIT. */
+      static DyldInfo<bits> *Create(RebaseInfo<bits> *rebase, BindInfo<bits, false> *bind,
+                                    BindInfo<bits, false> *weak_bind,
+                                    BindInfo<bits, true> *lazy_bind,
+                                    ExportInfo<bits> *export_info);
+
       virtual DyldInfo<opposite<bits>> *Transform(TransformEnv<bits>& env) const override {
          return new DyldInfo<opposite<bits>>(*this, env);
       }
 
    private:
+      DyldInfo() {}
       DyldInfo(const Image& img, std::size_t offset, ParseEnv<bits>& env);
       DyldInfo(const DyldInfo<opposite<bits>>& other, TransformEnv<opposite<bits>>& env):
          LinkeditCommand<bits>(other, env),
@@ -95,6 +105,28 @@ namespace MachO {
                              weak);
       }
 
+      /* Synthesize a bind node pointing at an already-resolved slot blob (used
+       * when manufacturing an LC_DYLD_INFO bind stream for a classic image —
+       * Archive::synthesize_dyld_info). `dylib` is the resolved DylibCommand
+       * (null for special/weak); `blob` is the slot whose post-Build loc.vmaddr
+       * is the bind site. */
+      static BindNode<bits, lazy> *Create(uint8_t type, ssize_t addend,
+                                          const DylibCommand<bits> *dylib, int8_t dylib_special,
+                                          const std::string& sym, uint8_t flags,
+                                          const SectionBlob<bits> *blob, bool weak = false) {
+         auto *node = new BindNode();
+         node->type = type;
+         node->addend = addend;
+         node->dylib = dylib;
+         node->dylib_special = dylib_special;
+         node->sym = sym;
+         node->flags = flags;
+         node->blob = blob;
+         node->index = 0;
+         node->weak = weak;
+         return node;
+      }
+
       void Build(BuildEnv<bits>& env);
 
       BindNode<opposite<bits>, lazy> *Transform(TransformEnv<bits>& env) const {
@@ -104,6 +136,7 @@ namespace MachO {
       void print(std::ostream& os) const;
       
    private:
+      BindNode() {} /*!< for Create (synthesized binds) */
       BindNode(std::size_t vmaddr, ParseEnv<bits>& env, uint8_t type, ssize_t addend,
                std::size_t dylib, int8_t dylib_special, const char *sym, uint8_t flags,
                uint32_t index, bool weak);
@@ -128,6 +161,14 @@ namespace MachO {
                                    ParseEnv<bits>& env, bool weak = false)
       { return new BindInfo(img, offset, size, env, weak); }
 
+      /* Synthesize an empty bind table (caller appends BindNode::Create nodes).
+       * Used to manufacture a classic image's LC_DYLD_INFO bind streams. */
+      static BindInfo<bits, lazy> *Create(bool weak = false) {
+         auto *info = new BindInfo();
+         info->weak = weak;
+         return info;
+      }
+
       BindInfo<opposite<bits>, lazy> *Transform(TransformEnv<bits>& env) const {
          return new BindInfo<opposite<bits>, lazy>(*this, env);
       }
@@ -143,6 +184,7 @@ namespace MachO {
       void print(std::ostream& os) const;
 
    private:
+      BindInfo() {} /*!< for Create (synthesized bind table) */
       BindInfo(const Image& img, std::size_t offset, std::size_t size, ParseEnv<bits>& env,
                bool weak = false);
       BindInfo(const BindInfo<opposite<bits>, lazy>& other, TransformEnv<opposite<bits>>& env);

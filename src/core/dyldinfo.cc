@@ -1,3 +1,5 @@
+#include <cstring>
+
 #include "dyldinfo.hh"
 #include "image.hh"
 #include "leb.hh"
@@ -226,6 +228,23 @@ namespace MachO {
       if constexpr (lazy) {
             env.lazy_bind_node_resolver.add(index, this);
          }
+   }
+
+   template <Bits bits>
+   DyldInfo<bits> *DyldInfo<bits>::Create(RebaseInfo<bits> *rebase, BindInfo<bits, false> *bind,
+                                          BindInfo<bits, false> *weak_bind,
+                                          BindInfo<bits, true> *lazy_bind,
+                                          ExportInfo<bits> *export_info) {
+      auto *self = new DyldInfo();
+      std::memset(&self->dyld_info, 0, sizeof(self->dyld_info));
+      self->dyld_info.cmd = LC_DYLD_INFO_ONLY;
+      self->dyld_info.cmdsize = sizeof(self->dyld_info);
+      self->rebase = rebase;
+      self->bind = bind;
+      self->weak_bind = weak_bind;
+      self->lazy_bind = lazy_bind;
+      self->export_info = export_info;
+      return self;
    }
 
    template <Bits bits>

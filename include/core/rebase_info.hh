@@ -56,6 +56,11 @@ namespace MachO {
                                      ParseEnv<bits>& env) {
          return new RebaseInfo(img, offset, size, env);
       }
+
+      /* Synthesize an empty rebase table (caller appends RebaseNode::Create
+       * nodes). Used to manufacture a classic image's LC_DYLD_INFO rebase
+       * stream — see Archive::synthesize_dyld_info. */
+      static RebaseInfo<bits> *Create() { return new RebaseInfo(); }
       
       RebaseInfo<opposite<bits>> *Transform(TransformEnv<bits>& env) const {
          return new RebaseInfo<opposite<bits>>(*this, env);
@@ -64,6 +69,7 @@ namespace MachO {
       void print(std::ostream& os) const;
 
    private:
+      RebaseInfo() {} /*!< for Create (synthesized rebase table) */
       RebaseInfo(const Image& img, std::size_t offset, std::size_t size, ParseEnv<bits>& env);
       RebaseInfo(const RebaseInfo<opposite<bits>>& other, TransformEnv<opposite<bits>>& env);
       std::size_t do_rebase(std::size_t vmaddr, ParseEnv<bits>& env, uint8_t type);

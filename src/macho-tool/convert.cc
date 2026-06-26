@@ -33,6 +33,10 @@ int ConvertCommand::opthandler(int optchar) {
       }
       return 1;
 
+   case 'D':
+      synthesize_dyld_info = true;
+      return 1;
+
    default: abort();
    }
 }
@@ -61,9 +65,21 @@ int ConvertCommand::work() {
       }
    }
 
+   /* Opt-in: manufacture a modern LC_DYLD_INFO_ONLY for a classic image so the
+    * output is a canonical modern dylib (install_name_tool/llvm accept it; binds
+    * flow through the modern opcode path). Only meaningful for an M64 archive;
+    * the synthesis itself no-ops for an already-modern or non-classic image. */
+   if (synthesize_dyld_info) {
+      if (auto *archive = dynamic_cast<MachO::Archive<MachO::Bits::M64> *>(macho)) {
+         archive->synthesize_dyld_info_enabled = true;
+      } else {
+         log("--synthesize-dyld-info: input is not an M64 archive; ignoring");
+      }
+   }
+
    macho->Build();
    macho->Emit(*out_img);
-      
+
    return 0;
 }
 

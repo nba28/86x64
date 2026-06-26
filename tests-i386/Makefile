@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps synth-dyld-info
 all: run-only
 
 list:
@@ -86,6 +86,13 @@ list:
 # (native x86_64 cc, no i386 sysroot), so it runs anywhere macho-tool is built.
 change-deps: $(MACHO_TOOL)
 	@bash change_deps_test.sh $(MACHO_TOOL)
+
+# synth-dyld-info: regression test for `convert --synthesize-dyld-info` (route C:
+# classic LC_DYSYMTAB image -> canonical modern LC_DYLD_INFO_ONLY dylib that
+# stock install_name_tool/llvm accept). Needs a real classic i386 dylib as input
+# (modern ld can't emit classic format); SKIPs if none is present.
+synth-dyld-info: $(MACHO_TOOL)
+	@bash synth_dyld_info_test.sh $(MACHO_TOOL)
 
 # ObjC test group. Kept separate from the default `all` so the core
 # (asm/C) suite stays green while ObjC support is still landing. Builds each

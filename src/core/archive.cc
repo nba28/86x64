@@ -2,6 +2,10 @@
 #include <sstream>
 #include <stdexcept>
 
+#include <algorithm>
+#include <vector>
+#include <mach-o/nlist.h>
+
 #include "archive.hh"
 #include "parse.hh"
 #include "build.hh"
@@ -10,6 +14,9 @@
 #include "section_blob.hh"
 #include "symtab.hh"   // Dysymtab (inject_xrel_section)
 #include "dyldinfo.hh" // DyldInfo (classic-image gate)
+#include "rebase_info.hh"  // RebaseInfo (synthesize_dyld_info)
+#include "export_info.hh"  // ExportInfo / RegularExportNode (synthesize_dyld_info)
+#include "lc.hh"           // DylibCommand (synthesize_dyld_info)
 
 namespace MachO {
 
@@ -144,6 +151,15 @@ namespace MachO {
        * its XrelBlob::Emit can read each slot blob's resolved vmaddr. M64-only,
        * no-op when there are no lifted relocs. */
       inject_xrel_section();
+
+      /* Manufacture a modern LC_DYLD_INFO_ONLY for a classic image (opt-in via
+       * convert --synthesize-dyld-info). Runs AFTER inject_xrel_section so the
+       * 4-byte external-reloc RTTI slots still get their runtime __86x64_xrel
+       * binding (that section is bound by libabiconv, not dyld, and covers a
+       * disjoint slot set from the 8-byte symbol-pointer binds synthesized
+       * here). Adds the DyldInfo load command, so it must precede the ncmds /
+       * sizeofcmds accounting below. */
+      synthesize_dyld_info();
 
       /* Enforce the "__LINKEDIT is the last segment" invariant before laying
        * out file offsets. codesign/dyld append the code-signature superblob at
@@ -315,6 +331,203 @@ namespace MachO {
          if (std::getenv("MACHO_BUILD_DEBUG")) {
             fprintf(stderr, "inject_xrel_section: %zu entries (%zu unresolved "
                     "skipped) -> __DATA,__86x64_xrel\n", blob->ents.size(), skipped);
+         }
+      }
+   }
+
+   template <Bits b>
+   void Archive<b>::synthesize_dyld_info() {
+      if constexpr (b != Bits::M64) {
+         return; /* M32 builds are intermediate; we only emit modern output */
+      } else {
+         if (!synthesize_dyld_info_enabled) { return; }
+
+         /* Already modern (binds live in a real LC_DYLD_INFO stream): nothing to
+          * do. This is exactly the inverse of the classic-image set. */
+         if (this->template subcommand<DyldInfo>() != nullptr) { return; }
+
+         auto *symtab   = this->template subcommand<Symtab>();
+         auto *dysymtab = this->template subcommand<Dysymtab>();
+         if (symtab == nullptr || dysymtab == nullptr) { return; }
+
+         const bool dbg = std::getenv("MACHO_BUILD_DEBUG") != nullptr;
+
+         /* (1) ordinal -> DylibCommand. dyld's two-level library ordinal counts
+          * every dylib-loading command in load-command order, 1-based (matching
+          * BuildEnv::dylib_counter and classic_symbind). */
+         std::vector<const DylibCommand<b> *> ord_dylibs;
+         for (LoadCommand<b> *lc : load_commands) {
+            auto *dc = dynamic_cast<DylibCommand<b> *>(lc);
+            if (dc == nullptr) { continue; }
+            switch (dc->cmd()) {
+            case LC_LOAD_DYLIB: case LC_LOAD_WEAK_DYLIB: case LC_REEXPORT_DYLIB:
+            case LC_LOAD_UPWARD_DYLIB: case LC_LAZY_LOAD_DYLIB:
+               ord_dylibs.push_back(dc); break;
+            default: break; /* LC_ID_DYLIB et al. don't get an ordinal */
+            }
+         }
+
+         /* (2) symbol-table index -> Nlist*. The multiset iteration order is the
+          * Build/Emit order and is exactly the index space the indirect symbol
+          * table entries reference (convert.cc re-indexes the indirect table
+          * into this same order after its symtab edits). */
+         std::vector<const Nlist<b> *> syms_by_index(symtab->syms.begin(),
+                                                     symtab->syms.end());
+
+         auto *rebase    = RebaseInfo<b>::Create();
+         auto *bind      = BindInfo<b, false>::Create();
+         auto *weak_bind = BindInfo<b, false>::Create(/*weak=*/true);
+         auto *lazy_bind = BindInfo<b, true>::Create();
+         auto *export_info = ExportInfo<b>::Create();
+
+         auto add_rebase = [&] (const SectionBlob<b> *blob) {
+            auto *rn = RebaseNode<b>::Create(REBASE_TYPE_POINTER);
+            rn->blob = blob;
+            rebase->rebasees.push_back(rn);
+         };
+
+         /* A symbol-pointer slot holds a sliding internal pointer only when its
+          * blob resolved to an internal pointee; a null-valued LOCAL slot must
+          * NOT be rebased (dyld would add the slide to 0). */
+         auto sp_has_pointee = [] (const SectionBlob<b> *blob) -> bool {
+            if (auto *n = dynamic_cast<const NonLazySymbolPointer<b> *>(blob)) {
+               return n->pointee != nullptr;
+            }
+            if (auto *l = dynamic_cast<const LazySymbolPointer<b> *>(blob)) {
+               return l->pointee != nullptr;
+            }
+            return false;
+         };
+
+         std::size_t n_bind = 0, n_lazy = 0, n_rebase = 0, n_export = 0;
+
+         /* (3) Symbol-pointer sections (S_{NON_,}LAZY_SYMBOL_POINTERS): each slot
+          * maps through the indirect symbol table to a symbol or a local/abs
+          * sentinel. External undef -> BIND (eager: we route lazy imports
+          * through the non-lazy bind stream too, which is always correct and
+          * avoids depending on the translated stub_helper / dyld_stub_binder
+          * path; true LAZY_BIND is a future optimization). Defined symbol or
+          * LOCAL sentinel -> REBASE (internal sliding pointer). These slots are
+          * 8 bytes wide in the M64 output, so a modern 8-byte bind/rebase is
+          * size-correct. */
+         for (Segment<b> *seg : segments()) {
+            for (Section<b> *sect : seg->sections) {
+               const uint32_t stype = sect->sect.flags & SECTION_TYPE;
+               if (stype != S_NON_LAZY_SYMBOL_POINTERS &&
+                   stype != S_LAZY_SYMBOL_POINTERS) { continue; }
+               const uint32_t reserved1 = sect->sect.reserved1;
+
+               uint32_t slot = 0;
+               for (SectionBlob<b> *blob : sect->content) {
+                  if (dynamic_cast<SymbolPointer<b> *>(blob) == nullptr) {
+                     continue; /* skip trailing placeholders etc. */
+                  }
+                  const uint32_t isym_idx = reserved1 + slot;
+                  ++slot;
+                  if (isym_idx >= dysymtab->indirectsyms.size()) { continue; }
+                  const uint32_t isym = dysymtab->indirectsyms[isym_idx];
+
+                  if (isym & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) {
+                     /* LOCAL = baked internal pointer (slides) -> rebase, but
+                      * only if it actually holds an internal pointer (skip
+                      * null-valued slots). ABS = absolute (never slides). */
+                     if ((isym & INDIRECT_SYMBOL_ABS) == 0 && sp_has_pointee(blob)) {
+                        add_rebase(blob); ++n_rebase;
+                     }
+                     continue;
+                  }
+                  if (isym >= syms_by_index.size()) { continue; }
+                  const Nlist<b> *nl = syms_by_index[isym];
+                  if (nl->string == nullptr) { continue; }
+
+                  if (nl->kind() == Nlist<b>::Kind::UNDEF) {
+                     const uint8_t ord = GET_LIBRARY_ORDINAL(nl->nlist.n_desc);
+                     int8_t special = 0;
+                     const DylibCommand<b> *dylib = nullptr;
+                     if (ord == DYNAMIC_LOOKUP_ORDINAL) {
+                        special = BIND_SPECIAL_DYLIB_FLAT_LOOKUP;       /* -2 */
+                     } else if (ord == EXECUTABLE_ORDINAL) {
+                        special = BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE;   /* -1 */
+                     } else if (ord >= 1 && ord <= ord_dylibs.size()) {
+                        dylib = ord_dylibs[ord - 1];
+                     } else {
+                        /* SELF (0) can't be represented in this codebase's
+                         * dylib_special sentinel scheme, and an unknown ordinal
+                         * has no dylib; skip rather than emit a corrupt bind. */
+                        continue;
+                     }
+                     uint8_t flags = 0;
+                     if (nl->nlist.n_desc & N_WEAK_REF) {
+                        flags |= BIND_SYMBOL_FLAGS_WEAK_IMPORT;
+                     }
+                     bind->bindees.push_back(
+                        BindNode<b, false>::Create(BIND_TYPE_POINTER, 0, dylib, special,
+                                                   nl->string->str, flags, blob));
+                     ++n_bind;
+                  } else {
+                     /* Defined symbol referenced by a non-lazy pointer = an
+                      * internal sliding pointer. */
+                     add_rebase(blob); ++n_rebase;
+                  }
+               }
+            }
+         }
+
+         /* (4) Absolute pointer arrays outside the symbol-pointer sections:
+          * __mod_init_func / __mod_term_func (NonLazySymbolPointer blobs with a
+          * resolved internal pointee). Mirrors Dysymtab::regenerate_local_relocs
+          * but emits REBASE opcodes instead of a classic local-reloc table. Only
+          * 8-byte NonLazySymbolPointer slots are rebased; 4-byte Immediate
+          * pointers stay un-rebased (the translated dylib loads at a pinned base
+          * with slide 0, so their baked values are already correct — same as the
+          * classic path; an 8-byte rebase would clobber the neighbouring 4-byte
+          * slot). */
+         for (Segment<b> *seg : segments()) {
+            const std::string sn = seg->name();
+            if (sn == SEG_PAGEZERO || sn == SEG_LINKEDIT) { continue; }
+            for (Section<b> *sect : seg->sections) {
+               const uint32_t stype = sect->sect.flags & SECTION_TYPE;
+               if (stype == S_NON_LAZY_SYMBOL_POINTERS ||
+                   stype == S_LAZY_SYMBOL_POINTERS) { continue; } /* handled in (3) */
+               for (SectionBlob<b> *blob : sect->content) {
+                  auto *nlp = dynamic_cast<NonLazySymbolPointer<b> *>(blob);
+                  if (nlp == nullptr || nlp->pointee == nullptr) { continue; }
+                  add_rebase(blob); ++n_rebase;
+               }
+            }
+         }
+
+         /* (5) Exports: every defined external (N_SECT | N_EXT) symbol. N_ABS
+          * externals have no `value` placeholder (Nlist parse only placeholders
+          * N_SECT symbols) and are skipped — which also avoids re-exporting GCC
+          * C++ `.eh` FDE markers (N_ABS, value 0) that dyld can't satisfy. Weak
+          * definitions carry EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION. */
+         for (const Nlist<b> *nl : symtab->syms) {
+            if (nl->kind() != Nlist<b>::Kind::EXT) { continue; }
+            if (nl->string == nullptr || nl->string->str.empty()) { continue; }
+            if (Nlist<b>::is_header_symbol(nl->string->str)) { continue; }
+            if (nl->value == nullptr) { continue; } /* N_ABS / no address */
+            std::size_t eflags = EXPORT_SYMBOL_FLAGS_KIND_REGULAR;
+            if (nl->nlist.n_desc & N_WEAK_DEF) {
+               eflags |= EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION;
+            }
+            auto *node = RegularExportNode<b>::Create(eflags, nl->value);
+            export_info->trie.insert(nl->string->str, node);
+            ++n_export;
+         }
+
+         auto *dyld = DyldInfo<b>::Create(rebase, bind, weak_bind, lazy_bind, export_info);
+
+         /* Insert the LC_DYLD_INFO_ONLY immediately before LC_SYMTAB (its
+          * conventional position, right after the segment commands). */
+         auto pos = std::find(load_commands.begin(), load_commands.end(),
+                              static_cast<LoadCommand<b> *>(symtab));
+         load_commands.insert(pos, dyld);
+
+         if (dbg) {
+            fprintf(stderr,
+                    "synthesize_dyld_info: %zu bind, %zu lazy, %zu rebase, "
+                    "%zu export\n", n_bind, n_lazy, n_rebase, n_export);
          }
       }
    }

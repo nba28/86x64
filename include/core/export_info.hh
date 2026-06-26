@@ -149,6 +149,12 @@ namespace MachO {
                                      ParseEnv<bits>& env) {
          return new ExportInfo(img, offset, size, env);
       }
+
+      /* Synthesize an empty export trie (caller inserts RegularExportNodes).
+       * Used to manufacture a classic image's LC_DYLD_INFO export stream —
+       * see Archive::synthesize_dyld_info. */
+      static ExportInfo<bits> *Create() { return new ExportInfo(); }
+
       void Emit(Image& img, std::size_t offset) const;
 
       ExportInfo<opposite<bits>> *Transform(TransformEnv<bits>& env) const {
@@ -158,6 +164,7 @@ namespace MachO {
       std::size_t size() const;
       
    private:
+      ExportInfo() {} /*!< for Create (synthesized export trie) */
       ExportInfo(const Image& img, std::size_t offset, std::size_t size, ParseEnv<bits>& env);
       ExportInfo(const ExportInfo<opposite<bits>>& other, TransformEnv<opposite<bits>>& env):
          trie(other.trie.Transform(env)) {}

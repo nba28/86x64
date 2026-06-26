@@ -45,6 +45,8 @@ namespace MachO {
       virtual std::size_t content_size() const = 0;
 
    protected:
+      LinkeditCommand() {} /*!< for synthesized linkedit commands (e.g. a
+                            * classic image's manufactured LC_DYLD_INFO_ONLY) */
       LinkeditCommand(const Image& img, std::size_t offset, ParseEnv<bits>& env):
          LoadCommand<bits>(img, offset, env) {}
       LinkeditCommand(const LinkeditCommand<opposite<bits>>& other,

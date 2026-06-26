@@ -6,13 +6,21 @@
 
 struct ConvertCommand: InOutCommand {
    std::optional<uint32_t> filetype;
-   
-   virtual std::string optusage() const override { return "[-h|-a <type>]"; }
-   virtual const char *optstring() const override { return "ha:"; }
+   bool synthesize_dyld_info = false; /*!< --synthesize-dyld-info: manufacture a
+                                       * modern LC_DYLD_INFO_ONLY for a classic
+                                       * (LC_DYSYMTAB-only) image so stock tools
+                                       * accept it. See
+                                       * Archive::synthesize_dyld_info. */
+
+   virtual std::string optusage() const override {
+      return "[-h|-a <type>|--synthesize-dyld-info]";
+   }
+   virtual const char *optstring() const override { return "ha:D"; }
 
    virtual std::vector<option> longopts() const override {
       return {{"help", no_argument, nullptr, 'h'},
               {"archive", required_argument, nullptr, 'a'},
+              {"synthesize-dyld-info", no_argument, nullptr, 'D'},
               {0}};
    }
 

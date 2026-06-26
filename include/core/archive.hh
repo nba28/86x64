@@ -41,6 +41,16 @@ namespace MachO {
        * is required. 0 = legacy behaviour (MACHO_HEADERPAD env / no pad). */
       std::size_t header_size_target = 0;
 
+      /*!< When set (by `macho-tool convert --synthesize-dyld-info`), Build
+       * manufactures a modern LC_DYLD_INFO_ONLY (rebase/bind/lazy/weak/export
+       * opcode streams) for a CLASSIC (LC_DYSYMTAB-only) M64 image, so the
+       * output is a canonical modern dylib: install_name_tool (cctools + llvm)
+       * accept it, and its binds flow through the same opcode-rewrite path as
+       * natively-modern images. No-op for images that already carry a
+       * DyldInfo, for M32 builds, and for non-classic outputs. See
+       * Archive::synthesize_dyld_info. */
+      bool synthesize_dyld_info_enabled = false;
+
       virtual uint32_t magic() const override { return header.magic; }
       virtual uint32_t& magic() override { return header.magic; }
       virtual Bits bits() const override { return b; }
@@ -133,6 +143,15 @@ namespace MachO {
        * with the rest of __DATA and its XrelBlob's Emit can read every slot
        * blob's resolved vmaddr. See the known-gaps list / objc_slide.c. */
       void inject_xrel_section();
+
+      /* Manufacture an LC_DYLD_INFO_ONLY (rebase/bind/lazy_bind/weak_bind/
+       * export opcode streams) for a classic (no-LC_DYLD_INFO) M64 image from
+       * its LC_DYSYMTAB indirect symbol table + relocations + nlist symtab, so
+       * the output is a canonical modern dylib. Gated on
+       * synthesize_dyld_info_enabled; no-op if a DyldInfo already exists, on
+       * M32, or with no Dysymtab/Symtab. Called from Build after
+       * inject_xrel_section. See the known-gaps list route C. */
+      void synthesize_dyld_info();
 
       template <template <Bits> class Blob>
       Blob<b> *find_blob(std::size_t vmaddr) const {
