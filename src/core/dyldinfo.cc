@@ -13,19 +13,17 @@ namespace MachO {
       LinkeditCommand<bits>(img, offset, env), dyld_info(img.at<dyld_info_command>(offset)),
       rebase(RebaseInfo<bits>::Parse(img, dyld_info.rebase_off, dyld_info.rebase_size, env)),
       bind(BindInfo<bits, false>::Parse(img, dyld_info.bind_off, dyld_info.bind_size, env)),
+      weak_bind(BindInfo<bits, false>::Parse(img, dyld_info.weak_bind_off,
+                                             dyld_info.weak_bind_size, env, /*weak=*/true)),
       lazy_bind(BindInfo<bits, true>::Parse(img, dyld_info.lazy_bind_off, dyld_info.lazy_bind_size,
                                             env)),
       export_info(ExportInfo<bits>::Parse(img, dyld_info.export_off, dyld_info.export_size, env))
-   {
-      weak_bind = std::vector<uint8_t>(&img.at<uint8_t>(dyld_info.weak_bind_off),
-                                       &img.at<uint8_t>(dyld_info.weak_bind_off +
-                                                        dyld_info.weak_bind_size));
-   }
+   {}
 
 
    template <Bits bits, bool lazy>
    BindInfo<bits, lazy>::BindInfo(const Image& img, std::size_t offset, std::size_t size,
-                                  ParseEnv<bits>& env) {
+                                  ParseEnv<bits>& env, bool weak): weak(weak) {
       const std::size_t begin = offset;
       const std::size_t end = begin + size;
       std::size_t it = begin;
@@ -193,7 +191,7 @@ namespace MachO {
                                              uint8_t flags, uint32_t index) {
       if (vmaddr != 0 && sym != nullptr) {
          bindees.push_back(BindNode<bits, lazy>::Parse(vmaddr, env, type, addend, dylib,
-                                                       dylib_special, sym, flags, index));
+                                                       dylib_special, sym, flags, index, weak));
       }
       return vmaddr + sizeof(ptr_t);
    }
@@ -215,12 +213,14 @@ namespace MachO {
    template <Bits bits, bool lazy>
    BindNode<bits, lazy>::BindNode(std::size_t vmaddr, ParseEnv<bits>& env, uint8_t type,
                                   ssize_t addend, std::size_t dylib, int8_t dylib_special,
-                                  const char *sym, uint8_t flags, uint32_t index):
+                                  const char *sym, uint8_t flags, uint32_t index, bool weak):
       type(type), addend(addend), dylib(nullptr), dylib_special(dylib_special), sym(sym),
-      flags(flags), blob(nullptr), index(index)
+      flags(flags), blob(nullptr), index(index), weak(weak)
    {
       env.vmaddr_resolver.resolve(vmaddr, &blob);
-      if (dylib_special == 0) {
+      /* weak binds carry no dylib ordinal (implicit weak lookup), so there is
+       * nothing to resolve and nothing to emit for the dylib. */
+      if (dylib_special == 0 && !weak) {
          env.dylib_resolver.resolve(dylib, &this->dylib);
       }
       if constexpr (lazy) {
@@ -237,9 +237,10 @@ namespace MachO {
       dyld_info.bind_off = env.allocate(dyld_info.bind_size);
       bind->Build(env);
 
-      dyld_info.weak_bind_size = align<bits>(weak_bind.size());
+      dyld_info.weak_bind_size = weak_bind->size();
       dyld_info.weak_bind_off = env.allocate(dyld_info.weak_bind_size);
-      
+      weak_bind->Build(env);
+
       dyld_info.lazy_bind_size = align<bits>(lazy_bind->size());
       dyld_info.lazy_bind_off = env.allocate(dyld_info.lazy_bind_size);
       lazy_bind->Build(env);
@@ -267,7 +268,9 @@ namespace MachO {
        * later LC), so they share this single predicate. */
       if (!active()) return false;
       if (blob->segment == nullptr) return false;
-      if (dylib_special == 0 && dylib == nullptr) return false;
+      /* weak binds have neither a real dylib nor a special ordinal; they are
+       * still emittable (implicit weak lookup, no SET_DYLIB opcode). */
+      if (!weak && dylib_special == 0 && dylib == nullptr) return false;
       if constexpr (bits == Bits::M64) {
          /* x86_64 W^X: __TEXT pages are RX, dyld can't write a bind
           * target there ("KERN_PROTECTION_FAILURE" SIGBUS during
@@ -293,6 +296,7 @@ namespace MachO {
        * opcode bits, corrupting it into SET_DYLIB_SPECIAL_IMM with an
        * invalid signed-extended ordinal (dyld_info reports "unknown library
        * special ordinal (-15)" etc.). */
+      if (weak) return 0; /* weak binds emit no SET_DYLIB opcode (dylib is null) */
       if (dylib_special != 0) return 1;
       if (dylib->id <= 15) return 1;
       return 1 + leb128_size(dylib->id);
@@ -347,9 +351,7 @@ namespace MachO {
 
       rebase->Emit(img, dyld_info.rebase_off);
       bind->Emit(img, dyld_info.bind_off);
-
-      img.copy(dyld_info.weak_bind_off, &*weak_bind.begin(), dyld_info.weak_bind_size);
-
+      weak_bind->Emit(img, dyld_info.weak_bind_off);
       lazy_bind->Emit(img, dyld_info.lazy_bind_off);
       export_info->Emit(img, dyld_info.export_off);
    }
@@ -375,6 +377,7 @@ namespace MachO {
        * Picking the wrong form for ordinal 16+ (i.e. OR-ing into IMM) silently
        * corrupts the opcode byte — high bits leak into next opcode's nibble,
        * dyld_info reports "unknown library special ordinal (-15)" etc. */
+      if (weak) return 0; /* weak binds emit no SET_DYLIB opcode (dylib is null) */
       if (dylib_special != 0) {
          img.at<uint8_t>(offset) = (uint8_t)(BIND_OPCODE_SET_DYLIB_SPECIAL_IMM |
                                              (dylib_special & 0xF));
@@ -440,12 +443,12 @@ namespace MachO {
    template <Bits bits>
    std::size_t DyldInfo<bits>::content_size() const {
       return rebase->size() + bind->size() +
-         weak_bind.size() + lazy_bind->size() + export_info->size();
+         weak_bind->size() + lazy_bind->size() + export_info->size();
    }
 
    template <Bits bits, bool lazy>
    BindInfo<bits, lazy>::BindInfo(const BindInfo<opposite<bits>, lazy>& other,
-                            TransformEnv<opposite<bits>>& env) {
+                            TransformEnv<opposite<bits>>& env): weak(other.weak) {
       for (const auto other_bindee : other.bindees) {
          bindees.push_back(other_bindee->Transform(env));
       }
@@ -456,10 +459,12 @@ namespace MachO {
                             TransformEnv<opposite<bits>>& env):
       type(other.type), addend(other.addend), dylib(nullptr),
       dylib_special(other.dylib_special), sym(other.sym), flags(other.flags),
-      blob(nullptr)
+      blob(nullptr), weak(other.weak)
    {
       if constexpr (lazy) { env.template add<LazyBindNode>(&other, this); }
-      if (dylib_special == 0) {
+      /* weak nodes have a null dylib (TransformEnv::resolve null-guards the
+       * key, but be explicit and parallel to the parse ctor). */
+      if (dylib_special == 0 && !weak) {
          env.resolve(other.dylib, &dylib);
       }
       env.resolve(other.blob, &blob);
@@ -477,7 +482,8 @@ namespace MachO {
    template <Bits bits, bool lazy>
    void BindNode<bits, lazy>::print(std::ostream& os) const {
       os << blob->segment->name() << " " << blob->section->name() << " 0x" << std::hex
-         << blob->loc.vmaddr << " " << dylib->name << " " << sym;
+         << blob->loc.vmaddr << " " << (weak ? "weak" : dylib_special ? "special" : dylib->name)
+         << " " << sym;
    }
 
    template <Bits bits, bool lazy>
