@@ -1,5 +1,7 @@
 #include <algorithm>
 #include <iostream>
+#include <unordered_map>
+#include <vector>
 #include <libgen.h>
 #include <mach/machine.h>
 
@@ -114,6 +116,20 @@ void ConvertCommand::archive_EXECUTE_to_DYLIB(MachO::Archive<MachO::Bits::M64> *
    if (symtab == nullptr) {
       throw std::string("missing symtab");
    }
+
+   /* Snapshot the symbol order BEFORE we mutate the symbol table.
+    *
+    * LC_DYSYMTAB's indirect symbol table is an array of raw INDICES into the
+    * symbol table (one per __la/__nl/__IMPORT pointer slot and stub). The
+    * symbol removals (__mh_execute_header, a stale private _main) and the
+    * _main insertion below shift every subsequent symbol's index, but the
+    * indirect indices were carried verbatim from the i386 input — so without
+    * fix-up they would point at the WRONG symbols afterward. Record the
+    * pre-mutation order so we can re-map the indirect table by symbol
+    * IDENTITY once all edits are done (see the re-index pass below). */
+   std::vector<const MachO::Nlist<MachO::Bits::M64> *> old_sym_order(
+      symtab->syms.begin(), symtab->syms.end());
+
    symtab->remove("__mh_execute_header");
 
    /* Inject the synthesized `_main` symbol now that the symtab exists. We
@@ -186,6 +202,54 @@ void ConvertCommand::archive_EXECUTE_to_DYLIB(MachO::Archive<MachO::Bits::M64> *
                /*value=*/entry_placeholder);
             trie.insert(std::string("_main"), node);
          }
+      }
+   }
+
+   /*
+    * Re-index the indirect symbol table to track the symbol-table edits above.
+    *
+    * The edits (remove __mh_execute_header, remove a stale private _main,
+    * insert the synthesized external _main) change every later symbol's index.
+    * The indirect symbol table holds raw indices, carried verbatim from the
+    * i386 input, so they now reference the wrong symbols. For a CLASSIC image
+    * (LC_DYSYMTAB only, NO LC_DYLD_INFO bind opcode stream — e.g. a GCC-built
+    * game executable) dyld resolves the __la/__nl/__IMPORT pointer slots purely
+    * through this table, so a stale index makes EVERY slot bind to a
+    * neighbouring symbol. Concretely, Civilization IV's __IMPORT,__pointers has
+    * ~25k self-referential non-lazy pointers (FDE `.eh` markers, vtables,
+    * statics); an off-by-one retargets ~18k of them onto N_ABS value-0 `.eh`
+    * markers, which aren't exportable, so dyld aborts at load with
+    * "Symbol not found: ..._GetClassInfo_StaticEv.eh".
+    *
+    * (Modern images bind via the LC_DYLD_INFO opcode stream, which names
+    * symbols directly, so the index shift was harmless there — but re-indexing
+    * is still correct for them, leaving the table consistent for any tool that
+    * reads it.)
+    *
+    * Re-map each entry by symbol IDENTITY: old index -> Nlist* (snapshot taken
+    * before the edits) -> new index (post-edit multiset order, which is exactly
+    * the Build/Emit order). Leave the INDIRECT_SYMBOL_LOCAL/_ABS sentinels and
+    * any out-of-range entry untouched. A slot whose referenced symbol was
+    * dropped (e.g. a stub to __mh_execute_header / the stale _main — these
+    * don't normally occur) becomes INDIRECT_SYMBOL_ABS so dyld leaves it as-is
+    * rather than binding a stale index. */
+   if (auto *dysymtab = archive->template subcommand<MachO::Dysymtab>()) {
+      std::unordered_map<const MachO::Nlist<MachO::Bits::M64> *, uint32_t> new_index;
+      new_index.reserve(symtab->syms.size());
+      uint32_t idx = 0;
+      for (const auto *sym : symtab->syms) {
+         new_index[sym] = idx++;
+      }
+      for (uint32_t& entry : dysymtab->indirectsyms) {
+         if ((entry & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) != 0) {
+            continue; /* sentinel: a local/absolute pointer, not a symbol ref */
+         }
+         if (entry >= old_sym_order.size()) {
+            continue; /* out of range (shouldn't happen) — leave untouched */
+         }
+         auto it = new_index.find(old_sym_order[entry]);
+         entry = (it != new_index.end()) ? it->second
+                                         : (uint32_t) INDIRECT_SYMBOL_ABS;
       }
    }
 
