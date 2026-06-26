@@ -1088,7 +1088,8 @@ static const char *enc_skip_digits(const char *t);
 static int enc_tag_ctx(const char *tag, size_t n) {
    static const char *cg[] = { "CGPoint", "CGSize", "CGRect", "NSPoint",
       "NSSize", "NSRect", "_NSPoint", "_NSSize", "_NSRect",
-      "CGAffineTransform", "NSAffineTransformStruct", "CGVector" };
+      "CGAffineTransform", "NSAffineTransformStruct", "CGVector",
+      "CATransform3D", "NSEdgeInsets" };
    static const char *ix[] = { "_NSRange", "NSRange", "CFRange" };
    for (unsigned i = 0; i < sizeof cg / sizeof *cg; ++i) {
       if (strlen(cg[i]) == n && !strncmp(tag, cg[i], n)) { return CTX_CGFLOAT; }
@@ -5335,6 +5336,36 @@ static struct geo_ent g_geo[] = {
    /* 73 */ { "CGContextGetClipBoundingBox", ENC_NSRECT "^{CGContext=}",     NULL },
    /* 74 */ { "CGContextGetCTM",          ENC_CGAFF "^{CGContext=}",         NULL },
    /* 75 */ { "CGContextSetPatternPhase", "v^{CGContext=}" ENC_NSSIZE,       NULL },
+   /* CG text + path + gradient + shadow draw family. These take CGFloat /
+    * CGPoint / CGSize / CGAffineTransform / CGRect BY VALUE, so abigen either
+    * SKIPS them (struct-by-value: the gradient/shadow/text-matrix/layer group)
+    * or — worse — emits a shim that reads each CGFloat as an 8-byte DOUBLE from
+    * the i386 4-byte float slot (the scalar-CGFloat group: ShowTextAtPoint /
+    * SetTextPosition / AddArc... — every following arg then mis-aligns). Either
+    * way the i386 app's custom-view drawRect:/drawInContext: drew text and
+    * shapes at garbage positions (iPhoto's EtchedText / AlbumView /
+    * IWWindowBackgroundView rendered blank/black/skewed). Listing them in
+    * custom.syms excludes abigen's broken shim; geo_call marshals each with the
+    * i386 (float) classifier. Opaque CG ptrs (CGGradient/CGColor/CGLayer) are
+    * handle-bridged by geo_cfptr_arg; the deprecated char* text path passes its
+    * low-4GB string pointer straight through. */
+   /* 76 */ { "CGContextShowTextAtPoint",  "v^{CGContext=}ff*I",            NULL },
+   /* 77 */ { "CGContextSetTextPosition",  "v^{CGContext=}ff",             NULL },
+   /* 78 */ { "CGContextSelectFont",       "v^{CGContext=}*fI",            NULL },
+   /* 79 */ { "CGContextAddArc",           "v^{CGContext=}fffffi",         NULL },
+   /* 80 */ { "CGContextAddArcToPoint",    "v^{CGContext=}fffff",          NULL },
+   /* 81 */ { "CGContextAddQuadCurveToPoint", "v^{CGContext=}ffff",        NULL },
+   /* 82 */ { "CGContextAddCurveToPoint",  "v^{CGContext=}ffffff",         NULL },
+   /* 83 */ { "CGContextDrawLinearGradient", "v^{CGContext=}^{CGGradient=}"
+                                            ENC_NSPOINT ENC_NSPOINT "I",   NULL },
+   /* 84 */ { "CGContextDrawRadialGradient", "v^{CGContext=}^{CGGradient=}"
+                                            ENC_NSPOINT "f" ENC_NSPOINT "f" "I", NULL },
+   /* 85 */ { "CGContextSetShadow",        "v^{CGContext=}" ENC_NSSIZE "f", NULL },
+   /* 86 */ { "CGContextSetShadowWithColor", "v^{CGContext=}" ENC_NSSIZE
+                                            "f^{CGColor=}",                 NULL },
+   /* 87 */ { "CGContextSetTextMatrix",    "v^{CGContext=}" ENC_CGAFF,      NULL },
+   /* 88 */ { "CGContextDrawLayerInRect",  "v^{CGContext=}" ENC_NSRECT
+                                            "^{CGLayer=}",                  NULL },
 };
 
 struct geo_res { uint64_t lo, hi; double fp; };

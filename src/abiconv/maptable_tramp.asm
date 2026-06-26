@@ -281,6 +281,20 @@
    GEOSHIM_S ___CGContextGetClipBoundingBox, 73
    GEOSHIM_S ___CGContextGetCTM,             74
    GEOSHIM_I ___CGContextSetPatternPhase,    75
+   ;; CG text/path/gradient/shadow draw family (KEEP IN SYNC with g_geo[]).
+   GEOSHIM_I ___CGContextShowTextAtPoint,    76
+   GEOSHIM_I ___CGContextSetTextPosition,    77
+   GEOSHIM_I ___CGContextSelectFont,         78
+   GEOSHIM_I ___CGContextAddArc,             79
+   GEOSHIM_I ___CGContextAddArcToPoint,      80
+   GEOSHIM_I ___CGContextAddQuadCurveToPoint, 81
+   GEOSHIM_I ___CGContextAddCurveToPoint,    82
+   GEOSHIM_I ___CGContextDrawLinearGradient, 83
+   GEOSHIM_I ___CGContextDrawRadialGradient, 84
+   GEOSHIM_I ___CGContextSetShadow,          85
+   GEOSHIM_I ___CGContextSetShadowWithColor, 86
+   GEOSHIM_I ___CGContextSetTextMatrix,      87
+   GEOSHIM_I ___CGContextDrawLayerInRect,    88
 
 ;; NSRect out-pointers: hand-marshalled in objc_shim.c (mt_NSDivideRect).
    MTSHIM ___NSDivideRect, _mt_NSDivideRect
