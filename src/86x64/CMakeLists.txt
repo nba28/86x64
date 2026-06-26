@@ -20,7 +20,18 @@ set_target_properties(acctnoop PROPERTIES
   COMPILE_OPTIONS "-fno-objc-arc")
 target_link_libraries(acctnoop "-framework Foundation")
 
-install(TARGETS wrapper interpose webnoop acctnoop
+# jscstackpatch: a single-purpose shim that lets a legacy WebKit1 WebView spin
+# up under translation by widening JSC's per-thread cached native-stack bounds
+# to also cover the low-4GB translation stack (so JSC::sanitizeStackForVM passes
+# instead of trapping). env-gated JSCSTACKPATCH=1, OFF by default. UNTESTED /
+# not bundled yet — preserved here for the WebKit-B work. See jscstackpatch.m.
+add_library(jscstackpatch SHARED jscstackpatch.m)
+set_target_properties(jscstackpatch PROPERTIES
+  OSX_ARCHITECTURES x86_64
+  COMPILE_OPTIONS "-fno-objc-arc")
+target_link_libraries(jscstackpatch "-framework Foundation")
+
+install(TARGETS wrapper interpose webnoop acctnoop jscstackpatch
   DESTINATION opt/86x64
   )
 
