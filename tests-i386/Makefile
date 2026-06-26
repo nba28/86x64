@@ -45,6 +45,15 @@ HOST_SDK := $(shell xcrun --show-sdk-path)
 CC_I386_OBJC := clang -arch i386 -isysroot $(HOST_SDK) -mmacosx-version-min=10.6 -fobjc-runtime=macosx-fragile
 LDFLAGS_I386_OBJC := $(LDFLAGS_I386) -lobjc -framework Foundation -framework CoreFoundation
 
+# C++ tests compile against the host SDK headers (the i386 sysroot ships no
+# libstdc++ headers) and link against the SL-era i386 libstdc++ staged by
+# `make sysroot-cpp`. -dead_strip_dylibs drops the libstdc++ load command for
+# tests that don't actually use the C++ runtime (e.g. the self-contained
+# weak_bind guard), so they run with NO libstdc++ at load — modern macOS ships
+# none. Tests that genuinely use libstdc++ (exceptions/RTTI/std::) keep the dep.
+CXX_I386 := clang++ -arch i386 -isysroot $(HOST_SDK) -mmacosx-version-min=10.6
+LDFLAGS_I386_CPP := $(LDFLAGS_I386) -lstdc++ -dead_strip_dylibs
+
 SRC_DIR      := src
 EXPECTED_DIR := expected
 BUILD_DIR    := build
@@ -53,8 +62,10 @@ ASM_SRCS := $(wildcard $(SRC_DIR)/[0-9][0-9]_*.asm)
 C_SRCS   := $(wildcard $(SRC_DIR)/[0-9][0-9]_*.c)
 S_SRCS   := $(wildcard $(SRC_DIR)/[0-9][0-9]_*.s)
 OBJC_SRCS := $(wildcard $(SRC_DIR)/[0-9][0-9]_*.m)
+CPP_SRCS  := $(wildcard $(SRC_DIR)/[0-9][0-9]_*.cc)
 TESTS    := $(notdir $(basename $(ASM_SRCS) $(C_SRCS) $(S_SRCS)))
 OBJC_TESTS := $(notdir $(basename $(OBJC_SRCS)))
+CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 
 # No crt0 — the 86x64.sh pipeline's wrapper exec calls into the translated
 # _main directly, replacing the libc start crt0 would have provided. Tests
@@ -62,12 +73,13 @@ OBJC_TESTS := $(notdir $(basename $(OBJC_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc list run-only build-only objc
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp
 all: run-only
 
 list:
 	@echo "Tests: $(TESTS)"
 	@echo "ObjC tests (opt-in via 'make objc'): $(OBJC_TESTS)"
+	@echo "C++ tests (opt-in via 'make cpp'): $(CPP_TESTS)"
 
 # ObjC test group. Kept separate from the default `all` so the core
 # (asm/C) suite stays green while ObjC support is still landing. Builds each
@@ -91,6 +103,33 @@ objc: $(BUILD_DIR) $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL)
 	  fi; \
 	done; \
 	echo ""; echo "===== objc: $$pass passed, $$fail failed ====="
+
+# C++ test group (opt-in via 'make cpp'). Mirrors `objc`. Builds each
+# src/NN_*.cc i386 C++ binary with clang++, translates via the full pipeline,
+# runs, and diffs stdout. Self-contained tests (no C++ runtime use) link to
+# libSystem only thanks to -dead_strip_dylibs and need no sysroot-cpp; tests
+# that use the C++ runtime (exceptions/RTTI/std::) need `make sysroot-cpp` once.
+# Per-test compile flags: the weak_bind guard builds -fno-rtti -fno-exceptions
+# so its only deps are its own weak vtables (no libstdc++ / typeinfo / cxa).
+cpp: $(BUILD_DIR) $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL)
+	@pass=0; fail=0; \
+	for t in $(CPP_TESTS); do \
+	  xtra=""; case $$t in *weak_bind) xtra="-fno-rtti -fno-exceptions";; esac; \
+	  $(CXX_I386) $$xtra -c $(SRC_DIR)/$$t.cc -o $(BUILD_DIR)/$$t.o 2>/dev/null || { echo "FAIL $$t (compile)"; fail=$$((fail+1)); continue; }; \
+	  $(LD) $(LDFLAGS_I386_CPP) -e _main -o $(BUILD_DIR)/$$t.i386 $(BUILD_DIR)/$$t.o 2>/dev/null || { echo "FAIL $$t (link — run 'make sysroot-cpp'?)"; fail=$$((fail+1)); continue; }; \
+	  bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) -o $(BUILD_DIR)/$$t.x86_64 $(BUILD_DIR)/$$t.i386 >/dev/null 2>&1 || { echo "FAIL $$t (translate)"; fail=$$((fail+1)); continue; }; \
+	  chmod +x $(BUILD_DIR)/$$t.x86_64; \
+	  actual=$(BUILD_DIR)/$$t.actual; expected=$(EXPECTED_DIR)/$$t.txt; \
+	  $(BUILD_DIR)/$$t.x86_64 > $$actual 2>/dev/null; \
+	  echo "exit_code: $$?" >> $$actual; \
+	  if [ -f $$expected ] && diff -q $$expected $$actual >/dev/null 2>&1; then \
+	    echo "PASS $$t"; pass=$$((pass+1)); \
+	  else \
+	    echo "FAIL $$t"; [ -f $$expected ] && diff -u $$expected $$actual | sed 's/^/    /' | head -12; \
+	    fail=$$((fail+1)); \
+	  fi; \
+	done; \
+	echo ""; echo "===== cpp: $$pass passed, $$fail failed ====="
 
 build-only: $(addprefix $(BUILD_DIR)/, $(addsuffix .x86_64, $(TESTS)))
 
@@ -140,6 +179,20 @@ sysroot-objc: sysroot
 	    -output "$(I386_SYSROOT)/System/Library/Frameworks/$$fw.framework/$$fw" 2>/dev/null || true; \
 	done
 	@echo "objc sysroot ready (libobjc + Foundation + CoreFoundation i386)"
+
+# Stage the i386 libstdc++ from the SL DVD so `make cpp` can link C++ tests that
+# use the C++ runtime (exceptions / RTTI / std::). Run once after `make sysroot`.
+# (The weak_bind guard is self-contained and needs only the compiler; the
+# exception-unwinding tests need the real libstdc++.) The dylib's install_name is
+# /usr/lib/libstdc++.6.dylib, so stage the versioned file plus the .6 and bare
+# symlinks ld resolves -lstdc++ through.
+sysroot-cpp: sysroot
+	@lipo -thin i386 "$(SL_DVD)/usr/lib/libstdc++.6.0.9.dylib" \
+	    -output "$(I386_SYSROOT)/usr/lib/libstdc++.6.0.9.dylib" 2>/dev/null || true
+	@( cd "$(I386_SYSROOT)/usr/lib" && \
+	   ln -sf libstdc++.6.0.9.dylib libstdc++.6.dylib && \
+	   ln -sf libstdc++.6.dylib libstdc++.dylib )
+	@echo "cpp sysroot ready (libstdc++ i386)"
 
 $(BUILD_DIR):
 	@mkdir -p $@

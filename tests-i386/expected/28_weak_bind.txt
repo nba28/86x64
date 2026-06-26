@@ -1,0 +1,6 @@
+shape 0 sides=4 area=25
+shape 1 sides=3 area=12
+box sq twice=18 per=36
+box tr twice=16 per=24
+sum=37
+exit_code: 0
