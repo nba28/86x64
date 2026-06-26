@@ -272,7 +272,27 @@ namespace MachO {
    void RelocBlobT<bits, T>::Emit(Image& img, std::size_t offset) const {
       img.at<T>(offset) = data;
    }
-   
+
+   template <Bits bits>
+   void XrelBlob<bits>::Emit(Image& img, std::size_t offset) const {
+      img.at<uint32_t>(offset + 0) = MAGIC;
+      img.at<uint32_t>(offset + 4) = static_cast<uint32_t>(ents.size());
+      std::size_t p = offset + 8;
+      for (const Ent& e : ents) {
+         /* The slot's resolved x86_64 vmaddr (translated images live <4GB, so a
+          * 32-bit field suffices; the runtime adds the load slide). */
+         const uint32_t slot_vmaddr =
+            e.slot ? static_cast<uint32_t>(e.slot->loc.vmaddr) : 0;
+         img.at<uint32_t>(p + 0) = slot_vmaddr;
+         img.at<int32_t>(p + 4) = e.addend;
+         img.at<uint32_t>(p + 8) = e.name_off;
+         p += 12;
+      }
+      if (!strtab.empty()) {
+         img.copy(p, strtab.data(), strtab.size());
+      }
+   }
+
    template class SectionBlob<Bits::M32>;
    template class SectionBlob<Bits::M64>;
    
@@ -293,6 +313,9 @@ namespace MachO {
 
    template class JumpTableEntry<Bits::M32>;
    template class JumpTableEntry<Bits::M64>;
+
+   template class XrelBlob<Bits::M32>;
+   template class XrelBlob<Bits::M64>;
 
    template class RelocBlob<Bits::M32>;
    template class RelocBlob<Bits::M64>;

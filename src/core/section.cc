@@ -1,5 +1,6 @@
 #include <typeinfo>
 #include <cassert>
+#include <cstring>
 #include <sstream>
 #include <string>
 #include <iterator>
@@ -56,7 +57,17 @@ namespace MachO {
       if (std::string(sect.sectname) == SECT_STUB_HELPER) {
          return new Section<bits>(img, offset, env, StubHelperParser);
       }
-      
+
+      /* Our own runtime-bind metadata section (slot vmaddrs + symbol names; see
+       * Archive::inject_xrel_section / objc_slide.c). Parse as opaque bytes so a
+       * later modify/convert reparse round-trips it verbatim — DataParser would
+       * pointer-detect a mangled-name byte that happens to alias an image vmaddr
+       * and "rebase" it, corrupting the table. */
+      if (std::string(sect.sectname,
+                      strnlen(sect.sectname, sizeof(sect.sectname))) == "__86x64_xrel") {
+         return new Section<bits>(img, offset, env, DataBlob<bits>::Parse);
+      }
+
       /*
        * Normalise: test by SECTION_TYPE (low 8 bits), not the full flags
        * field, so attribute bits (PURE_INSTRUCTIONS, NO_TOC, etc.) don't
@@ -1288,6 +1299,20 @@ namespace MachO {
    template <Bits bits>
    std::string Section<bits>::name() const {
       return std::string(sect.sectname, strnlen(sect.sectname, sizeof(sect.sectname)));
+   }
+
+   template <Bits bits>
+   Section<bits> *Section<bits>::Synthetic(const std::string& segname,
+                                           const std::string& sectname,
+                                           uint32_t flags, uint32_t align) {
+      auto *self = new Section<bits>();
+      std::memset(&self->sect, 0, sizeof(self->sect));
+      std::strncpy(self->sect.segname, segname.c_str(), sizeof(self->sect.segname));
+      std::strncpy(self->sect.sectname, sectname.c_str(), sizeof(self->sect.sectname));
+      self->sect.flags = flags;
+      self->sect.align = align;
+      /* addr/offset/size/reloff/nreloc are assigned by Build/Emit. */
+      return self;
    }
 
    template <Bits bits>

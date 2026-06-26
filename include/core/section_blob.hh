@@ -261,6 +261,49 @@ namespace MachO {
       template <Bits> friend class CFStringBlob;
    };
 
+   /*
+    * The whole `__DATA,__86x64_xrel` section payload as one synthesized blob.
+    * Holds the classic external relocations macho-tool lifted (so dyld never
+    * sees the unloadable 4-byte-slot extreloff table) for libabiconv to bind at
+    * image load (objc_slide.c bind_external_relocs). Created post-transform by
+    * Archive::inject_xrel_section; never parsed or transformed. Emit reads each
+    * slot blob's resolved loc.vmaddr (set during Build).
+    *
+    * On-disk layout (little-endian, all 4-byte fields — translated images live
+    * below 4GB):
+    *   u32 magic = MAGIC ("xrel")
+    *   u32 count
+    *   count * { u32 slot_vmaddr; i32 addend; u32 name_off }   // 12 bytes each
+    *   packed NUL-terminated symbol names
+    * name_off is the byte offset of the name from the SECTION base (so the
+    * runtime resolves it as section_base+slide + name_off).
+    */
+   template <Bits bits>
+   class XrelBlob: public SectionBlob<bits> {
+   public:
+      static constexpr uint32_t MAGIC = 0x6c657278u; /* "xrel" */
+      struct Ent {
+         const SectionBlob<bits> *slot = nullptr; /*!< reloc'd slot (its loc.vmaddr) */
+         int32_t addend = 0;
+         uint32_t name_off = 0;                    /*!< from section base */
+      };
+      std::vector<Ent> ents;
+      std::string strtab;                          /*!< packed NUL-terminated names */
+
+      std::size_t header_size() const { return 8 + ents.size() * 12; }
+      virtual std::size_t size() const override { return header_size() + strtab.size(); }
+      virtual void Emit(Image& img, std::size_t offset) const override;
+
+      static XrelBlob<bits> *Create() { return new XrelBlob(); }
+      virtual XrelBlob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
+         throw error("XrelBlob is synthesized post-transform and is never transformed");
+      }
+
+   private:
+      XrelBlob() {}
+      template <Bits> friend class XrelBlob;
+   };
+
    template <Bits bits>
    class Placeholder: public SectionBlob<bits> {
    public:

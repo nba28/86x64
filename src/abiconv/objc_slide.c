@@ -42,6 +42,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
+#include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 
@@ -597,6 +598,101 @@ static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
    }
 }
 
+/* real 64-bit pointer -> low-4GB proxy handle (objc_shim.c). */
+extern uint32_t x64_objc_wrap(uint64_t real);
+
+/* Resolve an xrel target symbol to a LOW-4GB-usable address (0 if not found).
+ * Mirrors the data-shadow ctor (objc_shim.c x64_init_data_shadows): dlsym the C
+ * name (strip the linker's leading '_'); a defined-local or libabiconv symbol
+ * resolves <4GB and is used directly; a native >4GB symbol (e.g. libc++abi's
+ * __cxxabiv1 typeinfo vtables, ___cxa_pure_virtual) is wrapped into a low-4GB
+ * proxy handle so the 4-byte slot is non-NULL and READABLE — which is all that's
+ * needed to stop the dropped-reloc deref SIGBUS. (Full C++ RTTI correctness
+ * across the i386/x86_64 typeinfo layout difference is a separate Tier-2
+ * concern; see the known-gaps list.) */
+static uint64_t xrel_resolve(const char *name) {
+   if (name == NULL || name[0] == '\0') { return 0; }
+   const char *dn = (name[0] == '_') ? name + 1 : name;
+   void *p = dlsym(RTLD_DEFAULT, dn);
+   if (p == NULL) { return 0; }
+   uintptr_t v = (uintptr_t)p;
+   if (v < 0x100000000UL) { return (uint64_t)v; }       /* defined-local / libabiconv */
+   return (uint64_t)x64_objc_wrap((uint64_t)v);          /* native >4GB -> handle */
+}
+
+/* Bind the classic EXTERNAL __DATA relocations macho-tool lifted into
+ * __DATA,__86x64_xrel (see Archive::inject_xrel_section). dyld can't process
+ * them (4-byte slots; it requires 8-byte/r_length=3 64-bit relocs), so the slots
+ * ship NULL -> SIGBUS on first deref of an imported C++ vtable/RTTI pointer
+ * (Portal 2, Pages, Civ IV, Front Row). We resolve each target to a low-4GB
+ * address and write (target + addend) into its 4-byte slot here, at the
+ * add-image callback, BEFORE the image's C++ static initializers run. Idempotent:
+ * re-binding writes the same value (the resolved symbol address is stable). */
+static void bind_external_relocs(const struct mach_header_64 *mh64, intptr_t slide,
+                                 const char *imgname) {
+   const uint8_t *xrel = NULL;
+   {
+      const uint8_t *p = (const uint8_t *)(mh64 + 1);
+      for (uint32_t i = 0; i < mh64->ncmds && !xrel; i++) {
+         const struct load_command *lc = (const struct load_command *)p;
+         if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg =
+               (const struct segment_command_64 *)p;
+            const struct section_64 *sect =
+               (const struct section_64 *)(seg + 1);
+            for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
+               if (strncmp(sect->sectname, "__86x64_xrel", 16) == 0) {
+                  xrel = (const uint8_t *)(uintptr_t)(sect->addr + slide);
+                  break;
+               }
+            }
+         }
+         p += lc->cmdsize;
+      }
+   }
+   if (xrel == NULL) { return; }
+
+   uint32_t magic, count;
+   memcpy(&magic, xrel + 0, 4);
+   memcpy(&count, xrel + 4, 4);
+   if (magic != 0x6c657278u) {   /* "xrel" */
+      if (g_verbose) {
+         fprintf(stderr, "abiconv objc_slide: %s __86x64_xrel bad magic 0x%08x\n",
+                 imgname, magic);
+      }
+      return;
+   }
+
+   size_t bound = 0, unresolved = 0;
+   for (uint32_t i = 0; i < count; i++) {
+      const uint8_t *e = xrel + 8 + (size_t)i * 12;
+      uint32_t slot_vmaddr, name_off;
+      int32_t addend;
+      memcpy(&slot_vmaddr, e + 0, 4);
+      memcpy(&addend,      e + 4, 4);
+      memcpy(&name_off,    e + 8, 4);
+
+      const char *name = (const char *)(xrel + name_off); /* section-relative */
+      uint64_t target = xrel_resolve(name);
+      if (target == 0) { ++unresolved; continue; }        /* leave it NULL */
+
+      uint32_t *slot =
+         (uint32_t *)(uintptr_t)((uint64_t)slot_vmaddr + (int64_t)slide);
+      /* Defensively make the slot's page writable (the slots live in __DATA so
+       * they normally already are; mprotect failure is non-fatal). A 4-byte,
+       * 4-aligned slot never straddles a page boundary. */
+      uintptr_t pg = (uintptr_t)slot & ~(uintptr_t)0xfff;
+      mprotect((void *)pg, 0x1000, PROT_READ | PROT_WRITE);
+      *slot = (uint32_t)((uint64_t)target + (int64_t)addend);
+      ++bound;
+   }
+   if (g_verbose) {
+      fprintf(stderr, "abiconv objc_slide: bound %zu/%u external relocs "
+              "(%zu unresolved) in __DATA,__86x64_xrel of %s\n",
+              bound, count, unresolved, imgname);
+   }
+}
+
 static void slide_objc(const struct mach_header *mh, intptr_t slide);
 
 /* Bottom-up dependency ordering for the run-inits path: before an image's
@@ -701,6 +797,11 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
        * on any app. */
       slide_data_fnptrs(mh64, slide, text_lo, text_hi,
                         vmaddr_lo, vmaddr_hi, imgname);
+      /* Bind the classic external __DATA relocations dyld can't process (the
+       * lifted C++ vtable/RTTI imports in __DATA,__86x64_xrel) before any C++
+       * static ctor dereferences them. Universal: triggers only on the presence
+       * of the macho-tool-emitted section. */
+      bind_external_relocs(mh64, slide, imgname);
    }
 
    /* the legacy-ObjC1 fixups below are __OBJC-only, but the collected

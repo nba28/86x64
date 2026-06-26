@@ -126,7 +126,100 @@ namespace MachO {
       LinkeditCommand<bits>(img, offset, env), dysymtab(img.at<dysymtab_command>(offset)),
       indirectsyms(std::vector<uint32_t>(&img.at<uint32_t>(dysymtab.indirectsymoff),
                                          &img.at<uint32_t>(dysymtab.indirectsymoff) +
-                                         dysymtab.nindirectsyms)) {}
+                                         dysymtab.nindirectsyms))
+   {
+      lift_external_relocs(img, env);
+   }
+
+   /* Lift the classic EXTERNAL relocation table (extreloff/nextrel) into
+    * xrel_entries so Archive::inject_xrel_section can re-emit it as a runtime-
+    * bound `__DATA,__86x64_xrel` section. We only RECORD them here; Build_LINKEDIT
+    * still zeroes extreloff so dyld never sees the (unloadable, 4-byte-slot)
+    * classic external relocs. Each entry captures: the slot blob (resolved by
+    * vmaddr so its new x86_64 address is known after Build), the target symbol
+    * name (read straight from the raw nlist+string table, since the parsed
+    * Symtab re-sorts and loses the original index order), and the reloc addend
+    * (the slot's current content). Only NON-scattered EXTERNAL relocs are taken;
+    * scattered / r_extern==0 entries are local-style and handled elsewhere. */
+   template <Bits bits>
+   void Dysymtab<bits>::lift_external_relocs(const Image& img, ParseEnv<bits>& env) {
+      if (dysymtab.nextrel == 0 || dysymtab.extreloff == 0) { return; }
+
+      /* Locate the raw symbol + string tables (order-independent: scan the load
+       * commands in the image rather than relying on LC_SYMTAB parsing before
+       * LC_DYSYMTAB). */
+      const auto& hdr = img.at<mach_header_t<bits>>(0);
+      std::size_t symoff = 0, stroff = 0, strsize = 0, nsyms = 0;
+      {
+         std::size_t lc_off = sizeof(mach_header_t<bits>);
+         for (uint32_t i = 0; i < hdr.ncmds; ++i) {
+            const auto& lc = img.at<load_command>(lc_off);
+            if (lc.cmd == LC_SYMTAB) {
+               const auto& st = img.at<symtab_command>(lc_off);
+               symoff = st.symoff; stroff = st.stroff;
+               strsize = st.strsize; nsyms = st.nsyms;
+               break;
+            }
+            lc_off += lc.cmdsize;
+         }
+      }
+      if (symoff == 0 || stroff == 0) { return; }
+
+      /* relocBase for a non-split-segment classic image = the first segment's
+       * vmaddr (== the image base; 0 for a dylib whose __TEXT is at vmaddr 0,
+       * and for an exec whose first segment is __PAGEZERO at 0). */
+      std::size_t reloc_base = 0;
+      {
+         const auto& segs = env.archive.segments();
+         if (!segs.empty()) { reloc_base = segs.front()->segment_command.vmaddr; }
+      }
+
+      /* reserve() so push_back never reallocates: each entry's &slot is handed
+       * to a DEFERRED env.vmaddr_resolver.resolve and must stay stable. */
+      xrel_entries.reserve(dysymtab.nextrel);
+
+      for (uint32_t i = 0; i < dysymtab.nextrel; ++i) {
+         const auto& ri = img.at<relocation_info>(
+            dysymtab.extreloff + i * sizeof(relocation_info));
+         /* Skip scattered relocs (first word's high bit) — different layout. */
+         if (reinterpret_cast<const uint32_t&>(ri) & R_SCATTERED) { continue; }
+         if (!ri.r_extern) { continue; } /* section-relative, not a symbol import */
+         if ((uint32_t)ri.r_symbolnum >= nsyms) { continue; }
+
+         const std::size_t slot_vmaddr =
+            reloc_base + static_cast<uint32_t>(ri.r_address);
+
+         /* Symbol name straight from the raw nlist + string table. */
+         const auto& nl = img.at<nlist_t<bits>>(
+            symoff + ri.r_symbolnum * Nlist<bits>::size());
+         const std::size_t strx = nl.n_un.n_strx;
+         if (strx >= strsize) { continue; }
+         std::string name(&img.at<char>(stroff + strx),
+                          strnlen(&img.at<char>(stroff + strx), strsize - strx));
+         if (name.empty()) { continue; }
+
+         /* Addend = the slot's current 4-byte content. Locate its file offset
+          * via the containing segment. */
+         int32_t addend = 0;
+         for (Segment<bits> *seg : env.archive.segments()) {
+            const auto& sc = seg->segment_command;
+            if (sc.filesize == 0) { continue; }
+            if (slot_vmaddr >= sc.vmaddr && slot_vmaddr < sc.vmaddr + sc.vmsize) {
+               const std::size_t foff = sc.fileoff + (slot_vmaddr - sc.vmaddr);
+               if (foff + 4 <= img.size()) { addend = img.at<int32_t>(foff); }
+               break;
+            }
+         }
+
+         XrelEntry e;
+         e.name = std::move(name);
+         e.addend = addend;
+         e.orig_vmaddr = slot_vmaddr;
+         xrel_entries.push_back(std::move(e));
+         /* Resolve the slot's blob by vmaddr (deferred; fires in do_resolve). */
+         env.vmaddr_resolver.resolve(slot_vmaddr, &xrel_entries.back().slot);
+      }
+   }
 
    template <Bits bits>
    void Symtab<bits>::Build_LINKEDIT_symtab(BuildEnv<bits>& env) {

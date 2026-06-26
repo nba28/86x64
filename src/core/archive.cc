@@ -8,6 +8,8 @@
 #include "segment.hh"
 #include "types.hh"
 #include "section_blob.hh"
+#include "symtab.hh"   // Dysymtab (inject_xrel_section)
+#include "dyldinfo.hh" // DyldInfo (classic-image gate)
 
 namespace MachO {
 
@@ -137,6 +139,12 @@ namespace MachO {
 
    template <Bits b>
    std::size_t Archive<b>::Build(std::size_t offset) {
+      /* Inject our runtime-bind metadata section (classic external relocs that
+       * dyld can't process) before laying out, so it shares __DATA's layout and
+       * its XrelBlob::Emit can read each slot blob's resolved vmaddr. M64-only,
+       * no-op when there are no lifted relocs. */
+      inject_xrel_section();
+
       /* Enforce the "__LINKEDIT is the last segment" invariant before laying
        * out file offsets. codesign/dyld append the code-signature superblob at
        * the end of __LINKEDIT and require it to cover the whole image, so
@@ -226,6 +234,65 @@ namespace MachO {
 
       total_size = env.loc.offset - offset;
       return total_size;
+   }
+
+   template <Bits b>
+   void Archive<b>::inject_xrel_section() {
+      if constexpr (b != Bits::M64) {
+         return; /* M32 builds are intermediate; XrelBlob is M64-output only */
+      } else {
+         /* Classic images only (no LC_DYLD_INFO) — exactly the set whose
+          * external relocs we drop (symtab.cc) and whose pointer slots are
+          * 4-byte. A modern image's binds live in the dyld_info stream and its
+          * relocs are 8-byte; we must never write our 4-byte entries there. */
+         if (this->template subcommand<DyldInfo>() != nullptr) { return; }
+
+         auto *dysymtab = this->template subcommand<Dysymtab>();
+         if (dysymtab == nullptr || dysymtab->xrel_entries.empty()) { return; }
+
+         Segment<b> *data_seg = segment(SEG_DATA);
+         if (data_seg == nullptr) { return; }
+
+         /* idempotent: a reparse (modify/convert) of an already-translated dylib
+          * carries the section as data but has no lifted relocs — and we never
+          * want two. */
+         for (Section<b> *s : data_seg->sections) {
+            if (s->name() == "__86x64_xrel") { return; }
+         }
+
+         auto *blob = XrelBlob<b>::Create();
+         std::size_t skipped = 0;
+         for (const auto& e : dysymtab->xrel_entries) {
+            if (e.slot == nullptr) { ++skipped; continue; } /* slot didn't resolve */
+            typename XrelBlob<b>::Ent ent;
+            ent.slot = e.slot;
+            ent.addend = e.addend;
+            ent.name_off = static_cast<uint32_t>(blob->strtab.size()); /* intra-strtab */
+            blob->strtab.append(e.name);
+            blob->strtab.push_back('\0');
+            blob->ents.push_back(ent);
+         }
+         if (blob->ents.empty()) { delete blob; return; }
+
+         /* Rebase name_off to the section start (header + entry table precede the
+          * packed names), now that the entry count (hence header size) is final. */
+         const uint32_t hdr = static_cast<uint32_t>(blob->header_size());
+         for (auto& ent : blob->ents) { ent.name_off += hdr; }
+
+         auto *sect = Section<b>::Synthetic(SEG_DATA, "__86x64_xrel",
+                                            S_REGULAR, /*align=*/2);
+         sect->segment = data_seg;
+         sect->content.push_back(blob);
+         blob->section = sect;
+         blob->segment = data_seg;
+         data_seg->sections.push_back(sect);
+         invalidate_segments_cache();
+
+         if (std::getenv("MACHO_BUILD_DEBUG")) {
+            fprintf(stderr, "inject_xrel_section: %zu entries (%zu unresolved "
+                    "skipped) -> __DATA,__86x64_xrel\n", blob->ents.size(), skipped);
+         }
+      }
    }
 
    template <Bits b>

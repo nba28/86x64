@@ -46,6 +46,13 @@ namespace MachO {
       void Parse1(const Image& img, ParseEnv<bits>& env);
       void Parse2(ParseEnv<bits>& env);
 
+      /* Synthesize an empty section (no input backing) for the translator's own
+       * injected metadata (e.g. __DATA,__86x64_xrel). The caller appends content
+       * blobs; Build/Emit/AssignID treat it like any parsed section. */
+      static Section<bits> *Synthetic(const std::string& segname,
+                                      const std::string& sectname,
+                                      uint32_t flags, uint32_t align);
+
       /* Post-parse dataflow pass: in a __text section, find i386 PIC
        * anchor patterns (`call $+0; pop %reg`) and resolve subsequent
        * `[reg + disp32]` reads to their target SectionBlob via
@@ -114,6 +121,7 @@ namespace MachO {
       
       Section(const Image& img, std::size_t offset, ParseEnv<bits>& env, Parser parser);
       Section(const Section<opposite<bits>>& other, TransformEnv<opposite<bits>>& env);
+      Section(): parser(nullptr) {} /*!< for Synthetic */
 
       static SectionBlob<bits> *TextParser(const Image& img, const Location& loc,
                                            ParseEnv<bits>& env);

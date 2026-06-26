@@ -116,7 +116,14 @@ namespace MachO {
 
       void insert(SectionBlob<b> *blob, const Location& loc, Relation rel);
       void remove_commands(uint32_t cmd);
-      
+
+      /* Synthesize the __DATA,__86x64_xrel section from the Dysymtab's lifted
+       * classic external relocations (M64 only; no-op otherwise / if empty / if
+       * already present). Called at the top of Build so the section is laid out
+       * with the rest of __DATA and its XrelBlob's Emit can read every slot
+       * blob's resolved vmaddr. See the known-gaps list / objc_slide.c. */
+      void inject_xrel_section();
+
       template <template <Bits> class Blob>
       Blob<b> *find_blob(std::size_t vmaddr) const {
          for (Segment<b> *segment : segments()) {

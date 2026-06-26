@@ -152,7 +152,26 @@ namespace MachO {
        * rebases live in the LC_DYLD_INFO rebase stream. */
       std::vector<relocation_info> local_relocs;
 
-      virtual uint32_t cmd() const override { return dysymtab.cmd; }      
+      /* One classic EXTERNAL relocation lifted out of the dyld-processed
+       * extreloff table (which is dropped: dyld x86_64 requires r_length=3 /
+       * 8-byte slots, but our translated pointer slots stay 4-byte — see
+       * the known-gaps list / the Portal 2 translation notes). Each is instead emitted into a
+       * custom `__DATA,__86x64_xrel` section that libabiconv binds at image load
+       * (objc_slide.c). These are typically C++ RTTI references in classic GCC
+       * dylibs (`__ZTI*`/`__ZTS*`/`__ZTVN10__cxxabiv1*`/`___cxa_pure_virtual`);
+       * dropping them left the slots NULL -> SIGBUS on first deref (Portal 2,
+       * Pages, Civ IV, Front Row). */
+      struct XrelEntry {
+         const SectionBlob<bits> *slot = nullptr; /*!< blob at the reloc'd slot;
+                                                       its post-Build loc.vmaddr is
+                                                       the slot's new x86_64 vmaddr */
+         std::string name;            /*!< target symbol (linker name, leading '_') */
+         int32_t addend = 0;          /*!< the slot's pre-existing content (reloc addend) */
+         std::size_t orig_vmaddr = 0; /*!< original i386 slot vmaddr (diagnostic) */
+      };
+      std::vector<XrelEntry> xrel_entries;
+
+      virtual uint32_t cmd() const override { return dysymtab.cmd; }
       virtual std::size_t size() const override { return sizeof(dysymtab_command); }
 
       static Dysymtab<bits> *Parse(const Image& img, std::size_t offset, ParseEnv<bits>& env) {
@@ -168,6 +187,10 @@ namespace MachO {
       /* Regenerate classic VANILLA local relocations (rebases) for a no-
        * LC_DYLD_INFO image; populates local_relocs. */
       void regenerate_local_relocs(BuildEnv<bits>& env);
+
+      /* Lift the classic external relocation table into xrel_entries (called at
+       * parse). See the XrelEntry comment + Archive::inject_xrel_section. */
+      void lift_external_relocs(const Image& img, ParseEnv<bits>& env);
       
       virtual Dysymtab<opposite<bits>> *Transform(TransformEnv<bits>& env) const override {
          return new Dysymtab<opposite<bits>>(*this, env);
@@ -177,7 +200,22 @@ namespace MachO {
       Dysymtab(const Image& img, std::size_t offset, ParseEnv<bits>& env);
       Dysymtab(const Dysymtab<opposite<bits>>& other, TransformEnv<opposite<bits>>& env):
          LinkeditCommand<bits>(other, env), dysymtab(other.dysymtab),
-         indirectsyms(other.indirectsyms) {}
+         indirectsyms(other.indirectsyms) {
+         /* Carry the lifted external relocs across the M32->M64 transform,
+          * re-resolving each slot blob to its M64 counterpart (whose post-Build
+          * loc.vmaddr is the slot's new address). reserve() first so the vector
+          * never reallocates — the deferred env.resolve callbacks store
+          * &entry.slot, which must stay stable. */
+         xrel_entries.reserve(other.xrel_entries.size());
+         for (const auto& oe : other.xrel_entries) {
+            xrel_entries.emplace_back();
+            XrelEntry& e = xrel_entries.back();
+            e.name = oe.name;
+            e.addend = oe.addend;
+            e.orig_vmaddr = oe.orig_vmaddr;
+            env.resolve(oe.slot, &e.slot);
+         }
+      }
       template <Bits> friend class Dysymtab;
    };   
    
