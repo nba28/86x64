@@ -1,11 +1,14 @@
 #include <errno.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <sys/mman.h>
 #include <os/lock.h>
+#include <pthread.h>
 #include <mach/mach_init.h>
 #include <mach/vm_map.h>
 #include <mach/vm_param.h>
+#include <mach/vm_region.h>
 #include <mach/mach_vm.h>
 
 /*
@@ -219,6 +222,73 @@ __mach_vm_map(vm_map_t task, mach_vm_address_t *addr, vm_size_t size, mach_vm_of
 		cur_protection, max_protection, inheritance);
 }
 
+/*
+ * Stack-bounds reconciliation (the same low-4GB-environment concern as the
+ * mmap/vm_* interposers above, just the read side instead of the alloc side).
+ *
+ * Translated i386 code MUST execute on a <4GB stack (it stores 32-bit rsp /
+ * frame pointers), so the wrapper runs the translated thread on a low-4GB mmap
+ * region rather than the kernel's real (high) thread stack. Native frameworks
+ * that ask the OS "where is my stack?" via pthread_get_stackaddr_np /
+ * _get_stacksize_np get the REAL high stack and then bounds-check the current
+ * rsp against it. WebKit's JSC does exactly this in sanitizeStackForVM (a
+ * RELEASE_ASSERT): on the low-4GB stack rsp (~0x8xxxxxxx) is far below the
+ * reported high stack, so JSC traps (EXC_BREAKPOINT) the instant it spins up a
+ * JS VM — e.g. when iPhoto unarchives a nib-embedded WebView, whose FrameLoader
+ * init fires a synthetic load-complete -> performance-logging -> VM::create.
+ *
+ * Fix: when the CURRENT thread is executing on a low-4GB stack, report the
+ * actual VM region it is running in (discovered from a real on-stack address
+ * via mach_vm_region) instead of the kernel's high stack. This is CORRECT, not
+ * a lie — it names the stack the thread is truly on — and is universal (any
+ * translated target that drives WebKit/JSC, or any native code that
+ * stack-bounds-checks). Queries from genuine native threads (high rsp) and for
+ * other threads pass straight through to the real call.
+ */
+static int low4gb_stack_region(uintptr_t onstack, mach_vm_address_t *base,
+                               mach_vm_size_t *size)
+{
+	if (onstack >= 0x100000000UL) { return 0; }   /* a real (high) native stack */
+	mach_vm_address_t a = onstack;
+	mach_vm_size_t sz = 0;
+	vm_region_basic_info_data_64_t info;
+	mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+	mach_port_t obj = MACH_PORT_NULL;
+	if (mach_vm_region(mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO_64,
+	                   (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) {
+		return 0;
+	}
+	if (onstack < a || onstack >= a + sz) { return 0; }
+	*base = a; *size = sz;
+	return 1;
+}
+
+static void *
+__pthread_get_stackaddr_np(pthread_t t)
+{
+	if (pthread_equal(t, pthread_self())) {
+		volatile int probe;
+		mach_vm_address_t base; mach_vm_size_t size;
+		if (low4gb_stack_region((uintptr_t)&probe, &base, &size)) {
+			return (void *)(uintptr_t)(base + size);  /* high end = stack origin */
+		}
+	}
+	return pthread_get_stackaddr_np(t);
+}
+
+static size_t
+__pthread_get_stacksize_np(pthread_t t)
+{
+	if (pthread_equal(t, pthread_self())) {
+		volatile int probe;
+		mach_vm_address_t base; mach_vm_size_t size;
+		if (low4gb_stack_region((uintptr_t)&probe, &base, &size)) {
+			return (size_t)size;
+		}
+	}
+	return pthread_get_stacksize_np(t);
+}
+
 typedef struct { const void* replacement; const void* replacee; } interpose_t;
 
 __attribute__((used)) static const interpose_t __interposers[]
@@ -228,4 +298,6 @@ __attribute__ ((section("__DATA, __interpose"))) = {
 	{ (void *)__vm_map,           (void *)vm_map },
 	{ (void *)__mach_vm_allocate, (void *)mach_vm_allocate },
 	{ (void *)__mach_vm_map,      (void *)mach_vm_map },
+	{ (void *)__pthread_get_stackaddr_np, (void *)pthread_get_stackaddr_np },
+	{ (void *)__pthread_get_stacksize_np, (void *)pthread_get_stacksize_np },
 };
