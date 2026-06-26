@@ -202,15 +202,39 @@ namespace MachO {
 
       env.allocate(header.sizeofcmds);
 
-      /* Optional headerpad: reserve bytes between end-of-LCs and first __TEXT
-       * section so install_name_tool can later -add_rpath / -change to longer
-       * strings without "load commands do not fit". Apple's linker reserves 32
-       * bytes by default (1024 with -headerpad_max_install_names). Opt in via
-       * MACHO_HEADERPAD=N env var — 0 by default to keep regressions byte-stable
-       * with prior outputs. Recommended: 1024 for binaries that will be path-
-       * patched after translation (e.g. iPhoto + bundled frameworks). */
-      static const char *hp_env = std::getenv("MACHO_HEADERPAD");
-      const std::size_t headerpad = hp_env ? std::strtoull(hp_env, nullptr, 0) : 0;
+      /* Header padding between the end of the load commands and the first
+       * section. Two sources, in priority order:
+       *
+       *  1. header_size_target (set by the `change-deps` dependency-path
+       *     rewriter): reserve exactly enough padding that the first section
+       *     keeps its ORIGINAL file offset, so no code/data vmaddr moves. This
+       *     makes a load-command string edit byte-stable everywhere except the
+       *     rewritten strings -- required because re-parsing a translated binary
+       *     leaves some absolute __data pointers as verbatim values that would
+       *     be stale if the layout shifted. Since such a rewrite only ever
+       *     shrinks dependency paths (/System/... -> @rpath/...), the freed
+       *     load-command bytes are absorbed back into this pad.
+       *
+       *  2. MACHO_HEADERPAD=N env var (legacy): reserve N bytes of slack so a
+       *     later install_name_tool -add_rpath / -change can grow a path without
+       *     "load commands do not fit". Apple's linker reserves 32 bytes by
+       *     default (1024 with -headerpad_max_install_names). 0 by default to
+       *     keep regressions byte-stable with prior outputs. */
+      std::size_t headerpad = 0;
+      const std::size_t header_used = sizeof(header) + header.sizeofcmds;
+      if (header_size_target > 0) {
+         if (header_size_target >= header_used) {
+            headerpad = header_size_target - header_used;
+         } else {
+            fprintf(stderr,
+                    "warning: rewritten load commands (%zu bytes) exceed the original "
+                    "header region (%zu bytes); first section will shift and absolute "
+                    "data pointers may go stale\n",
+                    header_used, header_size_target);
+         }
+      } else if (const char *hp_env = std::getenv("MACHO_HEADERPAD")) {
+         headerpad = std::strtoull(hp_env, nullptr, 0);
+      }
       if (headerpad > 0) {
          env.allocate(headerpad);
       }

@@ -18,6 +18,7 @@ add_executable(macho-tool
   transform.cc
   print.cc
   rebasify.cc
+  change-deps.cc
   $<TARGET_OBJECTS:core_objs>
   )
 

@@ -31,6 +31,7 @@
 #include "transform.hh"
 #include "print.hh"
 #include "rebasify.hh"
+#include "change-deps.hh"
 
 const char *progname = nullptr;
 static const char *usagestr =
@@ -91,6 +92,7 @@ int main(int argc, char *argv[]) {
        {"transform", std::make_shared<TransformCommand>()},
        {"print", std::make_shared<PrintCommand>()},
        {"rebasify", std::make_shared<Rebasify>()},
+       {"change-deps", std::make_shared<ChangeDepsCommand>()},
       };
 
    auto it = subcommands.find(subcommand);

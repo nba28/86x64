@@ -73,13 +73,19 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps
 all: run-only
 
 list:
 	@echo "Tests: $(TESTS)"
 	@echo "ObjC tests (opt-in via 'make objc'): $(OBJC_TESTS)"
 	@echo "C++ tests (opt-in via 'make cpp'): $(CPP_TESTS)"
+
+# change-deps: regression test for macho-tool's classic-dylib-safe dependency-
+# path rewriter (the deploy fix for translated classic dylibs). Self-contained
+# (native x86_64 cc, no i386 sysroot), so it runs anywhere macho-tool is built.
+change-deps: $(MACHO_TOOL)
+	@bash change_deps_test.sh $(MACHO_TOOL)
 
 # ObjC test group. Kept separate from the default `all` so the core
 # (asm/C) suite stays green while ObjC support is still landing. Builds each

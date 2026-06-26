@@ -31,6 +31,16 @@ namespace MachO {
       LoadCommands load_commands;
       std::size_t vmaddr = vmaddr_start<b>; /*!< start vmaddr */
 
+      /*!< If non-zero, Build reserves header padding so the first section keeps
+       * exactly this file offset (= the original header-region size). A
+       * post-translation pass that only edits load-command strings (e.g. the
+       * `change-deps` dependency-path rewriter) sets this to the input's
+       * original first-section offset so NO code/data vmaddr moves: re-parsing
+       * a translated binary leaves some absolute __data pointers as verbatim
+       * values that would be stale if the layout shifted, so byte-stable layout
+       * is required. 0 = legacy behaviour (MACHO_HEADERPAD env / no pad). */
+      std::size_t header_size_target = 0;
+
       virtual uint32_t magic() const override { return header.magic; }
       virtual uint32_t& magic() override { return header.magic; }
       virtual Bits bits() const override { return b; }

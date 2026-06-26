@@ -33,6 +33,37 @@ def _find_int():
     return shutil.which("llvm-install-name-tool") or "install_name_tool"
 INT = _find_int()
 
+# Our own load-command path rewriter, used as the LAST-RESORT fallback when both
+# install_name_tool variants refuse a binary. cctools install_name_tool rejects
+# translated CLASSIC dylibs ("local relocation entries out of place" — their
+# __LINKEDIT lays the symbol table before the relocation/indirect tables, the
+# reverse of cctools' expected canonical order) and llvm-install-name-tool punts
+# on shared libraries entirely ("shared library not yet supported"). macho-tool
+# change-deps re-emits the binary through its own model (rebuilding __LINKEDIT
+# from scratch, so it never trips cctools' reloc-placement checks) while
+# preserving the original header-region size so no code/data vmaddr moves.
+MACHO_TOOL = Path(__file__).resolve().parent.parent.parent / "build/src/macho-tool/macho-tool"
+
+def _change_deps(path, changes):
+    """Rewrite dependency paths with macho-tool change-deps (classic-dylib-safe).
+    `changes` is a list of ('-change', old, new) tuples (the same form passed to
+    install_name_tool). Patches `path` in place. Returns the CompletedProcess so
+    the caller can inspect returncode/stderr like the install_name_tool runs."""
+    if not MACHO_TOOL.exists():
+        return subprocess.CompletedProcess([], 1, "", f"macho-tool not built at {MACHO_TOOL}")
+    args = [str(MACHO_TOOL), "change-deps", "-q"]
+    for _flag, old, new in changes:
+        args += ["--change", f"{old}={new}"]
+    tmp = str(path) + ".cd"
+    args += [str(path), tmp]
+    r = subprocess.run(args, capture_output=True, text=True, errors="replace")
+    if r.returncode == 0 and os.path.exists(tmp):
+        shutil.copymode(str(path), tmp)
+        os.replace(tmp, str(path))
+    elif os.path.exists(tmp):
+        os.remove(tmp)
+    return r
+
 def _thin_x86_64(path):
     """Reduce a fat binary carrying dead ppc/i386 slices to its x86_64 slice
     in place. Old iWork frameworks (e.g. MobileMe) ship ppc/i386/x86_64 fat
@@ -200,11 +231,20 @@ for bin_path in all_binaries():
             r = subprocess.run(["install_name_tool", *flat], capture_output=True, text=True, errors="replace")
             if r.returncode != 0:
                 r = subprocess.run([INT, *flat], capture_output=True, text=True, errors="replace")
+        used_change_deps = False
+        if r.returncode != 0:
+            # Both install_name_tool variants refused (a translated CLASSIC dylib:
+            # cctools "local relocation entries out of place" / llvm "shared
+            # library not yet supported"). Fall back to our own rewriter, which
+            # re-emits via macho-tool's model — the whole point of this gap fix.
+            r = _change_deps(bin_path, changes)
+            used_change_deps = (r.returncode == 0)
         if r.returncode != 0:
             print(f"  FAIL {bin_path.name}: {r.stderr.splitlines()[0] if r.stderr else 'no stderr'}")
             continue
         flat_sign(str(bin_path))
-        print(f"  patched {bin_path.name}: {len(changes)} changes")
+        how = " (via macho-tool change-deps)" if used_change_deps else ""
+        print(f"  patched {bin_path.name}: {len(changes)} changes{how}")
         patched_count += 1
 
 print(f"TOTAL: {patched_count} binaries patched")
