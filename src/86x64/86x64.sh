@@ -229,9 +229,18 @@ fi
 # -syslibroot; derive both from xcrun.
 SDK_VER=$(xcrun --show-sdk-version)
 SDK_PATH=$(xcrun --show-sdk-path)
+# Reserve header slack between the load commands and the first __TEXT section,
+# matching the MACHO_HEADERPAD the translator gives the dylib (src/core/archive.cc).
+# Without it the wrapper's LCs abut __text (entry _main_wrapper), so any downstream
+# step that GROWS the load commands — codesign's LC_CODE_SIGNATURE, rpath-fix's
+# install_name_tool, or baking in the geoshim/webnoop LC_LOAD_DYLIBs — overwrites
+# the first bytes of the entry and the wrapper SIGILLs on launch (invalid opcode).
+# ld takes -headerpad as a hex byte count.
+WRAP_HEADERPAD=$(printf '0x%x' "${MACHO_HEADERPAD:-1024}")
 v ld -arch x86_64 \
     -syslibroot "$SDK_PATH" \
     -platform_version macos 11.0 "$SDK_VER" \
+    -headerpad "$WRAP_HEADERPAD" \
     -rpath "$(dirname $LIBINTERPOSE)" -rpath "$(dirname $ARCHIVE64)" \
     -rpath @loader_path \
     -rpath @loader_path/../Frameworks \
