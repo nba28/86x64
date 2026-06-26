@@ -78,6 +78,21 @@ if ! [ -s "$SHIM_EXPORTS" ]; then
     exit 3
 fi
 
+# Build the set of symbols bound through the WEAK bind table (their ORIGINAL,
+# pre-rewrite names — the same form as the incoming symbol list). These need
+# the extra weak_bind rewrite below; almost no symbol is in this table (it is
+# just the C++ weak-coalesced runtime externals: operator new/delete and any
+# weakly-referenced template/vtable symbol), so computing the membership set
+# once and emitting the weak --update ONLY for members is far cheaper than an
+# optional weak --update per symbol (which would 1.5× the modify arg list — an
+# ARG_MAX risk on a binary with thousands of imports — and force thousands of
+# no-op table searches). A classic (LC_DYSYMTAB-only) binary has no dyld_info
+# weak_bind table; print fails harmless and the set is empty.
+WEAK_SYMS=$(mktemp)
+trap "rm -f $SHIM_EXPORTS $WEAK_SYMS" EXIT
+macho-tool print --weak-bind "$INPATH" 2>/dev/null | tail +2 | cut -d" " -f5 \
+    | sort -u > "$WEAK_SYMS"
+
 # Collect symbols: prefer positional args, otherwise fall back to stdin.
 if [ "$#" -gt 0 ]; then
     SYM_INPUT=$(printf '%s\n' "$@")
@@ -131,6 +146,22 @@ while IFS= read -r SYM; do
     # `optional` so the one targeting the wrong table is silently skipped.
     ARGS="$ARGS --update bind,lazy,optional,old_sym=$SYM,new_sym=$REPLACEMENT,new_dylib=$ORD"
     ARGS="$ARGS --update bind,optional,old_sym=$SYM,new_sym=$REPLACEMENT,new_dylib=$ORD"
+    # If this symbol is ALSO bound through the WEAK bind table, redirect that
+    # entry too. C++ runtime weak-coalesced externals (operator new/delete:
+    # __Znwm/__Znam/__ZdlPv/__ZdaPv, and any weakly-referenced template/vtable
+    # symbol) appear in BOTH the regular bind table (rewritten above) AND the
+    # weak_bind table, targeting the SAME __la_symbol_ptr slot. dyld processes
+    # weak binds AFTER regular binds, so a weak_bind entry left under its
+    # ORIGINAL name re-resolves that slot by flat weak coalescing and OVERWRITES
+    # the libabiconv shim pointer with the NATIVE definition -> the call reaches
+    # native code unrouted -> the i386 4-byte ret is over-popped by the native
+    # 8-byte ret -> fused PC crash. Renaming the weak_bind symbol to the shim
+    # name (same REPLACEMENT) keeps the coalesced lookup resolving to libabiconv
+    # (its only definition). No new_dylib: a weak bind carries no ordinal
+    # (implicit BIND_SPECIAL_DYLIB_WEAK_LOOKUP). `optional` is belt-and-braces.
+    if grep -qFx "$SYM" "$WEAK_SYMS"; then
+        ARGS="$ARGS --update bind,weak,optional,old_sym=$SYM,new_sym=$REPLACEMENT"
+    fi
     REWRITTEN=$((REWRITTEN + 1))
 done <<< "$SYM_INPUT"
 

@@ -92,6 +92,21 @@ set(ABICONV_SYM_SOURCES
   # OpenGL (the iPhoto CGLChoosePixelFormat crash). Generic: benefits every
   # OpenGL-using target, not just iPhoto. See includes.h (<OpenGL/*>).
   /System/Library/Frameworks/OpenGL.framework/OpenGL
+  # libxml2 exports the libxml2 C API (xmlParseMemory/xmlNewNode/xmlAddChild/
+  # xmlDocDumpFormatMemory/xmlXPathEvalExpression/htmlParseChunk/xmlStr*/...).
+  # Legacy i386 apps that read/write XML or HTML call these via i386 cdecl
+  # (4-byte pushed return addr); unshimmed they bind to NATIVE libxml2 whose
+  # 8-byte `ret` over-pops the i386 4-byte frame, fusing the return addr with an
+  # adjacent stack word into a bogus PC. This is the iWeb document-archiving
+  # path (SFArchiving's SFAXMLUnarchiver/SFAXMLBundleArchiver -> sfaxml* ->
+  # libxml2, and BLWebView -> htmlParseChunk). The opaque tree pointers
+  # (xmlDocPtr/xmlNodePtr/xmlChar*) pass through the generic pointer path; like
+  # every other shimmed C library, that relies on the process heap being
+  # 32-bit-representable (low-4GB) so the truncated pointer round-trips. Generic:
+  # any i386 app using libxml2 (iLife, etc.). On macOS 11+ the dylib is
+  # cache-only, so print_exports_trie.sh falls back to the SDK .tbd. See
+  # includes.h (<libxml/*>).
+  /usr/lib/libxml2.2.dylib
   )
 
 add_custom_command(OUTPUT abiconv.syms
@@ -126,8 +141,12 @@ if(NOT ABICONV_CLANG_RESOURCE_DIR)
   message(WARNING "could not determine clang resource dir; abigen may fail to find builtin headers like stdarg.h")
 endif()
 
+# libxml2's public headers live in <sdk>/usr/include/libxml2/ and internally
+# include each other as <libxml/...>, so that directory must be on the header
+# search path for includes.h's <libxml/parser.h> (and its transitive includes)
+# to resolve. -isystem (not -I) so libxml2's own header warnings stay quiet.
 add_custom_command(OUTPUT abiconv.asm
-  COMMAND abigen -o abiconv.asm -s abiconv.syms -i ${CMAKE_CURRENT_SOURCE_DIR}/custom.syms --structfile ${CMAKE_CURRENT_SOURCE_DIR}/ignore.structs --data-shadow-file ${CMAKE_CURRENT_SOURCE_DIR}/data_shadows.syms --isysroot "${ABICONV_SDK_PATH}" -X -x -X objective-c -X -resource-dir -X "${ABICONV_CLANG_RESOURCE_DIR}" ${CMAKE_CURRENT_SOURCE_DIR}/includes.h
+  COMMAND abigen -o abiconv.asm -s abiconv.syms -i ${CMAKE_CURRENT_SOURCE_DIR}/custom.syms --structfile ${CMAKE_CURRENT_SOURCE_DIR}/ignore.structs --data-shadow-file ${CMAKE_CURRENT_SOURCE_DIR}/data_shadows.syms --isysroot "${ABICONV_SDK_PATH}" -X -x -X objective-c -X -resource-dir -X "${ABICONV_CLANG_RESOURCE_DIR}" -X -isystem -X "${ABICONV_SDK_PATH}/usr/include/libxml2" ${CMAKE_CURRENT_SOURCE_DIR}/includes.h
   DEPENDS abigen abiconv.syms ${CMAKE_CURRENT_SOURCE_DIR}/custom.syms ${CMAKE_CURRENT_SOURCE_DIR}/ignore.structs ${CMAKE_CURRENT_SOURCE_DIR}/data_shadows.syms ${CMAKE_CURRENT_SOURCE_DIR}/includes.h
   )
 

@@ -29,7 +29,11 @@ int PrintCommand::opthandler(int optchar) {
    case BIND:
       ops.push_back(BIND);
       return 1;
-      
+
+   case WEAK_BIND:
+      ops.push_back(WEAK_BIND);
+      return 1;
+
    default: abort();
    }
 }
@@ -63,6 +67,9 @@ int PrintCommand::workT(const MachO::MachO *macho) {
          break;
       case BIND:
          print_BIND<bits>(archive);
+         break;
+      case WEAK_BIND:
+         print_WEAK_BIND<bits>(archive);
          break;
       default: abort();
       }
@@ -106,6 +113,15 @@ void PrintCommand::print_BIND(const MachO::Archive<bits> *archive) {
       throw std::string("archive contains no dyld info");
    }
    dyld_info->bind->print(std::cout);
+}
+
+template <MachO::Bits bits>
+void PrintCommand::print_WEAK_BIND(const MachO::Archive<bits> *archive) {
+   const auto dyld_info = archive->template subcommand<MachO::DyldInfo>();
+   if (dyld_info == nullptr) {
+      throw std::string("archive contains no dyld info");
+   }
+   dyld_info->weak_bind->print(std::cout);
 }
 
 PrintCommand::PrintCommand(): InplaceCommand("print", O_RDONLY) {}

@@ -50,6 +50,31 @@
  * word that got fused in). Generic: any i386 app using SQLite (iLife, etc.). */
 #include <sqlite3.h>
 
+/* libxml2 C API (in ABICONV_SYM_SOURCES via /usr/lib/libxml2.2.dylib). Legacy
+ * i386 apps that read/write XML or HTML call xmlParseMemory / xmlNewNode /
+ * xmlAddChild / xmlDocDumpFormatMemory / xmlXPathEvalExpression /
+ * htmlParseChunk / xmlStr* / ... directly via i386 cdecl (4-byte pushed return
+ * address); unshimmed the call lands in native libxml2 whose 8-byte `ret`
+ * over-pops the i386 4-byte return push and fuses it with an adjacent stack
+ * word into a bogus PC. This is iWeb's document-archiving path (SFArchiving's
+ * SFAXMLUnarchiver/SFAXMLBundleArchiver -> sfaxml* helpers -> libxml2, and
+ * BLWebView -> htmlParseChunk). abigen emits ABI shims for the (almost entirely
+ * pointer-based) libxml2 API; opaque tree pointers (xmlDocPtr/xmlNodePtr/
+ * xmlChar*) round-trip through the generic low-4GB pointer path like every
+ * other shimmed C library. parser.h transitively pulls in tree.h, xmlstring.h,
+ * encoding.h, entities.h and xmlerror.h; HTMLparser.h/HTMLtree.h add the HTML
+ * push-parser used by BLWebView; xpath.h/xpathInternals.h add the XPath API.
+ * The header dir <sdk>/usr/include/libxml2 is added to the abigen clang search
+ * path in CMakeLists.txt (libxml2 headers cross-include as <libxml/...>). */
+#include <libxml/parser.h>
+#include <libxml/tree.h>
+#include <libxml/HTMLparser.h>
+#include <libxml/HTMLtree.h>
+#include <libxml/xpath.h>
+#include <libxml/xpathInternals.h>
+#include <libxml/entities.h>
+#include <libxml/xmlerror.h>
+
 /* Core C frameworks legacy i386 apps call. Their exports are added to the
  * abigen "consider set" via ABICONV_SYM_SOURCES in CMakeLists.txt; abigen
  * emits an ABI-conversion shim for every plain C function declared here that

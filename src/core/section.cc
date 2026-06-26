@@ -303,11 +303,18 @@ namespace MachO {
 
       /*
        * Progress: per-section banner so the long Section::Parse1 loop on
-       * a 17 MB binary is not silent. Cheap (one line per section).
+       * a 17 MB binary is not silent. Cheap (one line per section), but gated
+       * behind MACHO_TOOL_DEBUG: m64 drives macho-tool through a pipe, and the
+       * unconditional banner (× every section × every macho-tool invocation in
+       * the pipeline) floods that pipe; under Rosetta the flooded write can
+       * abort the tool, which surfaces downstream as a spurious
+       * "cp <file>: No such file" retranslate failure (the output never landed).
        */
-      fprintf(stderr, "parse: %.16s,%.16s vmaddr=0x%zx size=%zu\n",
-              sect.segname, sect.sectname,
-              (size_t)sect.addr, (size_t)sect.size);
+      if (std::getenv("MACHO_TOOL_DEBUG")) {
+         fprintf(stderr, "parse: %.16s,%.16s vmaddr=0x%zx size=%zu\n",
+                 sect.segname, sect.sectname,
+                 (size_t)sect.addr, (size_t)sect.size);
+      }
 
       /* Recognise PIC relative-offset switch jump tables BEFORE the linear
        * sweep so TextParser emits relocatable JumpTableEntry blobs for their

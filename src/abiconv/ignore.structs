@@ -34,3 +34,409 @@ PyMethodDef
 PyModuleDef
 PyGetSetDef
 PyMemberDef
+
+# libxml2 opaque handles (added with /usr/lib/libxml2.2.dylib in
+# ABICONV_SYM_SOURCES; see includes.h <libxml/*>). IDENTICAL to the Python
+# C-API case above: an i386 app receives xmlDocPtr/xmlNodePtr/&c from native
+# libxml2 and passes them straight back to libxml2 functions. libxml2's
+# structs are FULLY DEFINED in tree.h (not opaque like CF/sqlite3), so without
+# this abigen tries to deep-marshal the pointee BY VALUE — which is both wrong
+# (breaks pointer identity; native libxml2 wouldn't recognise the copy, and
+# the i386/x86_64 layouts differ by pointer width) and explosive (xmlNode ->
+# xmlDoc -> xmlDtd -> ... recursively unrolls to 12k-110k asm lines/shim; 794
+# libxml2 shims were skipped as 'too large' before this). Treat them as
+# pass-through pointers (widen i386 4-byte -> x86_64 8-byte). Matched on the
+# as-written pointee spelling (typeconv convert_pointer), so list the typedef
+# name + the struct tag, each plus a const variant.
+htmlElemDesc
+const htmlElemDesc
+struct _htmlElemDesc
+const struct _htmlElemDesc
+htmlEntityDesc
+const htmlEntityDesc
+struct _htmlEntityDesc
+const struct _htmlEntityDesc
+xlinkHandler
+const xlinkHandler
+struct _xlinkHandler
+const struct _xlinkHandler
+xmlAttr
+const xmlAttr
+struct _xmlAttr
+const struct _xmlAttr
+xmlAttribute
+const xmlAttribute
+struct _xmlAttribute
+const struct _xmlAttribute
+xmlAutomata
+const xmlAutomata
+struct _xmlAutomata
+const struct _xmlAutomata
+xmlAutomataState
+const xmlAutomataState
+struct _xmlAutomataState
+const struct _xmlAutomataState
+xmlBuf
+const xmlBuf
+struct _xmlBuf
+const struct _xmlBuf
+xmlBuffer
+const xmlBuffer
+struct _xmlBuffer
+const struct _xmlBuffer
+xmlCatalog
+const xmlCatalog
+struct _xmlCatalog
+const struct _xmlCatalog
+xmlCharEncodingHandler
+const xmlCharEncodingHandler
+struct _xmlCharEncodingHandler
+const struct _xmlCharEncodingHandler
+xmlChLRange
+const xmlChLRange
+struct _xmlChLRange
+const struct _xmlChLRange
+xmlChRangeGroup
+const xmlChRangeGroup
+struct _xmlChRangeGroup
+const struct _xmlChRangeGroup
+xmlChSRange
+const xmlChSRange
+struct _xmlChSRange
+const struct _xmlChSRange
+xmlDict
+const xmlDict
+struct _xmlDict
+const struct _xmlDict
+xmlDoc
+const xmlDoc
+struct _xmlDoc
+const struct _xmlDoc
+xmlDOMWrapCtxt
+const xmlDOMWrapCtxt
+struct _xmlDOMWrapCtxt
+const struct _xmlDOMWrapCtxt
+xmlDtd
+const xmlDtd
+struct _xmlDtd
+const struct _xmlDtd
+xmlElement
+const xmlElement
+struct _xmlElement
+const struct _xmlElement
+xmlElementContent
+const xmlElementContent
+struct _xmlElementContent
+const struct _xmlElementContent
+xmlEntity
+const xmlEntity
+struct _xmlEntity
+const struct _xmlEntity
+xmlEnumeration
+const xmlEnumeration
+struct _xmlEnumeration
+const struct _xmlEnumeration
+xmlError
+const xmlError
+struct _xmlError
+const struct _xmlError
+xmlExpCtxt
+const xmlExpCtxt
+struct _xmlExpCtxt
+const struct _xmlExpCtxt
+xmlExpNode
+const xmlExpNode
+struct _xmlExpNode
+const struct _xmlExpNode
+xmlGlobalState
+const xmlGlobalState
+struct _xmlGlobalState
+const struct _xmlGlobalState
+xmlAttributeTable
+const xmlAttributeTable
+struct _xmlHashTable
+const struct _xmlHashTable
+xmlElementTable
+const xmlElementTable
+struct _xmlHashTable
+const struct _xmlHashTable
+xmlEntitiesTable
+const xmlEntitiesTable
+struct _xmlHashTable
+const struct _xmlHashTable
+xmlHashTable
+const xmlHashTable
+struct _xmlHashTable
+const struct _xmlHashTable
+xmlIDTable
+const xmlIDTable
+struct _xmlHashTable
+const struct _xmlHashTable
+xmlNotationTable
+const xmlNotationTable
+struct _xmlHashTable
+const struct _xmlHashTable
+xmlRefTable
+const xmlRefTable
+struct _xmlHashTable
+const struct _xmlHashTable
+xmlID
+const xmlID
+struct _xmlID
+const struct _xmlID
+xmlLink
+const xmlLink
+struct _xmlLink
+const struct _xmlLink
+xmlList
+const xmlList
+struct _xmlList
+const struct _xmlList
+xmlLocationSet
+const xmlLocationSet
+struct _xmlLocationSet
+const struct _xmlLocationSet
+xmlModule
+const xmlModule
+struct _xmlModule
+const struct _xmlModule
+xmlMutex
+const xmlMutex
+struct _xmlMutex
+const struct _xmlMutex
+xmlNode
+const xmlNode
+struct _xmlNode
+const struct _xmlNode
+xmlNodeSet
+const xmlNodeSet
+struct _xmlNodeSet
+const struct _xmlNodeSet
+xmlNotation
+const xmlNotation
+struct _xmlNotation
+const struct _xmlNotation
+xmlNs
+const xmlNs
+struct _xmlNs
+const struct _xmlNs
+xmlOutputBuffer
+const xmlOutputBuffer
+struct _xmlOutputBuffer
+const struct _xmlOutputBuffer
+xmlParserCtxt
+const xmlParserCtxt
+struct _xmlParserCtxt
+const struct _xmlParserCtxt
+xmlParserInput
+const xmlParserInput
+struct _xmlParserInput
+const struct _xmlParserInput
+xmlParserInputBuffer
+const xmlParserInputBuffer
+struct _xmlParserInputBuffer
+const struct _xmlParserInputBuffer
+xmlParserNodeInfo
+const xmlParserNodeInfo
+struct _xmlParserNodeInfo
+const struct _xmlParserNodeInfo
+xmlParserNodeInfoSeq
+const xmlParserNodeInfoSeq
+struct _xmlParserNodeInfoSeq
+const struct _xmlParserNodeInfoSeq
+xmlPattern
+const xmlPattern
+struct _xmlPattern
+const struct _xmlPattern
+xmlRef
+const xmlRef
+struct _xmlRef
+const struct _xmlRef
+xmlRegExecCtxt
+const xmlRegExecCtxt
+struct _xmlRegExecCtxt
+const struct _xmlRegExecCtxt
+xmlRegexp
+const xmlRegexp
+struct _xmlRegexp
+const struct _xmlRegexp
+xmlRelaxNG
+const xmlRelaxNG
+struct _xmlRelaxNG
+const struct _xmlRelaxNG
+xmlRelaxNGParserCtxt
+const xmlRelaxNGParserCtxt
+struct _xmlRelaxNGParserCtxt
+const struct _xmlRelaxNGParserCtxt
+xmlRelaxNGValidCtxt
+const xmlRelaxNGValidCtxt
+struct _xmlRelaxNGValidCtxt
+const struct _xmlRelaxNGValidCtxt
+xmlRMutex
+const xmlRMutex
+struct _xmlRMutex
+const struct _xmlRMutex
+xmlSaveCtxt
+const xmlSaveCtxt
+struct _xmlSaveCtxt
+const struct _xmlSaveCtxt
+xmlSAXHandler
+const xmlSAXHandler
+struct _xmlSAXHandler
+const struct _xmlSAXHandler
+xmlSAXHandlerV1
+const xmlSAXHandlerV1
+struct _xmlSAXHandlerV1
+const struct _xmlSAXHandlerV1
+xmlSAXLocator
+const xmlSAXLocator
+struct _xmlSAXLocator
+const struct _xmlSAXLocator
+xmlSchema
+const xmlSchema
+struct _xmlSchema
+const struct _xmlSchema
+xmlSchemaAnnot
+const xmlSchemaAnnot
+struct _xmlSchemaAnnot
+const struct _xmlSchemaAnnot
+xmlSchemaAttribute
+const xmlSchemaAttribute
+struct _xmlSchemaAttribute
+const struct _xmlSchemaAttribute
+xmlSchemaAttributeGroup
+const xmlSchemaAttributeGroup
+struct _xmlSchemaAttributeGroup
+const struct _xmlSchemaAttributeGroup
+xmlSchemaAttributeLink
+const xmlSchemaAttributeLink
+struct _xmlSchemaAttributeLink
+const struct _xmlSchemaAttributeLink
+xmlSchemaElement
+const xmlSchemaElement
+struct _xmlSchemaElement
+const struct _xmlSchemaElement
+xmlSchemaFacet
+const xmlSchemaFacet
+struct _xmlSchemaFacet
+const struct _xmlSchemaFacet
+xmlSchemaFacetLink
+const xmlSchemaFacetLink
+struct _xmlSchemaFacetLink
+const struct _xmlSchemaFacetLink
+xmlSchemaNotation
+const xmlSchemaNotation
+struct _xmlSchemaNotation
+const struct _xmlSchemaNotation
+xmlSchemaParserCtxt
+const xmlSchemaParserCtxt
+struct _xmlSchemaParserCtxt
+const struct _xmlSchemaParserCtxt
+xmlSchemaSAXPlugStruct
+const xmlSchemaSAXPlugStruct
+struct _xmlSchemaSAXPlug
+const struct _xmlSchemaSAXPlug
+xmlSchematron
+const xmlSchematron
+struct _xmlSchematron
+const struct _xmlSchematron
+xmlSchematronParserCtxt
+const xmlSchematronParserCtxt
+struct _xmlSchematronParserCtxt
+const struct _xmlSchematronParserCtxt
+xmlSchematronValidCtxt
+const xmlSchematronValidCtxt
+struct _xmlSchematronValidCtxt
+const struct _xmlSchematronValidCtxt
+xmlSchemaType
+const xmlSchemaType
+struct _xmlSchemaType
+const struct _xmlSchemaType
+xmlSchemaTypeLink
+const xmlSchemaTypeLink
+struct _xmlSchemaTypeLink
+const struct _xmlSchemaTypeLink
+xmlSchemaVal
+const xmlSchemaVal
+struct _xmlSchemaVal
+const struct _xmlSchemaVal
+xmlSchemaValidCtxt
+const xmlSchemaValidCtxt
+struct _xmlSchemaValidCtxt
+const struct _xmlSchemaValidCtxt
+xmlSchemaWildcard
+const xmlSchemaWildcard
+struct _xmlSchemaWildcard
+const struct _xmlSchemaWildcard
+xmlSchemaWildcardNs
+const xmlSchemaWildcardNs
+struct _xmlSchemaWildcardNs
+const struct _xmlSchemaWildcardNs
+xmlShellCtxt
+const xmlShellCtxt
+struct _xmlShellCtxt
+const struct _xmlShellCtxt
+xmlStartTag
+const xmlStartTag
+struct _xmlStartTag
+const struct _xmlStartTag
+xmlStreamCtxt
+const xmlStreamCtxt
+struct _xmlStreamCtxt
+const struct _xmlStreamCtxt
+xmlTextReader
+const xmlTextReader
+struct _xmlTextReader
+const struct _xmlTextReader
+xmlTextWriter
+const xmlTextWriter
+struct _xmlTextWriter
+const struct _xmlTextWriter
+xmlURI
+const xmlURI
+struct _xmlURI
+const struct _xmlURI
+xmlValidCtxt
+const xmlValidCtxt
+struct _xmlValidCtxt
+const struct _xmlValidCtxt
+xmlValidState
+const xmlValidState
+struct _xmlValidState
+const struct _xmlValidState
+xmlXIncludeCtxt
+const xmlXIncludeCtxt
+struct _xmlXIncludeCtxt
+const struct _xmlXIncludeCtxt
+xmlXPathAxis
+const xmlXPathAxis
+struct _xmlXPathAxis
+const struct _xmlXPathAxis
+xmlXPathCompExpr
+const xmlXPathCompExpr
+struct _xmlXPathCompExpr
+const struct _xmlXPathCompExpr
+xmlXPathContext
+const xmlXPathContext
+struct _xmlXPathContext
+const struct _xmlXPathContext
+xmlXPathFunct
+const xmlXPathFunct
+struct _xmlXPathFunct
+const struct _xmlXPathFunct
+xmlXPathObject
+const xmlXPathObject
+struct _xmlXPathObject
+const struct _xmlXPathObject
+xmlXPathParserContext
+const xmlXPathParserContext
+struct _xmlXPathParserContext
+const struct _xmlXPathParserContext
+xmlXPathType
+const xmlXPathType
+struct _xmlXPathType
+const struct _xmlXPathType
+xmlXPathVariable
+const xmlXPathVariable
+struct _xmlXPathVariable
+const struct _xmlXPathVariable

@@ -119,6 +119,13 @@ int ModifyCommand::Update::BindNode::subopthandler(int index, char *value) {
       optional = true;
       return 1;
 
+   case 12: // weak
+      if (value) {
+         throw std::string("`weak' flag takes no arguments");
+      }
+      weak = true;
+      return 1;
+
    default: abort();
    }
 }
@@ -126,6 +133,10 @@ int ModifyCommand::Update::BindNode::subopthandler(int index, char *value) {
 void ModifyCommand::Update::BindNode::validate() const {
    if (!old_sym) {
       throw std::string("must specify original symbol name with `old_sym=<sym>'");
+   }
+   if (weak && lazy) {
+      throw std::string("`weak' and `lazy' are mutually exclusive "
+                        "(there is no lazy weak_bind table)");
    }
 }
 
@@ -175,21 +186,34 @@ void ModifyCommand::Update::BindNode::workT(MachO::Archive<b> *archive) {
    if constexpr (l) {
          bindinfo = dyldinfo->lazy_bind;
 } else {
-      bindinfo = dyldinfo->bind;
+      /* weak_bind and bind are both BindInfo<b,false>; `weak' picks the
+       * weak_bind table so a weak-coalesced symbol's coalesced lookup is
+       * redirected to the shim alongside its regular-bind redirect. */
+      bindinfo = weak ? dyldinfo->weak_bind : dyldinfo->bind;
    }
 
-   auto bindee_it = bindinfo->find(*old_sym);
-   if (bindee_it == bindinfo->end()) {
-      if (optional) { return; }
+   /* Redirect EVERY bind node for old_sym, not just the first. A symbol can be
+    * bound more than once in a single table — a weak-coalesced C++ runtime
+    * external (operator new/delete) commonly has duplicate weak_bind AND
+    * duplicate regular-bind entries for the same __la_symbol_ptr slot (one per
+    * referencing translation unit / explicit template instantiation). Renaming
+    * only the first left the duplicates pointing at the ORIGINAL symbol, which
+    * dyld then re-resolved to the native (or missing) definition — overwriting
+    * the shim pointer the renamed entry installed -> unrouted native call ->
+    * the i386 4-byte ret over-popped by the native 8-byte ret -> SIGSEGV. */
+   unsigned matched = 0;
+   for (auto bindee : bindinfo->bindees) {
+      if (bindee->sym != *old_sym) { continue; }
+      ++matched;
+      if (new_type) { bindee->type = *new_type; }
+      if (new_addend) { bindee->addend = *new_addend; }
+      if (new_dylib_ord) { bindee->dylib = load_dylibs[*new_dylib_ord - 1]; }
+      if (new_sym) { bindee->sym = *new_sym; }
+      if (new_flags) { bindee->flags = *new_flags; }
+   }
+   if (matched == 0 && !optional) {
       throw MachO::error("bind node for symbol `%s' not found", old_sym->c_str());
    }
-   auto bindee = *bindee_it;
-   
-   if (new_type) { bindee->type = *new_type; }
-   if (new_addend) { bindee->addend = *new_addend; }
-   if (new_dylib_ord) { bindee->dylib = load_dylibs[*new_dylib_ord - 1]; }
-   if (new_sym) { bindee->sym = *new_sym; }
-   if (new_flags) { bindee->flags = *new_flags; }
 }
 
 template <MachO::Bits b>

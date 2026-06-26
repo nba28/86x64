@@ -1,0 +1,4 @@
+count=5 sum=55
+arr sum=100
+ok
+exit_code: 0

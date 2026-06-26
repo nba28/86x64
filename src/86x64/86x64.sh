@@ -175,14 +175,22 @@ HAS_DYLD_INFO=$(otool -l "$DOLLAR64" 2>/dev/null | grep -c "cmd LC_DYLD_INFO" ||
 if [ "$HAS_DYLD_INFO" -gt 0 ]; then
     # gather bound symbols: lazy binds are function imports (bound via stubs),
     # non-lazy binds are DATA imports (e.g. NSString* consts like
-    # NSArgumentDomain). static-interpose redirects both to libabiconv shims /
-    # data-constant shadows, so feed it the union of the two tables.
+    # NSArgumentDomain), weak binds are C++ runtime weak-coalesced externals
+    # (operator new/delete and weakly-referenced template/vtable symbols).
+    # static-interpose redirects all three to libabiconv shims / data-constant
+    # shadows, so feed it the union of the tables. The weak table matters even
+    # though most weak symbols also appear in the regular table: a weak symbol
+    # that is ONLY weak-bound (no regular/lazy entry) would otherwise be missed,
+    # and any weak symbol left un-renamed gets its slot re-resolved to the
+    # NATIVE definition by dyld's post-bind weak coalescing (overriding the
+    # regular-bind redirect) -> unrouted native call -> fused PC crash.
     # Exclude dyld_stub_binder: it is a non-lazy bind that libabiconv DOES
     # provide a __-prefixed shim for, so leaving it in would make
     # static-interpose rename it early and the dedicated rebind step below
     # (which still looks for the original name) would fail to find it.
     SYMS=$( { "$MACHO_TOOL" print --lazy-bind "$DOLLAR64" | tail +2;
-              "$MACHO_TOOL" print --bind "$DOLLAR64" | tail +2; } \
+              "$MACHO_TOOL" print --bind "$DOLLAR64" | tail +2;
+              "$MACHO_TOOL" print --weak-bind "$DOLLAR64" | tail +2; } \
             | cut -d" " -f5 | grep -vx 'dyld_stub_binder' | sort -u )
 else
     # classic Mach-O: the import set is the undefined external symbols. nm

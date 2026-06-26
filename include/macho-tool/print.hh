@@ -9,7 +9,8 @@ struct PrintCommand: InplaceCommand {
    static constexpr int SYMS = 't';
    static constexpr int LAZY_BIND = 257;
    static constexpr int BIND = 258;
-   
+   static constexpr int WEAK_BIND = 259;
+
    virtual const char *optstring() const override { return "ht"; }
    virtual std::vector<option> longopts() const override {
       return {{"help", no_argument, nullptr, 'h'},
@@ -17,6 +18,7 @@ struct PrintCommand: InplaceCommand {
               {"syms", no_argument, nullptr, SYMS},
               {"lazy-bind", no_argument, nullptr, LAZY_BIND},
               {"bind", no_argument, nullptr, BIND},
+              {"weak-bind", no_argument, nullptr, WEAK_BIND},
               {0}};
    }
    virtual int opthandler(int optchar) override;
@@ -35,4 +37,5 @@ struct PrintCommand: InplaceCommand {
    template <MachO::Bits bits> void print_SYMS(const MachO::Archive<bits> *archive);
    template <MachO::Bits bits> void print_LAZY_BIND(const MachO::Archive<bits> *archive);
    template <MachO::Bits bits> void print_BIND(const MachO::Archive<bits> *archive);
+   template <MachO::Bits bits> void print_WEAK_BIND(const MachO::Archive<bits> *archive);
 };

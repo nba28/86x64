@@ -43,6 +43,25 @@ struct ModifyCommand::Update::BindNode: Operation {
                              * instead of throwing. Lets a caller redirect a
                              * symbol that lives in only one of the two tables
                              * by issuing both updates. */
+   bool weak = false;       /* if set, operate on the weak_bind table instead
+                             * of the regular bind table (mutually exclusive
+                             * with `lazy' — there is no lazy weak_bind table).
+                             * A weak bind carries no dylib ordinal (implicit
+                             * BIND_SPECIAL_DYLIB_WEAK_LOOKUP), so only new_sym
+                             * is meaningful — new_dylib is ignored. C++ runtime
+                             * weak-coalesced externals (operator new/delete:
+                             * __Znwm/__Znam/__ZdlPv/__ZdaPv) are bound via this
+                             * table; without rewriting it dyld's weak coalescing
+                             * OVERWRITES the regular-bind redirect with the
+                             * NATIVE definition (the __la_symbol_ptr slot the
+                             * regular bind aimed at libabiconv's ____Znwm gets
+                             * re-resolved to native libstdc++ __Znwm) -> the
+                             * call reaches native code UNROUTED -> the i386
+                             * 4-byte ret is over-popped by the native 8-byte
+                             * ret -> fused PC crash. Renaming the weak_bind
+                             * symbol to the shim name keeps the coalesced
+                             * lookup resolving to libabiconv (its only
+                             * definition). */
 
    std::optional<uint8_t> new_type;
    std::optional<ssize_t> new_addend;
@@ -59,6 +78,7 @@ struct ModifyCommand::Update::BindNode: Operation {
               "new_flags", "new-flags",
               "lazy",
               "optional",
+              "weak",
               nullptr};
    }
    virtual int subopthandler(int index, char *value) override;
