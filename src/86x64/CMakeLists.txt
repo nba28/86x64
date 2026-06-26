@@ -1,6 +1,31 @@
 add_library(wrapper STATIC wrapper.asm wrapper_setup.c)
 add_library(interpose SHARED interpose.c)
 
+# libobjc_compat: a single-purpose drop-in dylib that re-supplies the ObjC1
+# runtime symbols CLASSIC (pre-ObjC2, zero-LC_DYLD_INFO) translated binaries
+# import but modern /usr/lib/libobjc.A.dylib no longer exports
+# (objc_exception_try_enter/_try_exit/_extract/_match, class_nextMethodList,
+# _objc_setNilReceiver, and the _dealloc DATA IMP).  It LC_REEXPORTs the real
+# libobjc (so surviving symbols still resolve through it) and adds the removed
+# names back as bare-jmp thunks forwarding to libabiconv's i386-discipline
+# impls (the callers are translated-i386, so those impls are ABI-correct).
+# Deploy: install_name_tool -change /usr/lib/libobjc.A.dylib
+# @rpath/libobjc_compat.dylib on each classic binary.  Built x86_64 (runs under
+# Rosetta).  See libobjc_compat.c.  Output: libobjc_compat.dylib.
+add_library(objc_compat SHARED libobjc_compat.c)
+set_target_properties(objc_compat PROPERTIES
+  OUTPUT_NAME objc_compat
+  OSX_ARCHITECTURES x86_64)
+add_dependencies(objc_compat abiconv)
+# Link the libabiconv dylib FILE (not the target) so the impl symbols resolve
+# two-level against @rpath/libabiconv.dylib WITHOUT inheriting abiconv's own
+# framework deps -- this stays a minimal single-purpose shim (libabiconv +
+# reexported libobjc + libSystem).  Reexport the real libobjc
+# (LC_REEXPORT_DYLIB /usr/lib/libobjc.A.dylib) so surviving symbols pass through.
+target_link_libraries(objc_compat
+  "$<TARGET_FILE:abiconv>"
+  "-Wl,-reexport-lobjc")
+
 # webnoop: a single-purpose DYLD-insert shim that suppresses legacy-WebKit
 # (WebView) instantiation in the translated process (the JSC stack-bounds trap
 # under our low-4GB stack). Built x86_64 (runs under Rosetta). See webnoop.m.
@@ -31,7 +56,7 @@ set_target_properties(jscstackpatch PROPERTIES
   COMPILE_OPTIONS "-fno-objc-arc")
 target_link_libraries(jscstackpatch "-framework Foundation")
 
-install(TARGETS wrapper interpose webnoop acctnoop jscstackpatch
+install(TARGETS wrapper interpose objc_compat webnoop acctnoop jscstackpatch
   DESTINATION opt/86x64
   )
 
