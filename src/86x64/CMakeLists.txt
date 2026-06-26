@@ -1,7 +1,16 @@
 add_library(wrapper STATIC wrapper.asm wrapper_setup.c)
 add_library(interpose SHARED interpose.c)
 
-install(TARGETS wrapper interpose
+# webnoop: a single-purpose DYLD-insert shim that suppresses legacy-WebKit
+# (WebView) instantiation in the translated process (the JSC stack-bounds trap
+# under our low-4GB stack). Built x86_64 (runs under Rosetta). See webnoop.m.
+add_library(webnoop SHARED webnoop.m)
+set_target_properties(webnoop PROPERTIES
+  OSX_ARCHITECTURES x86_64
+  COMPILE_OPTIONS "-fno-objc-arc")
+target_link_libraries(webnoop "-framework Foundation" "-framework AppKit")
+
+install(TARGETS wrapper interpose webnoop
   DESTINATION opt/86x64
   )
 
