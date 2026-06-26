@@ -101,11 +101,19 @@ size_t leb128_encode(Image& img, std::size_t offset, T n) {
    const size_t buflen = leb128_size(n);
    char *buf = new char[buflen];
    
+   /* NB: the encode call must NOT live inside assert() -- assert() expands to
+    * nothing under -DNDEBUG (every -O Release/RelWithDebInfo/MinSizeRel build),
+    * which would skip the encode and copy an UNINITIALIZED buffer into the
+    * image, corrupting every LEB value (export-trie edge offsets, bind/rebase
+    * deltas, ...). Run the encode unconditionally; assert only its result. */
+   size_t encoded;
    if constexpr (std::is_unsigned<T>()) {
-         assert(uleb128_encode(buf, buflen, n));
+         encoded = uleb128_encode(buf, buflen, n);
       } else {
-      assert(sleb128_encode(buf, buflen, n));
+      encoded = sleb128_encode(buf, buflen, n);
    }
+   assert(encoded);
+   (void) encoded;
 
    img.copy(offset, buf, buflen);
    delete[] buf;
