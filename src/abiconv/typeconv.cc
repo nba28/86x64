@@ -892,8 +892,15 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
             emit_inst(os, "jmp", "near " + done_lbl);
 
             os << null_lbl << ":" << std::endl;
-            emit_inst(os, "xor", reg_dst.reg.reg_d, reg_dst.reg.reg_d);
-            convert_int(os, CXType_Pointer, reg_dst, dst);
+            /* Store NULL to dst. reg_src (r12) is already 0 here -- we reached
+             * null_lbl via `jz` after `test reg_src` -- and, unlike reg_dst (r11),
+             * it is NOT the base register of the `dst` memory operand. The old code
+             * did `xor reg_dst` first, zeroing r11 = dst's base, so the store wrote
+             * through [0 + field_off] -> SIGSEGV at a near-null addr (e.g.
+             * pthread_create(&t, NULL, fn, arg): the NULL attr faulted at 0x8).
+             * Emitted for EVERY nullable nested pointer/struct field (487 sites in
+             * libabiconv) -> a broad, data-dependent latent crash. */
+            convert_int(os, CXType_Pointer, reg_src, dst);
             os << done_lbl << ":" << std::endl;
          }
          pop(os, reg_src, src, dst);
