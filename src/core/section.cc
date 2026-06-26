@@ -1101,8 +1101,17 @@ namespace MachO {
             tbl_addr.erase(reg0); tbl_val.erase(reg0);
             sets_state = true;
          }
-         /* (b) table base via lea: i386 `[anchor+disp]` or x86_64 `[rip+disp]`. */
-         else if (iform == XED_IFORM_LEA_GPRv_AGEN && jt_is_gpr32(reg0)) {
+         /* (b) table base via lea: i386 `[anchor+disp]` or x86_64 `[rip+disp]`.
+          *     The M64 `convert` re-parse sees the ALREADY-TRANSLATED dispatch,
+          *     whose table base is loaded into the scratch reg r11
+          *     (`lea r11,[rip+disp]`). r11 is outside jt_is_gpr32's EAX..EDI
+          *     range, so accept it explicitly — otherwise the table is never
+          *     re-detected on the convert pass and TextParser disassembles its
+          *     relocated 4-byte entries as code (an entry like 0x174 = `74 01 ..`
+          *     mis-decodes as `je rel8` and length-widening shifts/corrupts the
+          *     whole table -> wild jump into __LINKEDIT; Portal2 CRC32 dispatch). */
+         else if (iform == XED_IFORM_LEA_GPRv_AGEN &&
+                  (jt_is_gpr32(reg0) || reg0raw == XED_REG_R11)) {
             const xed_reg_enum_t base = xed_decoded_inst_get_base_reg(ops, 0);
             const xed_reg_enum_t index = xed_decoded_inst_get_index_reg(ops, 0);
             const ssize_t disp = xed_decoded_inst_get_memory_displacement(ops, 0);
