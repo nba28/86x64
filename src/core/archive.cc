@@ -137,6 +137,48 @@ namespace MachO {
 
    template <Bits b>
    std::size_t Archive<b>::Build(std::size_t offset) {
+      /* Enforce the "__LINKEDIT is the last segment" invariant before laying
+       * out file offsets. codesign/dyld append the code-signature superblob at
+       * the end of __LINKEDIT and require it to cover the whole image, so
+       * __LINKEDIT must hold the highest file offset of any segment. dyld's
+       * strict validation additionally rejects a binary whose segment
+       * load-command order disagrees with its file/vmaddr order ("segment load
+       * commands out of order with respect to layout", MachOFile::validSegments
+       * / Malformed::segmentOrder). So we move the __LINKEDIT *load command*
+       * itself to sit after every other segment -- not merely bump its file
+       * offset -- so the Build cursor below and Emit both place it last in
+       * load-command, file, and vmaddr order. Without this, a binary that
+       * carries a custom segment trailing __LINKEDIT (e.g. Civ IV's Firaxis
+       * __OINK, a 93740-byte opaque sectionless payload) is unsignable:
+       * codesign reports "main executable failed strict validation".
+       *
+       * Universal: triggers on the structural property (a non-__LINKEDIT
+       * segment laid out after __LINKEDIT), never on an app name. Idempotent --
+       * a no-op once __LINKEDIT is already the last segment, so binaries with
+       * the normal layout are unaffected (and byte-stable). Moving only the
+       * sectionless __LINKEDIT past trailing segments leaves every section's
+       * index (n_sect) unchanged, since section IDs are assigned in
+       * load-command order and the section-bearing segments keep their relative
+       * positions. */
+      if (Segment<b> *linkedit = segment(SEG_LINKEDIT)) {
+         Segment<b> *last_seg = nullptr;
+         for (LoadCommand<b> *lc : load_commands) {
+            if (auto *seg = dynamic_cast<Segment<b> *>(lc)) { last_seg = seg; }
+         }
+         if (last_seg != linkedit) {
+            /* unlink __LINKEDIT from its current slot */
+            for (auto it = load_commands.begin(); it != load_commands.end(); ++it) {
+               if (*it == linkedit) { load_commands.erase(it); break; }
+            }
+            /* re-insert immediately after the (now) last segment command */
+            std::size_t insert_idx = 0;
+            for (std::size_t i = 0; i < load_commands.size(); ++i) {
+               if (dynamic_cast<Segment<b> *>(load_commands[i])) { insert_idx = i + 1; }
+            }
+            load_commands.insert(load_commands.begin() + insert_idx, linkedit);
+         }
+      }
+
       BuildEnv<b> env(this, Location(offset, vmaddr));
       
       env.allocate(sizeof(header));
