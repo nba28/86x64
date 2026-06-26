@@ -5245,6 +5245,7 @@ extern unsigned __int128 _86x64_plan_call(struct objc_call_plan *plan, void *fn)
 #define ENC_NSSIZE  "{_NSSize=ff}"
 #define ENC_NSRANGE "{_NSRange=II}"
 #define ENC_CGAFF   "{CGAffineTransform=ffffff}"
+#define ENC_CT3D    "{CATransform3D=ffffffffffffffff}"
 
 struct geo_ent { const char *name; const char *sig; void *fn; };
 /* sig: return encoding then arg encodings, concatenated, CONV_I386 widths.
@@ -5366,6 +5367,29 @@ static struct geo_ent g_geo[] = {
    /* 87 */ { "CGContextSetTextMatrix",    "v^{CGContext=}" ENC_CGAFF,      NULL },
    /* 88 */ { "CGContextDrawLayerInRect",  "v^{CGContext=}" ENC_NSRECT
                                             "^{CGLayer=}",                  NULL },
+   /* CATransform3D (CoreAnimation) C builder family. abigen SKIPS these — a
+    * 16-field CGFloat struct exceeds its by-value-arg classifier ("field count
+    * not in 1..2") — so they bound RAW to native QuartzCore. Taking/returning
+    * CATransform3D (16 CGFloats = 64B i386 / 128B native) + CGFloat angles BY
+    * VALUE, the raw i386 cdecl call (stack args + 64B hidden-ptr stret) mismatches
+    * the SysV ABI (xmm doubles + 128B stret) -> garbage matrices -> iPhoto's
+    * welcome-screen layer transforms came out as sheared parallelograms. geo_call
+    * marshals them via enc_widen/enc_narrow exactly like the CGAffineTransform
+    * twins (CGContextGetCTM idx 74 / ConcatCTM idx 64), just a bigger struct (128B
+    * fits stret_buf 184B; two 128B args fit plan.stack 352B). Struct returns use
+    * the i386 hidden-ptr stret convention -> GEOSHIM_S. KEEP IN SYNC with the
+    * GEOSHIM_* list in maptable_tramp.asm and the symbols in custom.syms. */
+   /* 89 */ { "CATransform3DMakeRotation",      ENC_CT3D "ffff",            NULL },
+   /* 90 */ { "CATransform3DMakeScale",         ENC_CT3D "fff",             NULL },
+   /* 91 */ { "CATransform3DMakeTranslation",   ENC_CT3D "fff",             NULL },
+   /* 92 */ { "CATransform3DRotate",            ENC_CT3D ENC_CT3D "ffff",   NULL },
+   /* 93 */ { "CATransform3DScale",             ENC_CT3D ENC_CT3D "fff",    NULL },
+   /* 94 */ { "CATransform3DTranslate",         ENC_CT3D ENC_CT3D "fff",    NULL },
+   /* 95 */ { "CATransform3DConcat",            ENC_CT3D ENC_CT3D ENC_CT3D, NULL },
+   /* 96 */ { "CATransform3DInvert",            ENC_CT3D ENC_CT3D,          NULL },
+   /* 97 */ { "CATransform3DMakeAffineTransform", ENC_CT3D ENC_CGAFF,       NULL },
+   /* 98 */ { "CATransform3DGetAffineTransform",  ENC_CGAFF ENC_CT3D,       NULL },
+   /* 99 */ { "CATransform3DIsIdentity",        "c" ENC_CT3D,              NULL },
 };
 
 struct geo_res { uint64_t lo, hi; double fp; };

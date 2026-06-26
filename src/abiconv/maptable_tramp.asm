@@ -295,6 +295,20 @@
    GEOSHIM_I ___CGContextSetShadowWithColor, 86
    GEOSHIM_I ___CGContextSetTextMatrix,      87
    GEOSHIM_I ___CGContextDrawLayerInRect,    88
+   ;; CATransform3D (CoreAnimation) C builder family (KEEP IN SYNC w/ g_geo[]).
+   ;; Struct returns use the i386 hidden-ptr stret convention -> GEOSHIM_S;
+   ;; the bool-returning IsIdentity -> GEOSHIM_I.
+   GEOSHIM_S ___CATransform3DMakeRotation,       89
+   GEOSHIM_S ___CATransform3DMakeScale,          90
+   GEOSHIM_S ___CATransform3DMakeTranslation,    91
+   GEOSHIM_S ___CATransform3DRotate,             92
+   GEOSHIM_S ___CATransform3DScale,              93
+   GEOSHIM_S ___CATransform3DTranslate,          94
+   GEOSHIM_S ___CATransform3DConcat,             95
+   GEOSHIM_S ___CATransform3DInvert,             96
+   GEOSHIM_S ___CATransform3DMakeAffineTransform, 97
+   GEOSHIM_S ___CATransform3DGetAffineTransform,  98
+   GEOSHIM_I ___CATransform3DIsIdentity,         99
 
 ;; NSRect out-pointers: hand-marshalled in objc_shim.c (mt_NSDivideRect).
    MTSHIM ___NSDivideRect, _mt_NSDivideRect

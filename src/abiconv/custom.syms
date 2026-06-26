@@ -181,6 +181,17 @@ _CGContextSetShadow
 _CGContextSetShadowWithColor
 _CGContextSetTextMatrix
 _CGContextDrawLayerInRect
+_CATransform3DMakeRotation
+_CATransform3DMakeScale
+_CATransform3DMakeTranslation
+_CATransform3DRotate
+_CATransform3DScale
+_CATransform3DTranslate
+_CATransform3DConcat
+_CATransform3DInvert
+_CATransform3DMakeAffineTransform
+_CATransform3DGetAffineTransform
+_CATransform3DIsIdentity
 _CGPatternCreate
 __dealloc
 __objc_setNilReceiver
