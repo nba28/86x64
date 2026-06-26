@@ -10,7 +10,17 @@ set_target_properties(webnoop PROPERTIES
   COMPILE_OPTIONS "-fno-objc-arc")
 target_link_libraries(webnoop "-framework Foundation" "-framework AppKit")
 
-install(TARGETS wrapper interpose webnoop
+# acctnoop: a single-purpose DYLD-insert shim that neutralizes iPhoto's DEAD
+# MobileMe / unknown-account startup discovery (IPAccountConfigurationManager
+# findUnknownAccounts / findUnknownSystemMobileMeAccount), which crashes ~50% of
+# launches under translation. Built x86_64 (runs under Rosetta). See acctnoop.m.
+add_library(acctnoop SHARED acctnoop.m)
+set_target_properties(acctnoop PROPERTIES
+  OSX_ARCHITECTURES x86_64
+  COMPILE_OPTIONS "-fno-objc-arc")
+target_link_libraries(acctnoop "-framework Foundation")
+
+install(TARGETS wrapper interpose webnoop acctnoop
   DESTINATION opt/86x64
   )
 
