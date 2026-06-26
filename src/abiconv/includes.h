@@ -63,6 +63,33 @@
  * already transitively includes the CG headers, but list it explicitly so the
  * VarDecls (kCGColorSpaceGenericRGB, ...) are unambiguously parsed. */
 #include <CoreGraphics/CoreGraphics.h>
+/* ImageIO is now in ABICONV_SYM_SOURCES (its CGImageSource*/CGImageDestination*
+ * functions + kCGImageSource*/kCGImageProperty* data constants are otherwise
+ * invisible re-exports of ApplicationServices). List the umbrella explicitly so
+ * the CGImageSourceCreateWithURL(CFURLRef,CFDictionaryRef) prototype is
+ * unambiguously parsed and abigen unwraps its CF-object args (the iPhoto
+ * -[IP_QTUtils bitsPerComponentForFormat:] -> CGImageSourceCreateWithURL crash:
+ * a raw arena handle reached native ImageIO -> CFGetTypeID -> SIGSEGV). */
+#include <ImageIO/ImageIO.h>
+/* Headerless ImageIO type-detection SPIs: exported by the framework (present in
+ * ImageIO.tbd, in the consider set via ABICONV_SYM_SOURCES) but DELETED from the
+ * public header, so abigen never saw a prototype and emitted no shim. The symbol
+ * was therefore left binding to the RAW native function — whose x86_64 8-byte
+ * `ret` OVER-POPS the i386 4-byte return push, fusing the return address with the
+ * adjacent stack word into a bogus PC. This is the File->Import crash: iPhoto's
+ * -[... copyTypeExtensions:] calls CGImageSourceCopyTypeExtensions(src) and the
+ * over-pop jumps to 0x<stale-code-ptr>_<real-retaddr> (it only CRASHES when that
+ * adjacent slot is nonzero, hence the intermittency). Declaring the prototypes
+ * here lets abigen emit i386-discipline shims that unwrap the CF-object args and
+ * wrap the CF return. Signatures verified live against the system framework
+ * (scratchpad/cg_spi_probe*). Universal: any i386 app calling these ImageIO
+ * SPIs. (CGImageSourceGetTypeWithData / GetTypeWithDataProvider are intentionally
+ * OMITTED — they SIGSEGV even from a clean native x86_64 caller, i.e. dead on
+ * modern macOS; a graceful no-op shim is the right tool there if a target ever
+ * calls them — see todo_gaps, cf. the ICA/FSSpec dead-API shims.) */
+extern CFArrayRef  CGImageSourceCopyTypeExtensions(CGImageSourceRef isrc);
+extern CFStringRef CGImageSourceGetTypeWithExtension(CFStringRef ext);
+extern CFStringRef CGImageSourceGetTypeWithURL(CFURLRef url);
 /* DiskArbitration: in ABICONV_SYM_SOURCES so DASessionCreate /
  * DADiskCreateFromBSDName / DADiskCopyDescription (iPhoto's PhotoCDManager
  * registerWithDiskArb:) get ABI shims; opaque DASessionRef/DADiskRef bridge

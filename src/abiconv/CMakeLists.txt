@@ -56,6 +56,19 @@ set(ABICONV_SYM_SOURCES
   # the PIC-anchor fix resolved the load to the real nl_ptr). List directly so
   # both the functions and the data constants enter the consider set.
   /System/Library/Frameworks/CoreGraphics.framework/CoreGraphics
+  # ImageIO is re-exported by ApplicationServices too, so the SAME re-export gap
+  # as CoreGraphics: its CGImageSource* / CGImageDestination* C functions never
+  # entered the consider set, so abigen emitted no ABI shims and the i386 calls
+  # bound straight to native ImageIO. CGImageSourceCreateWithURL(CFURLRef url,
+  # CFDictionaryRef options) then received the i386 url arg as a raw proxy-arena
+  # HANDLE (never unwrapped) and immediately did CFGetTypeID(url) ->
+  # objc_msgSend(handle,_cfTypeID) -> reads arena[slot] as the isa -> SIGSEGV in
+  # objc_class::demangledName (iPhoto -[IP_QTUtils bitsPerComponentForFormat:] ->
+  # CGImageSourceCreateWithURL, image-format probe). Listing ImageIO directly
+  # puts the whole family in the consider set; abigen's CF-record-ptr path
+  # (convert_cf_ptr) then unwraps the CFURLRef/CFDictionaryRef args. Generic:
+  # any i386 app that decodes images via ImageIO. See includes.h (<ImageIO/*>).
+  /System/Library/Frameworks/ImageIO.framework/ImageIO
   # DiskArbitration: iPhoto's PhotoCDManager registerWithDiskArb: calls
   # DASessionCreate / DADiskCreateFromBSDName / DADiskCopyDescription (opaque
   # DASessionRef/DADiskRef + CFDictionaryRef). Unshimmed they reached native
