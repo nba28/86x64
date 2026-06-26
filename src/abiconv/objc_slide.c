@@ -554,6 +554,14 @@ static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
                    type == S_MOD_INIT_FUNC_POINTERS ||
                    type == S_MOD_TERM_FUNC_POINTERS) { continue; }
                if (strncmp(sect->sectname, "__cfstring", 16) == 0) { continue; }
+               /* __86x64_xrel records carry a `slot_vmaddr` field that is itself
+                * a 4-aligned intra-image __DATA pointer. Sliding it here would
+                * double-apply the slide: bind_external_relocs (run right after)
+                * reads slot_vmaddr and slides it AGAIN, writing the bound value
+                * to slot_orig + 2*slide (a wild address). Only bites at slide!=0,
+                * so the slide==0 standalone-dylib test never caught it. Skip the
+                * whole section here; bind_external_relocs owns its slots. */
+               if (strncmp(sect->sectname, "__86x64_xrel", 16) == 0) { continue; }
                if (sect->size < 4) { continue; }
                void *base = (void *)(uintptr_t)(sect->addr + slide);
                const size_t page = 4096;
