@@ -214,8 +214,16 @@ else
     DYLD64="$INTERPOSE64"
 fi
 
-# convert result to dylib (final output)
-v "$MACHO_TOOL" convert --archive DYLIB "$DYLD64" "$DYLIB64" || error
+# convert result to dylib (final output). For CLASSIC images (no LC_DYLD_INFO)
+# synthesize a canonical modern LC_DYLD_INFO_ONLY (rebase/bind/export opcode
+# streams derived from the indirect symtab + relocs), so the output is a normal
+# modern x86_64 dylib: install_name_tool (cctools + llvm), codesign and dyld all
+# accept it, and the synthesized binds resolve through the SAME static-interpose
+# -> libabiconv shim path as modern targets (curing the classic-import truncation
+# family). Modern inputs already carry LC_DYLD_INFO and are untouched.
+SYNTH_DYLD_INFO=""
+[ "$HAS_DYLD_INFO" -gt 0 ] || SYNTH_DYLD_INFO="--synthesize-dyld-info"
+v "$MACHO_TOOL" convert --archive DYLIB $SYNTH_DYLD_INFO "$DYLD64" "$DYLIB64" || error
 
 # Post-process the dylib so install_name_tool can edit it later:
 #   1) strip LC_CODE_SIGNATURE (otherwise install_name_tool refuses with
