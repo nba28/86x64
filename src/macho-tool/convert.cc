@@ -274,4 +274,47 @@ void ConvertCommand::archive_EXECUTE_to_DYLIB(MachO::Archive<MachO::Bits::M64> *
     * posix_spawn) so the patched values are also the real load addresses.
     */
    archive->vmaddr = 0x10000000;
+
+   /* Define ___dso_handle at the image base.
+    *
+    * The i386 MH_EXECUTE carries ___dso_handle as an N_ABS symbol valued at the
+    * mach header (image base), provided by crt1.o. C++ static (de)structor
+    * registration passes its ADDRESS (&__dso_handle) to __cxa_atexit to
+    * identify the owning image. Converting to a DYLIB keeps the reference (a
+    * self-referential __IMPORT,__pointers / symbol-pointer bind) but dyld cannot
+    * satisfy a bind to an N_ABS symbol — only N_SECT defined symbols are yielded
+    * as a dylib's exports — so it aborts at load with
+    * "Symbol not found: ___dso_handle, Expected in: <this dylib>".
+    *
+    * A normal dylib gets ___dso_handle from dylib1.o/ld, defined as a section-
+    * relative symbol at the image base. Mirror that: retype the existing N_ABS
+    * ___dso_handle to a DEFINED N_SECT external symbol anchored at __TEXT,__text
+    * and valued at the image base, so the self-bind resolves to a stable,
+    * image-unique address. It must be THIS image's own defined symbol — never
+    * imported from a shared shim — because &__dso_handle is what tells
+    * __cxa_finalize which image an atexit registration belongs to. (The slide is
+    * 0 at runtime, so the pinned base is also the real load address.) */
+   {
+      const MachO::Section<MachO::Bits::M64> *text_section = nullptr;
+      if (auto *text_seg = archive->segment(SEG_TEXT)) {
+         for (auto *s : text_seg->sections) {
+            if (std::string(s->sect.sectname) == SECT_TEXT) {
+               text_section = s;
+               break;
+            }
+         }
+      }
+      if (text_section != nullptr) {
+         for (auto *sym : symtab->syms) {
+            if (sym->string && sym->string->str == "___dso_handle"
+                && sym->type() == MachO::Nlist<MachO::Bits::M64>::Type::ABS) {
+               sym->nlist.n_type = N_SECT | N_EXT;
+               sym->nlist.n_desc = 0;
+               sym->section = text_section;          /* Build sets n_sect from this */
+               sym->value = nullptr;                 /* keep our n_value through Emit */
+               sym->nlist.n_value = archive->vmaddr; /* image base (pinned, slide 0) */
+            }
+         }
+      }
+   }
 }
