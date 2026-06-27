@@ -897,6 +897,43 @@ namespace MachO {
             }
          }
 
+         /* (2c) Track the anchor through a register-to-register move
+          *      `mov %src, %dst` (MOV_GPRv_GPRv, both 0x89 and 0x8B
+          *      encodings). The destination takes on the source's contents:
+          *      if the source carries an anchor, propagate it; otherwise the
+          *      destination's prior value — possibly a STALE PIC anchor (e.g.
+          *      a get_pc_thunk base popped into %edi at function entry) — is
+          *      overwritten by non-anchor data and the anchor must be cleared.
+          *      Step 2b already does this for the stack spill/reload form
+          *      (`mov disp(%ebp), %reg`); a reg->reg move is the other way a
+          *      function reuses an anchor register for unrelated data. Without
+          *      it a later base+index access off the reassigned register,
+          *      `mov disp(%dst,%idx), ...`, is misrewritten as a rip-relative
+          *      absolute reference into read-only __TEXT (Portal 2
+          *      CLoggingSystem::LogDirect: %edi = PIC anchor at entry, then
+          *      `mov %eax, %edi` reassigns it from a function argument, then
+          *      `mov 0x745c(%edi,%eax), %eax` -> rip-relative load of a garbage
+          *      vtable ptr -> SIGSEGV). For XED both MOV_GPRv_GPRv encodings
+          *      present operand 0 = destination, operand 1 = source. The
+          *      fast/slow-path branch JOIN (branch_anchor_snap) preserves the
+          *      anchor for any slow-path block reached by a forward branch
+          *      taken BEFORE the move, so clearing here is safe. */
+         if (iform == XED_IFORM_MOV_GPRv_GPRv_89 ||
+             iform == XED_IFORM_MOV_GPRv_GPRv_8B) {
+            const xed_reg_enum_t mdst =
+               xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+            const xed_reg_enum_t msrc =
+               xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1);
+            if (mdst >= XED_REG_EAX && mdst <= XED_REG_EDI && mdst != msrc) {
+               auto a = anchors.find(msrc);
+               if (a != anchors.end()) {
+                  anchors[mdst] = a->second;   /* anchor copied src -> dst */
+               } else {
+                  anchors.erase(mdst);          /* overwritten with non-anchor */
+               }
+            }
+         }
+
          /* (3) Skipped: REG0-write clearing. Linear walk reaches the
           *     function-exit register restore (`mov %ebx, -0xc(%rbp)`)
           *     BEFORE the slow-path anchored reads (which sit at higher
