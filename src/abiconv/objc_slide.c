@@ -33,6 +33,7 @@
  */
 #include <mach-o/loader.h>
 #include <mach-o/dyld.h>
+#include <mach-o/nlist.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -268,6 +269,19 @@ static const struct mach_header *find_loaded_image(const char *leaf,
  * s3b/s4). Instead we COLLECT the target addresses into `collect[]` and NULL
  * the slots (so neither dyld nor a nested re-entry runs them); slide_objc runs
  * the collected targets at its very END, after all fixups. */
+/* Read the 8-byte on-disk value at file offset `fo` of `imgname` (a thin
+ * translated dylib, mach_header at offset 0). Returns 0 on any error. Used to
+ * recover __mod_init_func entries clobbered by dyld's classic-__dyld overflow. */
+static uint64_t read_image_qword(const char *imgname, uint64_t fo) {
+   if (!imgname) { return 0; }
+   int fd = open(imgname, O_RDONLY);
+   if (fd < 0) { return 0; }
+   uint64_t v = 0;
+   if (pread(fd, &v, 8, (off_t)fo) != 8) { v = 0; }
+   close(fd);
+   return v;
+}
+
 static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
                                 intptr_t slide, const char *imgname,
                                 void **collect, size_t *n_collect) {
@@ -314,6 +328,34 @@ static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
                collect != NULL && getenv("ABICONV_RUN_INITS") != NULL;
             for (size_t j = 0; j < n; j++) {
                if (!slots[j]) { continue; }
+               /* Recover a __mod_init_func entry clobbered by dyld's classic
+                * __DATA,__dyld overflow. A pre-10.5 i386 binary's __dyld section
+                * is 8 bytes (two 4-byte slots: lazy-binder, func_lookup), but a
+                * 64-bit dyld writes the classic linkage as two 8-BYTE pointers —
+                * lazy-binder at __dyld+0 and func_lookup
+                * (legacyDyldLookup4OldBinaries) at __dyld+8. When __mod_init_func
+                * immediately follows __dyld (the common Csu layout), __dyld+8 is
+                * __mod_init_func[0], so dyld stamps legacyDyldLookup over the
+                * first C++ static initializer. Running it jumps into dyld's
+                * old-binary lookup with an i386 stack frame -> NULL write SIGSEGV.
+                * A valid translated init is always intra-image (<4GB); a >4GB
+                * entry is this clobber. Restore the real ctor from the on-disk
+                * static value + slide. Universal (triggers on the structural
+                * ">4GB __mod_init_func entry", not an app name); the crt's own
+                * func_lookup read is handled separately by patch_dyld_section. */
+               if ((uintptr_t)slots[j] >= 0x100000000ULL) {
+                  uint64_t orig =
+                     read_image_qword(imgname, (uint64_t)sect->offset + j * 8);
+                  void *fixed = orig
+                     ? (void *)(uintptr_t)(orig + (uint64_t)slide) : NULL;
+                  if (g_verbose) {
+                     fprintf(stderr, "abiconv init_stack: recovered clobbered "
+                             "__mod_init_func[%zu] in %s: %p -> %p (dyld __dyld "
+                             "8-byte overflow)\n", j, imgname, slots[j], fixed);
+                  }
+                  slots[j] = fixed;
+                  if (!slots[j]) { continue; }
+               }
                if (run_now && *n_collect < INIT_COLLECT_MAX) {
                   /* Collect the target + NULL the slot FIRST so dyld (and a
                    * nested dlopen re-entry) won't also run it; slide_objc runs
@@ -756,26 +798,191 @@ static void patch_dyld_section(const struct mach_header_64 *mh64, intptr_t slide
             if (strncmp(sect->sectname, "__dyld", 16) != 0) { continue; }
             if (sect->size < 8) { continue; }
             uint8_t *base = (uint8_t *)(uintptr_t)(sect->addr + slide);
-            uintptr_t pg = (uintptr_t)base & ~(uintptr_t)0xfff;
-            if (mprotect((void *)pg, 0x1000, PROT_READ | PROT_WRITE) != 0) {
+            /* We write up to __dyld+16 (the 8-byte-layout func_lookup slot may sit
+             * past the i386-sized 8-byte section, in the next section); cover both
+             * possible pages. */
+            uintptr_t pg0 = (uintptr_t)base & ~(uintptr_t)0xfff;
+            uintptr_t pg1 = ((uintptr_t)base + 16 - 1) & ~(uintptr_t)0xfff;
+            if (mprotect((void *)pg0, (pg1 - pg0) + 0x1000,
+                         PROT_READ | PROT_WRITE) != 0) {
                if (g_verbose) {
                   fprintf(stderr, "abiconv dyld_section: mprotect failed for "
                           "%s: %s\n", imgname, strerror(errno));
                }
                continue;
             }
+            /* The i386 crt reads func_lookup through __dyld; the classic section
+             * is two pointers (lazy-binder, func_lookup). For an i386 binary that
+             * is 8 bytes (2x4), but a 64-bit dyld AND the translated helper treat
+             * these as 8-BYTE slots: lazy-binder at __dyld+0, func_lookup at
+             * __dyld+8 — which, because the section was kept at the i386 size of 8
+             * bytes (not the 16 two 8-byte slots need), overlaps the FIRST entry of
+             * the next section (commonly __mod_init_func[0]). dyld stamps native
+             * legacyDyldLookup4OldBinaries into __dyld+8; the i386 crt's func_lookup
+             * tail-jumps there with cdecl args on the stack -> wrong-ABI NULL write.
+             * Write our i386-cdecl shim into BOTH the 4-byte view (+4) and the
+             * 8-byte view (+8) so whichever the translated helper reads lands in
+             * the shim. wrap_mod_init_funcs has already recovered + collected the
+             * real __mod_init_func[0] initializer (it sees the >4GB legacyDyldLookup
+             * clobber and restores the on-disk value), so overwriting the live slot
+             * at +8 here does not lose it. The proper cure is a 16-byte __dyld at
+             * translate time; see the known-gaps list. */
             uint32_t *slot = (uint32_t *)base;
-            slot[0] = (uint32_t)(uintptr_t)&_86x64_dyld_noop;        /* lazy binder */
-            slot[1] = (uint32_t)(uintptr_t)&_86x64_dyld_func_lookup; /* func lookup */
+            slot[0] = (uint32_t)(uintptr_t)&_86x64_dyld_noop;        /* lazy binder (4B view) */
+            slot[1] = (uint32_t)(uintptr_t)&_86x64_dyld_func_lookup; /* func_lookup (4B view) */
+            *(uint64_t *)(base + 8) =
+               (uint64_t)(uintptr_t)&_86x64_dyld_func_lookup;        /* func_lookup (8B view) */
             if (g_verbose) {
                fprintf(stderr, "abiconv dyld_section: patched __DATA,__dyld in "
-                       "%s (noop=%p lookup=%p)\n", imgname,
+                       "%s (noop=%p lookup=%p, +4 and +8)\n", imgname,
                        (void *)&_86x64_dyld_noop,
                        (void *)&_86x64_dyld_func_lookup);
             }
          }
       }
       p += lc->cmdsize;
+   }
+}
+
+/* Low-4GB shadow words for the classic libc/crt-internal __IMPORT,__pointers
+ * symbols (patch_import_pointers). libabiconv maps <4GB, so the ADDRESS of a
+ * static here is a valid 32-bit pointer for the i386 4-byte slot read.
+ *  - zero_word: the crt's `if (*hook) (*hook)()` reads through the slot; making
+ *    the slot point here (which stays 0) makes the hook test false -> skipped.
+ *  - errno_word: the crt's `*errno = 0` writes 4 bytes through the slot; this
+ *    absorbs the write. (Per-copy; errno cross-image/thread fidelity is a
+ *    documented residual — startup only needs a writable landing pad.) */
+static uint64_t g_import_zero_word  = 0;
+static uint64_t g_import_errno_word = 0;
+
+/* Redirect the classic libc/crt-internal __IMPORT,__pointers slots whose i386
+ * 4-byte `movl <slot>(%rip),%eax` read would truncate a 64-bit-bound libSystem
+ * symbol address to its low 32 bits (then deref/write through the garbage) ->
+ * SIGSEGV. The shared root behind Halo (fault 0x5346cea8), Civ IV (0x54268ea8),
+ * Numbers and iWeb.
+ *
+ * Pre-10.5 crt1.o bootstraps through three S_NON_LAZY_SYMBOL_POINTERS slots:
+ *   _mach_init_routine     : `movl slot,%eax; movl (%rax),%eax; test; je; call`
+ *   __cthread_init_routine : same deref-then-test-then-call hook pattern
+ *   _errno                 : `movl slot,%eax; movl $0,(%rax)` (clears errno)
+ * dyld binds each slot to the 64-bit address of the libSystem symbol; the i386
+ * `movl` keeps only the low 32 bits -> an unmapped pointer -> fault on the deref
+ * (mach/cthread) or the store (errno). Our runtime already initialises mach and
+ * cthread (the host x86_64 libSystem did), so the hooks must be NO-OPS: point
+ * their slots at a low-4GB word that stays 0, so the crt's NULL test skips the
+ * call. errno's slot points at a low-4GB writable word so the `*errno = 0` store
+ * lands harmlessly.
+ *
+ * Universal: triggers on the STRUCTURE (a S_NON_LAZY_SYMBOL_POINTERS slot whose
+ * indirect symbol is one of these well-known classic libc/crt-internal data
+ * symbols), present in every classic i386 binary — not on an app name. The
+ * broader __IMPORT,__pointers truncation for framework data constants (CF/CG
+ * allocator/runloop refs), C++ vtables/RTTI and __sF needs per-symbol type info
+ * (object-wrap vs scalar-copy vs function-thunk) that only the TRANSLATE-TIME
+ * data-shadow table carries; extending that is the complete cure (see
+ * the known-gaps list). This runtime pass unblocks the crt bootstrap, which is the
+ * gate for all four targets. */
+static void patch_import_pointers(const struct mach_header_64 *mh64,
+                                  intptr_t slide, const char *imgname) {
+   if (((uintptr_t)&g_import_zero_word >> 32) ||
+       ((uintptr_t)&g_import_errno_word >> 32)) {
+      if (g_verbose) {
+         fprintf(stderr, "abiconv import_pointers: libabiconv >4GB; skip %s\n",
+                 imgname);
+      }
+      return;
+   }
+
+   /* Locate LC_SYMTAB, LC_DYSYMTAB and __LINKEDIT (to map the LINKEDIT file
+    * offsets the symtab/strtab/indirect tables use to runtime addresses). */
+   const struct symtab_command *st = NULL;
+   const struct dysymtab_command *dy = NULL;
+   uint64_t le_vmaddr = 0, le_fileoff = 0;
+   int have_le = 0;
+   {
+      const uint8_t *p = (const uint8_t *)(mh64 + 1);
+      for (uint32_t i = 0; i < mh64->ncmds; i++) {
+         const struct load_command *lc = (const struct load_command *)p;
+         if (lc->cmd == LC_SYMTAB) {
+            st = (const struct symtab_command *)p;
+         } else if (lc->cmd == LC_DYSYMTAB) {
+            dy = (const struct dysymtab_command *)p;
+         } else if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *seg =
+               (const struct segment_command_64 *)p;
+            if (strcmp(seg->segname, "__LINKEDIT") == 0) {
+               le_vmaddr = seg->vmaddr; le_fileoff = seg->fileoff; have_le = 1;
+            }
+         }
+         p += lc->cmdsize;
+      }
+   }
+   if (!st || !dy || !have_le || dy->nindirectsyms == 0) { return; }
+
+   /* file offset in __LINKEDIT -> live runtime address. */
+   #define LE_ADDR(fo) (uintptr_t)(le_vmaddr + (uint64_t)slide \
+                                   + ((uint64_t)(fo) - le_fileoff))
+   const struct nlist_64 *symtab = (const struct nlist_64 *)LE_ADDR(st->symoff);
+   const char *strtab            = (const char *)LE_ADDR(st->stroff);
+   const uint32_t *indirect      = (const uint32_t *)LE_ADDR(dy->indirectsymoff);
+
+   size_t patched = 0;
+   const uint8_t *p = (const uint8_t *)(mh64 + 1);
+   for (uint32_t i = 0; i < mh64->ncmds; i++) {
+      const struct load_command *lc = (const struct load_command *)p;
+      if (lc->cmd == LC_SEGMENT_64) {
+         const struct segment_command_64 *seg =
+            (const struct segment_command_64 *)p;
+         const struct section_64 *sect = (const struct section_64 *)(seg + 1);
+         for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
+            if ((sect->flags & SECTION_TYPE) != S_NON_LAZY_SYMBOL_POINTERS) {
+               continue;
+            }
+            /* Translated images carry 8-byte non-lazy pointer slots (one
+             * indirect-symtab entry each, based at reserved1). */
+            size_t nslot = (size_t)sect->size / 8;
+            for (size_t k = 0; k < nslot; k++) {
+               uint32_t ii = sect->reserved1 + (uint32_t)k;
+               if (ii >= dy->nindirectsyms) { continue; }
+               uint32_t isym = indirect[ii];
+               if (isym & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) {
+                  continue;                       /* intra-image, dyld rebases */
+               }
+               if (isym >= st->nsyms) { continue; }
+               const char *name = strtab + symtab[isym].n_un.n_strx;
+               uint64_t *target = NULL;
+               if (strcmp(name, "_mach_init_routine") == 0 ||
+                   strcmp(name, "__cthread_init_routine") == 0 ||
+                   strcmp(name, "_cthread_init_routine") == 0) {
+                  target = &g_import_zero_word;   /* deref->0 => crt skips hook */
+               } else if (strcmp(name, "_errno") == 0) {
+                  target = &g_import_errno_word;  /* `*errno = 0` lands here     */
+               }
+               if (!target) { continue; }
+
+               uint64_t *slot =
+                  (uint64_t *)(uintptr_t)((uint64_t)sect->addr + (uint64_t)slide
+                                          + (uint64_t)k * 8);
+               uintptr_t pg = (uintptr_t)slot & ~(uintptr_t)0xfff;
+               if (mprotect((void *)pg, 0x1000, PROT_READ | PROT_WRITE) != 0) {
+                  continue;
+               }
+               *slot = (uint64_t)(uintptr_t)target;   /* <4GB, zero-extended */
+               ++patched;
+               if (g_verbose) {
+                  fprintf(stderr, "abiconv import_pointers: %s slot[%zu] %s "
+                          "-> low-4GB %p in %s\n", sect->sectname, k, name,
+                          (void *)target, imgname);
+               }
+            }
+         }
+      }
+      p += lc->cmdsize;
+   }
+   #undef LE_ADDR
+   if (g_verbose && patched) {
+      fprintf(stderr, "abiconv import_pointers: redirected %zu crt-internal "
+              "__IMPORT,__pointers slot(s) in %s\n", patched, imgname);
    }
 }
 
@@ -894,6 +1101,13 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
        * function (ABICONV_RUN_INITS). Universal: triggers only on the structural
        * presence of __DATA,__dyld. */
       patch_dyld_section(mh64, slide, imgname);
+      /* Redirect the classic libc/crt-internal __IMPORT,__pointers slots
+       * (_mach_init_routine / __cthread_init_routine / _errno) whose i386 4-byte
+       * read would truncate a 64-bit-bound libSystem address. Same add-image
+       * timing requirement as patch_dyld_section: before the crt bootstrap (and
+       * the collected inits) reads them. Universal: triggers on the structural
+       * presence of those symbols in a S_NON_LAZY_SYMBOL_POINTERS section. */
+      patch_import_pointers(mh64, slide, imgname);
    }
 
    /* the legacy-ObjC1 fixups below are __OBJC-only, but the collected
