@@ -58,6 +58,24 @@ namespace MachO {
        * here. See JumpTableEntry in section_blob.hh. */
       std::map<std::size_t, std::size_t> jump_table_slots;
 
+      /* Classic i386 self-modifying CALL-stub redirect map (`__IMPORT,
+       * __jump_table`, section type S_SYMBOL_STUBS + attr
+       * S_ATTR_SELF_MODIFYING_CODE). A pre-10.4 i386 image routes its lazy
+       * calls through 5-byte stubs that dyld populated in place at load time;
+       * the section ships all-`0xf4` (hlt) and modern dyld never fills it, so a
+       * translated `call <stub>` jumps into hlt on a non-exec page (Civ IV crt
+       * `__start` -> `___keymgr_dwarf2_register_sections` SIGBUS). Keyed by each
+       * stub's original i386 vmaddr, valued by the original vmaddr of the
+       * DEFINED function the stub stands for (resolved via the indirect symbol
+       * table -> nlist n_value). Populated by Dysymtab::lift_jump_table_targets
+       * (parse phase, before any section's Parse1) and consumed by the relative-
+       * branch handler in Instruction::parse(): a branch whose target is a key
+       * here is retargeted to the defined function, bypassing the dead stub.
+       * Only DEFINED (N_SECT) stub symbols are entered — the 92% intra-image
+       * majority; UNDEFINED external stubs (libstdc++ __cxa_, keymgr) need a
+       * synthesized runtime-bound trampoline and are NOT handled here. */
+      std::map<std::size_t, std::size_t> jump_table_targets;
+
       /* Function-symbol vmaddrs, populated from the LC_SYMTAB nlist table
        * (all N_SECT, non-stab entries with n_value != 0).  Used by the linear
        * code sweep (Section::Parse1) to detect when a decoded instruction would

@@ -191,6 +191,14 @@ namespace MachO {
       /* Lift the classic external relocation table into xrel_entries (called at
        * parse). See the XrelEntry comment + Archive::inject_xrel_section. */
       void lift_external_relocs(const Image& img, ParseEnv<bits>& env);
+
+      /* Lift classic self-modifying CALL-stub sections (S_SYMBOL_STUBS +
+       * S_ATTR_SELF_MODIFYING_CODE — i386 `__IMPORT,__jump_table`) into
+       * env.jump_table_targets, mapping each DEFINED stub's vmaddr to the
+       * translated-image vmaddr of the function it stands for. Called at parse.
+       * See ParseEnv::jump_table_targets + the relative-branch redirect in
+       * Instruction::parse(). */
+      void lift_jump_table_targets(const Image& img, ParseEnv<bits>& env);
       
       virtual Dysymtab<opposite<bits>> *Transform(TransformEnv<bits>& env) const override {
          return new Dysymtab<opposite<bits>>(*this, env);

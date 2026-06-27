@@ -610,7 +610,23 @@ namespace MachO {
       /* Relative Branches */
       if (xed_operand_values_has_branch_displacement(operands)) {
          const ssize_t brdisp = xed_decoded_inst_get_branch_displacement(operands);
-         const size_t targetaddr = refaddr + brdisp;
+         size_t targetaddr = refaddr + brdisp;
+
+         /* Classic i386 self-modifying CALL-stub redirect. A pre-10.4 image
+          * routes lazy calls through `__IMPORT,__jump_table` stubs that ship as
+          * `0xf4` (hlt) and were filled in place by an old dyld; modern dyld
+          * never fills them, so `call <stub>` would jump into hlt on a non-exec
+          * page. For stubs whose indirect symbol is DEFINED in this image,
+          * Dysymtab::lift_jump_table_targets recorded stub_vmaddr -> the defined
+          * function's vmaddr; retarget the branch straight to the function,
+          * bypassing the dead stub (the function blob resolves the placeholder
+          * to its translated address exactly like any intra-image call). */
+         {
+            auto jtt = env.jump_table_targets.find(targetaddr);
+            if (jtt != env.jump_table_targets.end()) {
+               targetaddr = jtt->second;
+            }
+         }
 
          /*
           * Only resolve the target if it lands inside a real segment.

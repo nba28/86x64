@@ -161,6 +161,7 @@ namespace MachO {
                                          dysymtab.nindirectsyms))
    {
       lift_external_relocs(img, env);
+      lift_jump_table_targets(img, env);
    }
 
    /* Lift the classic EXTERNAL relocation table (extreloff/nextrel) into
@@ -250,6 +251,76 @@ namespace MachO {
          xrel_entries.push_back(std::move(e));
          /* Resolve the slot's blob by vmaddr (deferred; fires in do_resolve). */
          env.vmaddr_resolver.resolve(slot_vmaddr, &xrel_entries.back().slot);
+      }
+   }
+
+   /* Classic i386 `__IMPORT,__jump_table` (S_SYMBOL_STUBS +
+    * S_ATTR_SELF_MODIFYING_CODE): the section ships all-`0xf4` (hlt) because the
+    * 5-byte lazy CALL stubs were populated IN PLACE by a pre-10.4 dyld at load
+    * time (self-modifying code). Modern dyld never fills a translated dylib's
+    * stubs, so a `call <stub>` jumps into hlt on the non-exec __IMPORT page
+    * (Civ IV crt `__start` -> `___keymgr_dwarf2_register_sections`, SIGBUS at the
+    * translated stub vmaddr). The translator already knows where every DEFINED
+    * function lives, so for stubs whose indirect symbol is DEFINED (the 92%
+    * intra-image majority — the game's own C++ methods reached via lazy stubs)
+    * we record stub_vmaddr -> defined-function vmaddr; Instruction::parse() then
+    * retargets the relative branch straight to the function, bypassing the dead
+    * stub. UNDEFINED external stubs (libstdc++ __cxa_, keymgr) have no in-image
+    * target and need a synthesized runtime-bound trampoline — NOT handled here.
+    * Trigger is the structural self-modifying-stub attribute, so this is a
+    * universal classic-binary fix (Civ IV / iWork-'09 / other 2006-era ports)
+    * and is inert for modern images (their `__symbol_stub` isn't self-modifying
+    * and decodes to real `jmp *__la_symbol_ptr` already). */
+   template <Bits bits>
+   void Dysymtab<bits>::lift_jump_table_targets(const Image& img, ParseEnv<bits>& env) {
+      if (indirectsyms.empty()) { return; }
+
+      /* Raw symbol table (order-independent LC scan, like lift_external_relocs). */
+      const auto& hdr = img.at<mach_header_t<bits>>(0);
+      std::size_t symoff = 0, nsyms = 0;
+      {
+         std::size_t lc_off = sizeof(mach_header_t<bits>);
+         for (uint32_t i = 0; i < hdr.ncmds; ++i) {
+            const auto& lc = img.at<load_command>(lc_off);
+            if (lc.cmd == LC_SYMTAB) {
+               const auto& st = img.at<symtab_command>(lc_off);
+               symoff = st.symoff; nsyms = st.nsyms;
+               break;
+            }
+            lc_off += lc.cmdsize;
+         }
+      }
+      if (symoff == 0 || nsyms == 0) { return; }
+
+      std::size_t entered = 0;
+      for (Segment<bits> *seg : env.archive.segments()) {
+         for (Section<bits> *section : seg->sections) {
+            const auto& sect = section->sect;
+            if ((sect.flags & SECTION_TYPE) != S_SYMBOL_STUBS) { continue; }
+            if (!(sect.flags & S_ATTR_SELF_MODIFYING_CODE)) { continue; }
+            const uint32_t stub_size = sect.reserved2;  /* bytes per stub (i386: 5) */
+            const uint32_t idx_base  = sect.reserved1;  /* indirect-symtab base index */
+            if (stub_size == 0) { continue; }
+            const std::size_t nstubs = sect.size / stub_size;
+            for (std::size_t k = 0; k < nstubs; ++k) {
+               if (idx_base + k >= indirectsyms.size()) { break; }
+               const uint32_t symidx = indirectsyms[idx_base + k];
+               if (symidx & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) { continue; }
+               if (symidx >= nsyms) { continue; }
+               const auto& nl =
+                  img.at<nlist_t<bits>>(symoff + symidx * Nlist<bits>::size());
+               if (nl.n_type & N_STAB) { continue; }
+               if ((nl.n_type & N_TYPE) != N_SECT) { continue; } /* DEFINED only */
+               if (nl.n_value == 0) { continue; }
+               const std::size_t stub_vmaddr = sect.addr + k * stub_size;
+               env.jump_table_targets[stub_vmaddr] = nl.n_value;
+               ++entered;
+            }
+         }
+      }
+      if (entered && getenv("MACHO_TOOL_DEBUG")) {
+         fprintf(stderr, "lift_jump_table_targets: redirected %zu defined "
+                 "self-modifying CALL-stub(s) to their functions\n", entered);
       }
    }
 
