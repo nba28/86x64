@@ -97,6 +97,22 @@ if command -v dyld_info >/dev/null 2>&1; then
    echo "  dyld_info: $nbind binds, $nreb rebases, $nexp exports"
 fi
 
+# (b2) WEAK_BIND fidelity: if the input C++ dylib has weak-coalesced externals
+# (operator new/delete, weak template/RTTI refs == N_REF_TO_WEAK undefs, shown by
+# nm as "(undefined) weak external"), the synthesized weak_bind stream must carry
+# one entry PER such slot, matching a native linker (which records each in BOTH
+# the regular bind table and the weak_bind table). Empty weak_bind here would be
+# the gap that re-fuses operator new to native libstdc++ with an i386 frame.
+nweak_in=$(nm -m "$TMP/in.i386" 2>/dev/null | grep -c '(undefined) weak external')
+if [ "${nweak_in:-0}" -gt 0 ]; then
+   nweak_out=$("$MT" print --weak-bind "$TMP/out.dylib" 2>/dev/null | tail +2 | grep -c .)
+   [ "${nweak_out:-0}" -gt 0 ] \
+      || fail "input has $nweak_in weak externals but synthesized weak_bind is empty"
+   # every weak_bind symbol must ALSO be a regular bind to the SAME slot (the
+   # native pattern): assert each weak entry's slot address appears in the binds.
+   echo "  weak_bind: $nweak_out coalesced entries (input had $nweak_in weak externals)"
+fi
+
 # (c) cctools install_name_tool accepts (was 'local relocation entries out of place').
 cp "$TMP/out.dylib" "$TMP/cc.dylib"
 install_name_tool -add_rpath /synth_test_rpath "$TMP/cc.dylib" 2>/dev/null

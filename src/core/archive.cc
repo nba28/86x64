@@ -399,7 +399,7 @@ namespace MachO {
             return false;
          };
 
-         std::size_t n_bind = 0, n_lazy = 0, n_rebase = 0, n_export = 0;
+         std::size_t n_bind = 0, n_lazy = 0, n_rebase = 0, n_export = 0, n_weak = 0;
 
          /* (3) Symbol-pointer sections (S_{NON_,}LAZY_SYMBOL_POINTERS): each slot
           * maps through the indirect symbol table to a symbol or a local/abs
@@ -464,6 +464,47 @@ namespace MachO {
                         BindNode<b, false>::Create(BIND_TYPE_POINTER, 0, dylib, special,
                                                    nl->string->str, flags, blob));
                      ++n_bind;
+
+                     /* Weak-coalesced external (N_WEAK_REF): the C++ runtime
+                      * weak externals — operator new/delete (__Znwm/__Znam/
+                      * __ZdlPv/__ZdaPv) and weakly-referenced template/vtable/
+                      * RTTI symbols. A native i386 linker records each of these
+                      * in BOTH the regular bind table AND the weak_bind table,
+                      * targeting the SAME symbol-pointer slot (the modern path
+                      * preserves this; see static-interpose's weak rewrite and
+                      * tests-i386 29_weak_new_delete). Mirror it here so the
+                      * synthesized classic->modern stream is byte-faithful to a
+                      * native linker's __DATA weak-coalesced binds.
+                      *
+                      * A weak bind carries no dylib ordinal — it is an implicit
+                      * BIND_SPECIAL_DYLIB_WEAK_LOOKUP (-3) flat coalesced lookup
+                      * (BindNode `weak` mode emits no SET_DYLIB). It targets the
+                      * symbol by the name now in the nlist, which on the deployed
+                      * path is the post-static-interpose shim name (____X bound
+                      * to libabiconv): the coalesced lookup then resolves to
+                      * libabiconv's single definition — never re-fusing the slot
+                      * to a native libstdc++ operator new entered with an i386
+                      * frame (the pointer-fusion failure mode 1e685f1 fixed for
+                      * the modern path). This adds no new runtime risk over the
+                      * regular bind already emitted above (same target name),
+                      * and is a no-op for images with no weak externals.
+                      *
+                      * The coalescing marker on an UNDEF nlist is N_REF_TO_WEAK
+                      * (0x0080) — distinct from N_WEAK_REF (0x0040, a weak IMPORT
+                      * that may resolve to NULL, handled by the regular bind's
+                      * BIND_SYMBOL_FLAGS_WEAK_IMPORT above). N_REF_TO_WEAK shares
+                      * its bit value with N_WEAK_DEF but means "reference to a
+                      * weak symbol" in undef context — exactly what the linker
+                      * sets on operator new/delete and weak template/RTTI refs.
+                      * (Verified on Source-engine i386 C++ dylibs: __Znwm et al.
+                      * carry n_desc 0x0180 = ordinal 1 | N_REF_TO_WEAK.) */
+                     if (nl->nlist.n_desc & N_REF_TO_WEAK) {
+                        weak_bind->bindees.push_back(
+                           BindNode<b, false>::Create(BIND_TYPE_POINTER, 0, nullptr,
+                                                      /*dylib_special=*/0, nl->string->str,
+                                                      /*flags=*/0, blob, /*weak=*/true));
+                        ++n_weak;
+                     }
                   } else {
                      /* Defined symbol referenced by a non-lazy pointer = an
                       * internal sliding pointer. */
@@ -526,8 +567,8 @@ namespace MachO {
 
          if (dbg) {
             fprintf(stderr,
-                    "synthesize_dyld_info: %zu bind, %zu lazy, %zu rebase, "
-                    "%zu export\n", n_bind, n_lazy, n_rebase, n_export);
+                    "synthesize_dyld_info: %zu bind, %zu weak, %zu lazy, %zu rebase, "
+                    "%zu export\n", n_bind, n_weak, n_lazy, n_rebase, n_export);
          }
       }
    }

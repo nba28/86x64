@@ -220,9 +220,19 @@ for bin_path in all_binaries():
         subprocess.run(["codesign", "--remove-signature", str(bin_path)],
                        capture_output=True)
         flat = [a for c in changes for a in c] + [str(bin_path)]
-        # cctools install_name_tool handles .so/MH_BUNDLE but chokes on the
-        # __LINKEDIT slack of translated dylibs; llvm handles the slack but
-        # rejects MH_BUNDLE. Try both — whichever succeeds wins.
+        # PRIMARY PATH — stock cctools install_name_tool. Since route C
+        # (`convert --synthesize-dyld-info`, archive.cc) gives every translated
+        # CLASSIC dylib a canonical LC_DYLD_INFO_ONLY + emptied classic reloc
+        # tables, cctools no longer chokes on it ("local relocation entries out
+        # of place" is gone — proven across the Portal 2 C++ dylib spread and the
+        # 57MB Civ IV dylib; see tests-i386/canonical_matrix.sh). So for a
+        # route-C bundle this first call succeeds and NOTHING below it runs.
+        #
+        # The remaining fallbacks are pure safety net for the residual non-route-C
+        # shapes still found in mixed bundles: cctools handles .so/MH_BUNDLE but
+        # llvm rejects MH_BUNDLE; llvm tolerates odd __LINKEDIT slack that cctools
+        # may not; dead ppc/i386 slices can trip both until thinned. Try in turn —
+        # whichever succeeds wins.
         r = subprocess.run(["install_name_tool", *flat], capture_output=True, text=True, errors="replace")
         if r.returncode != 0:
             r = subprocess.run([INT, *flat], capture_output=True, text=True, errors="replace")
@@ -233,12 +243,18 @@ for bin_path in all_binaries():
                 r = subprocess.run([INT, *flat], capture_output=True, text=True, errors="replace")
         used_change_deps = False
         if r.returncode != 0:
-            # Both install_name_tool variants refused (a translated CLASSIC dylib:
-            # cctools "local relocation entries out of place" / llvm "shared
-            # library not yet supported"). Fall back to our own rewriter, which
-            # re-emits via macho-tool's model — the whole point of this gap fix.
+            # LAST RESORT — our own re-emitter (macho-tool change-deps, 4d02bd6).
+            # With route C active this should NEVER fire for a translated classic
+            # dylib; if it does, the input is NON-canonical (a classic dylib that
+            # missed --synthesize-dyld-info, or a shape route C doesn't cover yet)
+            # — a canonical gap worth root-causing in synthesize_dyld_info rather
+            # than papering over here. The warning below flags it loudly.
             r = _change_deps(bin_path, changes)
             used_change_deps = (r.returncode == 0)
+            if used_change_deps:
+                print(f"  NOTE {bin_path.name}: stock install_name_tool refused; used "
+                      f"macho-tool change-deps fallback — this dylib is not fully "
+                      f"canonical (route C should have prevented this).")
         if r.returncode != 0:
             print(f"  FAIL {bin_path.name}: {r.stderr.splitlines()[0] if r.stderr else 'no stderr'}")
             continue
