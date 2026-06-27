@@ -1,0 +1,3 @@
+guard dtor
+caught 5
+done

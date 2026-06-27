@@ -1,0 +1,3 @@
+before throw
+caught int 42
+after catch

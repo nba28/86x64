@@ -297,6 +297,21 @@ __ZTVN10__cxxabiv117__class_type_infoE
 __ZTVN10__cxxabiv120__si_class_type_infoE
 __ZTVN10__cxxabiv121__vmi_class_type_infoE
 
+# C++ exception unwinding entry points (eh_shim.c + eh_tramp.asm). Hand-shimmed
+# with i386 discipline; excluded from abigen so it neither double-generates them
+# nor (for _Unwind_Resume, declared in <unwind.h>) collides with the asm export.
+___cxa_allocate_exception
+___cxa_free_exception
+___cxa_throw
+___cxa_begin_catch
+___cxa_end_catch
+___cxa_rethrow
+___cxa_get_exception_ptr
+___cxa_call_unexpected
+___gxx_personality_v0
+__Unwind_Resume
+__Unwind_Resume_or_Rethrow
+
 _OSAtomicAdd32
 _OSAtomicAdd32Barrier
 

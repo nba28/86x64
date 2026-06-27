@@ -309,6 +309,7 @@ add_library(abiconv SHARED
   tls_shim.c
   pthread_sync_shim.c
   cxx_shim.c
+  eh_shim.c
   proc_shim.c
   osatomic_shim.c
   xml_shim.c
@@ -340,6 +341,7 @@ add_library(abiconv SHARED
   dlsym_tramp.asm
   init_trampoline.asm
   maptable_tramp.asm
+  eh_tramp.asm
   dyld_stub_binder.asm
   dyld_func_lookup.asm
   )
