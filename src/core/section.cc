@@ -486,6 +486,24 @@ namespace MachO {
     *
     * Triggers only for M32 sections; M64 is a no-op (no i386 PIC).
     */
+
+   /* Map the x86 GPR encoding (0..7) carried in ParseEnv::pic_thunks back to
+    * its 32-bit xed register, so the section-local thunk byte-scan maps can be
+    * seeded from the global symbol-table thunk map. */
+   static xed_reg_enum_t gpr32_from_enc(uint8_t enc) {
+      switch (enc) {
+      case 0: return XED_REG_EAX;
+      case 1: return XED_REG_ECX;
+      case 2: return XED_REG_EDX;
+      case 3: return XED_REG_EBX;
+      case 4: return XED_REG_ESP;
+      case 5: return XED_REG_EBP;
+      case 6: return XED_REG_ESI;
+      case 7: return XED_REG_EDI;
+      default: return XED_REG_INVALID;
+      }
+   }
+
    template <Bits bits>
    void Section<bits>::DetectPicAnchoredDisps(ParseEnv<bits>& env) {
       if constexpr (bits != Bits::M32) {
@@ -589,6 +607,17 @@ namespace MachO {
                }
             }
          }
+      }
+
+      /* Seed the section-local thunk map from the GLOBAL symbol-table thunk map
+       * (ParseEnv::pic_thunks) so a `call ___i686.get_pc_thunk.<r>` whose thunk
+       * lives in another text section (Civ IV: thunks in __textcoal_nt, callers
+       * in __text) is recognised here too.  The byte-scan above already covers
+       * thunks within THIS section (incl. unnamed/stripped ones); the symbol map
+       * adds the cross-section named thunks.  Same key (entry vmaddr). */
+      for (const auto& kv : env.pic_thunks) {
+         const xed_reg_enum_t r = gpr32_from_enc(kv.second);
+         if (r != XED_REG_INVALID) { pic_thunks.emplace(kv.first, r); }
       }
 
       Instruction<bits> *prev_inst = nullptr;
@@ -1079,6 +1108,19 @@ namespace MachO {
                }
             }
             pit += l; pvm += l;
+         }
+      }
+
+      /* Seed from the GLOBAL symbol-table thunk map so cross-section thunks
+       * (Civ IV: __textcoal_nt) anchor switch dispatches in __text too. See
+       * ParseEnv::pic_thunks / the matching seed in DetectPicAnchoredDisps.
+       * M32 only: the named-thunk anchor is the i386 `call get_pc_thunk` idiom;
+       * the M64 convert re-parse uses the lea-r11/mov-[rsp] dance and must not
+       * adopt these i386-vmaddr-keyed entries. */
+      if constexpr (bits == Bits::M32) {
+         for (const auto& kv : env.pic_thunks) {
+            const xed_reg_enum_t r = gpr32_from_enc(kv.second);
+            if (r != XED_REG_INVALID) { pic_thunks.emplace(kv.first, r); }
          }
       }
 

@@ -77,6 +77,38 @@ namespace MachO {
          const bool is_sect = !is_stab && (nl.n_type & N_TYPE) == N_SECT;
          if (is_sect && nl.n_value != 0) {
             env.func_syms.insert(static_cast<std::size_t>(nl.n_value));
+
+            /* GCC PIC thunk?  `___i686.get_pc_thunk.<r>` is a defined N_SECT
+             * leaf (`mov %r,(%esp); ret`) whose call is the separate-thunk PIC
+             * anchor.  Record (entry vmaddr -> GPR encoding) GLOBALLY so a
+             * caller in a DIFFERENT text section (these thunks live in
+             * __textcoal_nt, callers in __text) still anchors.  See
+             * ParseEnv::pic_thunks.  Map the 2-char register suffix to its x86
+             * GPR encoding (ax/cx/dx/bx/sp/bp/si/di = 0..7); only the PIC-usable
+             * subset is recorded. */
+            const std::size_t sx = nl.n_un.n_strx;
+            if (sx != 0 && strbegin + sx + 1 < strend) {
+               const char *nm = &img.template at<char>(strbegin + sx);
+               const char *needle = "get_pc_thunk.";
+               const char *p = std::strstr(nm, needle);
+               if (p != nullptr) {
+                  const char *suf = p + std::strlen(needle);
+                  if (suf[0] != '\0' && suf[1] != '\0') {
+                     int enc = -1;
+                     if      (suf[0]=='a' && suf[1]=='x') enc = 0; /* EAX */
+                     else if (suf[0]=='c' && suf[1]=='x') enc = 1; /* ECX */
+                     else if (suf[0]=='d' && suf[1]=='x') enc = 2; /* EDX */
+                     else if (suf[0]=='b' && suf[1]=='x') enc = 3; /* EBX */
+                     else if (suf[0]=='b' && suf[1]=='p') enc = 5; /* EBP */
+                     else if (suf[0]=='s' && suf[1]=='i') enc = 6; /* ESI */
+                     else if (suf[0]=='d' && suf[1]=='i') enc = 7; /* EDI */
+                     if (enc >= 0) {
+                        env.pic_thunks[static_cast<std::size_t>(nl.n_value)] =
+                           static_cast<uint8_t>(enc);
+                     }
+                  }
+               }
+            }
          }
       }
 

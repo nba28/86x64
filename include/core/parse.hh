@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <set>
 #include <unordered_map>
@@ -73,6 +74,23 @@ namespace MachO {
        * padding bytes before a labelled entry.  Gated on M32 only (no i386 PIC
        * confusion in M64 re-parses). */
       std::set<std::size_t> func_syms;
+
+      /* GCC PIC thunks (`___i686.get_pc_thunk.<r>`), keyed by the thunk's
+       * entry vmaddr (= its nlist n_value) and valued by the x86 GPR encoding
+       * (0=EAX,1=ECX,2=EDX,3=EBX,5=EBP,6=ESI,7=EDI) the thunk loads with the
+       * caller's PC.  Populated from the LC_SYMTAB by NAME in the Symtab ctor
+       * (first parse phase), so it is GLOBAL and ready before any section's
+       * Parse1 runs.  Section::DetectPicAnchoredDisps / DetectJumpTables each
+       * additionally byte-scan their own section for unnamed thunks, then
+       * seed from this map so a `call ___i686.get_pc_thunk.bx` whose thunk
+       * lives in a DIFFERENT text section (Civ IV/GCC put them in
+       * __textcoal_nt while callers are in __text) still establishes the PIC
+       * anchor.  Without it the anchored `[ebx+disp32]` falls through to the
+       * generic absolute-table rewrite, which keeps the anchor base and emits
+       * `[anchor + lea(rip+target)]` — double-counting the base (SIGSEGV at
+       * anchor+target, Civ IV crt `start`).  The uint8_t value avoids pulling
+       * xed into this header; the consumers map it back to xed_reg_enum_t. */
+      std::unordered_map<std::size_t, uint8_t> pic_thunks;
 
       Placeholder<bits> *add_placeholder(std::size_t vmaddr);
       void do_resolve();
