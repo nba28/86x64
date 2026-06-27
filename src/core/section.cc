@@ -360,9 +360,42 @@ namespace MachO {
       const std::size_t end = begin + sect.size;
       std::size_t it = begin;
       std::size_t vmaddr = sect.addr;
+      /* Tracks whether the previously emitted text blob ended control flow with
+       * NO fall-through (RET or unconditional JMP). After such a terminator the
+       * linker inserts 0x00 alignment padding before the next function entry;
+       * see the padding-resync guard below. Meaningful for TextParser only. */
+      bool prev_no_fallthrough = false;
       while (it != end) {
          SectionBlob<bits> *elem;
+         bool emitted_padding = false;
 
+         /* Re-sync the linear sweep at inter-function 0x00 alignment padding in
+          * STRIPPED binaries, where func_syms is empty so the boundary guard
+          * below is inert. After a no-fall-through terminator the linker pads
+          * with 0x00 before the next function; the sweep would otherwise decode
+          * e.g. `00 55 89` as `add [ebp-0x77],dl`, ABSORBING the next function's
+          * entry byte (0x55 = push ebp) and emitting the whole function body as
+          * translation-invariant garbage (eax/ebp-based misdecodes need no PIC
+          * fixup, so they survive M32->M64 byte-identical). A direct `call` to
+          * that swallowed entry then resolves to a mid-instruction address ->
+          * executes raw i386 bytes as x86_64 -> runtime SIGSEGV (Halo CE
+          * static-init ctor crash, Halo.dylib+0x37fd95, rax=1 from the raw
+          * `mov eax,1`). A 0x00 byte reached with no fall-through is never the
+          * first byte of a real instruction (no compiler starts a function or
+          * basic block at `add [r/m8],r8`), so emit it as a 1-byte DataBlob and
+          * stay in padding mode until a non-zero byte: the true entry. Skip
+          * jump-table slots (an indirect JMP can be followed by a relocated
+          * table that DetectJumpTables already claimed). Universal: triggers on
+          * the structural pattern (terminator + 0x00 fill), not an app name;
+          * complements the func_syms guard for symtab'd binaries and applies to
+          * the M64 convert re-parse too (the translated `jmpq *r11` ret idiom is
+          * an UNCOND_BR terminator). */
+         if (parser == TextParser && prev_no_fallthrough &&
+             img.at<uint8_t>(it) == 0x00 &&
+             env.jump_table_slots.find(vmaddr) == env.jump_table_slots.end()) {
+            elem = DataBlob<bits>::Parse(img, Location(it, vmaddr), env);
+            emitted_padding = true;
+         }
          /* Check whether the decoded instruction would STRADDLE the next known
           * function-symbol boundary.  If so, the bytes at [vmaddr, sym) are
           * inter-function padding — force a 1-byte DataBlob here and let the
@@ -370,7 +403,7 @@ namespace MachO {
           * Apply only when the parser is TextParser (code sections) and only
           * for M32 (the constexpr guard above already ensures this path is only
           * compiled for M32 parses). */
-         if (check_sym_boundary) {
+         else if (check_sym_boundary) {
             /* Advance next_sym_it past any symbol already consumed. */
             while (next_sym_it != env.func_syms.end() && *next_sym_it <= vmaddr) {
                ++next_sym_it;
@@ -421,6 +454,26 @@ namespace MachO {
          }
 
          elem->iter = content.insert(content.end(), elem);
+
+         /* Update no-fall-through state for the next iteration (TextParser): an
+          * emitted padding byte keeps us in the padding gap; otherwise consult
+          * the just-decoded instruction's category (RET / unconditional JMP end
+          * control flow with no fall-through). Non-instruction blobs fall
+          * through. Matches the terminator convention used elsewhere in this
+          * file (DetectPicAnchoredDisps). */
+         if (parser == TextParser) {
+            if (emitted_padding) {
+               prev_no_fallthrough = true;
+            } else if (auto *in = dynamic_cast<Instruction<bits> *>(elem)) {
+               const xed_category_enum_t cat =
+                  xed_decoded_inst_get_category(&in->xedd);
+               prev_no_fallthrough = (cat == XED_CATEGORY_RET ||
+                                      cat == XED_CATEGORY_UNCOND_BR);
+            } else {
+               prev_no_fallthrough = false;
+            }
+         }
+
          const std::size_t step = elem->size();
          if (step == 0 || it + step > end) {
             throw error("section %s: blob at offset 0x%zx (size %zu) "

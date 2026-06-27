@@ -256,6 +256,15 @@ $(BUILD_DIR)/35_pthread_cond_handshake.o: $(SRC_DIR)/35_pthread_cond_handshake.c
 $(BUILD_DIR)/%.i386: $(BUILD_DIR)/%.o
 	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
 
+# 36_stripped_func_pad: STRIP local symbols (keep only the .globl _main) so the
+# translator sees an empty func_syms, exercising the no-symbol padding-resync
+# path. Without the strip, _h10/_h20 would be in func_syms and the existing
+# boundary guard would catch them -> the test would pass for the wrong reason.
+# An explicit rule for this target overrides the generic %.i386 pattern rule.
+$(BUILD_DIR)/36_stripped_func_pad.i386: $(BUILD_DIR)/36_stripped_func_pad.o
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
+	strip -x $@
+
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +
 # abi-insert + static-interpose + wrap. Bare `macho-tool transform` output
 # isn't standalone-runnable because the i386 entry semantics (high-address
