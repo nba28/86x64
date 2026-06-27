@@ -4139,6 +4139,10 @@ struct reverse_plan {
    uint32_t    _pad;
    const char *stret_types;  /* +304 legacy method encoding (ret type first) */
    uint64_t    fp_out[2];    /* +312 */
+   /* C-only inherited-ivar write-back bookkeeping (the asm never reads past
+    * +320; these live in the 560-byte plan reservation's slack). */
+   uint32_t    wb_active;    /* +328 1 if sync_inherited_ivars pushed a frame */
+   uint32_t    wb_mark;      /* +332 g_snap index at this call's frame start */
 };
 
 extern void _86x64_reverse_imp(void);        /* objc_reverse.asm */
@@ -4347,6 +4351,169 @@ static uint32_t get_or_create_shadow(id real, Class cls) {
    objc_setAssociatedObject(real, assoc_key, (id)(uintptr_t)s,
                             OBJC_ASSOCIATION_ASSIGN);
    return s;
+}
+
+/* ---- inherited native-superclass ivar sync ------------------------------
+ * A legacy instance keeps its ivars in a zeroed i386-layout SHADOW; a native
+ * superclass's ivars live ONLY in the real x86_64 object. iPhoto's legacy
+ * subclasses read/write INHERITED protected ivars directly at hardcoded i386
+ * (fragile-ABI, ABSOLUTE) offsets (e.g. NSControl._cell @84) -> they hit the
+ * zeroed shadow -> 0/nil -> garbage geometry (collapsed sidebar, 1x1 card
+ * text). We keep the shadow's inherited region coherent with the real object
+ * in BOTH directions, around each reverse-bridge dispatch of a legacy IMP:
+ *   - on ENTRY (sync_inherited_ivars): real[x64] -> shadow[i386], so the IMP's
+ *     direct reads of inherited ivars see the live native values;
+ *   - on EXIT  (ivar_wb_flush): shadow[i386] -> real[x64] for ONLY the slots
+ *     the IMP actually changed (dirty-tracked against the entry snapshot), so
+ *     native superclass code / KVC / archiving see the IMP's direct writes,
+ *     without clobbering ivars a nested native call may have changed meanwhile.
+ * The i386 offset/width come from the generated map (10.6 framework __OBJC
+ * metadata); the x64 offset/width/signedness are resolved at RUNTIME by name
+ * (class_getInstanceVariable + ivar_getTypeEncoding), so the converter is
+ * robust to the modern runtime's layout drift (NSInteger widened 4->8, CGFloat
+ * float->double, reordered/removed ivars skipped). See gen_native_ivar_map.py. */
+#include "native_ivar_map.gen.h"
+
+static int nivar_cls_cmp(const void *k, const void *e) {
+   return strcmp((const char *)k, ((const struct nivar_cls *)e)->cls);
+}
+static const struct nivar_cls *native_ivar_map_lookup(const char *cls) {
+   if (!cls) { return NULL; }
+   /* g_native_ivar_map is emitted sorted by class name (Python sorted()). */
+   return (const struct nivar_cls *)bsearch(cls, g_native_ivar_map,
+      G_NATIVE_IVAR_MAP_N, sizeof(struct nivar_cls), nivar_cls_cmp);
+}
+
+/* modern x86_64 scalar/pointer width (bytes) + signedness from an @encode
+ * first char; 0 = unhandled (skip). */
+static uint32_t modern_enc_size(const char *enc, int *is_signed) {
+   if (is_signed) { *is_signed = 0; }
+   if (!enc || !enc[0]) { return 0; }
+   switch (enc[0]) {
+      case 'c': case 'B': if (is_signed) { *is_signed = (enc[0] == 'c'); } return 1;
+      case 'C':           return 1;
+      case 's': if (is_signed) { *is_signed = 1; } return 2;
+      case 'S': return 2;
+      case 'i': if (is_signed) { *is_signed = 1; } return 4;
+      case 'I': return 4;
+      case 'l': case 'q': if (is_signed) { *is_signed = 1; } return 8; /* LP64 */
+      case 'L': case 'Q': return 8;
+      case 'f': return 4;
+      case 'd': return 8;
+      case '@': case '#': case ':': case '^': case '*': return 8;
+      default:  return 0;
+   }
+}
+
+/* Per-call write-back snapshot stack (thread-local; reverse_prep/ret nest LIFO,
+ * each frame is [plan->wb_mark, g_snap_n)). Records what we deposited into each
+ * inherited shadow slot at entry so the exit flush writes back ONLY the slots
+ * the IMP changed. i386 slots are <=4 bytes (8-byte i386 scalars are not
+ * mapped), so the snapshot fits in a uint32_t. */
+struct ivar_snap {
+   uint8_t *real_slot;     /* &real[x64_off]   (write-back target) */
+   uint8_t *shadow_slot;   /* &shadow[i386_off] (the IMP's working copy) */
+   uint32_t snap;          /* value deposited at entry (i386_sz low bytes) */
+   uint8_t  kind;          /* 'P' object/class ptr, 'F' float, 'I' integer */
+   uint8_t  i386_sz;       /* 1/2/4 */
+   uint8_t  msz;           /* modern slot width 1/2/4/8 */
+   uint8_t  msign;         /* modern signedness (sign-extend ints when widening) */
+};
+static __thread struct ivar_snap *g_snap;
+static __thread uint32_t g_snap_n, g_snap_cap;
+
+/* ENTRY: refresh the shadow's inherited-ivar region from the real object and
+ * push a dirty-tracking frame onto the thread-local snapshot stack. */
+static void sync_inherited_ivars(struct reverse_plan *plan, uint32_t shadow,
+                                 id real, Class cls) {
+   plan->wb_active = 0;
+   if (!shadow || !real || !cls) { return; }
+   uint8_t *sh = (uint8_t *)(uintptr_t)shadow;
+   uint32_t mark = g_snap_n;
+   /* Skip the leaf legacy class and any LEGACY ancestor (their ivars are the
+    * shadow's OWN region, written by the legacy IMPs directly); sync only the
+    * NATIVE ancestors, whose ivars live in the real object. */
+   for (Class c = class_getSuperclass(cls); c; c = class_getSuperclass(c)) {
+      if (rcls_lookup(c)) { continue; }
+      const struct nivar_cls *m = native_ivar_map_lookup(class_getName(c));
+      if (!m) { continue; }
+      for (uint32_t k = 0; k < m->n; ++k) {
+         const struct nivar_ent *e = &m->iv[k];
+         Ivar iv = class_getInstanceVariable(c, e->name);
+         if (!iv) { continue; }                 /* renamed/removed in modern */
+         ptrdiff_t xoff = ivar_getOffset(iv);
+         if (xoff <= 0) { continue; }
+         int msign = 0;
+         uint32_t msz = modern_enc_size(ivar_getTypeEncoding(iv), &msign);
+         if (msz == 0 || e->i386_sz > 4 || e->i386_sz > msz) { continue; }
+         uint8_t *src = (uint8_t *)real + xoff;   /* real (modern) slot */
+         uint8_t *dst = sh + e->i386_off;         /* shadow (i386) slot */
+         if (!mem_readable((uintptr_t)src, msz)) { continue; }
+         uint32_t val = 0;                        /* i386-side value (<=4B) */
+         if (e->kind == 'P') {
+            uint64_t p; memcpy(&p, src, 8);
+            val = p ? x64_objc_wrap(p) : 0;
+            memcpy(dst, &val, 4);
+         } else if (e->kind == 'F') {
+            if (msz == 8) { double d; memcpy(&d, src, 8);
+                            float f = (float)d; memcpy(&val, &f, 4); }
+            else          { memcpy(&val, src, 4); }    /* genuine 4-byte float */
+            memcpy(dst, &val, e->i386_sz);
+         } else { /* 'I' */
+            memcpy(&val, src, e->i386_sz);              /* low i386_sz bytes */
+            memcpy(dst, &val, e->i386_sz);
+         }
+         if (g_snap_n == g_snap_cap) {
+            uint32_t nc = g_snap_cap ? g_snap_cap * 2 : 64;
+            struct ivar_snap *ns = realloc(g_snap, (size_t)nc * sizeof *ns);
+            if (!ns) { continue; }                /* OOM: skip write-back tracking */
+            g_snap = ns; g_snap_cap = nc;
+         }
+         struct ivar_snap *s = &g_snap[g_snap_n++];
+         s->real_slot = src; s->shadow_slot = dst; s->snap = val;
+         s->kind = e->kind; s->i386_sz = e->i386_sz;
+         s->msz = (uint8_t)msz; s->msign = (uint8_t)msign;
+      }
+   }
+   plan->wb_mark = mark;
+   plan->wb_active = 1;
+}
+
+/* EXIT: flush back the inherited shadow slots the IMP changed since entry. */
+static void ivar_wb_flush(uint32_t mark) {
+   for (uint32_t i = mark; i < g_snap_n; ++i) {
+      struct ivar_snap *s = &g_snap[i];
+      uint32_t cur = 0;
+      memcpy(&cur, s->shadow_slot, s->i386_sz);
+      if (cur == s->snap) { continue; }          /* IMP left it untouched */
+      if (!mem_readable((uintptr_t)s->real_slot, s->msz)) { continue; }
+      if (s->kind == 'P') {
+         uint64_t p = cur ? unwrap_obj_arg(cur) : 0;
+         memcpy(s->real_slot, &p, 8);            /* direct ivar store (MRC: no retain) */
+      } else if (s->kind == 'F') {
+         float f; memcpy(&f, &cur, 4);
+         if (s->msz == 8) { double d = (double)f; memcpy(s->real_slot, &d, 8); }
+         else             { memcpy(s->real_slot, &f, 4); }
+      } else { /* 'I': zero/sign-extend the i386 value to the modern width */
+         uint64_t v;
+         if (s->msign) {
+            int64_t sv;
+            switch (s->i386_sz) {
+               case 1:  sv = (int8_t)cur;  break;
+               case 2:  sv = (int16_t)cur; break;
+               default: sv = (int32_t)cur; break;
+            }
+            v = (uint64_t)sv;
+         } else {
+            switch (s->i386_sz) {
+               case 1:  v = (uint8_t)cur;  break;
+               case 2:  v = (uint16_t)cur; break;
+               default: v = (uint32_t)cur; break;
+            }
+         }
+         memcpy(s->real_slot, &v, s->msz);       /* msz in {1,2,4,8} */
+      }
+   }
 }
 
 /* Public: map a shadow self32 back to its real object (forward bridge). 0 if
@@ -5450,6 +5617,7 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
    plan->stret_src = 0;
    plan->stret_types = NULL;
    plan->fp_out[0] = plan->fp_out[1] = 0;
+   plan->wb_active = 0;     /* no inherited-ivar frame unless we reach the sync */
 
    /* A pending super-dispatch hint for exactly this (self,sel) overrides the
     * derived-class lookup so [super sel] runs the SUPER's legacy method, not
@@ -5518,6 +5686,12 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
       self32 = x64_objc_wrap((uint64_t)(uintptr_t)self_);
    } else {
       self32 = get_or_create_shadow(self_, lookup);
+      /* Refresh the inherited native-superclass ivars into the shadow so the
+       * IMP's direct reads of protected superclass ivars (NSControl._cell etc.)
+       * see live native values, not the zeroed shadow; pushes a dirty-tracking
+       * frame flushed back in reverse_ret. Walk the receiver's OWN class chain
+       * (object_getClass(self_)), independent of any super-dispatch hint. */
+      sync_inherited_ivars(plan, self32, self_, object_getClass(self_));
    }
 
    /* Return-kind decision. An i386 hidden struct pointer is prepended for
@@ -5686,6 +5860,12 @@ unsigned __int128 _86x64_reverse_ret(struct reverse_plan *plan,
    if (plan->legacy_imp != 0) {
       __atomic_sub_fetch(&g_rev_depth, 1, __ATOMIC_SEQ_CST);
       x64_cb_leave();
+   }
+   /* Flush inherited native-superclass ivars the IMP changed (shadow -> real),
+    * then pop this call's snapshot frame (LIFO with reverse_prep). */
+   if (plan->wb_active) {
+      ivar_wb_flush(plan->wb_mark);
+      g_snap_n = plan->wb_mark;
    }
    unsigned __int128 r;
    if (plan->ret_kind == 1) { r = unwrap_obj_arg(eax); }    /* object */
