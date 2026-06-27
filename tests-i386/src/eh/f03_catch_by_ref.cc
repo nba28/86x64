@@ -3,7 +3,7 @@
 // + the base-subobject pointer adjustment (coordinated with the RTTI agent's
 // i386 __dynamic_cast / typeinfo work). Wall-2 + RTTI.
 #include <cstdio>
-#include <unistd.h>
+#include <cstdlib>
 struct Base { virtual const char* who() const { return "Base"; } virtual ~Base() {} };
 struct Derived : Base { const char* who() const { return "Derived"; } };
 int main() {
@@ -13,6 +13,5 @@ int main() {
     printf("caught base-ref who=%s\n", b.who());
   }
   printf("done\n");
-  fflush(stdout);
-  _exit(0);
+  exit(0);
 }

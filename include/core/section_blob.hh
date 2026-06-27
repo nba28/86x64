@@ -27,6 +27,14 @@ namespace MachO {
        * vtable slot (f09_member_func_ptr).  Set in Section::Parse1; propagated
        * across the i386->x86_64 transform by the SectionBlob copy ctor. */
       bool func_entry = false;
+      /*!< Original i386 vmaddr this blob was translated from (0 if synthetic /
+       * unknown).  loc.vmaddr is reused for parse-time AND post-build addresses,
+       * so it cannot retain the original once Build assigns the final x86_64
+       * vmaddr; this field preserves the i386 source address across the
+       * transform (set in the M32->M64 copy ctor) so Archive::inject_pcmap_section
+       * can emit the original<->translated PC map the libabiconv C++ exception
+       * unwinder needs (eh_shim.c). */
+      std::size_t orig_vmaddr = 0;
       const Segment<bits> *segment = nullptr; /*!< containing segment */
       const Section<bits> *section = nullptr; /*!< containing section */
       Location loc; /*!< Post-build location, also used during parsing */
@@ -334,6 +342,100 @@ namespace MachO {
    private:
       XrelBlob() {}
       template <Bits> friend class XrelBlob;
+   };
+
+   /*
+    * `__DATA,__86x64_pcmap`: the original-i386 <-> translated-x86_64 instruction
+    * address map the libabiconv C++ exception unwinder (eh_shim.c) needs.  The
+    * translated binary carries the ORIGINAL i386 __eh_frame/__gcc_except_tab
+    * verbatim (every offset/range inside is in the i386 address space), but the
+    * code now lives at different x86_64 addresses; only the blob graph knows the
+    * correspondence, so it must be serialized here.
+    *
+    * Synthesized post-transform by Archive::inject_pcmap_section; never parsed or
+    * transformed.  trans offsets are stored RELATIVE TO THE __text SECTION (not
+    * the image base) because the later EXECUTE->DYLIB convert shifts segment
+    * vmaddrs by the header-size delta while preserving each section's internal
+    * byte layout — a section-relative offset is convert-invariant, an
+    * image-relative one is not.  Emit resolves each instruction blob's final
+    * loc.vmaddr (set during Build) and subtracts the anchor section's vmaddr.
+    *
+    * On-disk (little-endian, 4-byte fields; translated images live <4GB):
+    *   u32 magic = MAGIC ("pcm6")
+    *   u32 count
+    *   count * { i32 trans_off; u32 orig_vmaddr }   // sorted ascending by trans_off
+    * trans_off = blob.loc.vmaddr - anchor(__text).vmaddr; the runtime adds the
+    * actual loaded __text base (getsectiondata) so the load slide cancels.
+    */
+   template <Bits bits>
+   class PcmapBlob: public SectionBlob<bits> {
+   public:
+      static constexpr uint32_t MAGIC = 0x366d6370u; /* "pcm6" */
+      struct Ent {
+         const SectionBlob<bits> *trans = nullptr;   /*!< translated insn blob */
+         uint32_t orig = 0;                          /*!< original i386 vmaddr */
+      };
+      std::vector<Ent> ents;
+      const Section<bits> *anchor = nullptr;         /*!< __text (trans base) */
+
+      virtual std::size_t size() const override { return 8 + ents.size() * 8; }
+      virtual void Emit(Image& img, std::size_t offset) const override;
+
+      static PcmapBlob<bits> *Create() { return new PcmapBlob(); }
+      virtual PcmapBlob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
+         throw error("PcmapBlob is synthesized post-transform and is never transformed");
+      }
+   private:
+      PcmapBlob() {}
+      template <Bits> friend class PcmapBlob;
+   };
+
+   /*
+    * `__DATA,__86x64_ehlsda`: per-EH-function {translated start, original start,
+    * LSDA} so the unwinder can, for a translated frame, find the function's
+    * original i386 region start (the LSDA call-site/landing-pad offsets are
+    * relative to it) and the translated address of its __gcc_except_tab LSDA.
+    * The function<->LSDA association is read from the ORIGINAL i386 __eh_frame
+    * FDEs during transform (Archive::collect_eh_lsda_pairs, where the addresses
+    * are still correct) and resolved to translated blobs here.
+    *
+    * trans_func is __text-section-relative and lsda_off is
+    * __gcc_except_tab-section-relative (each anchored on its own section, so the
+    * convert segment-shift cancels regardless of inter-section repadding).
+    *
+    * On-disk (little-endian, 4-byte fields):
+    *   u32 magic = MAGIC ("ehl6")
+    *   u32 count
+    *   count * { i32 trans_func_off; u32 orig_func; i32 lsda_off }  // sorted by trans_func_off
+    */
+   template <Bits bits>
+   class EhlsdaBlob: public SectionBlob<bits> {
+   public:
+      static constexpr uint32_t MAGIC = 0x366c6865u; /* "ehl6" */
+      struct Ent {
+         const SectionBlob<bits> *func = nullptr;    /*!< translated func entry */
+         uint32_t orig_func = 0;                     /*!< original i386 func start */
+         int32_t lsda_off = 0;                       /*!< LSDA offset within
+                                                          __gcc_except_tab (the
+                                                          section is copied
+                                                          verbatim, so its
+                                                          intra-section offset is
+                                                          transform/convert-
+                                                          invariant) */
+      };
+      std::vector<Ent> ents;
+      const Section<bits> *text_anchor = nullptr;    /*!< __text (func base) */
+
+      virtual std::size_t size() const override { return 8 + ents.size() * 12; }
+      virtual void Emit(Image& img, std::size_t offset) const override;
+
+      static EhlsdaBlob<bits> *Create() { return new EhlsdaBlob(); }
+      virtual EhlsdaBlob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
+         throw error("EhlsdaBlob is synthesized post-transform and is never transformed");
+      }
+   private:
+      EhlsdaBlob() {}
+      template <Bits> friend class EhlsdaBlob;
    };
 
    /*

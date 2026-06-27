@@ -200,16 +200,19 @@ static struct eh_exception *hdr_from_handle(uint32_t handle) {
 /* ===================================================================== */
 /* Translator PC map + LSDA table discovery (per loaded image)          */
 /* ===================================================================== */
-struct pc_pair { uint32_t a, b; };                /* generic sorted pair     */
-struct lsda_rec { uint32_t trans_func, orig_func, lsda_off; };
+/* On-disk records (see Archive::inject_pcmap_section / inject_ehlsda_section).
+ * trans offsets are RELATIVE TO __text (convert-invariant); lsda_off is relative
+ * to __gcc_except_tab.  At runtime we add the actual section bases. */
+struct pcmap_ent { int32_t trans_off; uint32_t orig; };
+struct lsda_ent  { int32_t trans_func_off; uint32_t orig_func; int32_t lsda_off; };
 
 struct eh_image {
-   uintptr_t slide;
-   uint32_t  text_lo, text_hi;                    /* translated __text range */
-   const struct pc_pair *pcmap;                   /* sorted by trans_off     */
+   uintptr_t text_base, text_size;                /* runtime __text span     */
+   uintptr_t gxt_base;                            /* runtime __gcc_except_tab*/
+   const struct pcmap_ent *pcmap;                 /* sorted by trans_off     */
    uint32_t  pcmap_n;
-   struct pc_pair *pcmap_byorig;                  /* malloc'd, sorted by orig*/
-   const struct lsda_rec *lsda;                   /* sorted by trans_func    */
+   struct pcmap_ent *pcmap_byorig;                /* malloc'd, sorted by orig*/
+   const struct lsda_ent *lsda;                   /* sorted by trans_func_off*/
    uint32_t  lsda_n;
 };
 static struct eh_image g_imgs[64];
@@ -217,8 +220,8 @@ static int g_img_n = 0;
 static int g_img_scanned = 0;
 static pthread_mutex_t g_img_mu = PTHREAD_MUTEX_INITIALIZER;
 
-static int cmp_pair_byorig(const void *x, const void *y) {
-   uint32_t a = ((const struct pc_pair *)x)->b, b = ((const struct pc_pair *)y)->b;
+static int cmp_ent_byorig(const void *x, const void *y) {
+   uint32_t a = ((const struct pcmap_ent *)x)->orig, b = ((const struct pcmap_ent *)y)->orig;
    return (a > b) - (a < b);
 }
 
@@ -233,87 +236,86 @@ static void eh_scan_images(void) {
       const struct mach_header *mh = _dyld_get_image_header(i);
       if (!mh) continue;
       const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
-      unsigned long pcsz = 0, lssz = 0, txsz = 0;
+      unsigned long pcsz = 0, lssz = 0, txsz = 0, gxsz = 0;
       const uint8_t *pc = getsectiondata(mh64, "__DATA", "__86x64_pcmap", &pcsz);
       if (!pc) pc = getsectiondata(mh64, "__TEXT", "__86x64_pcmap", &pcsz);
       if (!pc || pcsz < 8) continue;
+      const uint8_t *tx = getsectiondata(mh64, "__TEXT", "__text", &txsz);
+      if (!tx) continue;                           /* need the trans anchor */
       const uint8_t *ls = getsectiondata(mh64, "__DATA", "__86x64_ehlsda", &lssz);
       if (!ls) ls = getsectiondata(mh64, "__TEXT", "__86x64_ehlsda", &lssz);
-      const uint8_t *tx = getsectiondata(mh64, "__TEXT", "__text", &txsz);
+      const uint8_t *gx = getsectiondata(mh64, "__TEXT", "__gcc_except_tab", &gxsz);
 
       struct eh_image *im = &g_imgs[g_img_n];
       memset(im, 0, sizeof *im);
-      im->slide   = _dyld_get_image_vmaddr_slide(i);
-      im->text_lo = tx ? (uint32_t)(uintptr_t)tx : 0;
-      im->text_hi = tx ? (uint32_t)((uintptr_t)tx + txsz) : 0;
+      im->text_base = (uintptr_t) tx;
+      im->text_size = txsz;
+      im->gxt_base  = (uintptr_t) gx;
       im->pcmap_n = ((const uint32_t *)pc)[0];
-      im->pcmap   = (const struct pc_pair *)(pc + 8);
+      im->pcmap   = (const struct pcmap_ent *)(pc + 8);
       if ((unsigned long)im->pcmap_n * 8 + 8 > pcsz) im->pcmap_n = (uint32_t)((pcsz - 8) / 8);
       if (ls && lssz >= 8) {
          im->lsda_n = ((const uint32_t *)ls)[0];
-         im->lsda   = (const struct lsda_rec *)(ls + 8);
+         im->lsda   = (const struct lsda_ent *)(ls + 8);
          if ((unsigned long)im->lsda_n * 12 + 8 > lssz) im->lsda_n = (uint32_t)((lssz - 8) / 12);
       }
       /* Build the orig-sorted index for orig->trans lookups. */
-      im->pcmap_byorig = malloc((size_t)im->pcmap_n * sizeof(struct pc_pair));
+      im->pcmap_byorig = malloc((size_t)im->pcmap_n * sizeof(struct pcmap_ent));
       if (im->pcmap_byorig) {
-         memcpy(im->pcmap_byorig, im->pcmap, (size_t)im->pcmap_n * sizeof(struct pc_pair));
-         qsort(im->pcmap_byorig, im->pcmap_n, sizeof(struct pc_pair), cmp_pair_byorig);
+         memcpy(im->pcmap_byorig, im->pcmap, (size_t)im->pcmap_n * sizeof(struct pcmap_ent));
+         qsort(im->pcmap_byorig, im->pcmap_n, sizeof(struct pcmap_ent), cmp_ent_byorig);
       }
-      EHLOG("registered eh-image #%d slide=%#lx text=[%#x,%#x) pcmap=%u lsda=%u\n",
-            g_img_n, (unsigned long)im->slide, im->text_lo, im->text_hi,
-            im->pcmap_n, im->lsda_n);
+      EHLOG("registered eh-image #%d text=[%#lx,+%#lx) gxt=%#lx pcmap=%u lsda=%u\n",
+            g_img_n, (unsigned long)im->text_base, (unsigned long)im->text_size,
+            (unsigned long)im->gxt_base, im->pcmap_n, im->lsda_n);
       g_img_n++;
    }
    g_img_scanned = 1;
    pthread_mutex_unlock(&g_img_mu);
 }
 
-static struct eh_image *eh_image_for_pc(uint32_t trans_pc) {
+static struct eh_image *eh_image_for_pc(uintptr_t ret) {
    for (int i = 0; i < g_img_n; i++) {
       struct eh_image *im = &g_imgs[i];
-      if (im->text_lo && trans_pc >= im->text_lo && trans_pc < im->text_hi) return im;
-   }
-   /* Fall back: any image whose pcmap brackets the PC. */
-   for (int i = 0; i < g_img_n; i++) {
-      struct eh_image *im = &g_imgs[i];
-      if (im->pcmap_n &&
-          trans_pc >= im->pcmap[0].a && trans_pc <= im->pcmap[im->pcmap_n - 1].a)
+      if (im->text_base && ret >= im->text_base && ret < im->text_base + im->text_size)
          return im;
    }
    return NULL;
 }
 
-/* translated PC -> original i386 PC.  Return addresses are instruction-aligned
- * so the largest trans_off <= pc is the instruction that the call returns
- * into; its orig_off is the original return address. */
-static int pc_trans_to_orig(struct eh_image *im, uint32_t trans_pc, uint32_t *orig_out) {
-   const struct pc_pair *m = im->pcmap; uint32_t n = im->pcmap_n;
+/* translated runtime PC -> original i386 PC.  Return addresses are instruction-
+ * aligned, so the largest trans_off <= toff is the instruction the call returns
+ * into; its orig is the original return address (parse-space i386 vmaddr). */
+static int pc_trans_to_orig(struct eh_image *im, uintptr_t ret, uint32_t *orig_out) {
+   const struct pcmap_ent *m = im->pcmap; uint32_t n = im->pcmap_n;
    if (!n) return 0;
-   uint32_t lo = 0, hi = n;                        /* find last a <= trans_pc */
-   while (lo < hi) { uint32_t mid = (lo + hi) / 2; if (m[mid].a <= trans_pc) lo = mid + 1; else hi = mid; }
+   const int32_t toff = (int32_t)(ret - im->text_base);
+   uint32_t lo = 0, hi = n;                        /* last trans_off <= toff  */
+   while (lo < hi) { uint32_t mid = (lo + hi) / 2; if (m[mid].trans_off <= toff) lo = mid + 1; else hi = mid; }
    if (lo == 0) return 0;
-   *orig_out = m[lo - 1].b + (trans_pc - m[lo - 1].a);
+   *orig_out = m[lo - 1].orig + (uint32_t)(toff - m[lo - 1].trans_off);
    return 1;
 }
 
-/* original i386 PC -> translated PC (exact instruction; for landing pads). */
-static int pc_orig_to_trans(struct eh_image *im, uint32_t orig_pc, uint32_t *trans_out) {
-   const struct pc_pair *m = im->pcmap_byorig; uint32_t n = im->pcmap_n;
+/* original i386 PC -> translated runtime address (for landing pads). */
+static int pc_orig_to_trans(struct eh_image *im, uint32_t orig_pc, uintptr_t *trans_out) {
+   const struct pcmap_ent *m = im->pcmap_byorig; uint32_t n = im->pcmap_n;
    if (!m || !n) return 0;
    uint32_t lo = 0, hi = n;
-   while (lo < hi) { uint32_t mid = (lo + hi) / 2; if (m[mid].b <= orig_pc) lo = mid + 1; else hi = mid; }
+   while (lo < hi) { uint32_t mid = (lo + hi) / 2; if (m[mid].orig <= orig_pc) lo = mid + 1; else hi = mid; }
    if (lo == 0) return 0;
-   *trans_out = m[lo - 1].a + (orig_pc - m[lo - 1].b);
+   const int32_t toff = m[lo - 1].trans_off + (int32_t)(orig_pc - m[lo - 1].orig);
+   *trans_out = im->text_base + (intptr_t)toff;
    return 1;
 }
 
-/* Find the EH function record covering a translated PC. */
-static const struct lsda_rec *eh_lsda_for_pc(struct eh_image *im, uint32_t trans_pc) {
-   const struct lsda_rec *r = im->lsda; uint32_t n = im->lsda_n;
+/* Find the EH function record covering a translated runtime PC. */
+static const struct lsda_ent *eh_lsda_for_pc(struct eh_image *im, uintptr_t ret) {
+   const struct lsda_ent *r = im->lsda; uint32_t n = im->lsda_n;
    if (!r || !n) return NULL;
+   const int32_t toff = (int32_t)(ret - im->text_base);
    uint32_t lo = 0, hi = n;
-   while (lo < hi) { uint32_t mid = (lo + hi) / 2; if (r[mid].trans_func <= trans_pc) lo = mid + 1; else hi = mid; }
+   while (lo < hi) { uint32_t mid = (lo + hi) / 2; if (r[mid].trans_func_off <= toff) lo = mid + 1; else hi = mid; }
    if (lo == 0) return NULL;
    return &r[lo - 1];
 }
@@ -336,16 +338,21 @@ static int type_caught_by(uint32_t thrown_ti, uint32_t catch_ti, uint32_t *adjus
 /* Returns 1 and fills *lp_orig (landing-pad ORIGINAL address) + *selector  */
 /* when an action (catch or cleanup) applies; 0 when the frame is transparent. */
 /* ===================================================================== */
-static int eh_scan_lsda(uint32_t lsda_addr, uint32_t region_start, uint32_t ip_orig,
+/* `region` is the EFFECTIVE @LPStart the core resolved into pcmap-orig space
+ * (Archive::collect_eh_lsda_pairs walks the i386 instruction stream so the LSDA
+ * disk offsets — which include PIC get_pc_thunk bytes the M64 transform drops —
+ * line up with the compressed translated layout).  So `region + cs_off` is
+ * directly a valid pcmap-orig address. */
+static int eh_scan_lsda(uint32_t lsda_addr, uint32_t region, uint32_t orig_pc,
                         uint32_t thrown_ti, int want_handler,
                         uint32_t *lp_orig, int32_t *selector, uint32_t *adjusted) {
    if (!lsda_addr) return 0;
    const uint8_t *p = (const uint8_t *)(uintptr_t)lsda_addr;
 
    uint8_t lpstart_enc = *p++;
-   uint32_t lpstart = region_start;
+   uint32_t lpstart = region;
    if (lpstart_enc != DW_EH_PE_omit)
-      lpstart = read_encoded(&p, lpstart_enc, region_start);
+      lpstart = read_encoded(&p, lpstart_enc, region);
 
    uint8_t ttype_enc = *p++;
    const uint8_t *ttype_base = NULL;
@@ -360,7 +367,7 @@ static int eh_scan_lsda(uint32_t lsda_addr, uint32_t region_start, uint32_t ip_o
    const uint8_t *cs_end = p + cs_len;
    const uint8_t *action_tab = cs_end;
 
-   uint32_t ip_off = ip_orig - region_start;
+   uint32_t ip_off = (orig_pc - 1) - region;
    while (cs < cs_end) {
       uint32_t cs_start = read_encoded(&cs, cs_enc, 0);
       uint32_t cs_clen  = read_encoded(&cs, cs_enc, 0);
@@ -389,6 +396,9 @@ static int eh_scan_lsda(uint32_t lsda_addr, uint32_t region_start, uint32_t ip_o
             }
             uint32_t adj = 0;
             if (type_caught_by(thrown_ti, catch_ti, &adj)) {
+               EHLOG("match: cs_start=%#x clen=%#x cs_lp=%#x region=%#x "
+                     "orig_pc=%#x -> lp_orig=%#x ti=%d\n", cs_start, cs_clen,
+                     cs_lp, region, orig_pc, lp, (int)ttype_index);
                *lp_orig = lp; *selector = (int32_t)ttype_index;
                if (adjusted) *adjusted = adj;
                return 1;
@@ -417,7 +427,8 @@ static int eh_ptr_mapped(uint32_t p) {
    if (p >= 0x88000000u && p < 0xF0000000u) return 1;     /* shim heap */
    for (int i = 0; i < g_img_n; i++) {
       struct eh_image *im = &g_imgs[i];
-      if (im->text_lo && p >= im->text_lo && p < im->text_hi + 0x100000u) return 1;
+      if (im->text_base && (uintptr_t)p >= im->text_base &&
+          (uintptr_t)p < im->text_base + im->text_size + 0x100000u) return 1;
    }
    return 0;
 }
@@ -442,7 +453,12 @@ static void eh_terminate(struct eh_exception *h, const char *why) {
  * continuation from _Unwind_Resume (cleanups only count as install points; a
  * catch still installs).  On success eh_resume() is tail-called (noreturn);
  * otherwise returns (caller terminates). */
-static void eh_raise_from(struct eh_exception *h, uint32_t start_ebp, uint32_t start_ret) {
+/* `lp_esp` is the esp the landing pad must run with: the function's WORKING esp
+ * (where it places call args), NOT the CFA.  For a frame-pointer function that
+ * is the esp it had at the unwound call site = (the inner frame's ebp) + 8; for
+ * the throwing frame itself it is the body esp captured at the throw call. */
+static void eh_raise_from(struct eh_exception *h, uint32_t start_ebp,
+                          uint32_t start_ret, uint32_t start_esp) {
    eh_scan_images();
    if (g_img_n == 0) {
       eh_terminate(h, "no translator PC map (core __86x64_pcmap/__86x64_ehlsda "
@@ -452,41 +468,42 @@ static void eh_raise_from(struct eh_exception *h, uint32_t start_ebp, uint32_t s
 
    uint32_t ebp = start_ebp;
    uint32_t ret = start_ret;                       /* translated return addr  */
+   uint32_t lp_esp = start_esp;                    /* this frame's body esp   */
    int hops = 0;
    while (ret && hops++ < 4096) {
-      struct eh_image *im = eh_image_for_pc(ret);
+      struct eh_image *im = eh_image_for_pc((uintptr_t)ret);
       if (!im) { EHLOG("frame ret=%#x not in any eh-image; stop\n", ret); break; }
 
       uint32_t orig_pc = 0;
-      if (!pc_trans_to_orig(im, ret, &orig_pc)) { EHLOG("no orig for ret=%#x\n", ret); goto next; }
+      if (!pc_trans_to_orig(im, (uintptr_t)ret, &orig_pc)) { EHLOG("no orig for ret=%#x\n", ret); goto next; }
       /* The unwinder keys the LSDA on the instruction BEFORE the return point
        * (the call), per Itanium ("ip-1"). */
-      const struct lsda_rec *rec = eh_lsda_for_pc(im, ret);
-      if (rec && rec->lsda_off) {
-         uint32_t lsda_addr = (uint32_t)(im->slide) + rec->lsda_off;
+      const struct lsda_ent *rec = eh_lsda_for_pc(im, (uintptr_t)ret);
+      if (rec && im->gxt_base) {
+         uint32_t lsda_addr = (uint32_t)(im->gxt_base + (intptr_t)rec->lsda_off);
          uint32_t lp_orig = 0; int32_t sel = 0; uint32_t adj = 0;
-         if (eh_scan_lsda(lsda_addr, rec->orig_func, orig_pc - 1, h->type_info,
+         if (eh_scan_lsda(lsda_addr, rec->orig_func, orig_pc, h->type_info,
                           /*want_handler=*/1, &lp_orig, &sel, &adj)) {
-            uint32_t lp_trans = 0;
+            uintptr_t lp_trans = 0;
             if (!pc_orig_to_trans(im, lp_orig, &lp_trans)) {
                EHLOG("handler LP orig=%#x has no trans mapping\n", lp_orig);
                goto next;
             }
-            /* CFA of the handler frame = ebp + 8 (i386 framed fn). The landing
-             * pad runs with esp at this CFA. */
-            uint32_t cfa = ebp + 8;
             if (sel != 0) { h->selector = sel; if (adj) h->adjusted = adj; }
-            EHLOG("install handler: frame ebp=%#x lp=%#x sel=%d\n", ebp, lp_trans, sel);
-            eh_resume(lp_trans, cfa, ebp, (uint32_t)(uintptr_t)h, (uint32_t)sel);
+            EHLOG("install handler: frame ebp=%#x esp=%#x lp=%#lx sel=%d\n",
+                  ebp, lp_esp, (unsigned long)lp_trans, sel);
+            eh_resume((uint32_t)lp_trans, lp_esp, ebp, (uint32_t)(uintptr_t)h, (uint32_t)sel);
             /* noreturn */
          }
       }
    next:
-      /* Pop to the caller frame (i386 ebp chain: [ebp]=saved ebp, [ebp+4]=ret).*/
+      /* Pop to the caller frame (i386 ebp chain: [ebp]=saved ebp, [ebp+4]=ret).
+       * The caller's body esp at the call into this frame = this ebp + 8. */
       if (!ebp) break;
       uint32_t saved_ebp = *(const uint32_t *)(uintptr_t)ebp;
       uint32_t caller_ret = *(const uint32_t *)(uintptr_t)(ebp + 4);
       if (saved_ebp <= ebp) break;                 /* chain must ascend */
+      lp_esp = ebp + 8;
       ebp = saved_ebp;
       ret = caller_ret;
    }
@@ -538,7 +555,8 @@ uint32_t shim_cxa_throw(uint32_t *a) {
     * address at [rbp+8] = a[-1]. */
    uint32_t thrower_ebp = a[-3];
    uint32_t thrower_ret = a[-1];
-   eh_raise_from(h, thrower_ebp, thrower_ret);
+   /* &a[0] is the throwing frame's body esp (where it staged the throw args). */
+   eh_raise_from(h, thrower_ebp, thrower_ret, (uint32_t)(uintptr_t)a);
 
    /* Unwinding returned => no handler. */
    eh_terminate(h, "__cxa_throw: no matching handler");
@@ -554,7 +572,7 @@ uint32_t shim_cxa_rethrow(uint32_t *a) {
    EHLOG("rethrow obj=%#x\n", h->obj);
    uint32_t thrower_ebp = a[-3];
    uint32_t thrower_ret = a[-1];
-   eh_raise_from(h, thrower_ebp, thrower_ret);
+   eh_raise_from(h, thrower_ebp, thrower_ret, (uint32_t)(uintptr_t)a);
    eh_terminate(h, "__cxa_rethrow: no matching handler");
    return 0;
 }
@@ -628,7 +646,8 @@ uint32_t shim_Unwind_Resume(uint32_t *a) {
    uint32_t cur_ebp = a[-3];                        /* the resuming frame ebp  */
    uint32_t caller_ebp = cur_ebp ? *(const uint32_t *)(uintptr_t)cur_ebp : 0;
    uint32_t caller_ret = cur_ebp ? *(const uint32_t *)(uintptr_t)(cur_ebp + 4) : 0;
-   eh_raise_from(h, caller_ebp, caller_ret);
+   /* The caller's body esp at the call into this (cleanup) frame = cur_ebp + 8. */
+   eh_raise_from(h, caller_ebp, caller_ret, cur_ebp + 8);
    eh_terminate(h, "_Unwind_Resume: no further handler");
    return 0;
 }

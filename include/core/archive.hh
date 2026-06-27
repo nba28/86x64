@@ -153,6 +153,25 @@ namespace MachO {
        * inject_xrel_section. See the known-gaps list route C. */
       void synthesize_dyld_info();
 
+      /* {original i386 function start, original i386 LSDA vmaddr} read from the
+       * source image's __eh_frame FDEs during transform (collect_eh_lsda_pairs),
+       * where the addresses are still correct; consumed by inject_ehlsda_section
+       * at Build to emit __DATA,__86x64_ehlsda. Empty for non-EH binaries. */
+      std::vector<std::pair<std::size_t, std::size_t>> eh_lsda_pairs;
+
+      /* Parse the SOURCE (M32) __eh_frame to populate eh_lsda_pairs. Called from
+       * the M32->M64 transform ctor (this == M64) with the original archive. */
+      void collect_eh_lsda_pairs(const Archive<opposite<b>>& other);
+
+      /* Synthesize __DATA,__86x64_pcmap (original<->translated instruction PC
+       * map) and __DATA,__86x64_ehlsda (per-EH-function start + LSDA) for the
+       * libabiconv C++ exception unwinder (eh_shim.c). M64 only; INERT (emits
+       * nothing) when the image has no __eh_frame / __gcc_except_tab so non-C++
+       * binaries are unperturbed; idempotent (skips if the section exists, e.g. a
+       * convert reparse). Called from Build alongside inject_xrel_section. */
+      void inject_pcmap_section();
+      void inject_ehlsda_section();
+
       template <template <Bits> class Blob>
       Blob<b> *find_blob(std::size_t vmaddr) const {
          for (Segment<b> *segment : segments()) {

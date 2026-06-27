@@ -4,6 +4,8 @@
 
 #include <algorithm>
 #include <vector>
+#include <map>
+#include <cstdint>
 #include <mach-o/nlist.h>
 
 #include "archive.hh"
@@ -12,6 +14,8 @@
 #include "segment.hh"
 #include "types.hh"
 #include "section_blob.hh"
+#include "instruction.hh" // Instruction (inject_pcmap_section)
+#include "section.hh"     // Section::Synthetic / iterate sections
 #include "symtab.hh"   // Dysymtab (inject_xrel_section)
 #include "dyldinfo.hh" // DyldInfo (classic-image gate)
 #include "rebase_info.hh"  // RebaseInfo (synthesize_dyld_info)
@@ -151,6 +155,13 @@ namespace MachO {
        * its XrelBlob::Emit can read each slot blob's resolved vmaddr. M64-only,
        * no-op when there are no lifted relocs. */
       inject_xrel_section();
+
+      /* Emit the C++ exception PC map + per-function LSDA table (M64 only; inert
+       * for binaries with no __eh_frame/LSDA; idempotent). Like inject_xrel
+       * these add __DATA sections, so they must run before the segment/section
+       * accounting below. */
+      inject_pcmap_section();
+      inject_ehlsda_section();
 
       /* Manufacture a modern LC_DYLD_INFO_ONLY for a classic image (opt-in via
        * convert --synthesize-dyld-info). Runs AFTER inject_xrel_section so the
@@ -331,6 +342,369 @@ namespace MachO {
          if (std::getenv("MACHO_BUILD_DEBUG")) {
             fprintf(stderr, "inject_xrel_section: %zu entries (%zu unresolved "
                     "skipped) -> __DATA,__86x64_xrel\n", blob->ents.size(), skipped);
+         }
+      }
+   }
+
+   /* ---- C++ exception PC map + LSDA table (eh_shim.c) ---------------------- */
+   namespace {
+      struct CieInfo { bool has_aug=false, has_L=false, has_R=false; uint8_t L_enc=0, R_enc=0; };
+
+      uint32_t ehbuf_le32(const std::vector<uint8_t>& b, size_t o) {
+         return (uint32_t)b[o] | ((uint32_t)b[o+1]<<8) |
+                ((uint32_t)b[o+2]<<16) | ((uint32_t)b[o+3]<<24);
+      }
+      uint16_t ehbuf_le16(const std::vector<uint8_t>& b, size_t o) {
+         return (uint16_t)(b[o] | (b[o+1]<<8));
+      }
+      uint64_t eh_uleb(const std::vector<uint8_t>& b, size_t& o) {
+         uint64_t r=0; int s=0; uint8_t c;
+         do { c=b[o++]; r |= (uint64_t)(c&0x7f)<<s; s+=7; } while ((c&0x80) && o<b.size());
+         return r;
+      }
+      int64_t eh_sleb(const std::vector<uint8_t>& b, size_t& o) {
+         int64_t r=0; int s=0; uint8_t c;
+         do { c=b[o++]; r |= (int64_t)(c&0x7f)<<s; s+=7; } while ((c&0x80) && o<b.size());
+         if (s<64 && (c&0x40)) r |= -((int64_t)1<<s);
+         return r;
+      }
+      int eh_enc_size(uint8_t enc) {       /* fixed-size encodings (i386 absptr=4) */
+         switch (enc & 0x0f) {
+         case 0x00: case 0x03: case 0x0b: return 4;   /* absptr/udata4/sdata4 */
+         case 0x02: case 0x0a: return 2;              /* udata2/sdata2 */
+         case 0x04: case 0x0c: return 8;              /* udata8/sdata8 */
+         default: return -1;                          /* uleb/sleb -> variable */
+         }
+      }
+      /* Decode an EH-encoded value; field_vmaddr = vmaddr of its first byte.
+       * Returns false (skip) for omit / indirect / unsupported relativity. */
+      bool eh_read_encoded(const std::vector<uint8_t>& b, size_t& o, uint8_t enc,
+                           uint32_t field_vmaddr, uint32_t& out) {
+         if (enc == 0xff) return false;               /* DW_EH_PE_omit */
+         uint32_t raw;
+         switch (enc & 0x0f) {
+         case 0x00: case 0x03: raw = ehbuf_le32(b,o); o+=4; break;          /* absptr/udata4 */
+         case 0x0b: raw = ehbuf_le32(b,o); o+=4; break;                     /* sdata4 (2's-comp) */
+         case 0x02: raw = ehbuf_le16(b,o); o+=2; break;                     /* udata2 */
+         case 0x0a: raw = (uint32_t)(int16_t)ehbuf_le16(b,o); o+=2; break;  /* sdata2 */
+         case 0x01: raw = (uint32_t)eh_uleb(b,o); break;                    /* uleb */
+         case 0x09: raw = (uint32_t)eh_sleb(b,o); break;                    /* sleb */
+         default: return false;
+         }
+         if (enc & 0x80) return false;                /* indirect: can't deref here */
+         switch (enc & 0x70) {
+         case 0x10: out = field_vmaddr + raw; return true;   /* pcrel (raw 2's-comp) */
+         case 0x00: out = raw; return true;                  /* absptr */
+         default: return false;                              /* datarel/funcrel/etc. */
+         }
+      }
+      /* Does a well-formed GCC LSDA header start at gbuf[off]?  Used to snap the
+       * (drifted) FDE LSDA pointer to the real LSDA position. */
+      bool eh_lsda_valid_at(const std::vector<uint8_t>& gbuf, size_t off) {
+         if (off >= gbuf.size()) return false;
+         size_t p = off;
+         uint8_t lpenc = gbuf[p++];
+         if (lpenc != 0xff && (lpenc & 0x0f) > 0x0c) return false;
+         if (lpenc != 0xff) { int s = eh_enc_size(lpenc); if (s < 0) eh_uleb(gbuf, p); else p += s; }
+         if (p >= gbuf.size()) return false;
+         uint8_t ttenc = gbuf[p++];
+         if (ttenc != 0xff) { eh_uleb(gbuf, p); }            /* @TType base offset */
+         if (p >= gbuf.size()) return false;
+         uint8_t csenc = gbuf[p++];
+         if ((csenc & 0x0f) > 0x0c) return false;
+         if (p >= gbuf.size()) return false;
+         uint64_t cslen = eh_uleb(gbuf, p);
+         if (p + cslen > gbuf.size()) return false;          /* table must fit */
+         return cslen > 0;
+      }
+   } // namespace
+
+   template <Bits b>
+   void Archive<b>::collect_eh_lsda_pairs(const Archive<opposite<b>>& other) {
+      if constexpr (b != Bits::M64) {
+         (void)other; return;                         /* M32 output is intermediate */
+      } else {
+         eh_lsda_pairs.clear();
+         const Section<opposite<b>> *ehf = nullptr, *gxt = nullptr;
+         for (Segment<opposite<b>> *seg : other.segments()) {
+            for (Section<opposite<b>> *s : seg->sections) {
+               if (s->name() == "__eh_frame") { ehf = s; }
+               else if (s->name() == "__gcc_except_tab") { gxt = s; }
+            }
+         }
+         if (ehf == nullptr) { return; }              /* no exceptions -> inert */
+
+         /* macho-tool's parse re-packs the source sections, so __eh_frame's base
+          * lands a few bytes off from the original inter-section layout and its
+          * self-relative (pcrel) FDE offsets are uniformly STALE in parse space
+          * (the same staleness libabiconv sees at runtime).  We don't trust the
+          * raw pcrel target; instead we SNAP each FDE's pc-begin to the nearest
+          * real instruction start (a function entry, in the same parse vmaddr
+          * space as SectionBlob::orig_vmaddr) and apply that per-FDE correction
+          * to the LSDA pointer too (both are pcrel from adjacent __eh_frame
+          * fields, so they share the offset).  The region used for the LSDA
+          * offsets must be the TRUE function entry (the i386 `push ebp`, which is
+          * a func_entry blob): in the source's disk-faithful M32 layout the
+          * landing pad is exactly entry+cs_lp, even though the M64 transform
+          * later drops the PIC get_pc_thunk and the entry/prologue themselves
+          * aren't in the pcmap.  So snap pc-begin to the nearest func_entry. */
+         std::vector<uint32_t> func_starts;
+         for (Segment<opposite<b>> *seg : other.segments()) {
+            for (Section<opposite<b>> *s : seg->sections) {
+               const std::string sn = s->name();
+               if (sn != "__text" && sn != "__textcoal_nt" && sn != "__coalesced")
+                  continue;
+               for (const SectionBlob<opposite<b>> *blob : s->content) {
+                  if (blob->func_entry &&
+                      dynamic_cast<const Instruction<opposite<b>> *>(blob) != nullptr)
+                     func_starts.push_back((uint32_t) blob->loc.vmaddr);
+               }
+            }
+         }
+         std::sort(func_starts.begin(), func_starts.end());
+
+         /* Reconstruct the i386 __eh_frame bytes from its blobs (DataParser emits
+          * 4-byte Immediates on aligned slots + DataBlob tails; M32 blobs still
+          * hold the original pre-transform values, so the bytes are exact). */
+         const uint32_t base = (uint32_t) ehf->loc().vmaddr;
+         std::vector<uint8_t> buf;
+         bool clean = true;
+         for (const SectionBlob<opposite<b>> *blob : ehf->content) {
+            const uint32_t v = (uint32_t) blob->loc.vmaddr;
+            const size_t off = v - base;
+            if (auto *im = dynamic_cast<const Immediate<opposite<b>> *>(blob)) {
+               if (off + 4 > buf.size()) { buf.resize(off + 4, 0); }
+               const uint32_t val = im->value;
+               buf[off+0]=val; buf[off+1]=val>>8; buf[off+2]=val>>16; buf[off+3]=val>>24;
+            } else if (auto *db = dynamic_cast<const DataBlob<opposite<b>> *>(blob)) {
+               if (off + 1 > buf.size()) { buf.resize(off + 1, 0); }
+               buf[off] = db->data;
+            } else {
+               clean = false; break;                  /* unexpected blob -> bail safely */
+            }
+         }
+         if (!clean) { return; }
+
+         /* Reconstruct the __gcc_except_tab bytes too, so the LSDA pointer can be
+          * snapped to a position whose LSDA header actually parses (the FDE
+          * pcrel drift means the raw pointer can be a few bytes off). */
+         const uint32_t gxt_base = gxt ? (uint32_t) gxt->loc().vmaddr : 0;
+         std::vector<uint8_t> gbuf;
+         if (gxt) {
+            for (const SectionBlob<opposite<b>> *blob : gxt->content) {
+               const uint32_t v = (uint32_t) blob->loc.vmaddr;
+               const size_t off = v - gxt_base;
+               if (auto *im = dynamic_cast<const Immediate<opposite<b>> *>(blob)) {
+                  if (off + 4 > gbuf.size()) { gbuf.resize(off + 4, 0); }
+                  const uint32_t val = im->value;
+                  gbuf[off+0]=val; gbuf[off+1]=val>>8; gbuf[off+2]=val>>16; gbuf[off+3]=val>>24;
+               } else if (auto *db = dynamic_cast<const DataBlob<opposite<b>> *>(blob)) {
+                  if (off + 1 > gbuf.size()) { gbuf.resize(off + 1, 0); }
+                  gbuf[off] = db->data;
+               }
+            }
+         }
+         std::map<size_t, CieInfo> cies;
+         size_t i = 0;
+         while (i + 4 <= buf.size()) {
+            const uint32_t len = ehbuf_le32(buf, i);
+            if (len == 0) { break; }                  /* terminator */
+            const size_t after_len = i + 4;
+            const size_t rec_end = after_len + len;
+            if (rec_end > buf.size()) { break; }
+            const uint32_t id = ehbuf_le32(buf, after_len);
+            if (id == 0) {                             /* CIE */
+               CieInfo ci;
+               size_t p = after_len + 4;
+               const uint8_t version = buf[p++];
+               std::string aug;
+               while (p < rec_end && buf[p] != 0) { aug.push_back((char)buf[p++]); }
+               if (p < rec_end) { p++; }               /* skip NUL */
+               ci.has_aug = (!aug.empty() && aug[0] == 'z');
+               eh_uleb(buf, p);                        /* code alignment factor */
+               eh_sleb(buf, p);                        /* data alignment factor */
+               if (version == 1) { p++; } else { eh_uleb(buf, p); } /* return reg */
+               if (ci.has_aug) {
+                  eh_uleb(buf, p);                     /* augmentation data length */
+                  for (size_t k = 1; k < aug.size(); k++) {
+                     switch (aug[k]) {
+                     case 'L': ci.L_enc = buf[p++]; ci.has_L = true; break;
+                     case 'R': ci.R_enc = buf[p++]; ci.has_R = true; break;
+                     case 'P': { uint8_t pe = buf[p++]; int sz = eh_enc_size(pe);
+                                 if (sz < 0) { eh_uleb(buf, p); } else { p += sz; } break; }
+                     case 'S': break;                  /* signal frame, no data */
+                     default: break;
+                     }
+                  }
+               }
+               cies[i] = ci;
+            } else {                                   /* FDE */
+               const size_t cie_off = (id <= after_len) ? after_len - id : SIZE_MAX;
+               auto it = cies.find(cie_off);
+               if (it != cies.end() && it->second.has_R) {
+                  const CieInfo& ci = it->second;
+                  size_t p = after_len + 4;            /* after CIE pointer */
+                  uint32_t pcbegin = 0;
+                  if (eh_read_encoded(buf, p, ci.R_enc, base + (uint32_t)p, pcbegin)) {
+                     int rsz = eh_enc_size(ci.R_enc);  /* skip pc-range */
+                     if (rsz < 0) { eh_uleb(buf, p); } else { p += rsz; }
+                     if (ci.has_aug) {
+                        eh_uleb(buf, p);               /* FDE aug data length */
+                        if (ci.has_L && gxt != nullptr) {
+                           uint32_t lsda = 0;
+                           if (eh_read_encoded(buf, p, ci.L_enc, base + (uint32_t)p, lsda) &&
+                               lsda != 0) {
+                              /* (1) region = nearest func_entry to the drifted
+                               * pc-begin (the true i386 function start the LSDA
+                               * offsets are relative to). */
+                              uint32_t region = 0; int64_t bestd = INT64_MAX;
+                              for (uint32_t fs : func_starts) {
+                                 int64_t d = (int64_t)fs - (int64_t)pcbegin;
+                                 if (d < 0) d = -d;
+                                 if (d < bestd) { bestd = d; region = fs; }
+                              }
+                              /* (2) lsda_off = nearest position to the drifted
+                               * LSDA pointer whose LSDA header actually parses. */
+                              int32_t lsda_off = -1;
+                              const int32_t want = (int32_t)(lsda - gxt_base);
+                              for (int32_t r = 0; r <= 16 && lsda_off < 0; r++) {
+                                 for (int sgn = 0; sgn < 2 && lsda_off < 0; sgn++) {
+                                    int32_t cand = want + (sgn ? -r : r);
+                                    if (cand < 0 || (size_t)cand >= gbuf.size()) continue;
+                                    if (eh_lsda_valid_at(gbuf, (size_t)cand)) lsda_off = cand;
+                                 }
+                              }
+                              if (bestd <= 96 && lsda_off >= 0) {
+                                 eh_lsda_pairs.emplace_back((size_t)region,
+                                                            (size_t)(uint32_t)lsda_off);
+                              }
+                           }
+                        }
+                     }
+                  }
+               }
+            }
+            i = rec_end;
+         }
+         if (std::getenv("MACHO_BUILD_DEBUG")) {
+            fprintf(stderr, "collect_eh_lsda_pairs: %zu FDE LSDA pairs\n",
+                    eh_lsda_pairs.size());
+            for (const auto& pr : eh_lsda_pairs) {
+               fprintf(stderr, "  pc-begin(orig_func)=0x%zx lsda_off=0x%zx\n",
+                       pr.first, pr.second);
+            }
+         }
+      }
+   }
+
+   template <Bits b>
+   void Archive<b>::inject_pcmap_section() {
+      if constexpr (b != Bits::M64) {
+         return;
+      } else {
+         /* Gate: only translated images that carry exception data. Keeps the
+          * section out of every non-C++ binary so the suite is unperturbed. */
+         bool has_eh = false;
+         Section<b> *text = nullptr;
+         Segment<b> *data_seg = segment(SEG_DATA);
+         for (Segment<b> *seg : segments()) {
+            for (Section<b> *s : seg->sections) {
+               const std::string n = s->name();
+               if (n == "__gcc_except_tab" || n == "__eh_frame") { has_eh = true; }
+               else if (n == "__text" && text == nullptr) { text = s; }
+               else if (n == "__86x64_pcmap") { return; } /* idempotent */
+            }
+         }
+         if (!has_eh || text == nullptr || data_seg == nullptr) { return; }
+
+         auto *blob = PcmapBlob<b>::Create();
+         blob->anchor = text;
+         for (Segment<b> *seg : segments()) {
+            for (Section<b> *s : seg->sections) {
+               for (SectionBlob<b> *sb : s->content) {
+                  if (sb->orig_vmaddr == 0) { continue; }
+                  if (dynamic_cast<const Instruction<b> *>(sb) == nullptr) { continue; }
+                  typename PcmapBlob<b>::Ent ent;
+                  ent.trans = sb;
+                  ent.orig = (uint32_t) sb->orig_vmaddr;
+                  blob->ents.push_back(ent);
+               }
+            }
+         }
+         if (blob->ents.empty()) { delete blob; return; }
+
+         auto *sect = Section<b>::Synthetic(SEG_DATA, "__86x64_pcmap",
+                                            S_REGULAR, /*align=*/2);
+         sect->segment = data_seg;
+         sect->content.push_back(blob);
+         blob->section = sect;
+         blob->segment = data_seg;
+         data_seg->sections.push_back(sect);
+         invalidate_segments_cache();
+         if (std::getenv("MACHO_BUILD_DEBUG")) {
+            fprintf(stderr, "inject_pcmap_section: %zu instructions -> "
+                    "__DATA,__86x64_pcmap\n", blob->ents.size());
+         }
+      }
+   }
+
+   template <Bits b>
+   void Archive<b>::inject_ehlsda_section() {
+      if constexpr (b != Bits::M64) {
+         return;
+      } else {
+         if (eh_lsda_pairs.empty()) { return; }
+         Section<b> *text = nullptr;
+         Segment<b> *data_seg = segment(SEG_DATA);
+         for (Segment<b> *seg : segments()) {
+            for (Section<b> *s : seg->sections) {
+               const std::string n = s->name();
+               if (n == "__text" && text == nullptr) { text = s; }
+               else if (n == "__86x64_ehlsda") { return; }  /* idempotent */
+            }
+         }
+         if (text == nullptr || data_seg == nullptr) { return; }
+
+         /* original i386 vmaddr -> translated instruction blob (sorted) */
+         std::map<size_t, const SectionBlob<b> *> by_orig;
+         for (Segment<b> *seg : segments()) {
+            for (Section<b> *s : seg->sections) {
+               for (SectionBlob<b> *sb : s->content) {
+                  if (sb->orig_vmaddr == 0) { continue; }
+                  if (dynamic_cast<const Instruction<b> *>(sb) == nullptr) { continue; }
+                  by_orig.emplace(sb->orig_vmaddr, sb); /* first (entry) wins */
+               }
+            }
+         }
+
+         auto *blob = EhlsdaBlob<b>::Create();
+         blob->text_anchor = text;
+         for (const auto& pr : eh_lsda_pairs) {
+            /* orig_func (region) is the TRUE entry, whose i386 prologue + PIC
+             * get_pc_thunk the M64 transform drops, so it usually isn't itself in
+             * the pcmap; use the first MAPPED instruction at/after it to identify
+             * the translated function. */
+            auto it = by_orig.lower_bound(pr.first);
+            if (it == by_orig.end()) { continue; }
+            typename EhlsdaBlob<b>::Ent ent;
+            ent.func = it->second;
+            ent.orig_func = (uint32_t) pr.first;
+            ent.lsda_off = (int32_t) pr.second;
+            blob->ents.push_back(ent);
+         }
+         if (blob->ents.empty()) { delete blob; return; }
+
+         auto *sect = Section<b>::Synthetic(SEG_DATA, "__86x64_ehlsda",
+                                            S_REGULAR, /*align=*/2);
+         sect->segment = data_seg;
+         sect->content.push_back(blob);
+         blob->section = sect;
+         blob->segment = data_seg;
+         data_seg->sections.push_back(sect);
+         invalidate_segments_cache();
+         if (std::getenv("MACHO_BUILD_DEBUG")) {
+            fprintf(stderr, "inject_ehlsda_section: %zu functions -> "
+                    "__DATA,__86x64_ehlsda\n", blob->ents.size());
          }
       }
    }
@@ -620,6 +994,9 @@ namespace MachO {
          }
          load_commands.push_back(lc->Transform(env));
       }
+      /* Read the source __eh_frame (i386 addresses still valid) so Build can emit
+       * the per-EH-function LSDA table for the C++ exception unwinder. */
+      collect_eh_lsda_pairs(other);
    }
 
    template <Bits b>

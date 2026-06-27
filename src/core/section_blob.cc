@@ -1,5 +1,6 @@
 #include <mach-o/x86_64/reloc.h>
 #include <typeinfo>
+#include <algorithm>
 
 #include "section_blob.hh"
 #include "segment.hh"
@@ -83,6 +84,10 @@ namespace MachO {
       env.add(&other, this);
       env.resolve(other.segment, &segment);
       func_entry = other.func_entry; /* preserve even-alignment intent i386->x86_64 */
+      /* Preserve the i386 source address: loc.vmaddr will be overwritten with the
+       * final x86_64 address at Build, so capture the original now for the
+       * __86x64_pcmap / __86x64_ehlsda emission (C++ exception unwinding). */
+      orig_vmaddr = other.loc.vmaddr;
    }
 
 
@@ -295,6 +300,59 @@ namespace MachO {
    }
 
    template <Bits bits>
+   void PcmapBlob<bits>::Emit(Image& img, std::size_t offset) const {
+      const uint32_t anchor_vmaddr =
+         anchor ? static_cast<uint32_t>(anchor->loc().vmaddr) : 0;
+      /* Resolve each instruction's final translated vmaddr (set at Build) and
+       * sort by the section-relative offset so the runtime can binary-search. */
+      std::vector<std::pair<int32_t, uint32_t>> rows;
+      rows.reserve(ents.size());
+      for (const Ent& e : ents) {
+         if (e.trans == nullptr) { continue; }
+         const int32_t trans_off =
+            static_cast<int32_t>(static_cast<uint32_t>(e.trans->loc.vmaddr) - anchor_vmaddr);
+         rows.emplace_back(trans_off, e.orig);
+      }
+      std::sort(rows.begin(), rows.end());
+      img.at<uint32_t>(offset + 0) = MAGIC;
+      img.at<uint32_t>(offset + 4) = static_cast<uint32_t>(rows.size());
+      std::size_t p = offset + 8;
+      for (const auto& r : rows) {
+         img.at<int32_t>(p + 0) = r.first;
+         img.at<uint32_t>(p + 4) = r.second;
+         p += 8;
+      }
+   }
+
+   template <Bits bits>
+   void EhlsdaBlob<bits>::Emit(Image& img, std::size_t offset) const {
+      const uint32_t text_vmaddr =
+         text_anchor ? static_cast<uint32_t>(text_anchor->loc().vmaddr) : 0;
+      struct Row { int32_t func_off; uint32_t orig_func; int32_t lsda_off; };
+      std::vector<Row> rows;
+      rows.reserve(ents.size());
+      for (const Ent& e : ents) {
+         if (e.func == nullptr) { continue; }
+         Row r;
+         r.func_off = static_cast<int32_t>(static_cast<uint32_t>(e.func->loc.vmaddr) - text_vmaddr);
+         r.orig_func = e.orig_func;
+         r.lsda_off = e.lsda_off;
+         rows.push_back(r);
+      }
+      std::sort(rows.begin(), rows.end(),
+                [] (const Row& a, const Row& b) { return a.func_off < b.func_off; });
+      img.at<uint32_t>(offset + 0) = MAGIC;
+      img.at<uint32_t>(offset + 4) = static_cast<uint32_t>(rows.size());
+      std::size_t p = offset + 8;
+      for (const auto& r : rows) {
+         img.at<int32_t>(p + 0) = r.func_off;
+         img.at<uint32_t>(p + 4) = r.orig_func;
+         img.at<int32_t>(p + 8) = r.lsda_off;
+         p += 12;
+      }
+   }
+
+   template <Bits bits>
    JumpStubBlob<bits>::JumpStubBlob(const JumpStubBlob<opposite<bits>>& other,
                                     TransformEnv<opposite<bits>>& env):
       SectionBlob<bits>(other, env), slot(nullptr)
@@ -344,6 +402,12 @@ namespace MachO {
 
    template class XrelBlob<Bits::M32>;
    template class XrelBlob<Bits::M64>;
+
+   template class PcmapBlob<Bits::M32>;
+   template class PcmapBlob<Bits::M64>;
+
+   template class EhlsdaBlob<Bits::M32>;
+   template class EhlsdaBlob<Bits::M64>;
 
    template class JumpStubBlob<Bits::M32>;
    template class JumpStubBlob<Bits::M64>;

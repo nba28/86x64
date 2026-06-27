@@ -2,7 +2,7 @@
 // exception object (adjustedPtr == object). Exercises the same path as f01 plus
 // a non-scalar exception object.
 #include <cstdio>
-#include <unistd.h>
+#include <cstdlib>
 struct E { int code; E(int c) : code(c) {} };
 int main() {
   try {
@@ -11,6 +11,5 @@ int main() {
     printf("caught E code=%d\n", e.code);
   }
   printf("done\n");
-  fflush(stdout);
-  _exit(0);
+  exit(0);
 }

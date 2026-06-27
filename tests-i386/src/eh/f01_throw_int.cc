@@ -2,7 +2,7 @@
 // exception. Exercises __cxa_allocate_exception/__cxa_throw/__cxa_begin_catch/
 // __cxa_end_catch + intra-frame landing-pad resume with rax=exc / rdx=selector.
 #include <cstdio>
-#include <unistd.h>
+#include <cstdlib>
 int main() {
   try {
     printf("before throw\n");
@@ -12,6 +12,5 @@ int main() {
     printf("caught int %d\n", x);
   }
   printf("after catch\n");
-  fflush(stdout);
-  _exit(0);
+  exit(0);
 }

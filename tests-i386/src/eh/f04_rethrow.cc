@@ -2,7 +2,7 @@
 // __cxa_rethrow + CROSS-FRAME unwinding (inner -> main) and the caught-exception
 // stack.
 #include <cstdio>
-#include <unistd.h>
+#include <cstdlib>
 static void inner() {
   try {
     throw 99;
@@ -18,6 +18,5 @@ int main() {
     printf("outer caught %d\n", x);
   }
   printf("done\n");
-  fflush(stdout);
-  _exit(0);
+  exit(0);
 }

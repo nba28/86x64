@@ -3,8 +3,8 @@
 // then continues via _Unwind_Resume to main's catch). Exercises cleanup landing
 // pads + cross-frame resume.
 #include <cstdio>
-#include <unistd.h>
-struct Guard { ~Guard() { printf("guard dtor\n"); fflush(stdout); } };
+#include <cstdlib>
+struct Guard { ~Guard() { printf("guard dtor\n"); } };
 static void f() {
   Guard g;
   throw 5;
@@ -16,6 +16,5 @@ int main() {
     printf("caught %d\n", x);
   }
   printf("done\n");
-  fflush(stdout);
-  _exit(0);
+  exit(0);
 }
