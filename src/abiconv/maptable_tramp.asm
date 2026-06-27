@@ -604,6 +604,159 @@ _x64_exc_longjmp:
 	MTSHIM	___FSMakeFSSpec,    _shim_FSMakeFSSpec
 	MTSHIM	___FSpOpenResFile,  _shim_FSpOpenResFile
 
+	; ===== Civ IV: removed Carbon/QuickDraw/QuickTime-callback symbols =====
+	; 139 classic APIs deleted from 64-bit macOS that Civ IV's translated __jt_ptrs
+	; slots bind to; without these dyld fails LOAD (Symbol not found _RGBBackColor ...).
+	; Grouped by single-purpose shim file; see each file's header for the rationale.
+	; --- QuickDraw 2D (qd_shim.c) ---
+	MTSHIM	___BackColor,                         _shim_BackColor
+	MTSHIM	___ClipRect,                          _shim_ClipRect
+	MTSHIM	___ClosePicture,                      _shim_ClosePicture
+	MTSHIM	___CopyBits,                          _shim_CopyBits
+	MTSHIM	___CreateCGContextForPort,            _shim_CreateCGContextForPort
+	MTSHIM	___CreateNewPort,                     _shim_CreateNewPort
+	MTSHIM	___CreateNewPortForCGDisplayID,       _shim_CreateNewPortForCGDisplayID
+	MTSHIM	___DisposeCTable,                     _shim_DisposeCTable
+	MTSHIM	___DisposePort,                       _shim_DisposePort
+	MTSHIM	___DrawText,                          _shim_DrawText
+	MTSHIM	___FillRect,                          _shim_FillRect
+	MTSHIM	___ForeColor,                         _shim_ForeColor
+	MTSHIM	___FrameRect,                         _shim_FrameRect
+	MTSHIM	___GetBackColor,                      _shim_GetBackColor
+	MTSHIM	___GetClip,                           _shim_GetClip
+	MTSHIM	___GetDeviceList,                     _shim_GetDeviceList
+	MTSHIM	___GetFontInfo,                       _shim_GetFontInfo
+	MTSHIM	___GetForeColor,                      _shim_GetForeColor
+	MTSHIM	___GetMainDevice,                     _shim_GetMainDevice
+	MTSHIM	___GetNextDevice,                     _shim_GetNextDevice
+	MTSHIM	___GetPenState,                       _shim_GetPenState
+	MTSHIM	___GetPort,                           _shim_GetPort
+	MTSHIM	___GetPortBackColor,                  _shim_GetPortBackColor
+	MTSHIM	___GetPortBitMapForCopyBits,          _shim_GetPortBitMapForCopyBits
+	MTSHIM	___GetPortBounds,                     _shim_GetPortBounds
+	MTSHIM	___GetPortClipRegion,                 _shim_GetPortClipRegion
+	MTSHIM	___GetPortForeColor,                  _shim_GetPortForeColor
+	MTSHIM	___GetPortTextFace,                   _shim_GetPortTextFace
+	MTSHIM	___GetPortTextFont,                   _shim_GetPortTextFont
+	MTSHIM	___GetPortVisibleRegion,              _shim_GetPortVisibleRegion
+	MTSHIM	___GetQDGlobalsBlack,                 _shim_GetQDGlobalsBlack
+	MTSHIM	___GetQDGlobalsDarkGray,              _shim_GetQDGlobalsDarkGray
+	MTSHIM	___GetQDGlobalsGray,                  _shim_GetQDGlobalsGray
+	MTSHIM	___GetQDGlobalsLightGray,             _shim_GetQDGlobalsLightGray
+	MTSHIM	___GetQDGlobalsWhite,                 _shim_GetQDGlobalsWhite
+	MTSHIM	___GlobalToLocal,                     _shim_GlobalToLocal
+	MTSHIM	___KillPicture,                       _shim_KillPicture
+	MTSHIM	___LineTo,                            _shim_LineTo
+	MTSHIM	___LocalToGlobal,                     _shim_LocalToGlobal
+	MTSHIM	___MoveTo,                            _shim_MoveTo
+	MTSHIM	___OpenCPicture,                      _shim_OpenCPicture
+	MTSHIM	___PaintRect,                         _shim_PaintRect
+	MTSHIM	___PenNormal,                         _shim_PenNormal
+	MTSHIM	___PenSize,                           _shim_PenSize
+	MTSHIM	___QDIsNamedPixMapCursorRegistered,   _shim_QDIsNamedPixMapCursorRegistered
+	MTSHIM	___QDRegisterNamedPixMapCursor,       _shim_QDRegisterNamedPixMapCursor
+	MTSHIM	___QDSetNamedPixMapCursor,            _shim_QDSetNamedPixMapCursor
+	MTSHIM	___QDUnregisterNamedPixMapCursur,     _shim_QDUnregisterNamedPixMapCursur
+	MTSHIM	___RGBBackColor,                      _shim_RGBBackColor
+	MTSHIM	___RGBForeColor,                      _shim_RGBForeColor
+	MTSHIM	___SetClip,                           _shim_SetClip
+	MTSHIM	___SetGDevice,                        _shim_SetGDevice
+	MTSHIM	___SetOrigin,                         _shim_SetOrigin
+	MTSHIM	___SetPenState,                       _shim_SetPenState
+	MTSHIM	___SetPort,                           _shim_SetPort
+	MTSHIM	___SetPortBounds,                     _shim_SetPortBounds
+	MTSHIM	___SetQDGlobalsRandomSeed,            _shim_SetQDGlobalsRandomSeed
+	MTSHIM	___TestDeviceAttribute,               _shim_TestDeviceAttribute
+	MTSHIM	___TextFace,                          _shim_TextFace
+	MTSHIM	___TextFont,                          _shim_TextFont
+	MTSHIM	___TextSize,                          _shim_TextSize
+	MTSHIM	___TextWidth,                         _shim_TextWidth
+	; --- Carbon HIToolbox UI + Display Mgr (carbon_ui_shim.c) ---
+	MTSHIM	___BeginUpdate,                       _shim_BeginUpdate
+	MTSHIM	___DMGetDeskRegion,                   _shim_DMGetDeskRegion
+	MTSHIM	___DMGetDisplayIDByGDevice,           _shim_DMGetDisplayIDByGDevice
+	MTSHIM	___DMGetGDeviceByDisplayID,           _shim_DMGetGDeviceByDisplayID
+	MTSHIM	___Draw1Control,                      _shim_Draw1Control
+	MTSHIM	___DrawThemeTextBox,                  _shim_DrawThemeTextBox
+	MTSHIM	___EndUpdate,                         _shim_EndUpdate
+	MTSHIM	___GetControl32BitValue,              _shim_GetControl32BitValue
+	MTSHIM	___GetControlPopupMenuHandle,         _shim_GetControlPopupMenuHandle
+	MTSHIM	___GetThemeTextDimensions,            _shim_GetThemeTextDimensions
+	MTSHIM	___GetWindowFromPort,                 _shim_GetWindowFromPort
+	MTSHIM	___GetWindowPort,                     _shim_GetWindowPort
+	MTSHIM	___GetWindowRegion,                   _shim_GetWindowRegion
+	MTSHIM	___InvalWindowRect,                   _shim_InvalWindowRect
+	MTSHIM	___SetControl32BitMaximum,            _shim_SetControl32BitMaximum
+	MTSHIM	___SetControl32BitValue,              _shim_SetControl32BitValue
+	MTSHIM	___SetControlMaximum,                 _shim_SetControlMaximum
+	MTSHIM	___SetPortWindowPort,                 _shim_SetPortWindowPort
+	MTSHIM	___SetWRefCon,                        _shim_SetWRefCon
+	MTSHIM	___SetWindowContentColor,             _shim_SetWindowContentColor
+	MTSHIM	___SetWindowProxyCreatorAndType,      _shim_SetWindowProxyCreatorAndType
+	MTSHIM	___ValidWindowRect,                   _shim_ValidWindowRect
+	; --- Universal Procedure Pointers (upp_shim.c) ---
+	MTSHIM	___DisposeControlUserPaneDrawUPP,     _shim_DisposeControlUserPaneDrawUPP
+	MTSHIM	___DisposeControlUserPaneHitTestUPP,  _shim_DisposeControlUserPaneHitTestUPP
+	MTSHIM	___DisposeControlUserPaneTrackingUPP, _shim_DisposeControlUserPaneTrackingUPP
+	MTSHIM	___DisposeEventHandlerUPP,            _shim_DisposeEventHandlerUPP
+	MTSHIM	___DisposeSndCallBackUPP,             _shim_DisposeSndCallBackUPP
+	MTSHIM	___NewControlUserPaneDrawUPP,         _shim_NewControlUserPaneDrawUPP
+	MTSHIM	___NewControlUserPaneHitTestUPP,      _shim_NewControlUserPaneHitTestUPP
+	MTSHIM	___NewControlUserPaneTrackingUPP,     _shim_NewControlUserPaneTrackingUPP
+	MTSHIM	___NewEventHandlerUPP,                _shim_NewEventHandlerUPP
+	MTSHIM	___NewEventLoopTimerUPP,              _shim_NewEventLoopTimerUPP
+	MTSHIM	___NewSndCallBackUPP,                 _shim_NewSndCallBackUPP
+	; --- Sound Manager (sndmgr_shim.c) ---
+	MTSHIM	___SndChannelStatus,                  _shim_SndChannelStatus
+	MTSHIM	___SndDisposeChannel,                 _shim_SndDisposeChannel
+	MTSHIM	___SndDoCommand,                      _shim_SndDoCommand
+	MTSHIM	___SndDoImmediate,                    _shim_SndDoImmediate
+	MTSHIM	___SndPlay,                           _shim_SndPlay
+	MTSHIM	___SysBeep,                           _shim_SysBeep
+	; --- Font Manager (fontmgr_shim.c) ---
+	MTSHIM	___FMActivateFonts,                   _shim_FMActivateFonts
+	MTSHIM	___FMDeactivateFonts,                 _shim_FMDeactivateFonts
+	MTSHIM	___FMGetFontFamilyFromName,           _shim_FMGetFontFamilyFromName
+	MTSHIM	___FMGetFontFamilyName,               _shim_FMGetFontFamilyName
+	MTSHIM	___GetAppFont,                        _shim_GetAppFont
+	; --- MLTE/TXN + HIView (mlte_shim.c) ---
+	MTSHIM	___HIImageViewSetImage,               _shim_HIImageViewSetImage
+	MTSHIM	___HITextViewCreate,                  _shim_HITextViewCreate
+	MTSHIM	___HITextViewGetTXNObject,            _shim_HITextViewGetTXNObject
+	MTSHIM	___TXNDeleteObject,                   _shim_TXNDeleteObject
+	MTSHIM	___TXNGetDataEncoded,                 _shim_TXNGetDataEncoded
+	MTSHIM	___TXNGetHIRect,                      _shim_TXNGetHIRect
+	MTSHIM	___TXNInitTextension,                 _shim_TXNInitTextension
+	MTSHIM	___TXNNewObject,                      _shim_TXNNewObject
+	MTSHIM	___TXNSetDataFromCFURLRef,            _shim_TXNSetDataFromCFURLRef
+	MTSHIM	___TXNSetDataFromFile,                _shim_TXNSetDataFromFile
+	MTSHIM	___TXNSetHIRectBounds,                _shim_TXNSetHIRectBounds
+	; --- Classic File Manager (fmgr_shim.c) ---
+	MTSHIM	___FSClose,                           _shim_FSClose
+	MTSHIM	___FSRead,                            _shim_FSRead
+	MTSHIM	___FSWrite,                           _shim_FSWrite
+	MTSHIM	___FSpDelete,                         _shim_FSpDelete
+	MTSHIM	___FSpGetFInfo,                       _shim_FSpGetFInfo
+	MTSHIM	___FSpOpenDF,                         _shim_FSpOpenDF
+	MTSHIM	___FSpRstFLock,                       _shim_FSpRstFLock
+	MTSHIM	___FSpSetFLock,                       _shim_FSpSetFLock
+	MTSHIM	___GetEOF,                            _shim_GetEOF
+	MTSHIM	___HGetVol,                           _shim_HGetVol
+	MTSHIM	___HSetVol,                           _shim_HSetVol
+	MTSHIM	___PBHGetVInfoSync,                   _shim_PBHGetVInfoSync
+	MTSHIM	___PBMakeFSRefSync,                   _shim_PBMakeFSRefSync
+	MTSHIM	___SetEOF,                            _shim_SetEOF
+	MTSHIM	___SetFPos,                           _shim_SetFPos
+	; --- OS utilities, real impls (osutil_shim.c) ---
+	MTSHIM	___GetDateTime,                       _shim_GetDateTime
+	MTSHIM	___GetGlobalMouse,                    _shim_GetGlobalMouse
+	MTSHIM	___GetMouse,                          _shim_GetMouse
+	MTSHIM	___OTAtomicClearBit,                  _shim_OTAtomicClearBit
+	MTSHIM	___c2pstrcpy,                         _shim_c2pstrcpy
+	MTSHIM	___p2cstrcpy,                         _shim_p2cstrcpy
+	; --- Python C-API name shim (py_shim.c) ---
+	MTSHIM	___Py_InitModule4,                    _shim_Py_InitModule4
+
 	; --- RTTI type_info vtable sentinels (used by cxx_shim.c's __dynamic_cast) ---
 	; Exported under the exact libstdc++ __cxxabiv1 vtable names so static-interpose
 	; redirects every translated typeinfo's vtable-ptr field (typeinfo+0) to one of

@@ -320,6 +320,17 @@ add_library(abiconv SHARED
   quicktime_image.c
   imagecapture_shim.c
   carbon_fsspec_shim.c
+  # Civ IV: removed Carbon/QuickDraw/QuickTime-callback subsystems (single-purpose shims,
+  # wired through maptable_tramp.asm MTSHIM -> ___<sym> exports). See each file's header.
+  qd_shim.c
+  carbon_ui_shim.c
+  upp_shim.c
+  sndmgr_shim.c
+  fontmgr_shim.c
+  mlte_shim.c
+  fmgr_shim.c
+  osutil_shim.c
+  py_shim.c
   lazy_bind.c
   objc_msgSend.asm
   objc_reverse.asm
