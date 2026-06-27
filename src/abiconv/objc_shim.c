@@ -1347,6 +1347,42 @@ static const char *seltypes_lookup(SEL s) {
    return NULL;
 }
 
+/* ---- selector -> CGFloat explicit-arg bitmask registry ----
+ * A `CGFloat` is a 4-byte float on i386 but an 8-byte double on x86_64, and the
+ * modern runtime encodes BOTH a CGFloat and a true `double` parameter as 'd' —
+ * the native encoding alone cannot tell them apart. When the translated app
+ * only CALLS a system method (it doesn't declare/override it) the seltypes
+ * registry never learns the true i386 width, so the forward bridge falls back to
+ * the native 'd' and reads 8 bytes (two i386 slots) for a value the i386 caller
+ * pushed as ONE 4-byte float -> a fused garbage double AND a one-slot
+ * misalignment of every following argument. This registry records, per
+ * selector, WHICH explicit args are CGFloat (bit k => explicit arg k, 0-based
+ * after self/_cmd) so the bridge reads them as a single 4-byte i386 float and
+ * cvtss2sd-widens to the double the native method expects — at any arg position,
+ * any arity. Keyed by real (interned) SEL: pointer compare is exact. */
+#define CGFLOAT_MASK_CAP 256u   /* power of two; only a curated handful seeded */
+static struct { SEL sel; uint32_t mask; } g_cgfloat_mask[CGFLOAT_MASK_CAP];
+static void cgfloat_mask_insert(SEL s, uint32_t mask) {
+   if (!s) { return; }
+   uint32_t i = (uint32_t)(((uintptr_t)s >> 3) * 2654435761u) & (CGFLOAT_MASK_CAP - 1);
+   for (uint32_t n = 0; n < CGFLOAT_MASK_CAP; ++n) {
+      if (g_cgfloat_mask[i].sel == NULL || g_cgfloat_mask[i].sel == s) {
+         g_cgfloat_mask[i].sel = s; g_cgfloat_mask[i].mask = mask; return;
+      }
+      i = (i + 1) & (CGFLOAT_MASK_CAP - 1);
+   }
+}
+static uint32_t cgfloat_mask_lookup(SEL s) {
+   if (!s) { return 0; }
+   uint32_t i = (uint32_t)(((uintptr_t)s >> 3) * 2654435761u) & (CGFLOAT_MASK_CAP - 1);
+   for (uint32_t n = 0; n < CGFLOAT_MASK_CAP; ++n) {
+      if (g_cgfloat_mask[i].sel == NULL) { return 0; }
+      if (g_cgfloat_mask[i].sel == s) { return g_cgfloat_mask[i].mask; }
+      i = (i + 1) & (CGFLOAT_MASK_CAP - 1);
+   }
+   return 0;
+}
+
 /* Extract explicit-arg encoding #k (method-arg index k+2) from a full legacy
  * types string ("v24@0:8{_NSRect=...}16"). Returns NULL past the end. */
 static const char *enc_nth_arg(const char *types, unsigned k) {
@@ -1547,6 +1583,10 @@ static unsigned fill_method_args(struct objc_call_plan *plan,
          lt = NULL;   /* arg-count mismatch: same name, different signature */
       }
    }
+   /* CGFloat-arg fallback for system methods the app only CALLS (no legacy
+    * metadata): bit k marks explicit arg k as a CGFloat (i386 4-byte float). */
+   const uint32_t cgf_mask = (conv == CONV_NATIVE && sel)
+      ? cgfloat_mask_lookup(sel) : 0;
    if (trace) {
       fprintf(stderr, "[fma] m=%p nargs=%u conv=%s%s types=\"%s\"\n", (void *)m,
               nargs, conv == CONV_I386 ? "i386" : "native",
@@ -1558,9 +1598,18 @@ static unsigned fill_method_args(struct objc_call_plan *plan,
       char *rt_alloc = m ? method_copyArgumentType(m, i) : NULL;
       const char *enc = rt_alloc;
       int aconv = conv;
+      int overridden = 0;
       if (lt) {
          const char *le = enc_nth_arg(lt, i - 2);
-         if (le) { enc = le; aconv = CONV_I386; }
+         if (le) { enc = le; aconv = CONV_I386; overridden = 1; }
+      }
+      /* CGFloat override: a native 'd'/'f' arg the registry marks as CGFloat is
+       * an i386 4-byte float in ONE slot (not an 8-byte double). Force the
+       * i386-float reading so marshal_arg_fwd widens it (cvtss2sd) and consumes
+       * a single slot, keeping every following arg aligned. */
+      if (!overridden && cgf_mask && ((cgf_mask >> (i - 2)) & 1u) && enc) {
+         const char *bb = enc_skip_quals(enc);
+         if (*bb == 'd' || *bb == 'f') { enc = "f"; aconv = CONV_I386; }
       }
       if (!enc || !*enc) {
          if (!m) {
@@ -6788,32 +6837,49 @@ uint32_t shim_dealloc_vec(uint32_t *a) {
 extern void x64_dealloc_vec_tramp(void);
 uint32_t ___dealloc = 0;            /* exported as ____dealloc */
 
-/* AppKit/Foundation methods whose single explicit arg is a CGFloat — on i386 a
+/* AppKit/Foundation/QuartzCore methods with CGFloat explicit args — on i386 a
  * 4-byte float, on x86_64 an 8-byte double. The translated app only CALLS these
  * (it doesn't declare/override them), so the seltypes registry — which learns
  * i386 widths from the app's own __OBJC metadata — never sees them, and the
- * forward bridge falls back to the NATIVE 'd' encoding and reads 8 bytes off the
- * i386 frame (a 4-byte float + 4 bytes of the next slot) -> garbage. iPhoto:
- * -[NSTableView setRowHeight:] got -6.9e38, collapsing the main library window
- * to 0x0. Seed the i386 encoding "v12@0:4f8" (void ret; self@0; _cmd@4; float@8)
- * so the bridge widens the 4-byte CGFloat to a double per SysV.
+ * forward bridge falls back to the NATIVE 'd' encoding (CGFloat and double are
+ * BOTH 'd' there) and reads 8 bytes off the i386 frame (a 4-byte float + 4 bytes
+ * of the NEXT slot) -> a fused garbage double AND a one-slot misalignment of
+ * every following arg. iPhoto: -[NSTableView setRowHeight:] got -6.9e38,
+ * collapsing the main library window to 0x0; iWeb:
+ * +[NSRulerView registerUnitWithName:...unitToPointsConversionFactor:...] got a
+ * denormal ~0 conversion factor (the CGFloat is arg2, BETWEEN object args, so
+ * the fix MUST be positional) -> "Registration information not complete or
+ * valid" uncaught exception. The bitmask (bit k => explicit arg k is CGFloat)
+ * makes the bridge read each marked arg as ONE 4-byte i386 float and
+ * cvtss2sd-widen it, at any position in any-arity method.
  *
- * The registry is keyed by BARE SEL (applies to every class's same-named
- * method), so list only selectors that are unambiguously a lone CGFloat across
- * the frameworks — never a double/NSTimeInterval/NSInteger elsewhere. */
-static const char *const g_cgfloat_scalar_sels[] = {
-   "setRowHeight:",            /* NSTableView / NSOutlineView  (grid + source list) */
-   "setIndentationPerLevel:",  /* NSOutlineView                (source list)        */
-   "setAlphaValue:",           /* NSView / NSWindow / NSCell                         */
-   "setLineWidth:",            /* NSBezierPath                                       */
-   NULL,
+ * Keyed by BARE SEL (applies to every class's same-named method), so list only
+ * selectors whose marked args are unambiguously CGFloat across ALL frameworks —
+ * never a double/NSTimeInterval/NSInteger elsewhere. This is a curated
+ * STRUCTURAL seed; the complete fix (eliminating the list) is to seed the
+ * seltypes registry from the i386 system frameworks' own __OBJC metadata. */
+static const struct { const char *name; uint32_t mask; } g_cgfloat_sels[] = {
+   { "setRowHeight:",            0x1 },  /* NSTableView / NSOutlineView (grid + source list) */
+   { "setIndentationPerLevel:",  0x1 },  /* NSOutlineView              (source list)         */
+   { "setAlphaValue:",           0x1 },  /* NSView / NSWindow / NSCell                        */
+   { "setLineWidth:",            0x1 },  /* NSBezierPath                                      */
+   { "registerUnitWithName:abbreviation:unitToPointsConversionFactor:"
+     "stepUpCycle:stepDownCycle:", 0x4 },/* +[NSRulerView ...]: arg2 is the CGFloat factor   */
+   { "colorWithCalibratedRed:green:blue:alpha:", 0xF }, /* +[NSColor ...]: 4 CGFloats        */
+   { "colorWithDeviceRed:green:blue:alpha:",     0xF }, /* +[NSColor ...]: 4 CGFloats        */
+   { "blendedColorWithFraction:ofColor:",        0x1 }, /* -[NSColor ...]: CGFloat then obj  */
+   { "scaleBy:",                 0x1 },  /* -[NSAffineTransform ...]                          */
+   { "scaleXBy:yBy:",            0x3 },  /* -[NSAffineTransform ...]: 2 CGFloats              */
+   { "translateXBy:yBy:",        0x3 },  /* -[NSAffineTransform ...]: 2 CGFloats              */
+   { "rotateByDegrees:",         0x1 },  /* -[NSAffineTransform ...]                          */
 };
 
 __attribute__((constructor))
 static void x64_init_objc1_compat(void) {
    ___dealloc = (uint32_t)(uintptr_t)&x64_dealloc_vec_tramp;
-   for (const char *const *p = g_cgfloat_scalar_sels; *p; ++p) {
-      seltypes_insert(sel_registerName(*p), "v12@0:4f8");
+   for (unsigned i = 0; i < sizeof g_cgfloat_sels / sizeof g_cgfloat_sels[0]; ++i) {
+      cgfloat_mask_insert(sel_registerName(g_cgfloat_sels[i].name),
+                          g_cgfloat_sels[i].mask);
    }
 }
 

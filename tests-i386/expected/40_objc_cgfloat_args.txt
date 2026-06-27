@@ -1,0 +1,7 @@
+ok a1
+ok a2
+ok b1
+ok b2
+ok c1
+ok c2
+exit_code: 0
