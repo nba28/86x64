@@ -551,6 +551,20 @@ _x64_exc_longjmp:
 	MTSHIM	____ZSt29_Rb_tree_insert_and_rebalancebPSt18_Rb_tree_node_baseS0_RS_, _shim_rb_insert_rebalance
 	MTSHIM	____ZSt28_Rb_tree_rebalance_for_erasePSt18_Rb_tree_node_baseRS_,      _shim_rb_rebalance_for_erase
 
+	; RTTI (cxx_shim.c). __dynamic_cast + type_info compares reimplemented on the
+	; i386 (4-byte-field) typeinfo layout; native libstdc++ walks 8-byte typeinfo.
+	; bad_typeid/bad_cast/pure_virtual = loud aborts (can't throw across translated
+	; frames). The three __cxxabiv1 type_info VTABLE symbols are exported as data
+	; sentinels below so static-interpose redirects every typeinfo's vtable-ptr to a
+	; known low-4GB address -> the typeinfo becomes self-describing (kind discrimination).
+	MTSHIM	_____dynamic_cast,                _shim_dynamic_cast
+	MTSHIM	_____cxa_bad_typeid,              _shim_cxa_bad_typeid
+	MTSHIM	_____cxa_bad_cast,                _shim_cxa_bad_cast
+	MTSHIM	_____cxa_pure_virtual,            _shim_cxa_pure_virtual
+	MTSHIM	____ZNKSt9type_infoeqERKS_,       _shim_type_info_eq
+	MTSHIM	____ZNKSt9type_infoneERKS_,       _shim_type_info_ne
+	MTSHIM	____ZNKSt9type_infoltERKS_,       _shim_type_info_before
+
 	; Legacy ImageCapture (ICA) Carbon host API (imagecapture_shim.c). Dead C API on
 	; modern macOS (header removed); reached via bare stubs => native 8-byte ret over-pops
 	; the 4-byte i386 frame. Graceful "no device" shims so device enumeration fails cleanly.
@@ -572,3 +586,20 @@ _x64_exc_longjmp:
 	MTSHIM	___FSpMakeFSRef,    _shim_FSpMakeFSRef
 	MTSHIM	___FSMakeFSSpec,    _shim_FSMakeFSSpec
 	MTSHIM	___FSpOpenResFile,  _shim_FSpOpenResFile
+
+	; --- RTTI type_info vtable sentinels (used by cxx_shim.c's __dynamic_cast) ---
+	; Exported under the exact libstdc++ __cxxabiv1 vtable names so static-interpose
+	; redirects every translated typeinfo's vtable-ptr field (typeinfo+0) to one of
+	; these low-4GB addresses. The compiler stores &vtable+8 (the i386 ABI address
+	; point) into the typeinfo, so the bound value lands inside the 16-byte sentinel;
+	; cxx_shim's ti_kind_of() range-checks +0 against these to recover the kind.
+	; Binding to the NATIVE 8-byte vtables would truncate to an unusable 32-bit value.
+	; 16 bytes each so adjacent sentinels never alias under the +8 addend.
+	segment .data
+	global	____ZTVN10__cxxabiv117__class_type_infoE
+	global	____ZTVN10__cxxabiv120__si_class_type_infoE
+	global	____ZTVN10__cxxabiv121__vmi_class_type_infoE
+	align	16
+____ZTVN10__cxxabiv117__class_type_infoE:	times 16 db 0
+____ZTVN10__cxxabiv120__si_class_type_infoE:	times 16 db 0
+____ZTVN10__cxxabiv121__vmi_class_type_infoE:	times 16 db 0

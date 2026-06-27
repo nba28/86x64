@@ -36,11 +36,17 @@
  *    native C++ throw could never unwind through translated frames anyway;
  *    failing fast with the message beats corrupting the unwinder.
  *
- * NOT shimmed (deliberate): __cxa_pure_virtual (zero-arg noreturn — calling
- * convention is irrelevant), __gxx_personality_v0 + __cxa_begin/end_catch/
- * rethrow (only reachable from unwinding, which cannot enter translated
- * frames), __ZTV*__class_type_infoE vtable DATA binds (RTTI metadata;
- * truncation hazard noted but inert until something dynamic_casts).
+ *  - RTTI (__dynamic_cast, std::type_info::operator==/!=/before,
+ *    __cxa_bad_typeid/__cxa_bad_cast/__cxa_pure_virtual + the three
+ *    __cxxabiv1 type_info vtable DATA symbols): reimplemented on the i386
+ *    Itanium-ABI typeinfo layout (4-byte pointer fields). See the RTTI block
+ *    at the bottom of this file. The native libstdc++ __dynamic_cast walks
+ *    8-byte typeinfo and would read garbage from the i386 structures.
+ *
+ * NOT shimmed (deliberate): __gxx_personality_v0 + __cxa_throw/begin/end_catch/
+ * rethrow + _Unwind_Resume (only reachable from C++ EXCEPTION UNWINDING, which
+ * cannot enter translated frames without a libabiconv-resident translated-frame
+ * unwinder + an original<->translated PC map — the big remaining C++ gap).
  */
 
 #include <stdint.h>
@@ -404,4 +410,311 @@ uint32_t shim_rb_rebalance_for_erase(uint32_t *a) {
    }
    (void)RP;
    return z;
+}
+
+/* ==========================================================================
+ * RTTI: __dynamic_cast / std::type_info compare / __cxa_bad_* / pure_virtual
+ *
+ * Reimplemented on the i386 Itanium-C++-ABI typeinfo layout (4-byte pointer
+ * fields). Native libstdc++/libc++abi __dynamic_cast walks 8-byte typeinfo
+ * structures, so handing it the i386 4-byte-field typeinfo objects the
+ * translated binary carries would read garbage. We never call native; we walk
+ * the i386 hierarchy ourselves (a faithful port of libsupc++'s class/si/vmi
+ * __do_dyncast + __do_find_public_src).
+ *
+ * SELF-DESCRIBING TYPEINFO. Every typeinfo's first field (+0) points at one of
+ * three ABI vtables. libabiconv EXPORTS those three vtable symbols (asm-global
+ * sentinels in maptable_tramp.asm) under their exact libstdc++ names, so
+ * static-interpose rebinds each typeinfo's vtable-ptr to a known low-4GB
+ * sentinel (the i386 +8 address-point addend lands inside it). Binding instead
+ * to the native 8-byte vtable would truncate to an unusable 32-bit value.
+ * Reading +0 and matching the sentinel range tells us the typeinfo kind.
+ *
+ * i386 typeinfo layouts (measured from a translated test binary):
+ *   __class_type_info     : {vtbl@0, name@4}                          (8 B)
+ *   __si_class_type_info  : {vtbl@0, name@4, base@8}                  (12 B)
+ *   __vmi_class_type_info : {vtbl@0, name@4, flags@8, base_count@12,
+ *                            {base_type, offset_flags}[base_count] @16}
+ *      base_info entry = 8 B (base_type@+0, offset_flags@+4, i386).
+ *      offset_flags: bit0=virtual, bit1=public, (signed val>>8)=offset.
+ * ======================================================================== */
+
+/* The three ABI vtable sentinels (defined+exported in maptable_tramp.asm). We
+ * only ever take their addresses — the bytes are inert. */
+extern const uint8_t cxxabi_class_vtbl[] __asm__("____ZTVN10__cxxabiv117__class_type_infoE");
+extern const uint8_t cxxabi_si_vtbl[]    __asm__("____ZTVN10__cxxabiv120__si_class_type_infoE");
+extern const uint8_t cxxabi_vmi_vtbl[]   __asm__("____ZTVN10__cxxabiv121__vmi_class_type_infoE");
+
+enum ti_kind { TI_UNKNOWN = 0, TI_CLASS, TI_SI, TI_VMI };
+
+static inline uint32_t ld32(uint32_t p)  { return *(uint32_t *)(uintptr_t)p; }
+static inline int32_t  ld32s(uint32_t p) { return *(int32_t  *)(uintptr_t)p; }
+
+static enum ti_kind ti_kind_of(uint32_t ti) {
+   if (!ti) return TI_UNKNOWN;
+   uint32_t v  = ld32(ti);                            /* typeinfo vtable-ptr (+0) */
+   uint32_t cb = (uint32_t)(uintptr_t)cxxabi_class_vtbl;
+   uint32_t sb = (uint32_t)(uintptr_t)cxxabi_si_vtbl;
+   uint32_t vb = (uint32_t)(uintptr_t)cxxabi_vmi_vtbl;
+   if (v >= cb && v < cb + 16) return TI_CLASS;
+   if (v >= sb && v < sb + 16) return TI_SI;
+   if (v >= vb && v < vb + 16) return TI_VMI;
+   return TI_UNKNOWN;                                 /* native/foreign typeinfo */
+}
+
+/* std::type_info equality on the i386 layout: same typeinfo, else same name
+ * pointer, else strcmp (unless an '*'-prefixed address-only name). */
+static int ti_equal(uint32_t a, uint32_t b) {
+   if (a == b) return 1;
+   if (!a || !b) return 0;
+   uint32_t na = ld32(a + 4), nb = ld32(b + 4);
+   if (na == nb) return 1;
+   if (!na || !nb) return 0;
+   const char *sa = (const char *)(uintptr_t)na;
+   const char *sb = (const char *)(uintptr_t)nb;
+   if (sa[0] == '*' || sb[0] == '*') return 0;
+   return strcmp(sa, sb) == 0;
+}
+
+/* __sub_kind access-path flags (Itanium ABI / libsupc++). */
+#define SK_unknown           0
+#define SK_not_contained     1
+#define SK_contained_ambig   2
+#define SK_virtual_mask      0x1
+#define SK_public_mask       0x2
+#define SK_contained_mask    0x10
+#define SK_contained_public  (SK_contained_mask | SK_public_mask)   /* 0x12 */
+#define VMI_FLAGS_UNKNOWN    0x10   /* __flags_unknown_mask sentinel */
+
+static int sk_contained_p(int k)        { return k >= SK_contained_mask; }
+static int sk_public_p(int k)           { return (k & SK_public_mask) != 0; }
+static int sk_contained_public_p(int k) { return (k & SK_contained_public) == SK_contained_public; }
+static int sk_contained_nonvirtual_p(int k) {
+   return (k & (SK_contained_mask | SK_virtual_mask)) == SK_contained_mask;
+}
+
+/* __vmi_class_type_info::__base_info[i] accessors (i386). */
+static uint32_t bi_base_type(uint32_t ti, uint32_t i) { return ld32(ti + 16 + 8 * i); }
+static int32_t  bi_offset(uint32_t ti, uint32_t i)    { return ld32s(ti + 16 + 8 * i + 4) >> 8; }
+static int      bi_is_virtual(uint32_t ti, uint32_t i){ return (ld32(ti + 16 + 8 * i + 4) & SK_virtual_mask) != 0; }
+static int      bi_is_public(uint32_t ti, uint32_t i) { return (ld32(ti + 16 + 8 * i + 4) & SK_public_mask) != 0; }
+
+/* obj_ptr adjusted to a base subobject. Virtual bases read their offset from
+ * the object's vtable at the (signed) in-vtable slot given by `offset`. */
+static uint32_t to_base(uint32_t obj_ptr, int is_virtual, int32_t offset) {
+   if (is_virtual) {
+      uint32_t vtbl = ld32(obj_ptr);
+      offset = ld32s((uint32_t)((int32_t)vtbl + offset));
+   }
+   return (uint32_t)((int32_t)obj_ptr + offset);
+}
+
+struct dyncast_result {
+   uint32_t dst_ptr;       /* found dst_type subobject (0 = not found) */
+   int      whole2dst;     /* access path most-derived -> dst */
+   int      whole2src;     /* access path most-derived -> src */
+   int      dst2src;       /* relationship dst -> src */
+   int      whole_details; /* cached vmi __flags */
+};
+
+/* Search the dst object for a publicly-reachable src subobject (libsupc++
+ * __do_find_public_src). Used when the static src2dst hint is unavailable. */
+static int do_find_public_src(uint32_t ti, int32_t src2dst, uint32_t obj_ptr,
+                              uint32_t src_type, uint32_t src_ptr) {
+   if (obj_ptr == src_ptr && ti_equal(ti, src_type))
+      return SK_contained_public;
+   switch (ti_kind_of(ti)) {
+   case TI_SI:
+      return do_find_public_src(ld32(ti + 8), src2dst, obj_ptr, src_type, src_ptr);
+   case TI_VMI: {
+      uint32_t n = ld32(ti + 12);
+      for (uint32_t i = n; i--; ) {
+         if (!bi_is_public(ti, i)) continue;
+         int is_virtual = bi_is_virtual(ti, i);
+         if (is_virtual && src2dst == -3) continue;   /* src not a virtual base */
+         uint32_t base = to_base(obj_ptr, is_virtual, bi_offset(ti, i));
+         int k = do_find_public_src(bi_base_type(ti, i), src2dst, base, src_type, src_ptr);
+         if (sk_contained_p(k)) {
+            if (is_virtual) k |= SK_virtual_mask;
+            return k;
+         }
+      }
+      return SK_not_contained;
+   }
+   case TI_CLASS:
+   default:
+      return SK_not_contained;
+   }
+}
+
+static int find_public_src(uint32_t ti, int32_t src2dst, uint32_t obj_ptr,
+                           uint32_t src_type, uint32_t src_ptr) {
+   if (src2dst >= 0)
+      return ((uint32_t)((int32_t)obj_ptr + src2dst) == src_ptr)
+             ? SK_contained_public : SK_not_contained;
+   if (src2dst == -2)
+      return SK_not_contained;
+   return do_find_public_src(ti, src2dst, obj_ptr, src_type, src_ptr);
+}
+
+/* Recursive most-derived-object walk (libsupc++ class/si/vmi __do_dyncast).
+ * Records, in *res, the dst_type subobject and the access paths to src/dst. */
+static void do_dyncast(uint32_t ti, int32_t src2dst, int access_path,
+                       uint32_t dst_type, uint32_t obj_ptr,
+                       uint32_t src_type, uint32_t src_ptr,
+                       struct dyncast_result *res) {
+   if (obj_ptr == src_ptr && ti_equal(ti, src_type)) {
+      res->whole2src = access_path;               /* this is the source subobject */
+      return;
+   }
+   if (ti_equal(ti, dst_type)) {                  /* a dst_type subobject */
+      res->dst_ptr = obj_ptr;
+      res->whole2dst = access_path;
+      if (src2dst >= 0)
+         res->dst2src = ((uint32_t)((int32_t)obj_ptr + src2dst) == src_ptr)
+                        ? SK_contained_public : SK_not_contained;
+      else if (src2dst == -2)
+         res->dst2src = SK_not_contained;
+      return;
+   }
+
+   switch (ti_kind_of(ti)) {
+   case TI_CLASS:
+      return;                                      /* leaf: no bases */
+   case TI_SI:                                     /* single public base @ off 0 */
+      do_dyncast(ld32(ti + 8), src2dst, access_path, dst_type,
+                 obj_ptr, src_type, src_ptr, res);
+      return;
+   case TI_VMI:
+      break;
+   default:
+      return;
+   }
+
+   if (res->whole_details & VMI_FLAGS_UNKNOWN)
+      res->whole_details = ld32(ti + 8);           /* vmi __flags */
+
+   uint32_t n = ld32(ti + 12);
+   for (uint32_t i = n; i--; ) {
+      struct dyncast_result r2;
+      memset(&r2, 0, sizeof r2);
+      r2.dst2src = SK_unknown;
+      r2.whole_details = res->whole_details;
+
+      int is_virtual = bi_is_virtual(ti, i);
+      uint32_t base = to_base(obj_ptr, is_virtual, bi_offset(ti, i));
+      int base_access = access_path;
+      if (!bi_is_public(ti, i))
+         base_access &= ~SK_public_mask;
+
+      do_dyncast(bi_base_type(ti, i), src2dst, base_access,
+                 dst_type, base, src_type, src_ptr, &r2);
+
+      res->whole2src |= r2.whole2src;              /* accumulate src reachability */
+
+      if (r2.dst_ptr) {
+         if (!res->dst_ptr) {                      /* first dst found */
+            res->dst_ptr   = r2.dst_ptr;
+            res->whole2dst = r2.whole2dst;
+            res->dst2src   = r2.dst2src;
+         } else if (res->dst_ptr == r2.dst_ptr) {  /* same subobject, 2nd path */
+            res->whole2dst |= r2.whole2dst;
+            if (r2.dst2src != SK_unknown)
+               res->dst2src = (res->dst2src == SK_unknown)
+                              ? r2.dst2src : (res->dst2src | r2.dst2src);
+         } else {                                  /* distinct dst -> ambiguous */
+            res->dst2src = SK_contained_ambig;
+         }
+      }
+   }
+}
+
+/* void* __dynamic_cast(const void* sub, const __class_type_info* src,
+ *                      const __class_type_info* dst, ptrdiff_t src2dst).
+ * i386 frame: sub[0] src[1] dst[2] src2dst[3]. */
+uint32_t shim_dynamic_cast(uint32_t *a) {
+   uint32_t src_ptr  = a[0];
+   uint32_t src_type = a[1];
+   uint32_t dst_type = a[2];
+   int32_t  src2dst  = (int32_t)a[3];
+   if (!src_ptr) return 0;
+
+   uint32_t vtable = ld32(src_ptr);
+   if (!vtable) return 0;
+   int32_t  off_to_top = ld32s(vtable - 8);          /* i386 vtable_prefix */
+   uint32_t whole_type = ld32(vtable - 4);
+   uint32_t whole_ptr  = (uint32_t)((int32_t)src_ptr + off_to_top);
+
+   /* If the most-derived typeinfo isn't one we recognize (its vtable bind was
+    * not redirected — a native/foreign type), we cannot walk it safely. Fail
+    * the cast rather than risk a wild read. */
+   if (ti_kind_of(whole_type) == TI_UNKNOWN) return 0;
+
+   struct dyncast_result res;
+   memset(&res, 0, sizeof res);
+   res.whole2src = SK_unknown;
+   res.whole2dst = SK_unknown;
+   res.dst2src   = SK_unknown;
+   res.whole_details = VMI_FLAGS_UNKNOWN;
+
+   do_dyncast(whole_type, src2dst, SK_contained_public, dst_type,
+              whole_ptr, src_type, src_ptr, &res);
+
+   if (!res.dst_ptr) return 0;
+   if (res.dst2src == SK_contained_ambig) return 0;
+   if (sk_contained_public_p(res.dst2src))
+      return res.dst_ptr;                            /* src is a public base of dst */
+   if (sk_contained_public_p(res.whole2src & res.whole2dst))
+      return res.dst_ptr;                            /* valid public cross-cast */
+   if (sk_contained_nonvirtual_p(res.whole2src))
+      return 0;                                      /* src uniquely found, not in dst */
+   if (res.dst2src == SK_unknown)
+      res.dst2src = find_public_src(dst_type, src2dst, res.dst_ptr, src_type, src_ptr);
+   if (sk_contained_public_p(res.dst2src))
+      return res.dst_ptr;
+   return 0;
+}
+
+/* ---------------- std::type_info comparison operators ---------------- */
+/* bool type_info::operator==(const type_info&) const  — i386: this[0] arg[1].
+ * Out-of-line in GCC-era libstdc++ (the real i386 targets); modern libc++
+ * headers inline it, so a libc++-headers test won't import these — they exist
+ * for the GCC-built binaries (Halo/Civ IV). */
+uint32_t shim_type_info_eq(uint32_t *a) { return ti_equal(a[0], a[1]) ? 1u : 0u; }
+uint32_t shim_type_info_ne(uint32_t *a) { return ti_equal(a[0], a[1]) ? 0u : 1u; }
+
+/* bool type_info::before(const type_info&) const — orders by mangled name. */
+uint32_t shim_type_info_before(uint32_t *a) {
+   uint32_t ta = a[0], tb = a[1];
+   if (ta == tb) return 0;
+   uint32_t na = ld32(ta + 4), nb = ld32(tb + 4);
+   if (na == nb) return 0;
+   const char *sa = na ? (const char *)(uintptr_t)na : "";
+   const char *sb = nb ? (const char *)(uintptr_t)nb : "";
+   if (sa[0] == '*' || sb[0] == '*') return na < nb ? 1u : 0u;  /* address-only */
+   return strcmp(sa, sb) < 0 ? 1u : 0u;
+}
+
+/* ---------------- __cxa_bad_typeid / __cxa_bad_cast / __cxa_pure_virtual --- */
+/* All three are noreturn diagnostics in normal libstdc++; they would throw
+ * (bad_typeid / bad_cast) or trap (pure_virtual), and a C++ throw cannot unwind
+ * translated frames. Abort loudly with a clear message (same discipline as the
+ * __throw_* shims above). */
+uint32_t shim_cxa_bad_typeid(uint32_t *a) {
+   (void)a;
+   fprintf(stderr, "[cxx] typeid applied to a null polymorphic pointer "
+           "(std::bad_typeid) from translated code; aborting\n");
+   fflush(stderr); abort();
+}
+uint32_t shim_cxa_bad_cast(uint32_t *a) {
+   (void)a;
+   fprintf(stderr, "[cxx] failed dynamic_cast<T&> (std::bad_cast) from "
+           "translated code; aborting\n");
+   fflush(stderr); abort();
+}
+uint32_t shim_cxa_pure_virtual(uint32_t *a) {
+   (void)a;
+   fprintf(stderr, "[cxx] pure virtual function called from translated code; "
+           "aborting\n");
+   fflush(stderr); abort();
 }
