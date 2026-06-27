@@ -106,7 +106,14 @@ shift 1
 # against the translated dylib and fail with `ld: _main undefined` — even
 # though the translated dylib itself was already produced. Detected on the
 # thin i386 input (m64 thins fat wrappers before calling us).
-if file "$ARCHIVE32" 2>/dev/null | grep -qi "shared library\|bundle"; then
+#
+# Use `file -b` (brief: type only, no filename) so the classification keys
+# off the Mach-O type alone. Plain `file` prefixes the path, and m64's
+# `translate-bundle.XXXXXX` tempdir contains the literal substring "bundle"
+# — which made every executable extracted there match and silently fall back
+# to dylib-only (no wrapper exec produced). [-b fixes that path-name false
+# positive while still matching real "shared library"/"bundle" Mach-O types.]
+if file -b "$ARCHIVE32" 2>/dev/null | grep -qi "shared library\|bundle"; then
     [ "$VERBOSE" ] && echo "86x64: dylib/bundle input -> dylib-only mode (no exec wrapper)"
     WRAPPER_OBJ=""
 fi
