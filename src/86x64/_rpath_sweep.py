@@ -145,6 +145,47 @@ def bundled_target(path):
         return f"@rpath/{base}"
     return None
 
+# An LC_RPATH path line from `otool -l` is:   <indent>path <P> (offset <N>)
+RPATH_RE = re.compile(r'^\s+path (?P<path>.*) \(offset \d+\)\s*$')
+
+def leaked_rpaths(bin_path):
+    """LC_RPATH entries that are ABSOLUTE build/staging-machine paths pointing
+    OUTSIDE the bundle. The wrapper-link step (86x64.sh / translate-bundle) bakes
+    its `-o <out>` output dir and the libwrapper/libinterpose build dir into the
+    wrapper's LC_RPATHs (e.g. `/tmp`, `/var/folders/.../translate-bundle.XXXX`,
+    `.../build/src/86x64`). Those are dev-machine leakage: at best dead weight,
+    at worst they SHADOW the in-bundle `@loader_path` rpath, so `@rpath/<lib>`
+    resolves to a stale staging copy of <lib> (whose own deps may still be dead
+    /System paths) instead of the bundled one — dyld then fails the load before
+    anything of ours runs. Generic + safe: we only drop ABSOLUTE rpaths that do
+    not resolve inside the bundle; `@loader_path`/`@executable_path`/`@rpath`
+    relative entries and any absolute rpath that does point into the bundle are
+    kept untouched."""
+    out = subprocess.run(["otool", "-l", str(bin_path)],
+                         capture_output=True, text=True, errors="replace").stdout
+    app_root = str(APP.resolve())
+    bad, in_rpath = [], False
+    for line in out.splitlines():
+        if "cmd LC_RPATH" in line:
+            in_rpath = True
+            continue
+        if not in_rpath:
+            continue
+        m = RPATH_RE.match(line)
+        if not m:
+            continue
+        in_rpath = False
+        rp = m.group('path')
+        if not rp.startswith('/'):          # @loader_path / @rpath / relative
+            continue
+        try:
+            if os.path.realpath(rp).startswith(app_root):
+                continue                    # absolute, but inside the bundle
+        except Exception:
+            pass
+        bad.append(rp)
+    return bad
+
 def all_binaries():
     # Main executables AND the co-located translated dylibs in MacOS/ (the
     # wrapper-exec split means the bundled-framework LC_LOAD_DYLIBs live in
@@ -177,6 +218,7 @@ for bin_path in all_binaries():
     out = subprocess.run(["otool", "-L", str(bin_path)], capture_output=True, text=True, errors="replace").stdout
     consumer_x64 = _has_x86_64(bin_path)
     changes = []
+    bad_rpaths = leaked_rpaths(bin_path)
     for line in out.splitlines()[1:]:  # skip first line (file path)
         lm = LINE_RE.match(line)
         if not lm: continue
@@ -216,10 +258,13 @@ for bin_path in all_binaries():
         fm = FW_RE.search(old)
         name = (fm.group('fw') + ".framework") if fm else os.path.basename(old)
         missing.setdefault(name, set()).add(bin_path.name)
-    if changes:
+    if changes or bad_rpaths:
         subprocess.run(["codesign", "--remove-signature", str(bin_path)],
                        capture_output=True)
-        flat = [a for c in changes for a in c] + [str(bin_path)]
+        flat = [a for c in changes for a in c]
+        for rp in bad_rpaths:
+            flat += ["-delete_rpath", rp]
+        flat += [str(bin_path)]
         # PRIMARY PATH — stock cctools install_name_tool. Since route C
         # (`convert --synthesize-dyld-info`, archive.cc) gives every translated
         # CLASSIC dylib a canonical LC_DYLD_INFO_ONLY + emptied classic reloc
@@ -242,8 +287,13 @@ for bin_path in all_binaries():
             if r.returncode != 0:
                 r = subprocess.run([INT, *flat], capture_output=True, text=True, errors="replace")
         used_change_deps = False
-        if r.returncode != 0:
+        if r.returncode != 0 and changes:
             # LAST RESORT — our own re-emitter (macho-tool change-deps, 4d02bd6).
+            # NOTE: change-deps only rewrites LC_LOAD_DYLIB deps, not LC_RPATH —
+            # but with route C active install_name_tool never refuses a translated
+            # classic dylib, and the wrapper/native binaries that carry leaked
+            # rpaths are modern Mach-O that install_name_tool always accepts, so
+            # this fallback never has to strip rpaths in practice.
             # With route C active this should NEVER fire for a translated classic
             # dylib; if it does, the input is NON-canonical (a classic dylib that
             # missed --synthesize-dyld-info, or a shape route C doesn't cover yet)
@@ -260,7 +310,8 @@ for bin_path in all_binaries():
             continue
         flat_sign(str(bin_path))
         how = " (via macho-tool change-deps)" if used_change_deps else ""
-        print(f"  patched {bin_path.name}: {len(changes)} changes{how}")
+        rps = f" + {len(bad_rpaths)} leaked rpath(s) dropped" if bad_rpaths else ""
+        print(f"  patched {bin_path.name}: {len(changes)} changes{rps}{how}")
         patched_count += 1
 
 print(f"TOTAL: {patched_count} binaries patched")
