@@ -47,6 +47,13 @@ namespace MachO {
       std::vector<std::string> text_sectnames = {
          SECT_TEXT, SECT_STUBS, SECT_SYMBOL_STUB,
          "__StaticInit", "__textcoal_nt", "__coalesced",
+         /* Synthesized x86_64 trampolines for classic __IMPORT,__jump_table
+          * UNDEFINED stubs (see JumpStubBlob / Dysymtab::lift_jump_table_targets):
+          * each is `ff 25 disp32` = `jmp [rip+slot]`. Decoding them as code on
+          * any reparse (modify/convert) re-resolves the rip-relative slot
+          * reference through the existing FF25 handling so the displacement
+          * tracks the final layout. */
+         "__jt_tramp",
       };
       for (const std::string& sectname : text_sectnames) {
          if (sectname == sect.sectname) {

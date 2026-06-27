@@ -197,9 +197,20 @@ namespace MachO {
        * env.jump_table_targets, mapping each DEFINED stub's vmaddr to the
        * translated-image vmaddr of the function it stands for. Called at parse.
        * See ParseEnv::jump_table_targets + the relative-branch redirect in
-       * Instruction::parse(). */
+       * Instruction::parse(). For UNDEFINED stubs it synthesizes per-stub
+       * `jmp *slot` trampolines (see synthesize_undef_jump_stubs). */
       void lift_jump_table_targets(const Image& img, ParseEnv<bits>& env);
-      
+
+      /* Build the __TEXT,__jt_tramp trampolines + __DATA,__jt_ptrs dyld-bound
+       * slots for the undefined self-modifying CALL-stubs collected by
+       * lift_jump_table_targets, append their indirect-symbol entries, and
+       * register each trampoline at its original stub vmaddr. `records` is an
+       * array of `count` { size_t vmaddr; size_t offset; uint32_t symidx; }
+       * structs (re-described in the .cc so the struct stays out of the
+       * header). See JumpStubBlob. */
+      void synthesize_undef_jump_stubs(ParseEnv<bits>& env, std::size_t count,
+                                       const void *records);
+
       virtual Dysymtab<opposite<bits>> *Transform(TransformEnv<bits>& env) const override {
          return new Dysymtab<opposite<bits>>(*this, env);
       }

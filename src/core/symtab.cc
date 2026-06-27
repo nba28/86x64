@@ -265,12 +265,29 @@ namespace MachO {
     * intra-image majority — the game's own C++ methods reached via lazy stubs)
     * we record stub_vmaddr -> defined-function vmaddr; Instruction::parse() then
     * retargets the relative branch straight to the function, bypassing the dead
-    * stub. UNDEFINED external stubs (libstdc++ __cxa_, keymgr) have no in-image
-    * target and need a synthesized runtime-bound trampoline — NOT handled here.
+    * stub.
+    *
+    * UNDEFINED external stubs (the ~8%: libstdc++ `__cxa_*`/`__ZSt*`, keymgr,
+    * soft-float) have no in-image target. For each we synthesize an x86_64
+    * trampoline `jmp *slot` in a fresh executable `__TEXT,__jt_tramp` section
+    * plus a paired dyld-bound `__DATA,__jt_ptrs` non-lazy pointer slot, and we
+    * register the trampoline at the ORIGINAL stub vmaddr so `call <stub>`
+    * resolves straight to it (the dead 0xf4 stub is bypassed without a
+    * call-site rewrite). The slot is bound at load: a fresh contiguous block of
+    * indirect-symbol-table entries (one per undefined stub, appended here) is
+    * referenced by __jt_ptrs.reserved1, and route-C synthesize_dyld_info
+    * auto-emits a BIND for every S_NON_LAZY_SYMBOL_POINTERS slot via
+    * reserved1 + slot_idx. This composes with static-interpose (the 536 shimmed
+    * symbols' undef nlist names are already rewritten to `___X@libabiconv`, so
+    * those slots bind to the shim; the keymgr/EH-registration tail needs a
+    * single-purpose no-op shim dylib so the crt bootstrap proceeds).
+    *
     * Trigger is the structural self-modifying-stub attribute, so this is a
     * universal classic-binary fix (Civ IV / iWork-'09 / other 2006-era ports)
     * and is inert for modern images (their `__symbol_stub` isn't self-modifying
-    * and decodes to real `jmp *__la_symbol_ptr` already). */
+    * and decodes to real `jmp *__la_symbol_ptr` already). Idempotent: a reparse
+    * of an already-synthesized image carries `__jt_tramp` as data/code and we
+    * never synthesize a second set. */
    template <Bits bits>
    void Dysymtab<bits>::lift_jump_table_targets(const Image& img, ParseEnv<bits>& env) {
       if (indirectsyms.empty()) { return; }
@@ -292,6 +309,18 @@ namespace MachO {
       }
       if (symoff == 0 || nsyms == 0) { return; }
 
+      /* Already synthesized (reparse of a translated image)? The __jt_tramp
+       * trampolines + appended indirect entries are present in the file; do not
+       * build a second set (the DEFINED-half redirect below is still re-run, but
+       * it is inert on a reparse — the call sites already point at functions /
+       * trampolines, not stub vmaddrs). */
+      const bool already_synthesized =
+         env.archive.section("__jt_tramp") != nullptr;
+
+      /* Collected undefined stubs (vmaddr/offset + the symbol they import). */
+      struct UndefStub { std::size_t vmaddr; std::size_t offset; uint32_t symidx; };
+      std::vector<UndefStub> undef;
+
       std::size_t entered = 0;
       for (Segment<bits> *seg : env.archive.segments()) {
          for (Section<bits> *section : seg->sections) {
@@ -310,18 +339,104 @@ namespace MachO {
                const auto& nl =
                   img.at<nlist_t<bits>>(symoff + symidx * Nlist<bits>::size());
                if (nl.n_type & N_STAB) { continue; }
-               if ((nl.n_type & N_TYPE) != N_SECT) { continue; } /* DEFINED only */
-               if (nl.n_value == 0) { continue; }
                const std::size_t stub_vmaddr = sect.addr + k * stub_size;
-               env.jump_table_targets[stub_vmaddr] = nl.n_value;
-               ++entered;
+               if ((nl.n_type & N_TYPE) == N_SECT && nl.n_value != 0) {
+                  /* DEFINED: redirect the call site straight to the function. */
+                  env.jump_table_targets[stub_vmaddr] = nl.n_value;
+                  ++entered;
+               } else if ((nl.n_type & N_TYPE) == N_UNDF) {
+                  /* UNDEFINED external: trampoline + bound slot (built below). */
+                  if (!already_synthesized) {
+                     undef.push_back({stub_vmaddr,
+                                      (std::size_t)(sect.offset + k * stub_size),
+                                      symidx});
+                  }
+               }
             }
          }
       }
-      if (entered && getenv("MACHO_TOOL_DEBUG")) {
-         fprintf(stderr, "lift_jump_table_targets: redirected %zu defined "
-                 "self-modifying CALL-stub(s) to their functions\n", entered);
+
+      if (!undef.empty() && !already_synthesized) {
+         synthesize_undef_jump_stubs(env, undef.size(),
+                                     /*records=*/static_cast<const void *>(undef.data()));
       }
+
+      if ((entered || !undef.empty()) && getenv("MACHO_TOOL_DEBUG")) {
+         fprintf(stderr, "lift_jump_table_targets: redirected %zu defined "
+                 "self-modifying CALL-stub(s) to their functions; %zu undefined "
+                 "stub(s) %s\n", entered, undef.size(),
+                 already_synthesized ? "already trampolined (reparse)"
+                                     : "got jmp-through-slot trampolines");
+      }
+   }
+
+   /* Build the __TEXT,__jt_tramp trampolines + __DATA,__jt_ptrs bound slots for
+    * the undefined `__IMPORT,__jump_table` stubs collected above. `records`
+    * points at an array of the (anonymous) UndefStub struct laid out exactly as
+    * { size_t vmaddr; size_t offset; uint32_t symidx; } — re-described locally so
+    * this helper stays out of the header. Runs at PARSE (before Section::Parse1)
+    * so the synthesized JumpStubBlob registers at the original stub vmaddr before
+    * the dead __jump_table bytes do (the resolver keeps the first registration),
+    * and so the slots/trampolines flow through the normal M32->M64 transform. */
+   template <Bits bits>
+   void Dysymtab<bits>::synthesize_undef_jump_stubs(ParseEnv<bits>& env, std::size_t count,
+                                                    const void *records) {
+      struct UndefStub { std::size_t vmaddr; std::size_t offset; uint32_t symidx; };
+      const UndefStub *undef = static_cast<const UndefStub *>(records);
+
+      Segment<bits> *text = env.archive.segment(SEG_TEXT);
+      Segment<bits> *data = env.archive.segment(SEG_DATA);
+      if (text == nullptr || data == nullptr) { return; }
+
+      /* Executable trampoline section (real instructions). */
+      auto *tramp_sect = Section<bits>::Synthetic(
+         SEG_TEXT, "__jt_tramp",
+         S_REGULAR | S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS, /*align=*/0);
+      tramp_sect->segment = text;
+
+      /* Dyld-bound non-lazy pointer slots. reserved1 indexes a fresh contiguous
+       * run of indirect-symbol entries appended below, one per undefined stub. */
+      auto *ptrs_sect = Section<bits>::Synthetic(
+         SEG_DATA, "__jt_ptrs", S_NON_LAZY_SYMBOL_POINTERS,
+         /*align=*/(bits == Bits::M64 ? 3 : 2));
+      ptrs_sect->segment = data;
+      ptrs_sect->sect.reserved1 = static_cast<uint32_t>(indirectsyms.size());
+
+      for (std::size_t j = 0; j < count; ++j) {
+         /* slot: synthetic dyld-bound non-lazy pointer (emits 0, bound at load) */
+         auto *slot = NonLazySymbolPointer<bits>::CreateBound();
+         slot->segment = data;
+         slot->section = ptrs_sect;
+         ptrs_sect->content.push_back(slot);
+         /* append the indirect-symbol entry for this slot (same symbol the dead
+          * stub imported); reserved1 + j -> here, so synthesize_dyld_info binds
+          * the slot to that import. */
+         indirectsyms.push_back(undef[j].symidx);
+         /* trampoline: jumps through the slot. Build assigns its real
+          * (executable __TEXT) vmaddr. The relative-branch handler points the
+          * `call <stub>` site straight at this blob via jump_table_undef_tramps
+          * (keyed by the original stub vmaddr), bypassing the vmaddr-positioned
+          * placeholder that would otherwise land on the dead __jump_table stub. */
+         auto *tramp = JumpStubBlob<bits>::Create(
+            Location(undef[j].offset, undef[j].vmaddr), env, slot);
+         tramp->segment = text;
+         tramp->section = tramp_sect;
+         tramp_sect->content.push_back(tramp);
+         env.jump_table_undef_tramps[undef[j].vmaddr] = tramp;
+      }
+
+      /* __jt_tramp goes at the end of __TEXT (no zerofill there). __jt_ptrs must
+       * precede any zerofill (__bss/__common) so the file layout stays
+       * contiguous. */
+      text->sections.push_back(tramp_sect);
+      auto insert_it = data->sections.end();
+      for (auto it = data->sections.begin(); it != data->sections.end(); ++it) {
+         const uint32_t st = (*it)->sect.flags & SECTION_TYPE;
+         if (st == S_ZEROFILL || st == S_GB_ZEROFILL ||
+             st == S_THREAD_LOCAL_ZEROFILL) { insert_it = it; break; }
+      }
+      data->sections.insert(insert_it, ptrs_sect);
+      env.archive.invalidate_segments_cache();
    }
 
    template <Bits bits>

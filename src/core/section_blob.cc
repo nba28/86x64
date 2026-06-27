@@ -294,9 +294,36 @@ namespace MachO {
       }
    }
 
+   template <Bits bits>
+   JumpStubBlob<bits>::JumpStubBlob(const JumpStubBlob<opposite<bits>>& other,
+                                    TransformEnv<opposite<bits>>& env):
+      SectionBlob<bits>(other, env), slot(nullptr)
+   {
+      env.resolve(other.slot, &slot);
+   }
+
+   template <Bits bits>
+   void JumpStubBlob<bits>::Emit(Image& img, std::size_t offset) const {
+      /* `ff 25` = JMP r/m (ModRM /4): in 64-bit mode the operand is
+       * rip-relative `[rip+disp32]`; in 32-bit mode it is absolute `[disp32]`. */
+      img.at<uint8_t>(offset + 0) = 0xff;
+      img.at<uint8_t>(offset + 1) = 0x25;
+      const uint32_t slot_vmaddr =
+         slot ? static_cast<uint32_t>(slot->loc.vmaddr) : 0;
+      if constexpr (bits == Bits::M32) {
+         img.at<uint32_t>(offset + 2) = slot_vmaddr; /* absolute pointer */
+      } else {
+         /* rip-relative displacement from the end of this 6-byte instruction */
+         const int32_t disp = static_cast<int32_t>(
+            static_cast<int64_t>(slot_vmaddr) -
+            static_cast<int64_t>(this->loc.vmaddr + 6));
+         img.at<int32_t>(offset + 2) = disp;
+      }
+   }
+
    template class SectionBlob<Bits::M32>;
    template class SectionBlob<Bits::M64>;
-   
+
    template class LazySymbolPointer<Bits::M32>;
    template class LazySymbolPointer<Bits::M64>;
 
@@ -317,6 +344,9 @@ namespace MachO {
 
    template class XrelBlob<Bits::M32>;
    template class XrelBlob<Bits::M64>;
+
+   template class JumpStubBlob<Bits::M32>;
+   template class JumpStubBlob<Bits::M64>;
 
    template class RelocBlob<Bits::M32>;
    template class RelocBlob<Bits::M64>;

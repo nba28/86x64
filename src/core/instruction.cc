@@ -628,29 +628,44 @@ namespace MachO {
             }
          }
 
-         /*
-          * Only resolve the target if it lands inside a real segment.
-          * Linear-sweep disassembly misdecodes data interleaved in __text
-          * as branch instructions; their computed targets fall outside any
-          * segment and would strand an unplaceable placeholder, which is
-          * fatal in Archive::Build ("not all placeholders could be
-          * placed"). brdisp==nullptr is already a handled state — Emit
-          * (xed_patch_brdisp) and the i386->x86_64 copy ctor both guard on
-          * it — so leaving it null keeps the original displacement bytes.
-          */
-         bool target_in_seg = false;
-         for (auto *seg : env.archive.segments()) {
-            std::string name(seg->segment_command.segname,
-                             strnlen(seg->segment_command.segname,
-                                     sizeof(seg->segment_command.segname)));
-            if (name == SEG_PAGEZERO || name == SEG_LINKEDIT) { continue; }
-            if (seg->contains_vmaddr(targetaddr)) {
-               target_in_seg = true;
-               break;
+         /* UNDEFINED half of the same redirect. An undefined stub has no
+          * in-image function to retarget to, so Dysymtab::synthesize_undef_jump_stubs
+          * built a `jmp *slot` trampoline (in __TEXT,__jt_tramp) reaching the real
+          * import at load. Point the branch's brdisp STRAIGHT at that trampoline
+          * blob. We must NOT route this through add_placeholder(): it positions a
+          * placeholder by vmaddr into whichever section owns the target address,
+          * and the dead __jump_table stub (its hlt bytes are still present) still
+          * owns the stub vmaddr — so the placeholder would land on the filler
+          * instead of the trampoline. A direct brdisp resolves through the
+          * trampoline blob's own (executable) Build vmaddr. */
+         auto jtu = env.jump_table_undef_tramps.find(targetaddr);
+         if (jtu != env.jump_table_undef_tramps.end()) {
+            this->brdisp = jtu->second;
+         } else {
+            /*
+             * Only resolve the target if it lands inside a real segment.
+             * Linear-sweep disassembly misdecodes data interleaved in __text
+             * as branch instructions; their computed targets fall outside any
+             * segment and would strand an unplaceable placeholder, which is
+             * fatal in Archive::Build ("not all placeholders could be
+             * placed"). brdisp==nullptr is already a handled state — Emit
+             * (xed_patch_brdisp) and the i386->x86_64 copy ctor both guard on
+             * it — so leaving it null keeps the original displacement bytes.
+             */
+            bool target_in_seg = false;
+            for (auto *seg : env.archive.segments()) {
+               std::string name(seg->segment_command.segname,
+                                strnlen(seg->segment_command.segname,
+                                        sizeof(seg->segment_command.segname)));
+               if (name == SEG_PAGEZERO || name == SEG_LINKEDIT) { continue; }
+               if (seg->contains_vmaddr(targetaddr)) {
+                  target_in_seg = true;
+                  break;
+               }
             }
-         }
-         if (target_in_seg) {
-            this->brdisp = env.add_placeholder(targetaddr);
+            if (target_in_seg) {
+               this->brdisp = env.add_placeholder(targetaddr);
+            }
          }
       }
 

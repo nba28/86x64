@@ -76,6 +76,18 @@ namespace MachO {
        * synthesized runtime-bound trampoline and are NOT handled here. */
       std::map<std::size_t, std::size_t> jump_table_targets;
 
+      /* Classic i386 self-modifying CALL-stub redirect for the UNDEFINED half.
+       * Keyed by each undefined stub's original i386 vmaddr, valued by the
+       * synthesized JumpStubBlob (in __TEXT,__jt_tramp) that jumps through a
+       * dyld-bound __DATA,__jt_ptrs slot to the real import. Populated by
+       * Dysymtab::synthesize_undef_jump_stubs (parse phase). Consumed by the
+       * relative-branch handler in Instruction::parse(): a branch whose target
+       * is a key here has its brdisp pointed STRAIGHT at the trampoline blob,
+       * bypassing add_placeholder() — which positions a placeholder by vmaddr
+       * and would otherwise land the branch on the dead __IMPORT stub (the stub
+       * vmaddr lives in the still-present __jump_table section). */
+      std::map<std::size_t, const SectionBlob<bits> *> jump_table_undef_tramps;
+
       /* Function-symbol vmaddrs, populated from the LC_SYMTAB nlist table
        * (all N_SECT, non-stab entries with n_value != 0).  Used by the linear
        * code sweep (Section::Parse1) to detect when a decoded instruction would

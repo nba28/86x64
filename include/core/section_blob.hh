@@ -159,10 +159,24 @@ namespace MachO {
          return new NonLazySymbolPointer(img, loc, env);
       }
 
+      /* Synthetic dyld-bound non-lazy pointer slot (pointee stays null, so
+       * raw_data() emits 0 and the slot is bound at load: route-C
+       * synthesize_dyld_info auto-emits a BIND for every slot of an
+       * S_NON_LAZY_SYMBOL_POINTERS section via reserved1 + slot_idx ->
+       * indirect symbol table). Not registered in any parse resolver; the
+       * caller places it in a synthesized section's content. Used to build the
+       * __DATA,__jt_ptrs slots that back the classic __IMPORT,__jump_table
+       * UNDEFINED-stub trampolines (see JumpStubBlob +
+       * Dysymtab::lift_jump_table_targets). */
+      static NonLazySymbolPointer<bits> *CreateBound() {
+         return new NonLazySymbolPointer();
+      }
+
       virtual NonLazySymbolPointer<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const
          override { return new NonLazySymbolPointer<opposite<bits>>(*this, env); }
 
    private:
+      NonLazySymbolPointer(): SymbolPointer<bits>() {}
       NonLazySymbolPointer(const Image& img, const Location& loc, ParseEnv<bits>& env);
       NonLazySymbolPointer(const NonLazySymbolPointer<opposite<bits>>& other,
                            TransformEnv<opposite<bits>>& env);
@@ -320,6 +334,59 @@ namespace MachO {
    private:
       XrelBlob() {}
       template <Bits> friend class XrelBlob;
+   };
+
+   /*
+    * One x86_64 trampoline for a classic i386 `__IMPORT,__jump_table` UNDEFINED
+    * external stub (the ~8% of self-modifying S_SYMBOL_STUBS that resolve to an
+    * import, not an in-image function -- libstdc++ `__cxa_*`/`__ZSt*`, keymgr,
+    * soft-float). The original 5-byte stub ships all-`0xf4` (hlt) and modern
+    * dyld never fills it, and the __IMPORT segment is mapped non-exec on Apple
+    * Silicon (its rwx initprot loses X), so the dead stub can't carry the jump.
+    * Instead Dysymtab::lift_jump_table_targets synthesizes, per undefined stub,
+    * a JumpStubBlob in a fresh executable `__TEXT,__jt_tramp` section plus a
+    * paired `__DATA,__jt_ptrs` NonLazySymbolPointer slot; the blob is registered
+    * at the ORIGINAL stub vmaddr so the `call <stub>` site resolves straight to
+    * it (no call-site rewrite needed -- the dead stub is simply bypassed). The
+    * slot is bound at load (route-C synthesize_dyld_info), so the trampoline is
+    * `jmp *slot` -> the real import.
+    *
+    * Emit is `ff 25` + a 4-byte operand:
+    *   M32 (noop/rebasify rebuild): absolute `jmp dword ptr [slot_vmaddr]`.
+    *   M64 (transform output): rip-relative `jmp qword ptr [rip+disp32]`,
+    *        disp = slot_vmaddr - (this_vmaddr + 6).
+    * On any later reparse (modify/convert) the `__jt_tramp` bytes decode through
+    * the TextParser whitelist as an ordinary `jmp [mem]` instruction and the
+    * existing FF25/symbol-stub handling recomputes the displacement -- so this
+    * blob is purely the one-time synthesis vehicle (idempotent: re-synthesis is
+    * skipped once the section exists).
+    */
+   template <Bits bits>
+   class JumpStubBlob: public SectionBlob<bits> {
+   public:
+      const SectionBlob<bits> *slot = nullptr; /*!< the __jt_ptrs slot to jump through */
+
+      virtual std::size_t size() const override { return 6; } /* ff 25 + disp32 */
+      virtual void Emit(Image& img, std::size_t offset) const override;
+
+      static JumpStubBlob<bits> *Create(const Location& loc, ParseEnv<bits>& env,
+                                        const SectionBlob<bits> *slot) {
+         return new JumpStubBlob(loc, env, slot);
+      }
+
+      virtual JumpStubBlob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
+         return new JumpStubBlob<opposite<bits>>(*this, env);
+      }
+
+   private:
+      /* add_to_map=false: the trampoline is reached via the branch handler's
+       * direct brdisp assignment (ParseEnv::jump_table_undef_tramps), never via
+       * a vmaddr resolve, so it must NOT register at the stub vmaddr (that slot
+       * belongs to the dead __jump_table bytes). */
+      JumpStubBlob(const Location& loc, ParseEnv<bits>& env, const SectionBlob<bits> *slot):
+         SectionBlob<bits>(loc, env, /*add_to_map=*/false), slot(slot) {}
+      JumpStubBlob(const JumpStubBlob<opposite<bits>>& other, TransformEnv<opposite<bits>>& env);
+      template <Bits> friend class JumpStubBlob;
    };
 
    template <Bits bits>
