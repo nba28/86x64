@@ -109,6 +109,37 @@ _libsys.dlsym.restype = ctypes.c_void_p
 _libsys.dlsym.argtypes = [ctypes.c_void_p, ctypes.c_char_p]
 _libsys.dlopen.restype = ctypes.c_void_p
 _libsys.dlopen.argtypes = [ctypes.c_char_p, ctypes.c_int]
+_libsys.objc_getClass.restype = ctypes.c_void_p
+_libsys.objc_getClass.argtypes = [ctypes.c_char_p]
+
+_objc_fw_loaded = set()
+
+def _ensure_fw_loaded(fw_name):
+    """dlopen a framework into this prober so its PRIVATE ObjC classes register
+    in the runtime — a private class's _OBJC_CLASS_$_ symbol is absent from the
+    export trie, so it is only visible through objc_getClass once loaded."""
+    if not fw_name or fw_name in _objc_fw_loaded:
+        return
+    _objc_fw_loaded.add(fw_name)
+    for cand in (f"/System/Library/Frameworks/{fw_name}.framework/{fw_name}",
+                 f"/System/Library/PrivateFrameworks/{fw_name}.framework/{fw_name}"):
+        if _libsys.dlopen(cand.encode(), 0x1):  # RTLD_LAZY
+            return
+
+def objc_class_live(name, fw_name=None):
+    """True if a class named <name> is ALREADY registered in the host ObjC
+    runtime. A framework's PRIVATE classes (NSFontEffectsBox, NSColorSwatchCell,
+    NSTextViewSharedData, NSFlippableView ...) are live at runtime but their
+    _OBJC_CLASS_$_ symbol is NOT in the export trie, so the dlsym/nm symbol probe
+    wrongly reports them missing. Re-implementing a live class with a duplicate
+    @implementation SHADOWS it and corrupts the runtime (the "Class X is
+    implemented in both ... may cause mysterious crashes" warning, e.g. iPhoto's
+    garbage text/colour metrics). Detect liveness here so the stub can ALIAS the
+    real class instead of registering a duplicate. The prober runs x86_64 (see
+    the re-exec at top), matching the arch the translated app runs under."""
+    for fw in ("AppKit", "Foundation", fw_name):
+        _ensure_fw_loaded(fw)
+    return bool(_libsys.objc_getClass(name.encode()))
 
 def nm_exports(path):
     out = run(["nm", "-gU", path]).stdout
@@ -335,8 +366,26 @@ def gen_stub_source(fw_name, uncovered, index, observed):
         if name in emitted:
             continue
         emitted.add(name)
-        src += ["", f"@interface {name} : NSObject", "@end",
-                f"@implementation {name}", "@end"]
+        if objc_class_live(name, fw_name):
+            # LIVE in the host runtime but its _OBJC_CLASS_$_ symbol is private
+            # (not exported), so the symbol probe marked it missing. A plain
+            # @implementation would register a DUPLICATE class and corrupt the
+            # runtime ("implemented in both"). Define a UNIQUELY-named real class
+            # and ALIAS the _OBJC_CLASS_$_/_OBJC_METACLASS_$_ symbols to it: the
+            # dyld bind still resolves, but the objc runtime registers our
+            # distinct name, so the live host class is never shadowed.
+            fwd = f"{name}_86x64fwd"
+            src += ["", f"@interface {fwd} : NSObject", "@end",
+                    f"@implementation {fwd}", "@end",
+                    "__asm__(",
+                    f'  ".globl _OBJC_CLASS_$_{name}\\n"',
+                    f'  ".set _OBJC_CLASS_$_{name}, _OBJC_CLASS_$_{fwd}\\n"',
+                    f'  ".globl _OBJC_METACLASS_$_{name}\\n"',
+                    f'  ".set _OBJC_METACLASS_$_{name}, _OBJC_METACLASS_$_{fwd}\\n"',
+                    ");"]
+        else:
+            src += ["", f"@interface {name} : NSObject", "@end",
+                    f"@implementation {name}", "@end"]
     for sym in sorted(funcs):
         c = sym.lstrip("_")
         if c in emitted:

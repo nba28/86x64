@@ -160,6 +160,20 @@ void *kFigTrackProperty_UneditedDuration = 0;
 void *kFigTrackProperty_Volume = 0;
 void *kFigUserDataKeyspace = 0;
 
-/* --- ObjC class stubs --- */
-@interface FigCaptionLayer : NSObject @end
-@implementation FigCaptionLayer @end
+/* --- ObjC class stubs ---
+ * FigCaptionLayer is once again LIVE in modern MediaToolbox as a PRIVATE class
+ * (objc_getClass("FigCaptionLayer") != nil); only its _OBJC_CLASS_$_ symbol is
+ * absent from the export trie, so QTKit/CoreMediaAuthoring still bind it here.
+ * Defining a class literally named "FigCaptionLayer" would register a DUPLICATE
+ * and corrupt the runtime ("implemented in both ... mysterious crashes"). Give
+ * the stub a UNIQUE objc name and ALIAS the _OBJC_CLASS_$_/_OBJC_METACLASS_$_
+ * symbols to it: the dyld bind resolves but the live host class is never
+ * shadowed. (Same technique shimgen/shimdb applies to live auto-stub classes.) */
+@interface FigCaptionLayer_86x64fwd : NSObject @end
+@implementation FigCaptionLayer_86x64fwd @end
+__asm__(
+"  .globl _OBJC_CLASS_$_FigCaptionLayer\n"
+"  .set _OBJC_CLASS_$_FigCaptionLayer, _OBJC_CLASS_$_FigCaptionLayer_86x64fwd\n"
+"  .globl _OBJC_METACLASS_$_FigCaptionLayer\n"
+"  .set _OBJC_METACLASS_$_FigCaptionLayer, _OBJC_METACLASS_$_FigCaptionLayer_86x64fwd\n"
+);
