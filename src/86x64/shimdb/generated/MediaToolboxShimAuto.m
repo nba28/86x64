@@ -10,9 +10,7 @@ static void shim_note(const char *sym) {
   for (int i = 0; i < n; i++)
     if (seen[i] == sym) { pthread_mutex_unlock(&mtx); return; }
   if (n < 2048) seen[n++] = sym;
-  fprintf(stderr, "[shimauto:%s] %s: removed-OS symbol CALLED with no curated impl -- returning 0 (write one in shimdb/impl/ if its behavior matters)\n", "AppKit", sym);
+  fprintf(stderr, "[shimauto:%s] %s: removed-OS symbol CALLED with no curated impl -- returning 0 (write one in shimdb/impl/ if its behavior matters)\n", "MediaToolbox", sym);
   if (getenv("SHIMGEN_STUB_ABORT")) abort();
   pthread_mutex_unlock(&mtx);
 }
-
-long NSCreateShapeForRoundedWindow(long a, long b, long c_, long d, long e, long f) { shim_note("NSCreateShapeForRoundedWindow"); return 0; }

@@ -1,22 +1,24 @@
 #import <Cocoa/Cocoa.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
 
-static void shim_note(const char *s) { fprintf(stderr, "[shimauto:%s] %s\n", "VideoToolbox", s); }
+static void shim_note(const char *sym) {
+  static const char *seen[2048]; static int n;
+  static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&mtx);
+  for (int i = 0; i < n; i++)
+    if (seen[i] == sym) { pthread_mutex_unlock(&mtx); return; }
+  if (n < 2048) seen[n++] = sym;
+  fprintf(stderr, "[shimauto:%s] %s: removed-OS symbol CALLED with no curated impl -- returning 0 (write one in shimdb/impl/ if its behavior matters)\n", "VideoToolbox", sym);
+  if (getenv("SHIMGEN_STUB_ABORT")) abort();
+  pthread_mutex_unlock(&mtx);
+}
 
-long kVTProfileLevel_H264_Baseline_1_3(long a, long b, long c_, long d, long e, long f) { shim_note("kVTProfileLevel_H264_Baseline_1_3 called (auto-stub)"); return 0; }
+long VTCompressionSessionRelease(long a, long b, long c_, long d, long e, long f) { shim_note("VTCompressionSessionRelease"); return 0; }
 
-long kVTProfileLevel_H264_Baseline_3_0(long a, long b, long c_, long d, long e, long f) { shim_note("kVTProfileLevel_H264_Baseline_3_0 called (auto-stub)"); return 0; }
+long VTDecompressionSessionRelease(long a, long b, long c_, long d, long e, long f) { shim_note("VTDecompressionSessionRelease"); return 0; }
 
-long kVTProfileLevel_H264_Extended_5_0(long a, long b, long c_, long d, long e, long f) { shim_note("kVTProfileLevel_H264_Extended_5_0 called (auto-stub)"); return 0; }
+long VTPixelTransferSessionRelease(long a, long b, long c_, long d, long e, long f) { shim_note("VTPixelTransferSessionRelease"); return 0; }
 
-long kVTProfileLevel_H264_High_5_0(long a, long b, long c_, long d, long e, long f) { shim_note("kVTProfileLevel_H264_High_5_0 called (auto-stub)"); return 0; }
-
-long kVTProfileLevel_H264_Main_3_0(long a, long b, long c_, long d, long e, long f) { shim_note("kVTProfileLevel_H264_Main_3_0 called (auto-stub)"); return 0; }
-
-long kVTProfileLevel_H264_Main_3_1(long a, long b, long c_, long d, long e, long f) { shim_note("kVTProfileLevel_H264_Main_3_1 called (auto-stub)"); return 0; }
-
-long kVTProfileLevel_H264_Main_4_0(long a, long b, long c_, long d, long e, long f) { shim_note("kVTProfileLevel_H264_Main_4_0 called (auto-stub)"); return 0; }
-
-long kVTProfileLevel_H264_Main_4_1(long a, long b, long c_, long d, long e, long f) { shim_note("kVTProfileLevel_H264_Main_4_1 called (auto-stub)"); return 0; }
-
-long kVTProfileLevel_H264_Main_5_0(long a, long b, long c_, long d, long e, long f) { shim_note("kVTProfileLevel_H264_Main_5_0 called (auto-stub)"); return 0; }
+long kVTDecompressionPropertyKey_CPECryptor(long a, long b, long c_, long d, long e, long f) { shim_note("kVTDecompressionPropertyKey_CPECryptor"); return 0; }

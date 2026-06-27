@@ -15,6 +15,14 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_AVRouteDescription_HasFeature": {
+  "first_seen_fw": "MediaControlSender",
+  "stub": "function"
+ },
+ "_AVSystemController_CopyProperty": {
+  "first_seen_fw": "MediaControlSender",
+  "stub": "function"
+ },
  "_AddIconToSuite": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
@@ -247,6 +255,10 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
+ "_FigAudioFormatDescriptionCreate": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
  "_FigAudioFormatDescriptionGetChannelLayout": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
@@ -256,6 +268,10 @@
   "stub": "function"
  },
  "_FigAudioFormatDescriptionGetMagicCookie": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigAudioFormatDescriptionGetStreamBasicDescription": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
@@ -279,6 +295,10 @@
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
+ "_FigBlockBufferCopyDataBytes": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
  "_FigBlockBufferCreateWithMemoryBlock": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
@@ -291,11 +311,19 @@
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
+ "_FigBlockBufferIsRangeContiguous": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
  "_FigBlockBufferRelease": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
  "_FigBlockBufferRetain": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBlockBufferToSimpleBBufCopy": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
@@ -331,6 +359,14 @@
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
+ "_FigBufferQueueGetHead": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigBufferQueueInstallTriggerWithIntegerThreshold": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
  "_FigBufferQueueIsAtEndOfData": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
@@ -351,7 +387,31 @@
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
+ "_FigByteStreamBaseGetTypeID": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigByteStreamGetFigBaseObject": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigCPEGetClassID": {
+  "first_seen_fw": "MediaToolbox",
+  "stub": "function"
+ },
+ "_FigCopyDictionaryOfAttachments": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
  "_FigDerivedObjectCreate": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigFormatDescriptionCreate": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigFormatDescriptionGetExtension": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
@@ -363,6 +423,10 @@
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
+ "_FigFormatDescriptionGetMediaType": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
  "_FigFormatDescriptionRelease": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
@@ -371,8 +435,28 @@
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
+ "_FigGetAttachment": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigNotificationCenterAddListener": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
  "_FigNotificationCenterCreate": {
   "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigNotificationCenterPostNotification": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigNotificationCenterRemoveListener": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigPlayerFigCreate": {
+  "first_seen_fw": "MediaToolbox",
   "stub": "function"
  },
  "_FigRegistryAddSearchPath": {
@@ -403,7 +487,15 @@
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
+ "_FigRemoveAttachment": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
  "_FigSampleBufferCreate": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferCreateCopyWithNewTiming": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
@@ -415,11 +507,23 @@
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
+ "_FigSampleBufferGetAudioBufferListWithRetainedBlockBuffer": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
  "_FigSampleBufferGetAudioStreamPacketDescriptions": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
+ "_FigSampleBufferGetAudioStreamPacketDescriptionsPtr": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
  "_FigSampleBufferGetDataBuffer": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferGetDuration": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
@@ -428,6 +532,10 @@
   "stub": "function"
  },
  "_FigSampleBufferGetImageBuffer": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferGetNumSamples": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
@@ -451,6 +559,14 @@
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
+ "_FigSampleBufferGetSampleSizeArray": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferGetSampleTimingInfoArray": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
  "_FigSampleBufferRelease": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
@@ -460,6 +576,22 @@
   "stub": "function"
  },
  "_FigSampleBufferSetDataBufferFromAudioBufferList": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleBufferSetOutputPresentationTimeStamp": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSampleGeneratorCreateForFormatReaderWithByteStream": {
+  "first_seen_fw": "MediaToolbox",
+  "stub": "function"
+ },
+ "_FigSetAttachment": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigSetAttachments": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
@@ -503,6 +635,14 @@
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
+ "_FigTrackReaderGetFigBaseObject": {
+  "first_seen_fw": "MediaToolboxShim",
+  "stub": "function"
+ },
+ "_FigVideoFormatDescriptionCreate": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
  "_FigVideoFormatDescriptionCreateForImageBuffer": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
@@ -512,6 +652,10 @@
   "stub": "function"
  },
  "_FigVideoFormatDescriptionGetExtensionKeysCommonWithImageBuffers": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_FigVideoFormatDescriptionGetPresentationDimensions": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
@@ -537,6 +681,10 @@
  },
  "_GetAppFont": {
   "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetApplicationTextEncoding": {
+  "first_seen_fw": "CarbonShim",
   "stub": "function"
  },
  "_GetBackColor": {
@@ -775,9 +923,85 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_OBJC_CLASS_$_QTCaptureDevice": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_class"
+ },
+ "_OBJC_CLASS_$_QTHUDBackgroundView": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_class"
+ },
+ "_OBJC_CLASS_$_QTHUDButtonCell": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_class"
+ },
+ "_OBJC_CLASS_$_QTHUDPopUpButtonCell": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_class"
+ },
+ "_OBJC_CLASS_$_QTHUDSlider": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_class"
+ },
+ "_OBJC_CLASS_$_QTHUDTimeFormatter": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_class"
+ },
+ "_OBJC_CLASS_$_QTHUDTimelineCell": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_class"
+ },
+ "_OBJC_CLASS_$_QTMovie": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_class"
+ },
+ "_OBJC_CLASS_$_QTMovieLayer": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_class"
+ },
+ "_OBJC_CLASS_$_QTMoviePlaybackController": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_class"
+ },
+ "_OBJC_CLASS_$_QTMovieView": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_class"
+ },
+ "_OBJC_CLASS_$_QTMutableMetadataItem": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_class"
+ },
  "_OBJC_EHTYPE_id": {
   "first_seen_fw": "libobjc.A.dylib",
   "stub": "function"
+ },
+ "_OBJC_METACLASS_$_QTHUDBackgroundView": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_metaclass"
+ },
+ "_OBJC_METACLASS_$_QTHUDButtonCell": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_metaclass"
+ },
+ "_OBJC_METACLASS_$_QTHUDPopUpButtonCell": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_metaclass"
+ },
+ "_OBJC_METACLASS_$_QTHUDSlider": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_metaclass"
+ },
+ "_OBJC_METACLASS_$_QTHUDTimelineCell": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_metaclass"
+ },
+ "_OBJC_METACLASS_$_QTMoviePlaybackController": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_metaclass"
+ },
+ "_OBJC_METACLASS_$_QTMovieView": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "objc_metaclass"
  },
  "_OKAO_CreateAlbum": {
   "first_seen_fw": "eOkaoFr.dylib",
@@ -1103,6 +1327,442 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_QTAlternates_LanguageCodeEncoding_ISO_639_2T": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTAlternates_LanguageCodeEncoding_MacType_LangCode": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTAlternates_LanguageCodeEncoding_RFC_4646": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTAlternates_QTTrack": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTAlternates_TrackIsAutoExcluded": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTGetComponentsFromRationalTime": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTGetTimeInterval": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTHUDTimeFormatterComponentDays": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTHUDTimeFormatterComponentHours": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTHUDTimeFormatterComponentMinutes": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTHUDTimeFormatterComponentSeconds": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTIndefiniteTime": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTIntersectionTimeRange": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTLocalizedStringFromErrorCode": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMakeTime": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMakeTimeRange": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMakeTimeScaled": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMakeTimeWithTimeInterval": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaCharacteristicVisual": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaType3D": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeClosedCaption": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeFlash": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeMPEG": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeMovie": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeMusic": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeQTVR": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeSkin": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeSound": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeSprite": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeStream": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeSubtitle": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeText": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeTween": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMediaTypeVideo": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieAllowDRMContentAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieApertureModeAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieApertureModeClean": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieAvailableRangesAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieChapterListDidChangeNotification": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieChapterName": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieChapterStartTime": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieDisplayNameAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieEditedNotification": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieEnableForkedH264DecodingAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieHasVideoAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieInteractivityFeatureHyperlinks": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieInteractivityFeaturesAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieIsLinearAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieIsSteppableAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieLoadStateAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieLoadStateDidChangeNotification": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieLoadStateErrorAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieLoopsAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieMessageNotificationParameter": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieMessageStringPostedNotification": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieMissingComponentsOptionsComponentsToIgnoreData": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieMissingComponentsOptionsConsiderAllTracks": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieMissingComponentsResultComponentsData": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieMissingComponentsResultMediaType": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieNaturalSizeAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieNaturalSizeDidChangeNotification": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieOpenForPlaybackAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieRateDidChangeNotification": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieRateDidChangeNotificationParameter": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieStatusCodeNotificationParameter": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieStatusFlagsNotificationParameter": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieStatusStringNotificationParameter": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieStatusStringPostedNotification": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieURLAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTMovieUsesHardwareVideoDecoderAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTOSTypeForString": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTSecurityPolicyBlockAllWiredActionsAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTSecurityPolicyNoRemoteToLocalSiteAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTStringForOSType": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTStringFromTime": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTTimeCompare": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTTimeDecrement": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTTimeInTimeRange": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTTimeIncrement": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTTimeIsIndefinite": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTTimeRangeEnd": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTTimeRangeFromString": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTTrackDeinterlaceVideoAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTTrackDisplayNameAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTTrackHighQualityVideoAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTTrackIDAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTTrackIsChapterTrackAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTTrackMediaTypeAttribute": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIDraw": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIIsFlippedKey": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIIsFocusedKey": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUISizeKey": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUISizeMini": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUISizeRegular": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUISizeSmall": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIStateActive": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIStateDisabled": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIStateKey": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIStatePressed": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIValueKey": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIWidgetBackground": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIWidgetBackgroundHighlightedFractionKey": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIWidgetKey": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIWidgetSlider": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIWidgetSliderDrawOutlineKey": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIWidgetSliderHighlightedRangesKey": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIWidgetSliderIndicatorOnlyKey": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTUIWidgetSliderNoIndicatorKey": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
+ "_QTZeroTime": {
+  "first_seen_fw": "QTKitShim",
+  "stub": "function"
+ },
  "_RFExportCreateCopy": {
   "first_seen_fw": "CoreMediaAuthoring",
   "stub": "function"
@@ -1215,6 +1875,18 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
+ "_VTCompressionSessionRelease": {
+  "first_seen_fw": "VideoToolbox",
+  "stub": "function"
+ },
+ "_VTDecompressionSessionRelease": {
+  "first_seen_fw": "VideoToolbox",
+  "stub": "function"
+ },
+ "_VTPixelTransferSessionRelease": {
+  "first_seen_fw": "VideoToolbox",
+  "stub": "function"
+ },
  "_XPCOAssortmentAssortmentsKey": {
   "first_seen_fw": "ExpressCheckout",
   "stub": "function"
@@ -1253,6 +1925,10 @@
  },
  "__NSConcreteStackBlock": {
   "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "__NSCreateShapeForRoundedWindow": {
+  "first_seen_fw": "AppKit",
   "stub": "function"
  },
  "__NSReadThemeImageFromRsrc": {
@@ -5259,6 +5935,10 @@
   "first_seen_fw": "Accelerate",
   "stub": "function"
  },
+ "_ctoz": {
+  "first_seen_fw": "vecLib",
+  "stub": "function"
+ },
  "_destroy_fftsetup": {
   "first_seen_fw": "Accelerate",
   "stub": "function"
@@ -5385,6 +6065,14 @@
  },
  "_fft2d_zip": {
   "first_seen_fw": "Accelerate",
+  "stub": "function"
+ },
+ "_fft_zip": {
+  "first_seen_fw": "vecLib",
+  "stub": "function"
+ },
+ "_fft_zop": {
+  "first_seen_fw": "vecLib",
   "stub": "function"
  },
  "_fgets": {
@@ -5569,6 +6257,126 @@
  },
  "_ioctl": {
   "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_kAVRouteFeature_AirPlayScreen": {
+  "first_seen_fw": "MediaControlSender",
+  "stub": "function"
+ },
+ "_kAVSystemControllerProperty_PickedRoute": {
+  "first_seen_fw": "MediaControlSender",
+  "stub": "function"
+ },
+ "_kFigByteStreamProperty_URL": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigFormatDescriptionExtension_BytesPerRow": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigFormatDescriptionExtension_SampleDescriptionExtensionAtoms": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigFormatDescriptionExtension_VerbatimSampleDescription": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigFormatDescriptionTransferFunction_SMPTE_240M_1995": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigFormatDescriptionTransferFunction_UseGamma": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigFormatWriterOption_FileFormat_QuickTimeMovie": {
+  "first_seen_fw": "MediaToolboxShim",
+  "stub": "function"
+ },
+ "_kFigFormatWriterOption_FileFormat_iTunesFamily": {
+  "first_seen_fw": "MediaToolboxShim",
+  "stub": "function"
+ },
+ "_kFigMetadataItemProperty_Key": {
+  "first_seen_fw": "MediaToolboxShim",
+  "stub": "function"
+ },
+ "_kFigMetadataItemProperty_Keyspace": {
+  "first_seen_fw": "MediaToolboxShim",
+  "stub": "function"
+ },
+ "_kFigMetadataItemProperty_Locale": {
+  "first_seen_fw": "MediaToolboxShim",
+  "stub": "function"
+ },
+ "_kFigPlaybackItemImageOptionsKey_ApertureMode": {
+  "first_seen_fw": "MediaToolbox",
+  "stub": "function"
+ },
+ "_kFigPlaybackItemImageOptionsKey_Deinterlaced": {
+  "first_seen_fw": "MediaToolbox",
+  "stub": "function"
+ },
+ "_kFigPlaybackItemImageOptionsKey_HighQuality": {
+  "first_seen_fw": "MediaToolbox",
+  "stub": "function"
+ },
+ "_kFigPlaybackItemImageOptionsKey_MaxHeight": {
+  "first_seen_fw": "MediaToolbox",
+  "stub": "function"
+ },
+ "_kFigPlaybackItemImageOptionsKey_MaxWidth": {
+  "first_seen_fw": "MediaToolbox",
+  "stub": "function"
+ },
+ "_kFigSampleAttachmentKey_DoNotDisplay": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigSampleAttachmentKey_IsDependedOnByOthers": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigSampleAttachmentKey_NotSync": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigSampleAttachmentKey_PartialSync": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigSampleBufferAttachmentKey_SpeedMultiplier": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigSampleBufferAttachmentKey_TrimDurationAtEnd": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigSampleBufferAttachmentKey_TrimDurationAtStart": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigTimeInvalid": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigTimePositiveInfinity": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigTimeZero": {
+  "first_seen_fw": "CoreMedia",
+  "stub": "function"
+ },
+ "_kFigTrackProperty_Enabled": {
+  "first_seen_fw": "MediaToolboxShim",
+  "stub": "function"
+ },
+ "_kFigTrackProperty_UneditedDuration": {
+  "first_seen_fw": "MediaToolboxShim",
   "stub": "function"
  },
  "_kMEQTMovieOptions": {
@@ -5793,6 +6601,10 @@
  },
  "_kRFExportOption_UseQTSourceAlways": {
   "first_seen_fw": "CoreMediaAuthoring",
+  "stub": "function"
+ },
+ "_kVTDecompressionPropertyKey_CPECryptor": {
+  "first_seen_fw": "VideoToolbox",
   "stub": "function"
  },
  "_kVTProfileLevel_H264_Baseline_1_3": {
@@ -6747,6 +7559,10 @@
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
  },
+ "_vadd": {
+  "first_seen_fw": "vecLib",
+  "stub": "function"
+ },
  "_valloc": {
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
@@ -6765,6 +7581,10 @@
  },
  "_vm_region_64": {
   "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_vmul": {
+  "first_seen_fw": "vecLib",
   "stub": "function"
  },
  "_voucher_mach_msg_set": {
@@ -6853,6 +7673,10 @@
  },
  "_xpc_retain": {
   "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_ztoc": {
+  "first_seen_fw": "vecLib",
   "stub": "function"
  },
  "_zvmul": {
