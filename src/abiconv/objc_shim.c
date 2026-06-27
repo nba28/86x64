@@ -2881,6 +2881,10 @@ static int bp_track_tag(struct objc_call_plan *plan, const uint32_t *args32,
    return 1;
 }
 
+/* Forward decl: answer conformsToProtocol: from a legacy class's OWN i386
+ * __OBJC protocol metadata (defined after the legacy registry below). */
+static int legacy_class_conforms(const char *clsname, const char *qname, int depth);
+
 /* conformsToProtocol: with a LEGACY i386 Protocol argument. The app's own
  * @protocol(...) objects live in its i386 __OBJC with the fragile-ABI layout
  * { Class isa; const char *name; struct protocol_list*; method_desc_list*
@@ -2888,11 +2892,19 @@ static int bp_track_tag(struct objc_call_plan *plan, const uint32_t *args32,
  * Protocol object. Passing one straight to native -[NSObject conformsToProtocol:]
  * makes libobjc strcmp a garbage name pointer -> crash (iPhoto AlbumView/AVSection
  * data-source wiring). Resolve it to the modern Protocol by NAME
- * (objc_getProtocol) and ask natively; an app-private protocol the modern runtime
- * never registered yields NO (safe: a reverse-registered class adopts no native
- * protocols anyway, and NO beats a crash). A protocol passed as an arena handle
- * (a wrapped native Protocol) unwraps directly. Universal: any i386 app calling
- * conformsToProtocol:. Keyed on the selector like bp_track_tag/bp_fast_enum. */
+ * (objc_getProtocol) and ask natively.
+ *
+ * A reverse-registered legacy class adopts its protocols (interface- AND
+ * category-declared) only in its OWN i386 __OBJC metadata — reverse_register_one
+ * never tells libobjc about them — so the native conformsToProtocol: returns NO
+ * for any app-declared protocol. When the native answer is NO we therefore fall
+ * back to legacy_class_conforms(), which walks the receiver's legacy class +
+ * its categories + legacy-super chain protocol lists BY NAME. This makes
+ * conformance to the app's own protocols (the common case) report YES while
+ * still preferring the authoritative native answer (e.g. NSObject protocol,
+ * a genuinely native-adopted protocol) when it says YES. A protocol passed as
+ * an arena handle (a wrapped native Protocol) unwraps directly. Universal: any
+ * i386 app calling conformsToProtocol:. Keyed on the selector. */
 static int bp_conforms_protocol(struct objc_call_plan *plan, const uint32_t *args32,
                                 id real_self, SEL sel) {
    static SEL s_conforms;
@@ -2905,22 +2917,35 @@ static int bp_conforms_protocol(struct objc_call_plan *plan, const uint32_t *arg
 
    uint32_t prot32 = args32[2];
    Protocol *p = NULL;
+   const char *qname = NULL;                         /* queried protocol NAME */
    uint64_t r = x64_objc_unwrap(prot32);            /* arena handle -> native ptr */
    if (r > 0xFFFFFFFFULL) {
       p = (Protocol *)(uintptr_t)r;                 /* already a modern Protocol */
+      qname = protocol_getName(p);
    } else if (prot32 && mem_readable((uintptr_t)prot32 + 4, 4)) {
       uint32_t name_ptr = *(const uint32_t *)(uintptr_t)(prot32 + 4);
-      if (name_ptr && mem_readable(name_ptr, 1))
-         p = objc_getProtocol((const char *)(uintptr_t)name_ptr);
+      if (name_ptr && mem_readable(name_ptr, 1)) {
+         qname = (const char *)(uintptr_t)name_ptr;
+         p = objc_getProtocol(qname);
+      }
    }
 
    int conforms = 0;
    if (p && real_self)
       conforms = ((BOOL (*)(id, SEL, Protocol *))objc_msgSend)(real_self, sel, p) ? 1 : 0;
 
+   /* libobjc said NO (or never heard of the protocol) — consult the receiver's
+    * own legacy __OBJC adoption list by name. */
+   if (!conforms && qname && real_self) {
+      Class c = object_getClass(real_self);
+      const char *cn = c ? class_getName(c) : NULL;
+      if (cn && legacy_class_conforms(cn, qname, 0))
+         conforms = 1;
+   }
+
    if (getenv("OBJC_BRIDGE_TRACE")) {
       fprintf(stderr, "[bp] conformsToProtocol: prot32=0x%x -> %p (%s) = %d\n",
-              prot32, (void *)p, p ? protocol_getName(p) : "(unresolved)", conforms);
+              prot32, (void *)p, qname ? qname : "(unresolved)", conforms);
       fflush(stderr);
    }
    plan->nreg = 1;
@@ -3652,6 +3677,69 @@ static uint64_t find_category_class_method(const char *clsname, const char *sel_
       if (strcmp(cn, clsname) == 0) {
          uint64_t imp = find_method_in_lists(cat->class_methods, sel_name);
          if (imp) { return imp; }
+      }
+   }
+   return 0;
+}
+
+/* Walk a legacy (fragile-ABI) objc_protocol_list — { protocol_list *next;
+ * long count; Protocol *list[count]; }, all 4-byte i386 fields — returning 1
+ * if any protocol it holds (or, transitively, any protocol THOSE incorporate)
+ * is named qname. Each protocol is { Class isa; char *name; protocol_list
+ * *incorporated; ... } with name at +4 and incorporated list at +8. The
+ * structures live in the app's own i386 __OBJC; every deref is ptr_ok-guarded
+ * because a 15-year-old binary's metadata carries junk. Recursion is bounded
+ * (incorporated-protocol / next-chain cycles). */
+static int legacy_plist_has(uint32_t plist, const char *qname, int depth) {
+   if (!qname || depth > 8) { return 0; }
+   if (!ptr_ok(plist, 8)) { return 0; }
+   const uint32_t *pl = (const uint32_t *)(uintptr_t)plist;
+   int32_t count = (int32_t)pl[1];
+   if (count <= 0 || count > 4096) {
+      /* still follow a chained next list even on a junk count */
+      uint32_t nx = pl[0];
+      return (nx && nx != plist) ? legacy_plist_has(nx, qname, depth + 1) : 0;
+   }
+   if (!ptr_ok(plist + 8, (size_t)count * 4)) { return 0; }
+   const uint32_t *list = pl + 2;
+   for (int i = 0; i < count; ++i) {
+      uint32_t proto = list[i];
+      if (!ptr_ok(proto, 12)) { continue; }
+      const uint32_t *pr = (const uint32_t *)(uintptr_t)proto;
+      uint32_t nameptr = pr[1];                 /* +4 protocol_name */
+      if (ptr_ok(nameptr, 1) &&
+          strcmp((const char *)(uintptr_t)nameptr, qname) == 0) { return 1; }
+      uint32_t incorporated = pr[2];            /* +8 adopted-protocol list */
+      if (incorporated && legacy_plist_has(incorporated, qname, depth + 1)) { return 1; }
+   }
+   uint32_t next = pl[0];
+   if (next && next != plist && legacy_plist_has(next, qname, depth + 1)) { return 1; }
+   return 0;
+}
+
+/* Does the legacy class `clsname` (or one of its categories, or a legacy
+ * superclass) adopt a protocol named `qname`? Mirrors the legacy super-chain
+ * walk of legacy_class_method_imp_byname: super_class holds the super-NAME
+ * cstring pre-fixup, and the chain stops at the first framework class (registry
+ * miss) — protocols a native superclass adopts are already answered by the
+ * native conformsToProtocol: check in bp_conforms_protocol. */
+static int legacy_class_conforms(const char *clsname, const char *qname, int depth) {
+   if (!clsname || !qname || depth > 64) { return 0; }
+   const struct legacy_objc_class *c = legacy_registry_lookup(clsname);
+   if (c && ptr_ok((uintptr_t)c, sizeof(*c)) && c->protocols &&
+       legacy_plist_has(c->protocols, qname, 0)) { return 1; }
+   /* categories on this class declare conformance in their own protocols field */
+   for (uint32_t i = 0; i < g_legacy_cat_cnt; ++i) {
+      const struct legacy_objc_category *cat = g_legacy_cats[i];
+      if (!cat || !ptr_ok(cat->class_name, 1)) { continue; }
+      if (strcmp((const char *)(uintptr_t)cat->class_name, clsname) != 0) { continue; }
+      if (cat->protocols && legacy_plist_has(cat->protocols, qname, 0)) { return 1; }
+   }
+   /* legacy superclass chain */
+   if (c && ptr_ok(c->super_class, 1)) {
+      const char *sup = (const char *)(uintptr_t)c->super_class;
+      if (strcmp(sup, clsname) != 0) {
+         return legacy_class_conforms(sup, qname, depth + 1);
       }
    }
    return 0;
