@@ -57,6 +57,15 @@ extern void _86x64_objc_index_legacy_classes(const struct mach_header_64 *mh,
 extern void _86x64_objc_register_classes(const struct mach_header_64 *mh,
                                          intptr_t slide);
 
+/* Classic __DATA,__dyld crt-bootstrap shims (dyld_func_lookup.asm). The crt's
+ * func_lookup slot is redirected to _86x64_dyld_func_lookup, which writes the
+ * address of _86x64_dyld_noop into the crt's out-parameter so the bootstrap is
+ * harmlessly satisfied with the i386 cdecl stack ABI (vs. dyld's native
+ * legacyDyldLookup4OldBinaries reading args from registers -> NULL write). See
+ * patch_dyld_section below. */
+extern void _86x64_dyld_func_lookup(void);
+extern void _86x64_dyld_noop(void);
+
 /* ---------------------------------------------------------------------------
  * Low-4GB stack for translated static initializers (see the init high-stack bug
  * and init_trampoline.asm). dyld runs __mod_init_func initializers before the
@@ -701,6 +710,75 @@ static void bind_external_relocs(const struct mach_header_64 *mh64, intptr_t sli
    }
 }
 
+/* Neutralize the classic __DATA,__dyld crt bootstrap of a pre-10.5 i386 binary.
+ *
+ * Old crt1.o __start tail-jumps through the 8-byte __DATA,__dyld section (two
+ * 4-byte slots: [+0]=lazy-symbol-binder, [+4]=dyld_func_lookup) to ask dyld for
+ * __dyld_make_delayed_module_initializer_calls / __dyld_mod_term_funcs, passing
+ * the name + an out-pointer on the i386 cdecl STACK. dyld, treating the image as
+ * legacy, points the func_lookup slot at native legacyDyldLookup4OldBinaries,
+ * which reads its args from registers (x86_64 ABI) — garbage — and writes the
+ * looked-up fp through the garbage out-pointer -> SIGSEGV writing 0x0 (Halo CE,
+ * Civ IV). Our own runtime (wrapper + slide_objc + ABICONV_RUN_INITS) already
+ * performs that legacy bootstrap, so we overwrite the slots to route the crt's
+ * func_lookup into our i386-cdecl-honoring shim (dyld_func_lookup.asm), which
+ * satisfies the lookup harmlessly. Defensive: the lazy-binder slot is pointed at
+ * a no-op too (translated binaries don't use classic lazy binding, and the static
+ * placeholder 0x8fe01000 would fault).
+ *
+ * Universal: triggers on the structural presence of __DATA,__dyld, not an app
+ * name. Runs from the add-image callback (before dyld's findAndRunAllInitializers
+ * reaches the crt, and before slide_objc runs the collected init funcs in
+ * RUN_INITS mode), so the slot is patched before the crt ever reads it.
+ * Idempotent: re-running writes the same shim addresses. */
+static void patch_dyld_section(const struct mach_header_64 *mh64, intptr_t slide,
+                               const char *imgname) {
+   /* The crt reads the slots with a 32-bit `movl (slot),%eax` and tail-jumps via
+    * `jmpq *%rax`, so our shim addresses must fit in 32 bits — i.e. libabiconv
+    * must map <4GB (it normally does; see init_stack_setup). If somehow not, bail
+    * and leave dyld's (buggy) native handler rather than write a truncated addr. */
+   if (((uintptr_t)&_86x64_dyld_func_lookup >> 32) ||
+       ((uintptr_t)&_86x64_dyld_noop >> 32)) {
+      if (g_verbose) {
+         fprintf(stderr, "abiconv dyld_section: libabiconv mapped >4GB; __dyld "
+                 "patch disabled for %s\n", imgname);
+      }
+      return;
+   }
+   const uint8_t *p = (const uint8_t *)(mh64 + 1);
+   for (uint32_t i = 0; i < mh64->ncmds; i++) {
+      const struct load_command *lc = (const struct load_command *)p;
+      if (lc->cmd == LC_SEGMENT_64) {
+         const struct segment_command_64 *seg =
+            (const struct segment_command_64 *)p;
+         const struct section_64 *sect = (const struct section_64 *)(seg + 1);
+         for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
+            if (strncmp(sect->sectname, "__dyld", 16) != 0) { continue; }
+            if (sect->size < 8) { continue; }
+            uint8_t *base = (uint8_t *)(uintptr_t)(sect->addr + slide);
+            uintptr_t pg = (uintptr_t)base & ~(uintptr_t)0xfff;
+            if (mprotect((void *)pg, 0x1000, PROT_READ | PROT_WRITE) != 0) {
+               if (g_verbose) {
+                  fprintf(stderr, "abiconv dyld_section: mprotect failed for "
+                          "%s: %s\n", imgname, strerror(errno));
+               }
+               continue;
+            }
+            uint32_t *slot = (uint32_t *)base;
+            slot[0] = (uint32_t)(uintptr_t)&_86x64_dyld_noop;        /* lazy binder */
+            slot[1] = (uint32_t)(uintptr_t)&_86x64_dyld_func_lookup; /* func lookup */
+            if (g_verbose) {
+               fprintf(stderr, "abiconv dyld_section: patched __DATA,__dyld in "
+                       "%s (noop=%p lookup=%p)\n", imgname,
+                       (void *)&_86x64_dyld_noop,
+                       (void *)&_86x64_dyld_func_lookup);
+            }
+         }
+      }
+      p += lc->cmdsize;
+   }
+}
+
 static void slide_objc(const struct mach_header *mh, intptr_t slide);
 
 /* Bottom-up dependency ordering for the run-inits path: before an image's
@@ -810,6 +888,12 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
        * static ctor dereferences them. Universal: triggers only on the presence
        * of the macho-tool-emitted section. */
       bind_external_relocs(mh64, slide, imgname);
+      /* Neutralize the classic __DATA,__dyld crt bootstrap (pre-10.5 i386
+       * binaries) before the crt's func_lookup is reached — by dyld's init pass
+       * (default mode) or by the collected init funcs run at the end of this
+       * function (ABICONV_RUN_INITS). Universal: triggers only on the structural
+       * presence of __DATA,__dyld. */
+      patch_dyld_section(mh64, slide, imgname);
    }
 
    /* the legacy-ObjC1 fixups below are __OBJC-only, but the collected

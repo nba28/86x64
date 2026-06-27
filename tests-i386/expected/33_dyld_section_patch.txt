@@ -1,0 +1,2 @@
+dyld __dyld patched: yes
+exit_code: 0

@@ -326,6 +326,7 @@ add_library(abiconv SHARED
   init_trampoline.asm
   maptable_tramp.asm
   dyld_stub_binder.asm
+  dyld_func_lookup.asm
   )
 # -undefined dynamic_lookup lets file_shim.c reference symbols defined by
 # the wrapper executable (_86x64_stderr_shim, _86x64_alloc_low_4gb) that
