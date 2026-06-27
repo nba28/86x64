@@ -92,6 +92,33 @@
 	MTSHIM	___pthread_getspecific,       _shim_pthread_getspecific
 	MTSHIM	___pthread_setspecific,       _shim_pthread_setspecific
 
+	;; pthread SYNCHRONIZATION primitives (mutex/cond/rwlock). abigen marshals
+	;; these BY VALUE (copy the i386 struct into a native stack buffer, call
+	;; native pthread on the COPY, copy back) — fatal for kernel-backed sync
+	;; handles, which require ONE stable shared address across threads (cross-
+	;; thread lock handoff + cond signal/wait rendezvous are lost -> deadlock;
+	;; Portal 2 CThreadPool startup). pthread_sync_shim.c keeps a stable native
+	;; object per i386 object. tests-i386/35. Universal (any multithreaded i386).
+	MTSHIM	___pthread_mutex_init,        _shim_pthread_mutex_init
+	MTSHIM	___pthread_mutex_lock,        _shim_pthread_mutex_lock
+	MTSHIM	___pthread_mutex_trylock,     _shim_pthread_mutex_trylock
+	MTSHIM	___pthread_mutex_unlock,      _shim_pthread_mutex_unlock
+	MTSHIM	___pthread_mutex_destroy,     _shim_pthread_mutex_destroy
+	MTSHIM	___pthread_cond_init,         _shim_pthread_cond_init
+	MTSHIM	___pthread_cond_wait,         _shim_pthread_cond_wait
+	MTSHIM	___pthread_cond_timedwait,    _shim_pthread_cond_timedwait
+	MTSHIM	___pthread_cond_timedwait_relative_np, _shim_pthread_cond_timedwait_relative_np
+	MTSHIM	___pthread_cond_signal,       _shim_pthread_cond_signal
+	MTSHIM	___pthread_cond_broadcast,    _shim_pthread_cond_broadcast
+	MTSHIM	___pthread_cond_destroy,      _shim_pthread_cond_destroy
+	MTSHIM	___pthread_rwlock_init,       _shim_pthread_rwlock_init
+	MTSHIM	___pthread_rwlock_rdlock,     _shim_pthread_rwlock_rdlock
+	MTSHIM	___pthread_rwlock_wrlock,     _shim_pthread_rwlock_wrlock
+	MTSHIM	___pthread_rwlock_tryrdlock,  _shim_pthread_rwlock_tryrdlock
+	MTSHIM	___pthread_rwlock_trywrlock,  _shim_pthread_rwlock_trywrlock
+	MTSHIM	___pthread_rwlock_unlock,     _shim_pthread_rwlock_unlock
+	MTSHIM	___pthread_rwlock_destroy,    _shim_pthread_rwlock_destroy
+
 	;; Carbon Process Manager: ProcessInfoRec embeds pointers (i386/x86_64
 	;; layouts differ) and is in/out — abigen can't marshal it. proc_shim.c.
 	MTSHIM	___GetProcessInformation,     _shim_GetProcessInformation

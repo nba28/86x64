@@ -32,6 +32,30 @@ _dlerror
 _pthread_getspecific
 _pthread_setspecific
 
+# pthread SYNCHRONIZATION primitives (pthread_sync_shim.c). abigen's by-value
+# marshalling of these kernel-backed handles loses cross-thread identity ->
+# deadlock at the first real contention (Portal 2 thread pool). Hand-shimmed to
+# keep one stable native object per i386 object. See maptable_tramp.asm + 35.
+_pthread_mutex_init
+_pthread_mutex_lock
+_pthread_mutex_trylock
+_pthread_mutex_unlock
+_pthread_mutex_destroy
+_pthread_cond_init
+_pthread_cond_wait
+_pthread_cond_timedwait
+_pthread_cond_timedwait_relative_np
+_pthread_cond_signal
+_pthread_cond_broadcast
+_pthread_cond_destroy
+_pthread_rwlock_init
+_pthread_rwlock_rdlock
+_pthread_rwlock_wrlock
+_pthread_rwlock_tryrdlock
+_pthread_rwlock_trywrlock
+_pthread_rwlock_unlock
+_pthread_rwlock_destroy
+
 __sprintf_chk
 
 _NSNextMapEnumeratorPair

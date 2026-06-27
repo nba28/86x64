@@ -244,6 +244,13 @@ $(BUILD_DIR)/20_callback_qsort.o: $(SRC_DIR)/20_callback_qsort.c | $(BUILD_DIR)
 $(BUILD_DIR)/24_libm_float_return.o: $(SRC_DIR)/24_libm_float_return.c | $(BUILD_DIR)
 	$(CC_I386) -fno-builtin -c $< -o $@
 
+# 35_pthread_cond_handshake: the i386 SL sysroot ships no <pthread.h>, so compile
+# against the host SDK headers under -arch i386 (correct i386 struct sizes +
+# PTHREAD_MUTEX_RECURSIVE); the link still resolves pthread to the SL i386
+# libSystem.
+$(BUILD_DIR)/35_pthread_cond_handshake.o: $(SRC_DIR)/35_pthread_cond_handshake.c | $(BUILD_DIR)
+	clang -arch i386 -isysroot $(HOST_SDK) -mmacosx-version-min=10.6 -c $< -o $@
+
 # Tests use _main as the entry directly (-e _main); the 86x64.sh wrapper
 # enters _main via jmp, so tests must end with `call _exit` not `ret`.
 $(BUILD_DIR)/%.i386: $(BUILD_DIR)/%.o
