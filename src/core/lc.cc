@@ -110,6 +110,16 @@ namespace MachO {
           * with -twolevel_namespace_hints (e.g. Portal 2 libbinkmachox86). */
          return nullptr;
 
+      case LC_PREBIND_CKSUM:
+         /* prebind_cksum_command {cmd, cmdsize, cksum}: a checksum stamped by
+          * the static linker for PREBINDING, a pre-10.4 dyld load-speed
+          * optimization removed from modern macOS. It carries no __LINKEDIT
+          * offsets — just the u32 cksum — and is meaningless for the translated
+          * x86_64 output (dyld ignores prebinding entirely now), so drop it like
+          * LC_TWOLEVEL_HINTS. Seen on old prebound i386/ppc frameworks
+          * (e.g. Quinn's Sparkle.framework). */
+         return nullptr;
+
       default:
          throw error("load command 0x%x not supported", lc.cmd);
       }
