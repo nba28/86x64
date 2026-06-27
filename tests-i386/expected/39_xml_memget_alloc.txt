@@ -1,0 +1,10 @@
+xmlMemGet rc=0
+allocators nonnull=1
+malloc nonnull=1
+buf=ABCDEFGHIJKLMNO
+realloc nonnull=1
+buf2=ABCDEFGHIJKLMNO
+strdup nonnull=1
+dup=xml-strdup-ok
+freed ok
+exit_code: 0

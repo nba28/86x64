@@ -421,6 +421,79 @@ def cmd_resync(args):
         good(f"{len(copies)} copies synced + ad-hoc signed")
 
 
+def _native_bound_syms(macho):
+    """Symbols a translated binary still imports from a NATIVE framework (i.e.
+    NOT already redirected to @loader_path/libabiconv.dylib). These are the
+    static-interpose rebind candidates: if libabiconv has since grown a
+    `___<sym>` shim, the symbol can now be routed instead of reaching native
+    code with the i386 ABI (whose 8-byte ret over-pops the 4-byte i386 ret
+    slot -> fused-PC crash). Both bind flavours (lazy = functions, non-lazy =
+    data consts) are scanned."""
+    out = set()
+    for flag in ("--lazy-bind", "--bind"):
+        try:
+            p = subprocess.run([str(MACHO_TOOL), "print", flag, str(macho)],
+                               capture_output=True, text=True, errors="replace")
+        except OSError:
+            continue
+        for line in p.stdout.splitlines()[1:]:
+            f = line.split()
+            if len(f) < 5:
+                continue
+            dylib, sym = f[3], f[4]
+            if "libabiconv.dylib" not in dylib:   # already-routed → skip
+                out.add(sym)
+    return out
+
+
+def cmd_reinterpose(args):
+    """Re-run static-interpose against the CURRENT libabiconv for every
+    translated binary in a bundle. `resync` only COPIES libabiconv; a binary's
+    bind opcodes were frozen at translate time, so a symbol that gained a shim
+    AFTER the binary was translated (e.g. the libxml2 family) stays bound to
+    its native framework -> over-pop crash. This rebinds such symbols WITHOUT a
+    full (heavy) re-translate — the code is unchanged, only __LINKEDIT binds.
+    Run it after `m64 build abiconv && m64 resync` whenever libabiconv grew new
+    shims that already-deployed bundle binaries should pick up."""
+    require(MACHO_TOOL, LIBABICONV)
+    app = Path(args.app)
+    si = SCRIPT_DIR / "static-interpose.sh"
+    require(si)
+    env = dict(os.environ,
+               PATH=f"{MACHO_TOOL.parent}:{os.environ.get('PATH', '')}")
+    info(f"reinterpose translated binaries in {app.name} -> current libabiconv")
+    n_bins = 0
+    for macho in iter_machos(app):
+        if not links_our_runtime(macho):
+            continue                              # native / non-output → leave
+        syms = _native_bound_syms(macho)
+        if not syms:
+            continue
+        rel = macho.relative_to(app)
+        if args.dry_run:
+            print(f"  dry-run: reinterpose {rel} ({len(syms)} native syms)")
+            continue
+        out = macho.with_name(macho.name + ".reint")
+        r = subprocess.run(
+            [str(si), "-l", str(LIBABICONV), "-n",
+             "@loader_path/libabiconv.dylib", "-p", "__", "-o", str(out),
+             str(macho)],
+            input="\n".join(sorted(syms)), text=True,
+            capture_output=True, env=env)
+        if r.returncode != 0 or not out.exists():
+            warn(f"reinterpose failed for {rel}: {r.stderr.strip().splitlines()[-1:]}")
+            if out.exists():
+                out.unlink()
+            continue
+        os.replace(out, macho)
+        subprocess.run(["codesign", "-f", "-s", "-", str(macho)],
+                       capture_output=True)
+        n_bins += 1
+        good(f"reinterposed {rel}")
+    if not args.dry_run:
+        good(f"{n_bins} binaries reinterposed in {app.name}")
+
+
 def _find_libinterpose():
     """The runtime interpose helper, wherever the build put it."""
     for c in (BUILD / "src" / "abiconv" / "libinterpose.dylib",
@@ -780,6 +853,14 @@ def build_parser():
                             "copy inside a bundle (+ ad-hoc sign)")
     s.add_argument("app")
     common(s); s.set_defaults(func=cmd_resync)
+
+    # reinterpose
+    ri = sub.add_parser("reinterpose",
+                        help="re-run static-interpose on every translated binary "
+                             "in a bundle against the current libabiconv (picks up "
+                             "newly-added shims without a heavy re-translate)")
+    ri.add_argument("app")
+    common(ri); ri.set_defaults(func=cmd_reinterpose)
 
     # tree (non-bundle directory trees, e.g. Source-engine games)
     tr = sub.add_parser(

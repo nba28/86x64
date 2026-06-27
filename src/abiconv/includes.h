@@ -3,6 +3,10 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
+#include <sys/ptrace.h>   /* ptrace(): legacy anti-debug call sites (e.g. iWeb
+                           * SFUAssertionHandler). Without a shim the i386
+                           * 4-byte-ret call reaches native ptrace whose 8-byte
+                           * ret over-pops -> fused PC crash. */
 #include <errno.h>
 #include <pwd.h>
 #include <sys/types.h>

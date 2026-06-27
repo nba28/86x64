@@ -1,3 +1,5 @@
+_xmlMemSetup
+_xmlMemGet
 _getopt
 _printf
 _sprintf

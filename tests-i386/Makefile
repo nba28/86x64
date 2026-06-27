@@ -265,6 +265,13 @@ $(BUILD_DIR)/36_stripped_func_pad.i386: $(BUILD_DIR)/36_stripped_func_pad.o
 	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
 	strip -x $@
 
+# 39_xml_memget_alloc: the i386 sysroot ships no libxml2, so `_xmlMemGet` is an
+# undefined dynamic_lookup import (resolved at translate time by static-interpose
+# -> libabiconv's ___xmlMemGet shim, exactly as a real binary's libxml2 bind is).
+# -undefined dynamic_lookup lets the link leave it unresolved. Overrides %.i386.
+$(BUILD_DIR)/39_xml_memget_alloc.i386: $(BUILD_DIR)/39_xml_memget_alloc.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +
 # abi-insert + static-interpose + wrap. Bare `macho-tool transform` output
 # isn't standalone-runnable because the i386 entry semantics (high-address

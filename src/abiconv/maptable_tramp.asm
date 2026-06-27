@@ -354,6 +354,23 @@
    MTSHIM ___RequestVolumeNotification, _shim_RequestVolumeNotification
    MTSHIM ___DeclineVolumeNotification, _shim_DeclineVolumeNotification
 
+;; libxml2 deprecated global memory-allocator override (xml_shim.c). The
+;; override API was removed on modern macOS (>=15.4): xmlMemSetup/xmlMemGet
+;; return -1, but legacy iWork/iLife (SFAXMLMemoryManager) ASSERTS ==0. The
+;; xmlMemSetup shim reports success (no-op); the xmlMemGet shim reports success
+;; AND hands back four CALLABLE low-4GB allocator trampolines (the manager
+;; STORES then INVOKES them i386-cdecl, so they cannot be native 8-byte ptrs).
+   MTSHIM ___xmlMemSetup, _shim_xmlMemSetup
+   MTSHIM ___xmlMemGet,   _shim_xmlMemGet
+;; The four allocator trampolines ___xmlMemGet writes into its out-params.
+;; Reached only via the stored i386 function pointers, so they are NOT
+;; ___-prefixed interpose targets; they forward to libabiconv's low-4GB heap
+;; (native malloc would return a >4GB ptr that truncates into the i386 slot).
+   MTSHIM _xml_malloc_tramp,  _shim_xml_malloc
+   MTSHIM _xml_free_tramp,    _shim_xml_free
+   MTSHIM _xml_realloc_tramp, _shim_xml_realloc
+   MTSHIM _xml_strdup_tramp,  _shim_xml_strdup
+
 ;; ---------------------------------------------------------------------
 ;; Legacy ObjC1 runtime compat (objc_shim.c "exc1" section): symbols modern
 ;; libobjc dropped. static-interpose redirects each image's libobjc binds
