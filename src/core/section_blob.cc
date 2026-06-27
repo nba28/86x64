@@ -82,6 +82,7 @@ namespace MachO {
                                   TransformEnv<opposite<bits>>& env): segment(nullptr) {
       env.add(&other, this);
       env.resolve(other.segment, &segment);
+      func_entry = other.func_entry; /* preserve even-alignment intent i386->x86_64 */
    }
 
 

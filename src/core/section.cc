@@ -412,6 +412,14 @@ namespace MachO {
             elem = parser(img, Location(it, vmaddr), env);
          }
 
+         /* Mark text function entries so Build aligns them to an even address
+          * (preserves the Itanium pmf low-bit tag; see SectionBlob::func_entry).
+          * Only code sections: a func_syms vmaddr that coincides with this blob's
+          * start in a text section is a function entry. */
+         if (parser == TextParser && env.func_syms.count(vmaddr)) {
+            elem->func_entry = true;
+         }
+
          elem->iter = content.insert(content.end(), elem);
          const std::size_t step = elem->size();
          if (step == 0 || it + step > end) {
@@ -1362,8 +1370,62 @@ namespace MachO {
       env.align(sect.align);
       loc(env.loc);
 
-      for (SectionBlob<bits> *elem : content) {
+      /* Even-align function entries by inserting a single 0-byte padding blob
+       * before any func_entry blob that would otherwise land at an odd VMADDR.
+       * This preserves the Itanium C++ ABI pointer-to-member-function low-bit
+       * tag (see SectionBlob::func_entry): a non-virtual member function
+       * pointer is just the function address, and an odd address sets bit0,
+       * which the pmf dispatch code interprets as "virtual" -> bogus vtable
+       * deref (f09_member_func_ptr).
+       *
+       * Two subtleties drive the implementation:
+       *  (1) The decision MUST be made against the live build cursor: instruction
+       *      sizes are not final until each Instruction::Build runs (it
+       *      re-resolves relative branches, which can widen them), so a pre-pass
+       *      over elem->size() would mis-predict parity.
+       *  (2) The function's defined SYMBOL is a zero-size placeholder blob that
+       *      sits in `content` at the SAME vmaddr, immediately before the entry
+       *      instruction (its n_value is read from that blob's post-Build
+       *      loc.vmaddr).  The pad must go BEFORE that whole same-vmaddr run, or
+       *      the code would shift even while the symbol (and the pmf literal that
+       *      references it) stays odd.
+       * We therefore pad when the cursor is odd and the run of blobs starting
+       * here -- skipping zero-size placeholders -- reaches a func_entry at this
+       * vmaddr.  Align the VMADDR (not the file offset): the vmaddr is final once
+       * assigned here, whereas env.loc.offset is still preliminary (header /
+       * load-command sizes are fixed up later, shifting section file offsets).
+       * Padding is a real blob in `content`, so the sequential Emit and the
+       * EXECUTE->DYLIB convert re-parse (whose func-boundary sweep already
+       * tolerates inter-function padding) stay consistent.  No-op when no blob
+       * carries func_entry (data sections; stripped binaries; empty func_syms). */
+      const bool trace = std::getenv("MACHO_TRACE_FUNCALIGN") != nullptr;
+      std::size_t nfe = 0, npad = 0;
+      for (auto it = content.begin(); it != content.end(); ++it) {
+         SectionBlob<bits> *elem = *it;
+         if (elem->active && elem->func_entry) { ++nfe; }
+         if (env.loc.vmaddr & 1) {
+            /* Does the same-vmaddr run starting at `it` begin a function entry? */
+            bool starts_func_entry = false;
+            for (auto pk = it; pk != content.end(); ++pk) {
+               SectionBlob<bits> *b = *pk;
+               if (!b->active) { continue; }
+               if (b->func_entry) { starts_func_entry = true; break; }
+               if (b->size() != 0) { break; } /* real blob -> vmaddr advances */
+            }
+            if (starts_func_entry) {
+               DataBlob<bits> *pad = DataBlob<bits>::Padding();
+               it = content.insert(it, pad);  /* before this run; it -> pad */
+               pad->Build(env);               /* allocate the pad byte */
+               ++it;                          /* it -> elem again */
+               elem = *it;
+               ++npad;
+            }
+         }
          elem->Build(env);
+      }
+      if (trace && nfe) {
+         fprintf(stderr, "[funcalign] section %s: %zu func entries, %zu even-aligned\n",
+                 name().c_str(), nfe, npad);
       }
 
       sect.size = env.loc.offset - loc().offset;

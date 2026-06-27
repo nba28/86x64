@@ -16,6 +16,17 @@ namespace MachO {
       using SectionBlobs = std::list<SectionBlob<opposite<bits>> *>;
       
       bool active = true;
+      /*!< This blob is a function entry point (its parse-time vmaddr is in
+       * env.func_syms and it lives in a text section).  At Build time such a
+       * blob is aligned to an even address so the Itanium C++ ABI's
+       * pointer-to-member-function low-bit tag survives translation: a pmf's
+       * first word is the function address when bit0==0 (non-virtual) or a
+       * vtable byte-offset+1 when bit0==1 (virtual).  If translation packs a
+       * function at an ODD address, &Class::nonvirtual_method has bit0 set and
+       * the dispatch code misreads it as a virtual thunk, dereferencing a bogus
+       * vtable slot (f09_member_func_ptr).  Set in Section::Parse1; propagated
+       * across the i386->x86_64 transform by the SectionBlob copy ctor. */
+      bool func_entry = false;
       const Segment<bits> *segment = nullptr; /*!< containing segment */
       const Section<bits> *section = nullptr; /*!< containing section */
       Location loc; /*!< Post-build location, also used during parsing */
@@ -45,14 +56,21 @@ namespace MachO {
       static SectionBlob<bits> *Parse(const Image& img, const Location& loc, ParseEnv<bits>& env) {
          return new DataBlob(img, loc, env);
       }
-      
+
+      /* Synthetic single-byte padding blob (value 0), not registered in any
+       * parse-time resolver map.  Used by Section::Build to even-align function
+       * entries (see SectionBlob::func_entry).  The byte sits between functions
+       * and is never executed. */
+      static DataBlob<bits> *Padding() { return new DataBlob<bits>((uint8_t)0); }
+
       virtual DataBlob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
          return new DataBlob<opposite<bits>>(*this, env);
       }
-      
+
    private:
       DataBlob(const Image& img, const Location& loc, ParseEnv<bits>& env);
       DataBlob(const DataBlob<opposite<bits>>& other, TransformEnv<opposite<bits>>& env);
+      explicit DataBlob(uint8_t value): SectionBlob<bits>() { data = value; }
 
       template <Bits b> friend class DataBlob;
    };

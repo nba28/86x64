@@ -1,0 +1,8 @@
+add=13
+sub=6
+mul=50
+neg=-10
+madd=13
+apply=17
+ok
+exit_code: 0

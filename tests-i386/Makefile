@@ -127,7 +127,7 @@ objc: $(BUILD_DIR) $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL)
 cpp: $(BUILD_DIR) $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL)
 	@pass=0; fail=0; \
 	for t in $(CPP_TESTS); do \
-	  xtra=""; case $$t in *weak_bind) xtra="-fno-rtti -fno-exceptions";; esac; \
+	  xtra=""; case $$t in *weak_bind|*member_func_ptr) xtra="-fno-rtti -fno-exceptions";; esac; \
 	  $(CXX_I386) $$xtra -c $(SRC_DIR)/$$t.cc -o $(BUILD_DIR)/$$t.o 2>/dev/null || { echo "FAIL $$t (compile)"; fail=$$((fail+1)); continue; }; \
 	  $(LD) $(LDFLAGS_I386_CPP) -e _main -o $(BUILD_DIR)/$$t.i386 $(BUILD_DIR)/$$t.o 2>/dev/null || { echo "FAIL $$t (link — run 'make sysroot-cpp'?)"; fail=$$((fail+1)); continue; }; \
 	  bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) -o $(BUILD_DIR)/$$t.x86_64 $(BUILD_DIR)/$$t.i386 >/dev/null 2>&1 || { echo "FAIL $$t (translate)"; fail=$$((fail+1)); continue; }; \
