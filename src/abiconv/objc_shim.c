@@ -505,6 +505,18 @@ static id       legacy_obj_to_real(uint32_t p);
 static id       i386_cfstr_to_real(uint32_t p);
 static id       lpair_lookup(uint32_t p);
 static uint64_t unwrap_obj_arg(uint32_t a);
+/* ObjC block bridge (defined after unwrap_obj_arg). A translated i386 block
+ * crossing into the native runtime needs structural marshalling: see the big
+ * comment at i386_block_kind. */
+static int      i386_block_kind(uint32_t p);     /* 0 / 1 stack / 2 global / 3 malloc */
+static uint64_t i386_block_to_native(uint32_t p);/* synth native Block_layout, or 0 */
+static uint32_t i386_block_copy(uint32_t p);     /* i386-layout heap copy (low-4GB) */
+/* native->i386 C call primitive (objc_reverse.asm), shared with cb_bridge. */
+extern uint32_t _86x64_call_i386(uint64_t fn, uint64_t nwords,
+                                 const uint32_t *words, uint64_t lowstack_top);
+/* cross-copy native->translated nesting depth (defined later in this file). */
+void x64_cb_enter(void);
+void x64_cb_leave(void);
 /* The i386 IMP of a legacy instance method on `c` (walking superclasses), or 0
  * if the legacy-method map has none / it is implausible. Lets the forward bridge
  * route [self legacyOnlyMethod] back to the i386 code when the modern class
@@ -2956,6 +2968,47 @@ static int bp_conforms_protocol(struct objc_call_plan *plan, const uint32_t *arg
    return 1;
 }
 
+/* plan.target helper: returns its first argument verbatim. bp_block_copy puts
+ * the precomputed i386 result in reg[0] and points plan.target here so the
+ * msgSend asm returns it (ret_kind 0 = scalar) without calling objc_msgSend. */
+static uint64_t x64_blk_ret_identity(uint64_t v) { return v; }
+
+/* [block copy]/copyWithZone:/mutableCopy/retain/self/autorelease/release/dealloc
+ * sent to an i386 block. Native -[NSBlock copy] (= _Block_copy) would misread
+ * the i386 Block_layout (invoke@12/descriptor@16, 4-byte fields) and crash; and
+ * the result MUST stay an i386-layout block so the translated code can keep
+ * invoking it via the i386 layout. So handle these inline: copy -> i386 heap
+ * copy (low-4GB); retain/self/autorelease -> same pointer; release/dealloc ->
+ * no-op. Returns 1 (handled, result placed in the plan) or 0 (fall through).
+ * Triggers on the block's structural isa + the selector name, never the app. */
+static int bp_block_copy(struct objc_call_plan *plan, const uint32_t *args32,
+                         SEL sel) {
+   if (!sel) { return 0; }
+   uint32_t p = args32[0];
+   if (!i386_block_kind(p)) { return 0; }
+   const char *s = sel_getName(sel);
+   uint32_t result;
+   if (!strcmp(s, "copy") || !strcmp(s, "copyWithZone:") ||
+       !strcmp(s, "mutableCopy") || !strcmp(s, "mutableCopyWithZone:")) {
+      result = i386_block_copy(p);
+   } else if (!strcmp(s, "retain") || !strcmp(s, "self") ||
+              !strcmp(s, "autorelease")) {
+      result = p;
+   } else if (!strcmp(s, "release") || !strcmp(s, "dealloc")) {
+      result = 0;                          /* void; i386 caller ignores eax */
+   } else {
+      return 0;                            /* other selectors: normal dispatch */
+   }
+   plan->reg[0]     = result;
+   plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
+   plan->ret_is_obj = 0;                   /* scalar passthrough: eax = result */
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[bp] block %s on 0x%08x -> 0x%08x\n", s, p, result);
+      fflush(stderr);
+   }
+   return 1;
+}
+
 void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
    appkit_compat_install();
@@ -2994,6 +3047,13 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
       }
       trace_args("send", cls_name, sel, args32);
    }
+
+   /* i386 block as the receiver of copy/retain/release etc.: handle inline so
+    * the result stays an i386-layout block (native _Block_copy would misread
+    * the layout). Detected structurally from args32[0]'s isa, independent of
+    * how resolve_self mapped it. */
+   if (bp_block_copy(plan, args32, sel))
+      return;
 
    /* NSFastEnumeration: convert the by-pointer state struct (x86_64 layout from
     * native Foundation) into the i386 layout the caller reads. */
@@ -4806,6 +4866,21 @@ static uint64_t unwrap_obj_arg(uint32_t a) {
    if ((uintptr_t)a >= g_arena_base && (uintptr_t)a < g_arena_end) {
       return *(uint64_t *)(uintptr_t)a;    /* arena proxy handle */
    }
+   {
+      /* An i386 block passed as a typed @?/@ argument to a native API the
+       * runtime will INVOKE (enumerate/sort/GCD/completion): hand native a
+       * synthesized native Block_layout whose invoke trampolines back to the
+       * i386 invoke. Triggers on the block's structural isa, not the app. */
+      uint64_t nb = i386_block_to_native(a);
+      if (nb) {
+         if (utrace) {
+            fprintf(stderr, "[uo] 0x%08x i386-block -> native 0x%llx\n",
+                    a, (unsigned long long)nb);
+            fflush(stderr);
+         }
+         return nb;
+      }
+   }
    if (is_real_x86_object(a)) {            /* raw constant x86_64 obj (cfstring) */
       if (utrace) { fprintf(stderr, "[uo] 0x%08x real-obj passthrough\n", a); }
       return (uint64_t)a;
@@ -4865,6 +4940,346 @@ static const char *enc_skip_type(const char *t) {
 static const char *enc_skip_digits(const char *t) {
    while (*t >= '0' && *t <= '9') { ++t; }
    return t;
+}
+
+/* ===========================================================================
+ * ObjC BLOCK marshalling bridge.
+ *
+ * A translated i386 block that crosses into the native runtime breaks two ways:
+ *  - LAYOUT: the i386 Block_layout has 4-byte fields (isa@0 flags@4 reserved@8
+ *    invoke@12 descriptor@16), the x86_64 one has 8-byte fields (isa@0 flags@8
+ *    reserved@12 invoke@16 descriptor@24) -> native _Block_copy reads a garbage
+ *    descriptor/size and crashes.
+ *  - ISA: the block's isa (__NSConcrete*Block) was stored by the i386 code via a
+ *    4-byte load of a __nl_symbol_ptr bound to the NATIVE 64-bit class, so it is
+ *    TRUNCATED to a low-32 class pointer (the __IMPORT,__pointers family).
+ *
+ * Two complementary fixes, BOTH triggered on STRUCTURE (the block's isa is one
+ * of the three concrete block classes) and never on app identity:
+ *
+ *  (1) bp_block_copy (forward prep): [block copy]/retain/release on an i386
+ *      block is handled inline to produce an i386-LAYOUT heap copy (i386_block_
+ *      copy) the translated code keeps invoking via the i386 layout.
+ *
+ *  (2) i386_block_to_native (via unwrap_obj_arg): an i386 block passed as a @?/@
+ *      argument to a native method that will INVOKE it (enumerate/sort/GCD/
+ *      completion) is replaced with a synthesized NATIVE Block_layout whose
+ *      `invoke` is block_tramp.asm -> x64_blk_invoke, marshalling the native
+ *      SysV call down to the i386 cdecl invoke via _86x64_call_i386, with the
+ *      real native isa. The marshalling signature is parsed from the block's
+ *      own descriptor signature string.
+ * ======================================================================== */
+
+/* libsystem_blocks concrete block classes — the real native isa values. The
+ * i386 block stores the low-32 half of these. (Declared as the runtime does.) */
+extern void *_NSConcreteStackBlock[32];
+extern void *_NSConcreteGlobalBlock[32];
+extern void *_NSConcreteMallocBlock[32];
+
+enum {
+   I386_BLOCK_DEALLOCATING     = 0x0001u,
+   I386_BLOCK_REFCOUNT_MASK    = 0xfffeu,
+   I386_BLOCK_NEEDS_FREE       = (1u << 24),
+   I386_BLOCK_HAS_COPY_DISPOSE = (1u << 25),
+   I386_BLOCK_IS_GLOBAL        = (1u << 28),
+   I386_BLOCK_HAS_SIGNATURE    = (1u << 30),
+};
+
+/* cb_bridge arg/ret kind codes, mirrored locally for the block dispatcher. */
+enum { BLK_I32 = 0, BLK_I64 = 1, BLK_PTR = 2, BLK_OBJ = 3, BLK_F32 = 4, BLK_F64 = 5 };
+enum { BLKR_VOID = 0, BLKR_I32 = 1, BLKR_PTR = 2, BLKR_OBJ = 3, BLKR_I32SX = 4 };
+
+#define BLK_MAX_ARGS   16
+#define BLK_LOWSTACK_SZ (256u * 1024u)
+
+struct blk_sig {
+   uint8_t nargs;                       /* incl. arg0 (the block self) */
+   uint8_t ret_kind;                    /* BLKR_* */
+   uint8_t arg_kinds[BLK_MAX_ARGS];     /* BLK_* */
+};
+
+/* Native x86_64 Block_layout + a private trailer x64_blk_invoke reads. */
+struct x64_native_block {
+   void    *isa;                 /* +0  real native concrete-block class */
+   int32_t  flags;              /* +8                                   */
+   int32_t  reserved;           /* +12                                  */
+   void    *invoke;             /* +16 -> _x64_blk_invoke_tramp          */
+   const void *descriptor;      /* +24                                  */
+   /* trailer (native side only): */
+   uint32_t i386_block;         /* +32 the i386 block address (low-4GB)  */
+   uint32_t i386_invoke;        /* +36 the i386 invoke fn (low-4GB)      */
+   struct blk_sig sig;          /* +40 marshalling descriptor            */
+};
+
+static const struct { uint64_t reserved; uint64_t size; } g_blk_desc = {
+   0, sizeof(struct x64_native_block)
+};
+
+/* block_tramp.asm exports the Mach-O symbol `_x64_blk_invoke_tramp`; the C
+ * name omits the leading underscore (the toolchain adds it), as cb_bridge does
+ * for x64_cb_tramp_table. */
+extern void x64_blk_invoke_tramp(void);
+
+/* Structural block detection: returns 1 stack / 2 global / 3 malloc / 0 none.
+ * Compares the truncated 4-byte isa against the low-32 of each concrete block
+ * class, then hardens with a sane descriptor+size so a coincidental isa value
+ * cannot false-match a non-block object. */
+static int i386_block_kind(uint32_t p) {
+   if (!p || !mem_readable(p, 20)) { return 0; }
+   uint32_t isa = *(const uint32_t *)(uintptr_t)p;
+   int kind;
+   if      (isa == (uint32_t)(uintptr_t)_NSConcreteStackBlock)  { kind = 1; }
+   else if (isa == (uint32_t)(uintptr_t)_NSConcreteMallocBlock) { kind = 3; }
+   else if (isa == (uint32_t)(uintptr_t)_NSConcreteGlobalBlock) { kind = 2; }
+   else { return 0; }
+   uint32_t desc = *(const uint32_t *)(uintptr_t)(p + 16);
+   if (!mem_readable(desc, 8)) { return 0; }
+   uint32_t size = *(const uint32_t *)(uintptr_t)(desc + 4);
+   if (size < 16 || size > 0x100000u) { return 0; }
+   return kind;
+}
+
+/* The block's ObjC signature string (i386 char*), or NULL. Lives in the
+ * descriptor past reserved(4)+size(4), plus copy(4)+dispose(4) iff the block
+ * HAS_COPY_DISPOSE.
+ *
+ * NB a GLOBAL block (kind 2) is statically allocated in the translated image,
+ * and the translator widened its isa to a full 8-byte native pointer IN PLACE,
+ * clobbering the 4-byte flags field at offset 4 with the isa's high half. So
+ * flags is unreadable for globals — but a global block is captureless by
+ * construction (a capturing block would be a STACK block), hence never has
+ * copy/dispose, so its signature is unconditionally at descriptor+8. Stack and
+ * malloc blocks keep an intact 4-byte isa + flags, so use flags normally. */
+static const char *i386_block_signature(uint32_t p, int kind) {
+   uint32_t desc = *(const uint32_t *)(uintptr_t)(p + 16);
+   uint32_t off  = 8;                                   /* reserved(4)+size(4) */
+   if (kind != 2) {
+      uint32_t flags = *(const uint32_t *)(uintptr_t)(p + 4);
+      if (!(flags & I386_BLOCK_HAS_SIGNATURE)) { return NULL; }
+      if (flags & I386_BLOCK_HAS_COPY_DISPOSE) { off += 8; }  /* copy(4)+dispose(4) */
+   }
+   if (!mem_readable((uintptr_t)desc + off, 4)) { return NULL; }
+   uint32_t sigp = *(const uint32_t *)(uintptr_t)(desc + off);
+   if (!sigp || !legacy_cstr_ok(sigp)) { return NULL; }
+   return (const char *)(uintptr_t)sigp;
+}
+
+/* Map one ObjC type-encoding to a BLK arg/ret kind (l/L are 4-byte on i386). */
+static int blk_arg_kind(const char *t) {
+   t = enc_skip_quals(t);
+   switch (*t) {
+   case '@': case '#':                                 return BLK_OBJ;
+   case ':': case '^': case '*':                       return BLK_PTR;
+   case 'f':                                           return BLK_F32;
+   case 'd':                                           return BLK_F64;
+   case 'q': case 'Q':                                 return BLK_I64;
+   case 'i': case 'I': case 's': case 'S': case 'c':
+   case 'C': case 'l': case 'L': case 'B':             return BLK_I32;
+   default:                                            return -1;
+   }
+}
+static int blk_ret_kind(const char *t) {
+   t = enc_skip_quals(t);
+   switch (*t) {
+   case 'v':                                           return BLKR_VOID;
+   case '@': case '#':                                 return BLKR_OBJ;
+   case '^': case '*': case ':':                       return BLKR_PTR;
+   case 'i': case 's': case 'c': case 'l':             return BLKR_I32SX;
+   default:                                            return BLKR_I32;
+   }
+}
+
+/* Advance past ONE complete type encoding + its trailing frame-offset digits.
+ * enc_skip_type stops right after '@' without consuming the block marker '?'
+ * (@?) or a '"ClassName"' protocol/class suffix (@"NSString"), which appear in
+ * block signatures — handle those here so the per-arg walk stays in sync. */
+static const char *blk_skip_one(const char *t) {
+   t = enc_skip_quals(t);
+   char base = *t;
+   const char *after = enc_skip_type(t);
+   if (base == '@') {
+      if (*after == '?') {
+         ++after;                                    /* block: @? */
+      } else if (*after == '"') {                    /* @"ClassName" */
+         ++after;
+         while (*after && *after != '"') { ++after; }
+         if (*after == '"') { ++after; }
+      }
+   }
+   return enc_skip_digits(after);
+}
+
+/* Parse the block signature into sig. Returns 0 on failure (no signature, a
+ * struct/array arg we cannot marshal, or too many args). Arg0 (the block self,
+ * @?) is recorded but replaced by the i386 block pointer at invoke time. */
+static int blk_parse_sig(const char *types, struct blk_sig *sig) {
+   if (!types) { return 0; }
+   const char *t = enc_skip_quals(types);
+   sig->ret_kind = (uint8_t)blk_ret_kind(t);
+   t = blk_skip_one(t);                              /* return + frame size */
+   unsigned n = 0;
+   while (*t && n < BLK_MAX_ARGS) {
+      int ak = blk_arg_kind(t);
+      if (ak < 0) { return 0; }                      /* struct/array arg */
+      sig->arg_kinds[n++] = (uint8_t)ak;
+      t = blk_skip_one(t);
+   }
+   if (*t || n == 0) { return 0; }                   /* overflow / no self arg */
+   sig->nargs = (uint8_t)n;
+   return 1;
+}
+
+/* (i386_block, i386_invoke) -> synthesized native block. Dedup keeps the table
+ * bounded; the native block forwards to whatever i386 block currently lives at
+ * the address (captures are read live by the i386 invoke), so reusing a binding
+ * for a recycled stack address that holds the same block literal is correct. */
+#define BLK_BIND_CAP 2048u
+struct blk_bind_ent {
+   uint32_t i386_block;
+   uint32_t i386_invoke;
+   struct x64_native_block *nat;
+};
+static struct blk_bind_ent g_blk_bind[BLK_BIND_CAP];
+static os_unfair_lock      g_blk_bind_lock = OS_UNFAIR_LOCK_INIT;
+
+static struct x64_native_block *blk_make(uint32_t p, uint32_t invoke,
+                                         const struct blk_sig *sig) {
+   struct x64_native_block *b = (struct x64_native_block *)malloc(sizeof *b);
+   if (!b) { return NULL; }
+   /* Present as a GLOBAL block: native _Block_copy returns it unchanged and
+    * _Block_release no-ops, so the binding (and the i386 block it forwards to)
+    * outlive the synchronous native call without an allocator mismatch. */
+   b->isa        = (void *)_NSConcreteGlobalBlock;
+   b->flags      = (int32_t)I386_BLOCK_IS_GLOBAL;
+   b->reserved   = 0;
+   b->invoke     = (void *)x64_blk_invoke_tramp;
+   b->descriptor = &g_blk_desc;
+   b->i386_block = p;
+   b->i386_invoke = invoke;
+   b->sig        = *sig;
+   return b;
+}
+
+static uint64_t i386_block_to_native(uint32_t p) {
+   int kind = i386_block_kind(p);
+   if (!kind) { return 0; }
+   uint32_t invoke = *(const uint32_t *)(uintptr_t)(p + 12);
+   if (!invoke) { return 0; }
+   struct blk_sig sig;
+   if (!blk_parse_sig(i386_block_signature(p, kind), &sig)) {
+      /* No parseable signature: cannot reliably marshal native->i386 args.
+       * Pass the i386 block through unchanged (legacy behavior). */
+      return 0;
+   }
+   uint32_t h = (p * 2654435761u + invoke) & (BLK_BIND_CAP - 1);
+   os_unfair_lock_lock(&g_blk_bind_lock);
+   for (uint32_t n = 0; n < BLK_BIND_CAP; ++n) {
+      struct blk_bind_ent *e = &g_blk_bind[h];
+      if (!e->nat) {
+         struct x64_native_block *b = blk_make(p, invoke, &sig);
+         if (b) { e->i386_block = p; e->i386_invoke = invoke; e->nat = b; }
+         os_unfair_lock_unlock(&g_blk_bind_lock);
+         return b ? (uint64_t)(uintptr_t)b : 0;
+      }
+      if (e->i386_block == p && e->i386_invoke == invoke) {
+         os_unfair_lock_unlock(&g_blk_bind_lock);
+         return (uint64_t)(uintptr_t)e->nat;
+      }
+      h = (h + 1) & (BLK_BIND_CAP - 1);
+   }
+   os_unfair_lock_unlock(&g_blk_bind_lock);
+   /* Table full (extreme): allocate uncached so we never crash. */
+   {
+      struct x64_native_block *b = blk_make(p, invoke, &sig);
+      return b ? (uint64_t)(uintptr_t)b : 0;
+   }
+}
+
+/* Run an i386 function (cdecl) from native code on a fresh low-4GB stack. */
+static uint32_t blk_call_i386(uint32_t fn, uint32_t nwords, const uint32_t *words) {
+   void *stk = malloc(BLK_LOWSTACK_SZ);
+   if (!stk) { return 0; }
+   uint64_t top = ((uint64_t)(uintptr_t)stk + BLK_LOWSTACK_SZ) & ~0xfULL;
+   x64_cb_enter();
+   uint32_t r = _86x64_call_i386(fn, nwords, words, top);
+   x64_cb_leave();
+   free(stk);
+   return r;
+}
+
+/* Produce an i386-LAYOUT heap copy (low-4GB) of an i386 block so the translated
+ * code keeps invoking it via the i386 layout. Mirrors _Block_copy for i386
+ * blocks: malloc size bytes, memcpy, retype isa to the malloc class, set the
+ * NEEDS_FREE/refcount flags, and run the i386 copy helper (retains captured
+ * objects/blocks) if HAS_COPY_DISPOSE. Global blocks copy to themselves. */
+static uint32_t i386_block_copy(uint32_t p) {
+   int kind = i386_block_kind(p);
+   if (kind == 0) { return p; }
+   if (kind == 2) { return p; }                       /* global: identity */
+   uint32_t desc  = *(const uint32_t *)(uintptr_t)(p + 16);
+   uint32_t flags = *(const uint32_t *)(uintptr_t)(p + 4);
+   uint32_t size  = *(const uint32_t *)(uintptr_t)(desc + 4);
+   if (size < 16 || size > 0x100000u || !mem_readable(p, size)) { return p; }
+   void *q = malloc(size);                             /* low-4GB shim malloc */
+   if (!q || (uintptr_t)q >= 0x100000000UL) { free(q); return p; }
+   memcpy(q, (const void *)(uintptr_t)p, size);
+   uint8_t *qb = (uint8_t *)q;
+   *(uint32_t *)qb = (uint32_t)(uintptr_t)_NSConcreteMallocBlock;   /* malloc isa */
+   uint32_t f = *(uint32_t *)(qb + 4);
+   f &= ~(uint32_t)(I386_BLOCK_REFCOUNT_MASK | I386_BLOCK_DEALLOCATING);
+   f |= I386_BLOCK_NEEDS_FREE | (1u << 1);             /* refcount = 1 */
+   *(uint32_t *)(qb + 4) = f;
+   if (flags & I386_BLOCK_HAS_COPY_DISPOSE) {
+      uint32_t copyfn = *(const uint32_t *)(uintptr_t)(desc + 8);
+      if (copyfn) {
+         uint32_t words[2] = { (uint32_t)(uintptr_t)q, p };  /* copy(dst, src) */
+         blk_call_i386(copyfn, 2, words);
+      }
+   }
+   return (uint32_t)(uintptr_t)q;
+}
+
+/* The C dispatcher behind every synthesized native block's invoke trampoline
+ * (block_tramp.asm). Recovers the bound i386 block + invoke from the native
+ * block, marshals the native SysV args down to the i386 cdecl frame per the
+ * block signature (the block self becomes the i386 invoke's first arg), and
+ * re-enters the translated invoke. Classification mirrors cb_dispatch. */
+uint64_t x64_blk_invoke(uint64_t blockp, const uint64_t *gp, const uint64_t *fp,
+                        const uint64_t *stk);
+uint64_t x64_blk_invoke(uint64_t blockp, const uint64_t *gp, const uint64_t *fp,
+                        const uint64_t *stk) {
+   struct x64_native_block *b = (struct x64_native_block *)(uintptr_t)blockp;
+   const struct blk_sig *sig = &b->sig;
+   uint32_t words[BLK_MAX_ARGS * 2];
+   uint32_t w = 0, gpi = 1, fpi = 0, sti = 0;          /* gp[0]/rdi = the block */
+   words[w++] = b->i386_block;                         /* i386 invoke self arg */
+   for (uint32_t i = 1; i < sig->nargs; ++i) {         /* skip arg0 (the block) */
+      uint8_t kind = sig->arg_kinds[i];
+      uint64_t v = (kind == BLK_F32 || kind == BLK_F64)
+                   ? (fpi < 8 ? fp[fpi++] : stk[sti++])
+                   : (gpi < 6 ? gp[gpi++] : stk[sti++]);
+      switch (kind) {
+      case BLK_I32: case BLK_PTR: case BLK_F32:
+         words[w++] = (uint32_t)v;
+         break;
+      case BLK_OBJ:
+         words[w++] = v >= 0x100000000ULL ? x64_objc_wrap(v) : (uint32_t)v;
+         break;
+      case BLK_I64: case BLK_F64:
+         words[w++] = (uint32_t)v;
+         words[w++] = (uint32_t)(v >> 32);
+         break;
+      default:
+         break;
+      }
+   }
+   uint32_t eax = blk_call_i386(b->i386_invoke, w, words);
+   switch (sig->ret_kind) {
+   case BLKR_VOID:  return 0;
+   case BLKR_OBJ:   return x64_objc_unwrap(eax);       /* handle -> real object */
+   case BLKR_I32SX: return (uint64_t)(int64_t)(int32_t)eax;
+   default:         return eax;                        /* I32 / PTR */
+   }
 }
 
 /* ---- the C prep called by _86x64_reverse_imp ---- */
