@@ -145,6 +145,15 @@ struct objc_shared_ctrl {
     * counters miss a callback running through a DIFFERENT libabiconv copy than
     * the one a crash handler dumps. */
    int             cb_active_depth;
+   /* Cross-copy registry of VARIADIC legacy methods (Class,SEL)->present. The
+    * forward bridge runs in the CALLER's libabiconv copy but legacy methods are
+    * registered (and their per-copy g_rmeth populated) only in the REGISTERING
+    * copy, so the forward side can't tell a legacy nil-terminated id-list method
+    * (e.g. -[ATAnimationGroup addAnimations:a,b,nil]) from a 1-arg one. The
+    * registering copy publishes variadic legacy methods here (Class/SEL are
+    * process-global), so any copy's forward bridge spills the full id list.
+    * Open-addressed struct rvar_ent *, allocated by the first copy. */
+   uint64_t        rvariadic;
 };
 #define SUPER_HINT_SLOTS 64
 #define OBJC_CTRL_MAGIC 0x3836583634415243ULL  /* "86X64ARC" */
@@ -153,6 +162,12 @@ struct objc_shared_ctrl {
 /* legacy i386 object pointer -> real modern id (paired proxy). */
 struct lpair_ent { uint32_t p; uint64_t real; };
 #define LPAIR_CAP (1u << 16)
+
+/* (Class,SEL) of a variadic legacy method, shared cross-copy (see ctrl
+ * ->rvariadic). Open-addressed; an entry's presence == "this legacy method
+ * takes a nil-terminated id list past its declared arg". */
+struct rvar_ent { Class cls; SEL sel; };
+#define RVAR_CAP 8192u
 
 /* reverse-registered legacy class -> (modern Class, legacy isa addr, i386
  * instance size). Lives in the shared g_ctrl so get_or_create_shadow in ANY
@@ -242,6 +257,8 @@ static void arena_init(void) {
       calloc(LPAIR_CAP, sizeof(struct lpair_ent));
    c->rcls       = (uint64_t)(uintptr_t)
       calloc(RCLS_CAP, sizeof(struct rcls_ent));
+   c->rvariadic  = (uint64_t)(uintptr_t)
+      calloc(RVAR_CAP, sizeof(struct rvar_ent));
    c->pgmemo     = (uint64_t)(uintptr_t)
       calloc(PGMEMO_CAP, sizeof(struct pgmemo_ent));
    __sync_synchronize();
@@ -517,6 +534,10 @@ static id       legacy_obj_to_real(uint32_t p);
 static id       i386_cfstr_to_real(uint32_t p);
 static id       lpair_lookup(uint32_t p);
 static uint64_t unwrap_obj_arg(uint32_t a);
+/* Cross-copy registry of variadic legacy methods (defined with the rmeth map):
+ * the forward bridge consults it to know when a legacy method takes a nil-
+ * terminated id list past its single declared arg (e.g. addAnimations:a,b,nil). */
+static int rvar_contains(Class start, SEL s);
 /* ObjC block bridge (defined after unwrap_obj_arg). A translated i386 block
  * crossing into the native runtime needs structural marshalling: see the big
  * comment at i386_block_kind. */
@@ -2061,7 +2082,19 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
     * nil sentinel or plan capacity. */
    unsigned final_pos = (cur.gp < 6 && cur.stk == 0)
       ? cur.gp : 6 + (unsigned)(cur.stk / 8);
-   if (m && is_varargs_sel((const char *)sel)) {
+   /* A LEGACY (reverse-bridge) method may itself be variadic (its i386 IMP does
+    * va_start past the single declared arg, e.g. -[ATAnimationGroup
+    * addAnimations:a,b,nil]). The encoding doesn't say so, so detect it from the
+    * IMP prologue and spill the same nil-terminated id list; the reverse bridge
+    * re-lays it into the IMP's i386 frame. (Quinn 0x00080000 garbage-receiver.) */
+   /* The forward bridge runs in the CALLER's libabiconv copy, whose g_rmeth is
+    * empty for a class some OTHER copy reverse-registered (and whose local
+    * _86x64_reverse_imp address won't match the registered IMP) — so consult the
+    * SHARED rvariadic registry the registering copy published. lookup/sel are
+    * process-global Class/SEL, valid in any copy. */
+   int legacy_va = (m && !is_varargs_sel((const char *)sel))
+                      ? rvar_contains(lookup, sel) : 0;
+   if (m && (is_varargs_sel((const char *)sel) || legacy_va)) {
       char fmtbuf[2048];
       /* the format NSString is the last fixed arg == last GP slot filled */
       uint64_t fmt_slot = (cur.gp > reg_base && cur.gp <= 6)
@@ -4295,12 +4328,93 @@ extern void _86x64_reverse_imp_stret(void);  /* objc_reverse.asm */
 /* ---- (lookup_class, sel) -> legacy method map. lookup_class is
  * object_getClass(self): the registered class for instance methods, its
  * metaclass for class methods. ---- */
+/*
+ * Core variadic detector (see legacy_method_is_variadic's comment for the why):
+ * scan a legacy (translated) IMP's prologue for the i386 `va_start` idiom —
+ * `lea (8+framesize)(%rbp), r32`, taking the address of the first stack slot
+ * PAST the declared args, which a non-variadic cdecl method never does.
+ * `framesize` = the i386 arg-frame byte count, the digits after the return type
+ * in the encoding. Pure read; no caching (callers memoize).
+ */
+static int imp_is_variadic(uint64_t imp, const char *types) {
+   if (!imp || !types) { return 0; }
+   long F = strtol(enc_skip_type(types), NULL, 10);   /* arg-frame bytes */
+   if (F < 12) { return 0; }                  /* need self+_cmd+>=1 fixed arg */
+   long want = 8 + F;                          /* ebp offset of first vararg */
+   if (want > 0x7fffffff) { return 0; }
+   const uint8_t *c = (const uint8_t *)(uintptr_t)imp;
+   /* Window must clear an expanded prologue: a PIC get_pc_thunk (i386
+    * `call .+0;pop` -> a ~25-byte `lea rip;push;jmp;pop` in the translation)
+    * plus saved regs/zeroed locals can push va_start ~70 bytes in (vs ~40 for a
+    * non-PIC 2006 binary). A bigger window is false-positive-safe: only va_start
+    * `lea`s the slot PAST the last declared arg; a non-variadic method's leas of
+    * its own args/locals all use offsets < want. */
+#define VA_SCAN 192
+   if (!mem_readable((uintptr_t)c, VA_SCAN)) { return 0; }
+   for (int i = 0; i + 6 < VA_SCAN; ++i) {
+      int j = i;
+      /* optional REX that does NOT set .B (so rm=101 still means rbp): the
+       * va_start lea may target r8d-r15d (REX.R) but never re-bases off .B. */
+      if ((c[j] & 0xf8) == 0x40 && !(c[j] & 0x01)) { ++j; }
+      if (c[j] != 0x8d) { continue; }                  /* lea */
+      uint8_t modrm = c[j + 1];
+      if ((modrm & 0x07) != 0x05) { continue; }        /* rm == rbp */
+      unsigned mod = modrm >> 6;
+      long disp;
+      if (mod == 1) { disp = (int8_t)c[j + 2]; }
+      else if (mod == 2) { int32_t d; memcpy(&d, &c[j + 2], 4); disp = d; }
+      else { continue; }                               /* mod 0 = rip-rel */
+      if (disp == want) { return 1; }
+   }
+   return 0;
+#undef VA_SCAN
+}
+
+/* Shared cross-copy registry of variadic legacy methods (ctrl->rvariadic):
+ * populated by the registering copy at rmeth_insert, queried by the forward
+ * bridge (which runs in the caller's copy, with no local g_rmeth). */
+static uint32_t rvar_hash(Class c, SEL s) {
+   uint64_t h = (uint64_t)(uintptr_t)c * 1099511628211ULL ^ (uint64_t)(uintptr_t)s;
+   return (uint32_t)((h ^ (h >> 32)) & (RVAR_CAP - 1));
+}
+static void rvar_insert(Class c, SEL s) {
+   if (!g_ctrl || !g_ctrl->rvariadic || !c || !s) { return; }
+   struct rvar_ent *t = (struct rvar_ent *)(uintptr_t)g_ctrl->rvariadic;
+   uint32_t i = rvar_hash(c, s);
+   for (uint32_t n = 0; n < RVAR_CAP; ++n) {
+      if (t[i].cls == NULL || (t[i].cls == c && t[i].sel == s)) {
+         t[i].cls = c; t[i].sel = s; return;
+      }
+      i = (i + 1) & (RVAR_CAP - 1);
+   }
+}
+static int rvar_lookup1(Class c, SEL s) {
+   if (!g_ctrl || !g_ctrl->rvariadic || !c) { return 0; }
+   struct rvar_ent *t = (struct rvar_ent *)(uintptr_t)g_ctrl->rvariadic;
+   uint32_t i = rvar_hash(c, s);
+   for (uint32_t n = 0; n < RVAR_CAP; ++n) {
+      if (t[i].cls == NULL) { return 0; }
+      if (t[i].cls == c && t[i].sel == s) { return 1; }
+      i = (i + 1) & (RVAR_CAP - 1);
+   }
+   return 0;
+}
+/* Walk the superclass chain so an inherited variadic legacy method is found
+ * (mirrors reverse_prep's owner walk); only reached for legacy receivers. */
+static int rvar_contains(Class start, SEL s) {
+   for (Class c = start; c; c = class_getSuperclass(c)) {
+      if (rvar_lookup1(c, s)) { return 1; }
+   }
+   return 0;
+}
+
 /* power of two; keyed by (class,selector) so it must exceed the TOTAL legacy
  * method count across all loaded frameworks (iWork SF*: 100k+). Saturation
  * here both hangs registration (O(n) per insert) and silently drops method
  * IMPs, breaking later reverse dispatch — see SELTYPES_CAP. */
 #define RMETH_CAP 262144u
-struct rmeth_ent { Class cls; SEL sel; uint64_t imp; const char *types; };
+struct rmeth_ent { Class cls; SEL sel; uint64_t imp; const char *types;
+                   int8_t variadic; /* -1 unknown, 0 no, 1 yes (cached) */ };
 static struct rmeth_ent g_rmeth[RMETH_CAP];
 static uint32_t rmeth_hash(Class c, SEL s) {
    uint64_t h = (uint64_t)(uintptr_t)c * 1099511628211ULL ^ (uint64_t)(uintptr_t)s;
@@ -4311,7 +4425,11 @@ static void rmeth_insert(Class c, SEL s, uint64_t imp, const char *types) {
    for (uint32_t n = 0; n < RMETH_CAP; ++n) {
       if (g_rmeth[i].imp == 0 || (g_rmeth[i].cls == c && g_rmeth[i].sel == s)) {
          g_rmeth[i].cls = c; g_rmeth[i].sel = s;
-         g_rmeth[i].imp = imp; g_rmeth[i].types = types; return;
+         g_rmeth[i].imp = imp; g_rmeth[i].types = types;
+         g_rmeth[i].variadic = (int8_t)imp_is_variadic(imp, types);
+         /* publish variadic legacy methods cross-copy for the forward bridge */
+         if (g_rmeth[i].variadic) { rvar_insert(c, s); }
+         return;
       }
       i = (i + 1) & (RMETH_CAP - 1);
    }
@@ -4335,6 +4453,31 @@ static struct rmeth_ent *rmeth_find_owner(Class start, SEL s) {
       if (e) { return e; }
    }
    return NULL;
+}
+
+/*
+ * Is this legacy (reverse-bridge) method VARIADIC — i.e. does it take a
+ * nil-terminated id list past its single declared argument (e.g. an i386
+ * `-(void)addAnimations:(ATAnimation*)first, ...`)?  The ObjC type encoding
+ * never models `...` (addAnimations: encodes as the plain `v12@0:4@8`), so the
+ * forward/reverse marshallers would otherwise stop at the first declared arg
+ * and the IMP's va_arg walk would read leftover lowstack words as bogus object
+ * pointers (the Quinn 0x00080000 garbage-receiver sort crash).
+ *
+ * Detected STRUCTURALLY, not by selector/class name: the i386 `va_start`
+ * idiom takes the address of the first stack slot PAST the fixed args
+ * (`leal (8+framesize)(%ebp), %reg`), which a non-variadic cdecl method never
+ * does (its locals live at NEGATIVE %ebp offsets). The translator copies the
+ * i386 frame semantics verbatim — %rbp stays the i386 %ebp — so the translated
+ * IMP prologue still carries `lea (8+framesize)(%rbp), r32`. `framesize` is the
+ * total i386 arg-frame byte count, the digits right after the return type in
+ * the encoding. Result cached on the rmeth entry (computed once per method).
+ */
+static int legacy_method_is_variadic(struct rmeth_ent *m) {
+   if (!m) { return 0; }
+   if (m->variadic >= 0) { return m->variadic; }
+   m->variadic = (int8_t)imp_is_variadic(m->imp, m->types);
+   return m->variadic;
 }
 
 static uint64_t legacy_instance_method_imp(Class c, SEL s) {
@@ -5979,6 +6122,21 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
          plan->frame[w++] = (uint32_t)v;
       }
       t = enc_skip_digits(enc_skip_type(t));
+   }
+   /* Variadic legacy method (e.g. -[ATAnimationGroup addAnimations:a,b,nil]):
+    * the encoding models only the fixed args, so the loop above stopped at the
+    * last declared one. The forward bridge spilled the rest of the nil-
+    * terminated id list into the GP/stack arg sequence — copy them down into the
+    * i386 cdecl frame (each object wrapped back to its shadow/handle) so the
+    * IMP's va_arg walk reads real receivers, not leftover lowstack words. */
+   if (legacy_method_is_variadic(m)) {
+      while (w < 62) {
+         uint64_t v; REV_GP(v);
+         uint32_t fw = (v >= 0x100000000ULL) ? x64_objc_wrap_ret(v) : (uint32_t)v;
+         plan->frame[w++] = fw;
+         if (fw == 0) { break; }          /* placed the nil terminator */
+      }
+      if (plan->frame[w - 1] != 0 && w < 63) { plan->frame[w++] = 0; }
    }
 #undef REV_GP
 #undef REV_XMM
