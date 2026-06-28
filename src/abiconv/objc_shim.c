@@ -1220,15 +1220,31 @@ static void enc_copy3(char c, size_t isz, size_t nsz, int fp, int dir,
  * pointer) argument or struct MEMBER is an i386 code address the native API
  * will later CALL with the x86_64 ABI; passed raw it crashes. We bind it to a
  * trampoline whose dispatcher marshals the native args down to an i386 cdecl
- * word frame. The type encoding `^?` carries NO signature, so we use a generic
- * descriptor: up to 6 GP (pointer/int) args, pointer return — correct for the
- * overwhelming majority of C callbacks (extra words are harmless under cdecl;
- * the rare FP-arg callback is the known limitation). */
+ * word frame. The type encoding `^?` carries NO inner signature, so the
+ * descriptor below is fixed by what `^?` MEANS on the ObjC message-send
+ * surface: the only AppKit/Foundation methods that take a bare C function
+ * pointer are the sort-comparator family —
+ *   -[NS(Mutable)Array sort(ed)UsingFunction:context:(hint:)]
+ * and any third-party method of the same shape — whose callback is universally
+ *   NSInteger (*)(id obj1, id obj2, void *context).
+ * (A `^?` only reaches this forward bridge when it is being handed to a NATIVE
+ * method; native methods with a C-fn-ptr arg are exactly the comparators.
+ * C-API callbacks — qsort, CFArray* — never come through here; abigen emits a
+ * per-prototype descriptor for those.)  So we bind it with the comparator
+ * shape: two OBJECT args (kind 3, handle-wrapped so a >4GB / tagged native
+ * object pointer survives into the i386 callee, where it unwraps on the next
+ * message send — NOT truncated like a raw pointer), a pointer context (kind 2),
+ * and a SIGN-EXTENDED NSInteger return (kind 4) so -1/0/1 (NSOrderedAscending/
+ * Same/Descending) reaches CoreFoundation as a signed 64-bit long rather than a
+ * zero-extended huge positive. (Quinn 3.5.7 crashed in CoreFoundation's
+ * -[NSMutableArray sortUsingFunction:context:] -> sortRange:options:
+ * usingComparator: because the old all-POINTER descriptor truncated the two id
+ * args -> the i386 comparator dereferenced a chopped object pointer.) */
 typedef struct { uint32_t nargs; uint32_t ret_kind; uint8_t arg_kinds[16]; }
    x64_cb_sig_t;
 extern uint64_t x64_cb_wrap(uint32_t fn32, const x64_cb_sig_t *sig);
-/* arg kind PTR=2 ; ret kind PTR=2 (mirror cb_bridge.c) */
-static const x64_cb_sig_t g_generic_cb_sig = { 6, 2, { 2, 2, 2, 2, 2, 2 } };
+/* arg kinds: OBJ=3, OBJ=3, PTR=2 ; ret kind I32SX=4 (mirror cb_bridge.c) */
+static const x64_cb_sig_t g_objc_cmp_sig = { 3, 4, { 3, 3, 2 } };
 
 /* walk state: eightbyte SysV class accumulators over the NATIVE layout */
 struct enc_ew {
@@ -1259,7 +1275,7 @@ static const char *enc_walk3(struct enc_ew *w, const char *t, int ctx,
           * call it with the x86_64 ABI. */
          if (w->wrap_fnptr && c == '^' && t[1] == '?') {
             uint32_t fn32; memcpy(&fn32, w->src + *i_off, 4);
-            uint64_t tr = x64_cb_wrap(fn32, &g_generic_cb_sig);
+            uint64_t tr = x64_cb_wrap(fn32, &g_objc_cmp_sig);
             memcpy(w->dst + *n_off, &tr, 8);
          }
       } else if (w->dir == 2 && w->src && w->dst) {
@@ -1575,7 +1591,7 @@ static int marshal_arg_fwd(struct objc_call_plan *plan, struct mcur *c,
    }
    if (b == '^' && t[1] == '?') {             /* function pointer (callback) */
       uint32_t fn32 = args32[(*ai)++];
-      return mcur_put_gp(plan, c, x64_cb_wrap(fn32, &g_generic_cb_sig));
+      return mcur_put_gp(plan, c, x64_cb_wrap(fn32, &g_objc_cmp_sig));
    }
    /* everything else: int/char/short/BOOL/enum/pointer — one 4-byte slot, GP */
    return mcur_put_gp(plan, c, (uint64_t)args32[(*ai)++]);

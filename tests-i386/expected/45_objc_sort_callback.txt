@@ -1,0 +1,4 @@
+ok sort_ascending
+ok sort_descending
+ok sorted_array_func
+exit_code: 0
