@@ -1,0 +1,5 @@
+ok one_pair
+ok four_pairs
+ok twenty_pairs
+ok array_objects
+exit_code: 0

@@ -15,23 +15,37 @@
 ;; it — struct returns that are stret on i386 but register-class on
 ;; x86_64), and converts the return per plan.ret_kind on the way back.
 ;;
-;; struct objc_call_plan layout (must match objc_shim.c):
+;; struct objc_call_plan layout (must match objc_shim.c). The fields AFTER
+;; stack[] move with PLAN_STACK_Q, so they are referenced through the OFF_*
+;; symbols defined below instead of magic numbers. PLAN_STACK_Q MUST equal
+;; PLAN_STACK_MAX in objc_shim.c (currently 128). Offsets shown for Q=128:
 ;;   [plan +  0]  reg[0..5]   ; 48 bytes (rdi,rsi,rdx,rcx,r8,r9)
 ;;   [plan + 48]  nreg        ; int32  (count of valid regs, unused by asm)
 ;;   [plan + 52]  ret_kind    ; int32  (see below)
 ;;   [plan + 56]  super       ; struct objc_super storage (16 bytes)
 ;;   [plan + 72]  legacy_imp  ; uint64 (translated i386 IMP, or 0)
 ;;   [plan + 80]  nstack      ; uint32 (count of overflow stack qwords)
-;;   [plan + 88]  stack[32]   ; uint64[] overflow / MEMORY-struct args
-;;   [plan +344]  xmm[8]      ; uint64[] xmm0..7 payloads
-;;   [plan +408]  nxmm        ; uint32 (-> al, SysV variadic SSE count)
-;;   [plan +412]  sret_conv   ; uint32 (C side only)
-;;   [plan +416]  sret_dst32  ; uint32 (C side only)
-;;   [plan +424]  sret_enc    ; char*  (C side only)
-;;   [plan +432]  target      ; uint64 (override for the real msgSend variant)
-;;   [plan +440]  fp_out[2]   ; uint64[2] (asm fld scratch)
-;;   [plan +456]  stret_buf   ; 184 bytes (native struct bounce buffer)
-;;   total 640
+;;   [plan + 88]  stack[Q]    ; uint64[] overflow / MEMORY-struct args (OFF_STACK)
+;;   [OFF_XMM]    xmm[8]      ; uint64[] xmm0..7 payloads          (+1112)
+;;   [OFF_NXMM]   nxmm        ; uint32 (-> al, SysV variadic SSE count) (+1176)
+;;   [OFF_NXMM+4] sret_conv   ; uint32 (C side only)
+;;   [OFF_NXMM+8] sret_dst32  ; uint32 (C side only)
+;;   [OFF_NXMM+16]sret_enc    ; char*  (C side only)
+;;   [OFF_TARGET] target      ; uint64 (override for the real msgSend variant) (+1200)
+;;   [OFF_FP_OUT] fp_out[2]   ; uint64[2] (asm fld scratch)         (+1208)
+;;   [OFF_STRET]  stret_buf   ; 184 bytes (native struct bounce buffer) (+1224)
+;;   total PLAN_SIZE (1408 for Q=128)
+
+;; --- objc_call_plan field offsets, derived from the spill capacity so a single
+;; --- constant change tracks objc_shim.c's PLAN_STACK_MAX. ---
+%define PLAN_STACK_Q  128            ; MUST match PLAN_STACK_MAX in objc_shim.c
+%define OFF_STACK     88
+%define OFF_XMM       (OFF_STACK + PLAN_STACK_Q*8)
+%define OFF_NXMM      (OFF_XMM + 64)
+%define OFF_TARGET    (OFF_NXMM + 24)
+%define OFF_FP_OUT    (OFF_TARGET + 8)
+%define OFF_STRET     (OFF_FP_OUT + 16)
+%define PLAN_SIZE     (OFF_STRET + 184)
 ;;
 ;; ret_kind: 0 scalar (rax/rdx pass through)   1 object -> wrap handle
 ;;           2 char* -> low-4GB bounce          3 stret narrow (C finisher)
@@ -92,13 +106,13 @@
    push rdi
    push rsi
 
-   ;; reserve struct objc_call_plan (640 bytes), keep rsp 16-aligned
-   sub rsp, 640
+   ;; reserve struct objc_call_plan (PLAN_SIZE bytes), keep rsp 16-aligned
+   sub rsp, PLAN_SIZE
    and rsp, ~0xf
    mov qword [rsp + 72], 0         ; plan.legacy_imp = 0 (uninit stack mem)
    mov dword [rsp + 80], 0         ; plan.nstack    = 0
-   mov dword [rsp + 408], 0        ; plan.nxmm      = 0
-   mov qword [rsp + 432], 0        ; plan.target    = 0
+   mov dword [rsp + OFF_NXMM], 0   ; plan.nxmm      = 0
+   mov qword [rsp + OFF_TARGET], 0 ; plan.target    = 0
    mov rdi, rsp                    ; &plan
    lea rsi, [rbp + 12]             ; args32 -> first i386 stack arg
    call %2
@@ -146,17 +160,17 @@
    mov r9,  [r11 + 40]
    ;; XMM args (FP scalars / SSE-class struct eightbytes). Slots past nxmm
    ;; hold stack garbage — harmless in registers the callee never reads.
-   movsd xmm0, [r11 + 344]
-   movsd xmm1, [r11 + 352]
-   movsd xmm2, [r11 + 360]
-   movsd xmm3, [r11 + 368]
-   movsd xmm4, [r11 + 376]
-   movsd xmm5, [r11 + 384]
-   movsd xmm6, [r11 + 392]
-   movsd xmm7, [r11 + 400]
-   mov eax, dword [r11 + 408]      ; al = SSE count (SysV variadic rule)
+   movsd xmm0, [r11 + OFF_XMM]
+   movsd xmm1, [r11 + OFF_XMM+8]
+   movsd xmm2, [r11 + OFF_XMM+16]
+   movsd xmm3, [r11 + OFF_XMM+24]
+   movsd xmm4, [r11 + OFF_XMM+32]
+   movsd xmm5, [r11 + OFF_XMM+40]
+   movsd xmm6, [r11 + OFF_XMM+48]
+   movsd xmm7, [r11 + OFF_XMM+56]
+   mov eax, dword [r11 + OFF_NXMM] ; al = SSE count (SysV variadic rule)
    ;; plan.target overrides the default variant (reg-return struct form)
-   mov r10, [r11 + 432]
+   mov r10, [r11 + OFF_TARGET]
    test r10, r10
    jnz %%calltgt
    call %3                         ; rsp is 16-aligned
@@ -188,12 +202,12 @@
    call _objc_bridge_ret_finish    ; -> rax:rdx (i386 eax:edx / buffer ptr)
    jmp %%ret
 %%fpd:
-   movsd [rbx + 440], xmm0         ; native double -> x87 st0 (i386 fp return)
-   fld qword [rbx + 440]
+   movsd [rbx + OFF_FP_OUT], xmm0  ; native double -> x87 st0 (i386 fp return)
+   fld qword [rbx + OFF_FP_OUT]
    jmp %%ret
 %%fpf:
-   movss [rbx + 440], xmm0         ; native float -> x87 st0
-   fld dword [rbx + 440]
+   movss [rbx + OFF_FP_OUT], xmm0  ; native float -> x87 st0
+   fld dword [rbx + OFF_FP_OUT]
    jmp %%ret
 %%satnarrow:
    ;; 64-bit int return: remap the NSNotFound sentinel (NSIntegerMax_64) to the
@@ -292,18 +306,18 @@ __86x64_plan_call:
    mov rcx, [rbx + 24]
    mov r8,  [rbx + 32]
    mov r9,  [rbx + 40]
-   movsd xmm0, [rbx + 344]
-   movsd xmm1, [rbx + 352]
-   movsd xmm2, [rbx + 360]
-   movsd xmm3, [rbx + 368]
-   movsd xmm4, [rbx + 376]
-   movsd xmm5, [rbx + 384]
-   movsd xmm6, [rbx + 392]
-   movsd xmm7, [rbx + 400]
-   mov eax, dword [rbx + 408]      ; al = SSE count
+   movsd xmm0, [rbx + OFF_XMM]
+   movsd xmm1, [rbx + OFF_XMM+8]
+   movsd xmm2, [rbx + OFF_XMM+16]
+   movsd xmm3, [rbx + OFF_XMM+24]
+   movsd xmm4, [rbx + OFF_XMM+32]
+   movsd xmm5, [rbx + OFF_XMM+40]
+   movsd xmm6, [rbx + OFF_XMM+48]
+   movsd xmm7, [rbx + OFF_XMM+56]
+   mov eax, dword [rbx + OFF_NXMM] ; al = SSE count
    call r12
-   movsd [rbx + 440], xmm0         ; fp_out[0]
-   movsd [rbx + 448], xmm1         ; fp_out[1]
+   movsd [rbx + OFF_FP_OUT], xmm0  ; fp_out[0]
+   movsd [rbx + OFF_FP_OUT+8], xmm1 ; fp_out[1]
    lea rsp, [rbp - 16]
    pop r12
    pop rbx

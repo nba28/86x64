@@ -453,31 +453,43 @@ struct objc_super_x64 { id receiver; Class super_class; };
  * exceed the 6 GP registers AND must carry a nil terminator past the last
  * object — when the explicit objects fill rdi..r9 the terminator itself lands
  * in stack[0]. The asm trampoline copies plan.stack[0..nstack) onto the real
- * stack before the call (see objc_msgSend.asm). */
-#define PLAN_STACK_MAX 32
+ * stack before the call (see objc_msgSend.asm).
+ *
+ * The spill capacity bounds how long a nil-terminated id-list variadic call can
+ * be (arrayWithObjects:/dictionaryWithObjectsAndKeys: literals): the list needs
+ * PLAN_STACK_MAX + 6 - 2 slots for its objects plus the nil terminator. Sized
+ * generously so real hand-written literals (Quinn/Sparkle build ~18-pair
+ * dictionaries) never overflow; at 32 they did, dropping the nil terminator and
+ * sending Foundation walking off the end of the args into uninitialized stack.
+ * The cost is purely a larger per-call trampoline frame (sub rsp), freed on
+ * return — no memory is touched unless written. Keep PLAN_STACK_Q in
+ * objc_msgSend.asm in sync with this value. */
+#define PLAN_STACK_MAX 128
 #define PLAN_STRET_MAX 184       /* native bounce buffer for stret narrows */
 struct objc_call_plan {
-   uint64_t reg[6];               /* +0  rdi,rsi,rdx,rcx,r8,r9            */
-   int32_t  nreg;                 /* +48                                 */
+   uint64_t reg[6];               /* +0   rdi,rsi,rdx,rcx,r8,r9            */
+   int32_t  nreg;                 /* +48                                  */
    int32_t  ret_is_obj;           /* +52  return KIND, see fill_args_and_return */
-   struct objc_super_x64 super;   /* +56 (16 bytes)                      */
-   uint64_t legacy_imp;           /* +72                                 */
-   uint32_t nstack;               /* +80 number of valid stack[] entries */
-   uint32_t _pad;                 /* +84                                 */
-   uint64_t stack[PLAN_STACK_MAX];/* +88 overflow args (7th onward)      */
-   /* ---- FP / struct-by-value support (28th blocker). Append-only: the
-    * offsets above are baked into objc_msgSend.asm. ---- */
-   uint64_t xmm[8];               /* +344 xmm0..7 (doubles or float bits) */
-   uint32_t nxmm;                 /* +408 count of valid xmm slots (-> al) */
-   uint32_t sret_conv;            /* +412 encoding convention of sret_enc */
-   uint32_t sret_dst32;           /* +416 i386 caller's struct-return buf */
-   uint32_t _pad3;                /* +420                                */
-   const char *sret_enc;          /* +424 return-type encoding            */
-   uint64_t target;               /* +432 override for the real msgSend
-                                   *      variant (kind-6 reg-return form) */
-   uint64_t fp_out[2];            /* +440 asm scratch: fld src / xmm0,1 out */
-   uint8_t  stret_buf[PLAN_STRET_MAX]; /* +456 native struct bounce buffer */
-};                                /* sizeof == 640; asm reserves 640      */
+   struct objc_super_x64 super;   /* +56  (16 bytes)                      */
+   uint64_t legacy_imp;           /* +72                                  */
+   uint32_t nstack;               /* +80  number of valid stack[] entries */
+   uint32_t _pad;                 /* +84                                  */
+   uint64_t stack[PLAN_STACK_MAX];/* +88  overflow args (7th onward)      */
+   /* ---- FP / struct-by-value support (28th blocker). The offsets below are
+    * baked into objc_msgSend.asm as OFF_XMM/OFF_NXMM/OFF_TARGET/OFF_FP_OUT,
+    * all computed from PLAN_STACK_Q — keep that constant == PLAN_STACK_MAX.
+    * (Offsets shown for PLAN_STACK_MAX=128.) ---- */
+   uint64_t xmm[8];               /* +1112 xmm0..7 (doubles or float bits) */
+   uint32_t nxmm;                 /* +1176 count of valid xmm slots (-> al) */
+   uint32_t sret_conv;            /* +1180 encoding convention of sret_enc */
+   uint32_t sret_dst32;           /* +1184 i386 caller's struct-return buf */
+   uint32_t _pad3;                /* +1188                                */
+   const char *sret_enc;          /* +1192 return-type encoding           */
+   uint64_t target;               /* +1200 override for the real msgSend
+                                   *       variant (kind-6 reg-return form) */
+   uint64_t fp_out[2];            /* +1208 asm scratch: fld src / xmm0,1 out */
+   uint8_t  stret_buf[PLAN_STRET_MAX]; /* +1224 native struct bounce buffer */
+};                                /* sizeof == 1408; asm reserves PLAN_SIZE */
 
 /* Write SysV integer-arg position `pos` (0=rdi..5=r9, 6+=stack) into the plan. */
 static inline void plan_put(struct objc_call_plan *plan, unsigned pos, uint64_t v) {
@@ -2026,11 +2038,22 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
           * Walk forward placing each object (registers then stack) up to and
           * INCLUDING the nil terminator — when the explicit objects fill all 6
           * GP registers the terminator itself must still go out, in stack[0],
-          * or Foundation reads uninitialized stack and retains garbage. */
+          * or Foundation reads uninitialized stack and retains garbage.
+          *
+          * If the list is longer than the plan can hold, force the nil
+          * terminator into the LAST available slot rather than breaking with a
+          * real object there: a missing terminator makes Foundation read past
+          * the marshalled args into uninitialized stack -> garbage key/value ->
+          * SIGSEGV or an uncaught NSException (the Quinn/Sparkle crash). The cap
+          * is sized so real literals never reach here; this is the safety net,
+          * which truncates gracefully (terminated) instead of corrupting. */
          const unsigned pos_cap = 6 + PLAN_STACK_MAX;
          unsigned i386_i = ai, pos = final_pos;
          for (;;) {
-            if (pos >= pos_cap) { break; }
+            if (pos >= pos_cap) {
+               plan_put(plan, pos - 1, 0);   /* force-terminate at capacity */
+               break;
+            }
             uint32_t a = args32[i386_i++];
             plan_put(plan, pos++, unwrap_obj_arg(a));
             if (a == 0) { break; }        /* placed the nil terminator */
