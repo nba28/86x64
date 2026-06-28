@@ -253,10 +253,15 @@ static const struct mach_header *find_loaded_image(const char *leaf,
 }
 
 /* Max translated __mod_init_func pointers we collect per image in RUN_INITS
- * mode before running them at the end of slide_objc. libtier0 has 11; any real
- * image is well under this. Overflow falls back to wrapping (the default path)
- * so nothing is silently dropped. */
-#define INIT_COLLECT_MAX 1024
+ * mode before running them at the end of slide_objc. Overflow falls back to the
+ * make_init_stub wrapping path — but on dyld4 those out-of-image stubs are
+ * SILENTLY SKIPPED (the same in-image validation that motivates RUN_INITS, see
+ * the wrap_mod_init_funcs comment), so any init beyond the cap simply never
+ * runs. The cap must therefore comfortably exceed any real image's init count:
+ * Civ IV's main dylib has 1063 __mod_init_func entries (libtier0 has 11), so the
+ * former 1024 cap dropped ~39 of Civ IV's initializers. 4096 (a 32 KiB on-stack
+ * pointer array in slide_objc) covers it with wide margin. */
+#define INIT_COLLECT_MAX 4096
 
 /* Rewrite every __DATA,__mod_init_func 8-byte pointer in a translated image to
  * a stack-switching stub. Runs from the add-image callback, BEFORE dyld reads
