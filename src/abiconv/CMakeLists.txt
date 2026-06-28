@@ -334,6 +334,9 @@ add_library(abiconv SHARED
   py_shim.c
   quicktime_movie_shim.c
   keymgr_shim.c
+  # Halo: native libSystem calls abigen's consider set never covered (single-purpose ABI
+  # shims, wired through halo_tramp.asm MTSHIM -> ___<sym> exports). See halo_shim.c header.
+  halo_shim.c
   lazy_bind.c
   objc_msgSend.asm
   objc_reverse.asm
@@ -342,6 +345,7 @@ add_library(abiconv SHARED
   dlsym_tramp.asm
   init_trampoline.asm
   maptable_tramp.asm
+  halo_tramp.asm
   eh_tramp.asm
   dyld_stub_binder.asm
   dyld_func_lookup.asm
