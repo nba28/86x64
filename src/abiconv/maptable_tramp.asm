@@ -709,6 +709,7 @@ _x64_exc_longjmp:
 	; --- Sound Manager (sndmgr_shim.c) ---
 	MTSHIM	___SndChannelStatus,                  _shim_SndChannelStatus
 	MTSHIM	___SndDisposeChannel,                 _shim_SndDisposeChannel
+	MTSHIM	___SndNewChannel,                     _shim_SndNewChannel
 	MTSHIM	___SndDoCommand,                      _shim_SndDoCommand
 	MTSHIM	___SndDoImmediate,                    _shim_SndDoImmediate
 	MTSHIM	___SndPlay,                           _shim_SndPlay

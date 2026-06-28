@@ -29,3 +29,19 @@ uint32_t shim_SndChannelStatus(uint32_t *args) {
     if (st) memset(st, 0, 28);   // SCStatus is 28 bytes (Sound.h)
     return SND_NO_ERR;
 }
+
+// SndNewChannel(SndChannelPtr *chan, short synth, SInt32 init, SndCallBackUPP userRoutine):
+// the channel ALLOCATOR. Unlike the fire-and-forget commands above it must hand back a valid
+// SndChannelPtr; we cannot fabricate one (the caller stores it in a 32-bit slot and may deref
+// it). So NULL the out channel and report no sound hardware — the caller takes its "no Sound
+// Manager" path and never issues SndPlay/SndDoCommand on a bogus channel. Civ IV's real audio
+// is the bundled OpenAL, so this disables only the dead classic path.
+// ★This was the 1 Sound Manager symbol missed by the original probe: it is in CarbonSound's
+// SYMTAB (which the nm-based bundled-export subtraction wrongly cleared) but the bind targets
+// Carbon, where it is removed — the same symtab-vs-trie trap as _NewMovieFromDataRef.
+#define SND_NO_HARDWARE (-201)   // notEnoughHardwareErr
+uint32_t shim_SndNewChannel(uint32_t *args) {
+    uint32_t *chan = (uint32_t *)PTR(0);
+    if (chan) *chan = 0;          // out SndChannelPtr -> NULL
+    return (uint32_t)SND_NO_HARDWARE;
+}
