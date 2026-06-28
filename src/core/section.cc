@@ -66,13 +66,23 @@ namespace MachO {
       }
 
       /* Our own runtime-bind metadata section (slot vmaddrs + symbol names; see
-       * Archive::inject_xrel_section / objc_slide.c). Parse as opaque bytes so a
-       * later modify/convert reparse round-trips it verbatim — DataParser would
-       * pointer-detect a mangled-name byte that happens to alias an image vmaddr
-       * and "rebase" it, corrupting the table. */
+       * Archive::inject_xrel_section / objc_slide.c). On a later modify/convert
+       * reparse, parse it back into a live XrelBlob that RE-RESOLVES each slot to
+       * the blob now at that vmaddr — so this build's Emit re-emits the slot's
+       * post-re-layout address. (A plain DataBlob round-trip froze the baked
+       * absolute slot vmaddrs; when the EXECUTE->DYLIB convert then shifts every
+       * section by the header-size delta, the binds went stale — e.g. the
+       * cfstring isa binds missed their records, staying isa=0 -> __CF_IS_OBJC
+       * trap. We read the structured table explicitly, so unlike DataParser we
+       * never pointer-detect a mangled-name byte.) Only M64 carries this section;
+       * the M32 input never has one. */
       if (std::string(sect.sectname,
                       strnlen(sect.sectname, sizeof(sect.sectname))) == "__86x64_xrel") {
-         return new Section<bits>(img, offset, env, DataBlob<bits>::Parse);
+         if constexpr (bits == Bits::M64) {
+            return new Section<bits>(img, offset, env, XrelBlob<bits>::Parse);
+         } else {
+            return new Section<bits>(img, offset, env, DataBlob<bits>::Parse);
+         }
       }
 
       /*

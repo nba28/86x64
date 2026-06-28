@@ -290,9 +290,11 @@ namespace MachO {
       std::size_t p = offset + 8;
       for (const Ent& e : ents) {
          /* The slot's resolved x86_64 vmaddr (translated images live <4GB, so a
-          * 32-bit field suffices; the runtime adds the load slide). */
+          * 32-bit field suffices; the runtime adds the load slide). slot_offset
+          * is non-zero only for a reparse slot that fell inside a multi-byte blob
+          * (resolve_containing); for a freshly-lifted exact slot it is 0. */
          const uint32_t slot_vmaddr =
-            e.slot ? static_cast<uint32_t>(e.slot->loc.vmaddr) : 0;
+            e.slot ? static_cast<uint32_t>(e.slot->loc.vmaddr + e.slot_offset) : 0;
          img.at<uint32_t>(p + 0) = slot_vmaddr;
          img.at<int32_t>(p + 4) = e.addend;
          img.at<uint32_t>(p + 8) = e.name_off;
@@ -301,6 +303,45 @@ namespace MachO {
       if (!strtab.empty()) {
          img.copy(p, strtab.data(), strtab.size());
       }
+   }
+
+   template <Bits bits>
+   SectionBlob<bits> *XrelBlob<bits>::Parse(const Image& img, const Location& loc,
+                                            ParseEnv<bits>& env) {
+      /* One blob for the WHOLE section (Section::Parse1 calls us once: size()
+       * spans the entire payload). Reconstruct ents/strtab from the on-disk
+       * table and RE-RESOLVE each slot by its baked vmaddr, so this build's
+       * Emit writes the slot's post-re-layout address. */
+      auto *blob = new XrelBlob<bits>(loc, env);
+      const uint32_t magic = img.at<uint32_t>(loc.offset + 0);
+      if (magic != MAGIC) {
+         throw error("__86x64_xrel: bad magic 0x%08x on reparse", magic);
+      }
+      const uint32_t count = img.at<uint32_t>(loc.offset + 4);
+      blob->ents.reserve(count); /* keep &ents.back() stable for deferred resolve */
+      for (uint32_t i = 0; i < count; ++i) {
+         const std::size_t eo = loc.offset + 8 + static_cast<std::size_t>(i) * 12;
+         const uint32_t slot_vmaddr = img.at<uint32_t>(eo + 0);
+         const int32_t  addend      = img.at<int32_t>(eo + 4);
+         const uint32_t name_off    = img.at<uint32_t>(eo + 8); /* from section base */
+         Ent ent;
+         ent.addend = addend;
+         ent.name_off = static_cast<uint32_t>(blob->strtab.size()); /* intra; rebased below */
+         const char *nm = &img.at<char>(loc.offset + name_off);
+         blob->strtab.append(nm);
+         blob->strtab.push_back('\0');
+         blob->ents.push_back(ent);
+         /* resolve_containing handles a slot that lands at a blob start (offset 0)
+          * AND one inside a multi-byte blob; fires in do_resolve_containing once
+          * every section's blobs are registered. */
+         env.vmaddr_resolver.resolve_containing(
+            slot_vmaddr, &blob->ents.back().slot, &blob->ents.back().slot_offset);
+      }
+      /* Rebase name_off to the section base (header precedes the packed names),
+       * now that the entry count is final — matches inject_xrel_section. */
+      const uint32_t hdr = static_cast<uint32_t>(blob->header_size());
+      for (auto& e : blob->ents) { e.name_off += hdr; }
+      return blob;
    }
 
    template <Bits bits>

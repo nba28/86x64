@@ -324,6 +324,8 @@ namespace MachO {
       static constexpr uint32_t MAGIC = 0x6c657278u; /* "xrel" */
       struct Ent {
          const SectionBlob<bits> *slot = nullptr; /*!< reloc'd slot (its loc.vmaddr) */
+         std::size_t slot_offset = 0;             /*!< slot is slot->loc.vmaddr+offset
+                                                       (mid-blob slots on reparse) */
          int32_t addend = 0;
          uint32_t name_off = 0;                    /*!< from section base */
       };
@@ -335,12 +337,23 @@ namespace MachO {
       virtual void Emit(Image& img, std::size_t offset) const override;
 
       static XrelBlob<bits> *Create() { return new XrelBlob(); }
+      /* Re-parse an already-emitted __86x64_xrel section (a modify/convert
+       * reparse): read each entry's slot vmaddr back and RE-RESOLVE it to the
+       * blob currently at that address, so Emit re-emits the slot's NEW vmaddr
+       * after this build's re-layout. Without this the baked absolute slot
+       * vmaddrs go stale when a later pass shifts segments (the EXECUTE->DYLIB
+       * convert shifts every section by the header-size delta) — leaving the
+       * external binds pointing at pre-shift addresses (e.g. the cfstring isa
+       * binds miss their records, which then stay isa=0 -> __CF_IS_OBJC trap). */
+      static SectionBlob<bits> *Parse(const Image& img, const Location& loc,
+                                      ParseEnv<bits>& env);
       virtual XrelBlob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
          throw error("XrelBlob is synthesized post-transform and is never transformed");
       }
 
    private:
       XrelBlob() {}
+      XrelBlob(const Location& loc, ParseEnv<bits>& env): SectionBlob<bits>(loc, env) {}
       template <Bits> friend class XrelBlob;
    };
 
