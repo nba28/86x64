@@ -192,10 +192,17 @@ def classify(bundle, macho):
     rel = str(Path(macho).resolve().relative_to(Path(bundle).resolve()))
     archs = archs_of(macho)
     if "x86_64" in archs:
-        # Our output AND an i386 backup to re-translate from → retranslate.
-        # (A wrapper's paired <name>.dylib output links our runtime too but has
-        # no backup of its own — it's regenerated with the exec, so: native.)
-        if links_our_runtime(macho) and (backup_root(bundle) / rel).exists():
+        # Our output AND a backup that still carries an i386 slice to
+        # re-translate from → retranslate. (A wrapper's paired <name>.dylib
+        # output links our runtime too but has no backup of its own — it's
+        # regenerated with the exec, so: native.) If the backup exists but has
+        # lost its i386 slice (e.g. a prior run overwrote it with the x86_64
+        # output), there is nothing left to translate from → leave the existing
+        # x86_64 output in place as native rather than feeding translate-bundle
+        # a source with no i386 arch (which exits 1 and would abort the whole
+        # bundle's shim+sign deploy).
+        bak = backup_root(bundle) / rel
+        if links_our_runtime(macho) and bak.exists() and "i386" in archs_of(bak):
             return ("retranslate", rel)
         return ("native", rel)
     if "i386" in archs:
