@@ -217,6 +217,15 @@ fi
 #    the pipeline expects via @loader_path/libabiconv.dylib).
 cp "$LIBABICONV" "$TARGET_DIR/libabiconv.dylib"
 
+# 6b. Co-locate libinterpose.dylib next to a wrapper EXEC. The wrapper links
+#     @rpath/libinterpose.dylib (step 3, -i); co-locating libabiconv alone is
+#     not enough. Without this, libinterpose only resolves via the leaked build
+#     rpath, which `m64 rpath-fix` (eeec256) later strips → "Library not loaded"
+#     at launch. Gated on IS_EXEC since dylib-only targets have no wrapper.
+if [ "$IS_EXEC" = "1" ] && [ -f "$LIBINTERPOSE" ]; then
+    cp "$LIBINTERPOSE" "$TARGET_DIR/libinterpose.dylib"
+fi
+
 # 7. Ad-hoc codesign the new files — FLAT, not as a bundle. The targets sit
 #    inside .framework / .app bundles; signing them in place makes codesign
 #    walk the bundle (Info.plist + nested-code manifest), which fails on the
@@ -235,6 +244,7 @@ flat_sign() {
     rm -f "$t"
 }
 flat_sign "$TARGET_DIR/libabiconv.dylib"
+[ "$IS_EXEC" = "1" ] && [ -f "$TARGET_DIR/libinterpose.dylib" ] && flat_sign "$TARGET_DIR/libinterpose.dylib"
 flat_sign "$DEPLOYED_DYLIB"
 [ "$IS_EXEC" = "1" ] && flat_sign "$TARGET"
 
