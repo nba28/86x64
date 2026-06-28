@@ -756,6 +756,9 @@ _x64_exc_longjmp:
 	MTSHIM	___p2cstrcpy,                         _shim_p2cstrcpy
 	; --- Python C-API name shim (py_shim.c) ---
 	MTSHIM	___Py_InitModule4,                    _shim_Py_InitModule4
+	; --- QuickTime Movie Toolbox: trie-missing symbol in the bundled QuickTime
+	;     (symtab-only; dyld two-level binds resolve via the trie) (quicktime_movie_shim.c) ---
+	MTSHIM	___NewMovieFromDataRef,               _shim_NewMovieFromDataRef
 
 	; --- RTTI type_info vtable sentinels (used by cxx_shim.c's __dynamic_cast) ---
 	; Exported under the exact libstdc++ __cxxabiv1 vtable names so static-interpose
