@@ -67,25 +67,29 @@
 
 ;
 ; void eh_resume(uint32_t rip, uint32_t esp, uint32_t ebp,
-;                uint32_t eax_exc, uint32_t edx_sel)   -- NORETURN
+;                uint32_t eax_exc, uint32_t edx_sel,
+;                uint32_t ebx, uint32_t esi, uint32_t edi)   -- NORETURN
 ;
-; Install a translated landing-pad context: set the i386 GPR state the Itanium
+; Install a translated landing-pad context: the i386 GPR state the Itanium
 ; landing pad expects (rax = _Unwind_Exception handle, rdx = selector switch
-; value, rbp = the handler frame pointer, rsp = the handler frame's CFA) and
-; jump to the translated landing-pad address. ebx/esi/edi are left as-is:
-; frame-pointer unwinding cannot recover them and -O0 landing pads reload
-; locals through rbp; the precise restore is a later increment driven by the
-; original i386 CFI register rules (valid because the translator preserves the
-; i386 stack layout). All inputs are low-4GB (translated/i386 address space).
+; value, rbp = the handler frame pointer, rsp = the handler frame's working esp)
+; PLUS the callee-saved ebx/esi/edi the eh_shim.c CFI interpreter recovered from
+; the handler frame's saved slots — the original i386 __eh_frame CFI is valid for
+; the translated frame because the translator preserves the i386 stack layout —
+; then jump to the translated landing-pad address. All inputs are low-4GB.
 ;
-; SysV in: rdi=rip, rsi=esp, rdx=ebp, rcx=eax_exc, r8=edx_sel.
+; SysV in: rdi=rip, rsi=esp, rdx=ebp, rcx=eax_exc, r8=edx_sel, r9=ebx,
+;          [rsp+8]=esi, [rsp+16]=edi.
 ;
 	global	_eh_resume
 _eh_resume:
-	mov	r11d,	edi             ; r11 = target rip (survives esp/rbp loads)
-	mov	eax,	ecx             ; rax = exception handle
-	mov	r9d,	r8d             ; stash selector (rdx about to be reloaded)
+	mov	r11d,	edi             ; r11 = target rip (survives all reloads)
+	mov	r10d,	esi             ; r10 = esp arg (save before reusing rsi)
+	mov	edi,	dword [rsp + 16]; rdi = edi value (stack arg, rsp still ours)
+	mov	esi,	dword [rsp + 8] ; rsi = esi value (stack arg)
+	mov	ebx,	r9d             ; rbx = ebx
 	mov	ebp,	edx             ; rbp = handler frame pointer
-	mov	esp,	esi             ; rsp = handler frame CFA
-	mov	edx,	r9d             ; rdx = selector switch value
+	mov	eax,	ecx             ; rax = exception handle
+	mov	edx,	r8d             ; rdx = selector switch value
+	mov	esp,	r10d            ; rsp = handler working esp (set last)
 	jmp	r11

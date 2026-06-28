@@ -77,7 +77,8 @@
 /* eh_tramp.asm                                                          */
 /* ===================================================================== */
 extern void eh_resume(uint32_t rip, uint32_t esp, uint32_t ebp,
-                      uint32_t eax_exc, uint32_t edx_sel) __attribute__((noreturn));
+                      uint32_t eax_exc, uint32_t edx_sel,
+                      uint32_t ebx, uint32_t esi, uint32_t edi) __attribute__((noreturn));
 
 /* ===================================================================== */
 /* DWARF EH pointer encodings (DW_EH_PE_*)                              */
@@ -206,6 +207,19 @@ static struct eh_exception *hdr_from_handle(uint32_t handle) {
 struct pcmap_ent { int32_t trans_off; uint32_t orig; };
 struct lsda_ent  { int32_t trans_func_off; uint32_t orig_func; int32_t lsda_off; };
 
+/* One i386 __eh_frame FDE + its CIE's relevant fields, for the CFI register
+ * restore.  relpc = the function's ORIGINAL i386 start relative to the
+ * __eh_frame disk base (recovered from the FDE's pcrel pc-begin, immune to the
+ * stale absolute address); `region` is the resolved disk func start. */
+struct fde_rec {
+   uint32_t relpc;
+   uint32_t region;                               /* resolved disk func start */
+   const uint8_t *cfi, *cfi_end;                  /* FDE CFI instructions     */
+   const uint8_t *cie_cfi, *cie_cfi_end;          /* CIE initial instructions */
+   uint8_t  code_align;
+   int32_t  data_align;
+};
+
 struct eh_image {
    uintptr_t text_base, text_size;                /* runtime __text span     */
    uintptr_t gxt_base;                            /* runtime __gcc_except_tab*/
@@ -214,6 +228,8 @@ struct eh_image {
    struct pcmap_ent *pcmap_byorig;                /* malloc'd, sorted by orig*/
    const struct lsda_ent *lsda;                   /* sorted by trans_func_off*/
    uint32_t  lsda_n;
+   struct fde_rec *fdes;                          /* malloc'd, sorted by region*/
+   uint32_t  fde_n;
 };
 static struct eh_image g_imgs[64];
 static int g_img_n = 0;
@@ -223,6 +239,191 @@ static pthread_mutex_t g_img_mu = PTHREAD_MUTEX_INITIALIZER;
 static int cmp_ent_byorig(const void *x, const void *y) {
    uint32_t a = ((const struct pcmap_ent *)x)->orig, b = ((const struct pcmap_ent *)y)->orig;
    return (a > b) - (a < b);
+}
+static int cmp_fde_relpc(const void *x, const void *y) {
+   uint32_t a = ((const struct fde_rec *)x)->relpc, b = ((const struct fde_rec *)y)->relpc;
+   return (a > b) - (a < b);
+}
+static int cmp_fde_region(const void *x, const void *y) {
+   uint32_t a = ((const struct fde_rec *)x)->region, b = ((const struct fde_rec *)y)->region;
+   return (a > b) - (a < b);
+}
+
+static int eh_enc_sz(uint8_t e) {
+   switch (e & 0x0f) {
+   case 0x00: case 0x03: case 0x0b: return 4;     /* absptr/udata4/sdata4 (i386) */
+   case 0x02: case 0x0a: return 2;
+   case 0x04: case 0x0c: return 8;
+   default: return -1;                            /* uleb/sleb -> variable */
+   }
+}
+
+/* Parse __eh_frame: keep the FDEs that carry an LSDA (the EH functions — exactly
+ * the ehlsda set), recording each FDE's relpc (its function start relative to
+ * the __eh_frame disk base, recovered from the pcrel pc-begin so it's immune to
+ * the stale absolute address) + the FDE/CIE CFI instruction ranges.  The
+ * function<->FDE association is resolved against the ehlsda in eh_scan_images. */
+static void eh_parse_eh_frame(struct eh_image *im, const uint8_t *base, unsigned long size) {
+   im->fdes = NULL; im->fde_n = 0;
+   if (!base || size < 8) return;
+   struct cie_t { size_t off; uint8_t code_align; int32_t data_align; uint8_t r_enc, l_enc;
+                  int has_aug, has_l; const uint8_t *cfi, *cfi_end; };
+   struct cie_t *cies = malloc(sizeof(struct cie_t) * 64); int ncie = 0, ciecap = 64;
+   struct fde_rec *fdes = malloc(((size / 8) + 1) * sizeof(struct fde_rec));
+   if (!cies || !fdes) { free(cies); free(fdes); return; }
+   uint32_t nfde = 0;
+   size_t i = 0;
+   while (i + 4 <= size) {
+      uint32_t len = *(const uint32_t *)(base + i);
+      if (len == 0 || len == 0xffffffffu) break;
+      size_t after_len = i + 4, rec_end = after_len + len;
+      if (rec_end > size) break;
+      uint32_t id = *(const uint32_t *)(base + after_len);
+      if (id == 0) {                               /* CIE */
+         const uint8_t *p = base + after_len + 4;
+         uint8_t version = *p++;
+         const char *aug = (const char *)p;
+         while (p < base + rec_end && *p) { p++; }
+         if (p < base + rec_end) { p++; }
+         int has_aug = (aug[0] == 'z');
+         read_uleb(&p);                            /* code_align (re-read below) */
+         const uint8_t *q = base + after_len + 4 + 1 + (size_t)(strlen(aug) + 1);
+         uint64_t code_align = read_uleb(&q);
+         int64_t data_align = read_sleb(&q);
+         if (version == 1) { q++; } else { read_uleb(&q); }
+         uint8_t r_enc = 0, l_enc = 0; int has_l = 0;
+         if (has_aug) {
+            uint64_t auglen = read_uleb(&q);
+            const uint8_t *aug_end = q + auglen;
+            for (const char *c = aug + 1; *c; c++) {
+               if (*c == 'L') { l_enc = *q++; has_l = 1; }
+               else if (*c == 'R') { r_enc = *q++; }
+               else if (*c == 'P') { uint8_t pe = *q++; int s = eh_enc_sz(pe);
+                                     if (s < 0) read_uleb(&q); else q += s; }
+            }
+            q = aug_end;
+         }
+         if (ncie >= ciecap) { ciecap *= 2; cies = realloc(cies, sizeof(struct cie_t) * ciecap); if (!cies) break; }
+         cies[ncie++] = (struct cie_t){ i, (uint8_t)(code_align?code_align:1),
+            (int32_t)(data_align?data_align:-4), r_enc, l_enc, has_aug, has_l,
+            q, base + rec_end };
+      } else {                                     /* FDE */
+         size_t cie_off = (id <= after_len) ? after_len - id : (size_t)-1;
+         struct cie_t *cie = NULL;
+         for (int k = 0; k < ncie; k++) if (cies[k].off == cie_off) { cie = &cies[k]; break; }
+         if (cie && cie->has_l) {
+            const uint8_t *p = base + after_len + 4;
+            size_t pcfield = (size_t)(p - base);
+            int rsz = eh_enc_sz(cie->r_enc);
+            int32_t V = 0;
+            if (rsz == 4) { V = *(const int32_t *)p; p += 4; }
+            else if (rsz == 2) { V = *(const int16_t *)p; p += 2; }
+            else { p += (rsz > 0 ? rsz : 4); }
+            uint32_t relpc = (uint32_t)((int64_t)pcfield + V);
+            if (rsz > 0) { p += rsz; } else { read_uleb(&p); }   /* pc_range */
+            uint64_t auglen = read_uleb(&p);
+            const uint8_t *aug_end = p + auglen;
+            /* LSDA pointer: keep only FDEs with a real LSDA (the EH set). */
+            uint32_t lsda_raw = 0; int lsz = eh_enc_sz(cie->l_enc);
+            if (lsz == 4) lsda_raw = *(const uint32_t *)p;
+            p = aug_end;
+            if (lsda_raw != 0) {
+               struct fde_rec *f = &fdes[nfde++];
+               f->relpc = relpc; f->region = 0;
+               f->cfi = p; f->cfi_end = base + rec_end;
+               f->cie_cfi = cie->cfi; f->cie_cfi_end = cie->cfi_end;
+               f->code_align = cie->code_align; f->data_align = cie->data_align;
+            }
+         }
+      }
+      i = rec_end;
+   }
+   free(cies);
+   im->fdes = fdes; im->fde_n = nfde;
+}
+
+/* Resolve each FDE's `region` (disk func start) by pairing the LSDA-bearing FDEs
+ * (sorted by relpc) 1:1 with the ehlsda functions (sorted by orig_func): both
+ * are exactly the EH-function set, so region[k] = orig_func[k] and the constant
+ * ehf_disk_base falls out (region = ehf_disk_base + relpc). */
+static void eh_assoc_fdes(struct eh_image *im) {
+   if (!im->fdes || !im->fde_n || !im->lsda || !im->lsda_n) { im->fde_n = 0; return; }
+   qsort(im->fdes, im->fde_n, sizeof(struct fde_rec), cmp_fde_relpc);
+   uint32_t *regions = malloc(sizeof(uint32_t) * im->lsda_n);
+   if (!regions) { im->fde_n = 0; return; }
+   for (uint32_t k = 0; k < im->lsda_n; k++) regions[k] = im->lsda[k].orig_func;
+   /* simple insertion sort of regions (small) */
+   for (uint32_t a = 1; a < im->lsda_n; a++) { uint32_t v = regions[a]; int b = (int)a - 1;
+      while (b >= 0 && regions[b] > v) { regions[b+1] = regions[b]; b--; } regions[b+1] = v; }
+   uint32_t pairs = im->fde_n < im->lsda_n ? im->fde_n : im->lsda_n;
+   for (uint32_t k = 0; k < pairs; k++) im->fdes[k].region = regions[k];
+   im->fde_n = pairs;
+   free(regions);
+   qsort(im->fdes, im->fde_n, sizeof(struct fde_rec), cmp_fde_region);
+}
+
+static const struct fde_rec *eh_fde_for_region(struct eh_image *im, uint32_t region) {
+   for (uint32_t k = 0; k < im->fde_n; k++) if (im->fdes[k].region == region) return &im->fdes[k];
+   return NULL;
+}
+
+/* Execute the CFI (CIE initial instructions then the FDE up to pc_off) for a
+ * frame-pointer function, returning the CFA rule + the CFA-relative save offset
+ * of each GP register.  i386 reg numbers: eax0 ecx1 edx2 ebx3 esp4 ebp5 esi6
+ * edi7.  reg_off[r] is meaningful only when reg_set[r]. */
+static void eh_cfi_run(const struct fde_rec *fde, uint32_t pc_off,
+                       int *cfa_reg, int32_t *cfa_off,
+                       int32_t reg_off[8], int reg_set[8]) {
+   *cfa_reg = 4; *cfa_off = 4;                     /* initial: CFA = esp+4 */
+   for (int r = 0; r < 8; r++) reg_set[r] = 0;
+   int32_t da = fde->data_align ? fde->data_align : -4;
+   uint8_t ca = fde->code_align ? fde->code_align : 1;
+   /* remembered state for DW_CFA_remember/restore_state */
+   int32_t s_cfa_off = 0; int s_cfa_reg = 0; int32_t s_reg_off[8]; int s_reg_set[8]; int have_saved = 0;
+   for (int phase = 0; phase < 2; phase++) {
+      const uint8_t *p = phase == 0 ? fde->cie_cfi : fde->cfi;
+      const uint8_t *end = phase == 0 ? fde->cie_cfi_end : fde->cfi_end;
+      uint32_t loc = 0;
+      while (p < end) {
+         uint8_t op = *p++;
+         uint8_t hi = op & 0xc0, lo = op & 0x3f;
+         if (hi == 0x40) {                          /* advance_loc */
+            loc += (uint32_t)lo * ca;
+            if (phase == 1 && loc > pc_off) return;
+         } else if (hi == 0x80) {                   /* offset reg */
+            uint64_t n = read_uleb(&p);
+            reg_off[lo & 7] = (int32_t)n * da; reg_set[lo & 7] = 1;
+         } else if (hi == 0xc0) {                    /* restore reg */
+            reg_set[lo & 7] = 0;
+         } else {                                    /* extended (op = lo) */
+            switch (op) {
+            case 0x00: break;                        /* nop */
+            case 0x01: { read_uleb(&p); /*set_loc abs (rare)*/ break; }
+            case 0x02: { uint32_t d = *p++; loc += d * ca; if (phase==1 && loc>pc_off) return; break; }
+            case 0x03: { uint32_t d = *(const uint16_t *)p; p += 2; loc += d * ca; if (phase==1 && loc>pc_off) return; break; }
+            case 0x04: { uint32_t d = *(const uint32_t *)p; p += 4; loc += d * ca; if (phase==1 && loc>pc_off) return; break; }
+            case 0x05: { uint64_t r = read_uleb(&p); uint64_t n = read_uleb(&p);
+                         reg_off[r & 7] = (int32_t)n * da; reg_set[r & 7] = 1; break; }
+            case 0x06: case 0x07: case 0x08: { uint64_t r = read_uleb(&p); if (op!=0x08) {} (void)r;
+                         reg_set[r & 7] = 0; break; }     /* restore_ext/undefined/same */
+            case 0x09: { uint64_t r1 = read_uleb(&p); read_uleb(&p); (void)r1; break; } /* register */
+            case 0x0a: { s_cfa_off=*cfa_off; s_cfa_reg=*cfa_reg;
+                         for(int r=0;r<8;r++){s_reg_off[r]=reg_off[r];s_reg_set[r]=reg_set[r];} have_saved=1; break; }
+            case 0x0b: { if (have_saved){ *cfa_off=s_cfa_off; *cfa_reg=s_cfa_reg;
+                         for(int r=0;r<8;r++){reg_off[r]=s_reg_off[r];reg_set[r]=s_reg_set[r];} } break; }
+            case 0x0c: { *cfa_reg = (int)read_uleb(&p); *cfa_off = (int32_t)read_uleb(&p); break; }
+            case 0x0d: { *cfa_reg = (int)read_uleb(&p); break; }
+            case 0x0e: { *cfa_off = (int32_t)read_uleb(&p); break; }
+            case 0x0f: { read_uleb(&p); /*def_cfa_expression*/ goto done; }
+            case 0x12: { *cfa_reg=(int)read_uleb(&p); *cfa_off=(int32_t)read_sleb(&p)*da; break; } /* def_cfa_sf */
+            case 0x13: { *cfa_off=(int32_t)read_sleb(&p)*da; break; }                              /* def_cfa_offset_sf */
+            default: goto done;                      /* unknown -> stop */
+            }
+         }
+      }
+   }
+done:
+   return;
 }
 
 /* Locate the __86x64_pcmap / __86x64_ehlsda sections in each loaded image and
@@ -245,6 +446,8 @@ static void eh_scan_images(void) {
       const uint8_t *ls = getsectiondata(mh64, "__DATA", "__86x64_ehlsda", &lssz);
       if (!ls) ls = getsectiondata(mh64, "__TEXT", "__86x64_ehlsda", &lssz);
       const uint8_t *gx = getsectiondata(mh64, "__TEXT", "__gcc_except_tab", &gxsz);
+      unsigned long ehfsz = 0;
+      const uint8_t *ehf = getsectiondata(mh64, "__TEXT", "__eh_frame", &ehfsz);
 
       struct eh_image *im = &g_imgs[g_img_n];
       memset(im, 0, sizeof *im);
@@ -265,6 +468,9 @@ static void eh_scan_images(void) {
          memcpy(im->pcmap_byorig, im->pcmap, (size_t)im->pcmap_n * sizeof(struct pcmap_ent));
          qsort(im->pcmap_byorig, im->pcmap_n, sizeof(struct pcmap_ent), cmp_ent_byorig);
       }
+      /* Parse __eh_frame CFI for callee-saved register restore at landing pads. */
+      eh_parse_eh_frame(im, ehf, ehfsz);
+      eh_assoc_fdes(im);
       EHLOG("registered eh-image #%d text=[%#lx,+%#lx) gxt=%#lx pcmap=%u lsda=%u\n",
             g_img_n, (unsigned long)im->text_base, (unsigned long)im->text_size,
             (unsigned long)im->gxt_base, im->pcmap_n, im->lsda_n);
@@ -468,10 +674,12 @@ static int eh_has_handler(struct eh_exception *h, uint32_t start_ebp, uint32_t s
    uint32_t ebp = start_ebp, ret = start_ret; int hops = 0;
    while (ret && hops++ < 4096) {
       struct eh_image *im = eh_image_for_pc((uintptr_t)ret);
-      if (!im) break;
+      if (!im) { EHLOG("ph1 ret=%#x not in image\n", ret); break; }
       uint32_t orig_pc = 0;
       if (pc_trans_to_orig(im, (uintptr_t)ret, &orig_pc)) {
          const struct lsda_ent *rec = eh_lsda_for_pc(im, (uintptr_t)ret);
+         EHLOG("ph1 ret=%#x orig_pc=%#x rec_region=%#x lsda_off=%d\n",
+               ret, orig_pc, rec?rec->orig_func:0, rec?rec->lsda_off:0);
          if (rec && im->gxt_base) {
             uint32_t lp = 0; int32_t sel = 0; uint32_t adj = 0;
             if (eh_scan_lsda((uint32_t)(im->gxt_base + (intptr_t)rec->lsda_off),
@@ -479,7 +687,7 @@ static int eh_has_handler(struct eh_exception *h, uint32_t start_ebp, uint32_t s
                              /*want_handler=*/1, &lp, &sel, &adj))
                return 1;
          }
-      }
+      } else { EHLOG("ph1 no orig for ret=%#x\n", ret); }
       if (!ebp) break;
       uint32_t saved_ebp = *(const uint32_t *)(uintptr_t)ebp;
       uint32_t caller_ret = *(const uint32_t *)(uintptr_t)(ebp + 4);
@@ -536,10 +744,36 @@ static void eh_raise_from(struct eh_exception *h, uint32_t start_ebp,
                goto next;
             }
             if (sel != 0) { h->selector = sel; if (adj) h->adjusted = adj; }
-            EHLOG("resume: frame ebp=%#x esp=%#x lp=%#lx sel=%d (%s)\n",
-                  ebp, lp_esp, (unsigned long)lp_trans, sel,
-                  sel ? "catch" : "cleanup");
-            eh_resume((uint32_t)lp_trans, lp_esp, ebp, (uint32_t)(uintptr_t)h, (uint32_t)sel);
+            /* Restore callee-saved ebx/esi/edi from the handler frame's saved
+             * slots, located via the original i386 __eh_frame CFI (valid for the
+             * translated frame: the i386 stack layout is preserved).  CFA from the
+             * frame pointer (ebp + cfa_off when cfa_reg==ebp); each register's
+             * saved value is at [CFA + reg_off].  Defaults keep the current value
+             * when the function didn't save that register (it doesn't clobber it).*/
+            uint32_t r_ebx = 0, r_esi = 0, r_edi = 0;
+            __asm__ volatile("movl %%ebx,%0; movl %%esi,%1; movl %%edi,%2"
+                             : "=r"(r_ebx), "=r"(r_esi), "=r"(r_edi));
+            const struct fde_rec *fde = eh_fde_for_region(im, rec->orig_func);
+            if (fde) {
+               int cfa_reg; int32_t cfa_off; int32_t roff[8]; int rset[8];
+               eh_cfi_run(fde, orig_pc - rec->orig_func, &cfa_reg, &cfa_off, roff, rset);
+               /* Handler frames are frame-pointer functions, so the post-prologue
+                * CFA is frame-pointer-based regardless of the i386 eh_frame's
+                * esp/ebp register number (it swaps esp=5/ebp=4): CFA = ebp +
+                * cfa_off (cfa_off is 8 once the prologue's push ebp is set up). */
+               uint32_t cfa = ebp + (uint32_t)cfa_off;
+               if (rset[3]) r_ebx = *(const uint32_t *)(uintptr_t)(cfa + roff[3]);
+               if (rset[6]) r_esi = *(const uint32_t *)(uintptr_t)(cfa + roff[6]);
+               if (rset[7]) r_edi = *(const uint32_t *)(uintptr_t)(cfa + roff[7]);
+               EHLOG("cfi: cfa_reg=%d cfa_off=%d ebx@%d=%s esi@%d=%s edi@%d=%s\n",
+                     cfa_reg, cfa_off, roff[3], rset[3]?"y":"n", roff[6],
+                     rset[6]?"y":"n", roff[7], rset[7]?"y":"n");
+            }
+            EHLOG("resume: frame ebp=%#x esp=%#x lp=%#lx sel=%d (%s) ebx=%#x esi=%#x edi=%#x\n",
+                  ebp, lp_esp, (unsigned long)lp_trans, sel, sel ? "catch" : "cleanup",
+                  r_ebx, r_esi, r_edi);
+            eh_resume((uint32_t)lp_trans, lp_esp, ebp, (uint32_t)(uintptr_t)h,
+                      (uint32_t)sel, r_ebx, r_esi, r_edi);
             /* noreturn */
          }
       }
