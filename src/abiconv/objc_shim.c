@@ -1593,7 +1593,33 @@ static int marshal_arg_fwd(struct objc_call_plan *plan, struct mcur *c,
       uint32_t fn32 = args32[(*ai)++];
       return mcur_put_gp(plan, c, x64_cb_wrap(fn32, &g_objc_cmp_sig));
    }
-   /* everything else: int/char/short/BOOL/enum/pointer — one 4-byte slot, GP */
+   if (b == '^' && t[1] == 'v') {
+      /* Opaque `void*` arg. When the i386 app holds a value the bridge earlier
+       * WRAPPED (a 64-bit native pointer that does NOT fit a 32-bit slot — e.g. a
+       * CGContextRef obtained via `-[NSGraphicsContext CGContext]`
+       * (`^{CGContext=}`, return KIND 1 -> arena handle) and handed back as the
+       * `^v` graphicsPort of `+[NSGraphicsContext graphicsContextWithGraphicsPort:
+       * flipped:]`), that value is a low-4GB ARENA HANDLE that must be unwrapped
+       * to the real 64-bit pointer. Passing the raw handle makes native code
+       * (CGContextRetain) dereference the arena-slot ADDRESS as the object ->
+       * SIGSEGV (Quinn: fault 0x343545854, the handle's slot read as a CGContext).
+       * x64_objc_unwrap is a pure arena read: an arena handle -> its real 64-bit
+       * pointer; EVERY other value (a genuine low-4GB i386 `void*` buffer the
+       * native side reads/writes, or NULL) passes through zero-extended
+       * unchanged, so real i386 buffers are never disturbed. This is the
+       * symmetric inverse of the opaque-pointer RETURN wrap (and mirrors
+       * bp_track_tag, which unwraps a wrapped 64-bit token on the remove* arg).
+       * Scoped to `^v` only: typed buffers (`^i`/`^c`/`^S`), by-ref out-params
+       * (`^@`), and struct pointers (`^{T=body}`) are always genuine app-side
+       * <4GB pointers, never wrapped handles, so they keep raw passthrough.
+       * (`^{Name=}` opaque CF/CG tokens and `^{Name=#}` object struct-ptrs are
+       * already unwrapped by enc_is_cfptr / enc_is_objptr_struct at the top.)
+       * UNIVERSAL: triggers on the `^v` encoding crossing into a native method,
+       * not on the selector. */
+      return mcur_put_gp(plan, c, x64_objc_unwrap(args32[(*ai)++]));
+   }
+   /* everything else: int/char/short/BOOL/enum, ^i/^c/^@/^{T=body}/^* pointers —
+    * one 4-byte slot, GP (raw; genuine i386 pointers already fit <4GB) */
    return mcur_put_gp(plan, c, (uint64_t)args32[(*ai)++]);
 }
 

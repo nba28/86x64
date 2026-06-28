@@ -1,0 +1,4 @@
+ok opaque_voidptr_arg_unwrapped
+ok opaque_voidptr_arg_stable
+ok plain_voidptr_passthrough
+exit_code: 0
