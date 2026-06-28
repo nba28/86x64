@@ -359,27 +359,60 @@ namespace MachO {
    template <Bits bits>
    JumpStubBlob<bits>::JumpStubBlob(const JumpStubBlob<opposite<bits>>& other,
                                     TransformEnv<opposite<bits>>& env):
-      SectionBlob<bits>(other, env), slot(nullptr)
+      SectionBlob<bits>(other, env), slot(nullptr), name(other.name)
    {
       env.resolve(other.slot, &slot);
    }
 
    template <Bits bits>
    void JumpStubBlob<bits>::Emit(Image& img, std::size_t offset) const {
-      /* `ff 25` = JMP r/m (ModRM /4): in 64-bit mode the operand is
-       * rip-relative `[rip+disp32]`; in 32-bit mode it is absolute `[disp32]`. */
-      img.at<uint8_t>(offset + 0) = 0xff;
-      img.at<uint8_t>(offset + 1) = 0x25;
-      const uint32_t slot_vmaddr =
-         slot ? static_cast<uint32_t>(slot->loc.vmaddr) : 0;
       if constexpr (bits == Bits::M32) {
-         img.at<uint32_t>(offset + 2) = slot_vmaddr; /* absolute pointer */
+         /* Intermediate image (never executed): classic 6-byte absolute
+          * `jmp dword ptr [slot_vmaddr]` (`ff 25` + absolute disp32). */
+         img.at<uint8_t>(offset + 0) = 0xff;
+         img.at<uint8_t>(offset + 1) = 0x25;
+         img.at<uint32_t>(offset + 2) =
+            slot ? static_cast<uint32_t>(slot->loc.vmaddr) : 0;
+         return;
       } else {
-         /* rip-relative displacement from the end of this 6-byte instruction */
-         const int32_t disp = static_cast<int32_t>(
-            static_cast<int64_t>(slot_vmaddr) -
-            static_cast<int64_t>(this->loc.vmaddr + 6));
-         img.at<int32_t>(offset + 2) = disp;
+         /* Fixed 17-byte NULL-checking diagnostic trampoline (PURE CODE -- no
+          * inline data, so it survives the convert/modify reparse that decodes
+          * __jt_tramp as instructions and SHIFTS its layout). The slot may be
+          * bound to NULL (weak import of a removed symbol), in which case the
+          * classic `jmp *slot` would fault at 0x0 with no attribution. Instead
+          * load the slot into r11 (PLT scratch -- not an argument register, not
+          * the SysV varargs AL count, so the resolved fast path is register-
+          * faithful to the old jmp) and trap with ud2 if NULL.
+          *
+          *   +0  4c 8b 1d <disp32>   mov  r11, [rip+slot]   (rip = self+7)
+          *   +7  4d 85 db            test r11, r11
+          *  +10  74 03               jz   .trap (+15)
+          *  +12  41 ff e3            jmp  r11               ; resolved import
+          *  +15  0f 0b               ud2                    ; .trap (NULL slot)
+          *
+          * Both references re-resolve on reparse: the rip-relative mov to its
+          * __jt_ptrs slot (NonLazySymbolPointer), and the jz to the ud2. */
+         const int64_t slot_va = slot ? static_cast<int64_t>(slot->loc.vmaddr) : 0;
+         const int64_t self_va = static_cast<int64_t>(this->loc.vmaddr);
+         /* mov r11, [rip+disp32] */
+         img.at<uint8_t>(offset + 0) = 0x4c;
+         img.at<uint8_t>(offset + 1) = 0x8b;
+         img.at<uint8_t>(offset + 2) = 0x1d;
+         img.at<int32_t>(offset + 3) = static_cast<int32_t>(slot_va - (self_va + 7));
+         /* test r11, r11 */
+         img.at<uint8_t>(offset + 7) = 0x4d;
+         img.at<uint8_t>(offset + 8) = 0x85;
+         img.at<uint8_t>(offset + 9) = 0xdb;
+         /* jz +3 -> .trap */
+         img.at<uint8_t>(offset + 10) = 0x74;
+         img.at<uint8_t>(offset + 11) = 0x03;
+         /* jmp r11 (resolved tail-call) */
+         img.at<uint8_t>(offset + 12) = 0x41;
+         img.at<uint8_t>(offset + 13) = 0xff;
+         img.at<uint8_t>(offset + 14) = 0xe3;
+         /* .trap: ud2 */
+         img.at<uint8_t>(offset + 15) = 0x0f;
+         img.at<uint8_t>(offset + 16) = 0x0b;
       }
    }
 

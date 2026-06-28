@@ -294,7 +294,7 @@ namespace MachO {
 
       /* Raw symbol table (order-independent LC scan, like lift_external_relocs). */
       const auto& hdr = img.at<mach_header_t<bits>>(0);
-      std::size_t symoff = 0, nsyms = 0;
+      std::size_t symoff = 0, nsyms = 0, stroff = 0, strsize = 0;
       {
          std::size_t lc_off = sizeof(mach_header_t<bits>);
          for (uint32_t i = 0; i < hdr.ncmds; ++i) {
@@ -302,12 +302,28 @@ namespace MachO {
             if (lc.cmd == LC_SYMTAB) {
                const auto& st = img.at<symtab_command>(lc_off);
                symoff = st.symoff; nsyms = st.nsyms;
+               stroff = st.stroff; strsize = st.strsize;
                break;
             }
             lc_off += lc.cmdsize;
          }
       }
       if (symoff == 0 || nsyms == 0) { return; }
+
+      /* Parsed Symtab — used to mark each undefined jump-table import N_WEAK_REF
+       * (below). In every real image LC_SYMTAB is parsed before LC_DYSYMTAB, so
+       * this is populated; if for some reason it is not yet available the
+       * weak-marking is skipped and the bind stays eager (prior behavior). There
+       * is exactly one undef nlist per external name, so a name->nlist map is a
+       * precise mapping from the raw disk symidx we read below. */
+      std::unordered_map<std::string, Nlist<bits> *> undef_by_name;
+      if (Symtab<bits> *symtab_lc = env.archive.template subcommand<Symtab>()) {
+         for (Nlist<bits> *nl : symtab_lc->syms) {
+            if (nl->string != nullptr && nl->kind() == Nlist<bits>::Kind::UNDEF) {
+               undef_by_name.emplace(nl->string->str, nl);
+            }
+         }
+      }
 
       /* Already synthesized (reparse of a translated image)? The __jt_tramp
        * trampolines + appended indirect entries are present in the file; do not
@@ -318,8 +334,10 @@ namespace MachO {
          env.archive.section("__jt_tramp") != nullptr;
 
       /* Collected undefined stubs (vmaddr/offset + the symbol they import). */
-      struct UndefStub { std::size_t vmaddr; std::size_t offset; uint32_t symidx; };
+      struct UndefStub { std::size_t vmaddr; std::size_t offset; uint32_t symidx;
+                         std::string name; };
       std::vector<UndefStub> undef;
+      std::size_t weak_marked = 0;
 
       std::size_t entered = 0;
       for (Segment<bits> *seg : env.archive.segments()) {
@@ -346,10 +364,30 @@ namespace MachO {
                   ++entered;
                } else if ((nl.n_type & N_TYPE) == N_UNDF) {
                   /* UNDEFINED external: trampoline + bound slot (built below). */
+                  std::string sym_name;
+                  if (stroff != 0 && nl.n_un.n_strx < strsize) {
+                     sym_name = &img.at<char>(stroff + nl.n_un.n_strx);
+                  }
+                  /* Mark the import a WEAK reference. synthesize_dyld_info turns
+                   * N_WEAK_REF into BIND_SYMBOL_FLAGS_WEAK_IMPORT (archive.cc), so
+                   * dyld binds the slot to NULL instead of hard-failing the whole
+                   * image when the symbol is REMOVED from modern macOS. The image
+                   * then LOADS even with removed Carbon/QuickDraw/Sound imports;
+                   * only a genuinely-CALLED removed symbol traps (diagnostic
+                   * JumpStubBlob). Idempotent across reparse. Safe for symbols
+                   * that DO resolve: a present weak import binds normally. */
+                  if (!sym_name.empty()) {
+                     auto it = undef_by_name.find(sym_name);
+                     if (it != undef_by_name.end() &&
+                         !(it->second->nlist.n_desc & N_WEAK_REF)) {
+                        it->second->nlist.n_desc |= N_WEAK_REF;
+                        ++weak_marked;
+                     }
+                  }
                   if (!already_synthesized) {
                      undef.push_back({stub_vmaddr,
                                       (std::size_t)(sect.offset + k * stub_size),
-                                      symidx});
+                                      symidx, sym_name});
                   }
                }
             }
@@ -361,27 +399,38 @@ namespace MachO {
                                      /*records=*/static_cast<const void *>(undef.data()));
       }
 
-      if ((entered || !undef.empty()) && getenv("MACHO_TOOL_DEBUG")) {
+      if ((entered || !undef.empty() || weak_marked) && getenv("MACHO_TOOL_DEBUG")) {
          fprintf(stderr, "lift_jump_table_targets: redirected %zu defined "
                  "self-modifying CALL-stub(s) to their functions; %zu undefined "
-                 "stub(s) %s\n", entered, undef.size(),
+                 "stub(s) %s; %zu import(s) marked weak (NULL-tolerant load)\n",
+                 entered, undef.size(),
                  already_synthesized ? "already trampolined (reparse)"
-                                     : "got jmp-through-slot trampolines");
+                                     : "got NULL-checking diagnostic trampolines",
+                 weak_marked);
+         /* Ordered list: trampoline #i (== __jt_tramp slot i) traps for this
+          * symbol if it is REMOVED and genuinely called. A crash at __jt_tramp
+          * PC -> (PC - section base)/stub-stride == i -> this name. */
+         for (std::size_t i = 0; i < undef.size(); ++i) {
+            fprintf(stderr, "  weak-import jt_tramp[%zu] -> %s\n",
+                    i, undef[i].name.empty() ? "<anon>" : undef[i].name.c_str());
+         }
       }
    }
 
    /* Build the __TEXT,__jt_tramp trampolines + __DATA,__jt_ptrs bound slots for
     * the undefined `__IMPORT,__jump_table` stubs collected above. `records`
     * points at an array of the (anonymous) UndefStub struct laid out exactly as
-    * { size_t vmaddr; size_t offset; uint32_t symidx; } — re-described locally so
-    * this helper stays out of the header. Runs at PARSE (before Section::Parse1)
-    * so the synthesized JumpStubBlob registers at the original stub vmaddr before
-    * the dead __jump_table bytes do (the resolver keeps the first registration),
-    * and so the slots/trampolines flow through the normal M32->M64 transform. */
+    * { size_t vmaddr; size_t offset; uint32_t symidx; std::string name; } —
+    * re-described locally (identically) so this helper stays out of the header.
+    * Runs at PARSE (before Section::Parse1) so the synthesized JumpStubBlob
+    * registers at the original stub vmaddr before the dead __jump_table bytes do
+    * (the resolver keeps the first registration), and so the slots/trampolines
+    * flow through the normal M32->M64 transform. */
    template <Bits bits>
    void Dysymtab<bits>::synthesize_undef_jump_stubs(ParseEnv<bits>& env, std::size_t count,
                                                     const void *records) {
-      struct UndefStub { std::size_t vmaddr; std::size_t offset; uint32_t symidx; };
+      struct UndefStub { std::size_t vmaddr; std::size_t offset; uint32_t symidx;
+                         std::string name; };
       const UndefStub *undef = static_cast<const UndefStub *>(records);
 
       Segment<bits> *text = env.archive.segment(SEG_TEXT);
@@ -418,7 +467,7 @@ namespace MachO {
           * (keyed by the original stub vmaddr), bypassing the vmaddr-positioned
           * placeholder that would otherwise land on the dead __jump_table stub. */
          auto *tramp = JumpStubBlob<bits>::Create(
-            Location(undef[j].offset, undef[j].vmaddr), env, slot);
+            Location(undef[j].offset, undef[j].vmaddr), env, slot, undef[j].name);
          tramp->segment = text;
          tramp->section = tramp_sect;
          tramp_sect->content.push_back(tramp);

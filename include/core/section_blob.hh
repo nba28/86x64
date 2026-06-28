@@ -450,30 +450,67 @@ namespace MachO {
     * paired `__DATA,__jt_ptrs` NonLazySymbolPointer slot; the blob is registered
     * at the ORIGINAL stub vmaddr so the `call <stub>` site resolves straight to
     * it (no call-site rewrite needed -- the dead stub is simply bypassed). The
-    * slot is bound at load (route-C synthesize_dyld_info), so the trampoline is
-    * `jmp *slot` -> the real import.
+    * imported symbol's undef nlist is marked N_WEAK_REF (see
+    * lift_jump_table_targets), so synthesize_dyld_info emits a WEAK_IMPORT bind:
+    * if the symbol is REMOVED from modern macOS (the common Carbon/QuickDraw/
+    * Sound case) dyld binds the slot to NULL (0) instead of hard-failing the
+    * whole image load. The image therefore LOADS even with removed imports, and
+    * only a genuinely-CALLED removed symbol faults.
     *
-    * Emit is `ff 25` + a 4-byte operand:
-    *   M32 (noop/rebasify rebuild): absolute `jmp dword ptr [slot_vmaddr]`.
-    *   M64 (transform output): rip-relative `jmp qword ptr [rip+disp32]`,
-    *        disp = slot_vmaddr - (this_vmaddr + 6).
-    * On any later reparse (modify/convert) the `__jt_tramp` bytes decode through
-    * the TextParser whitelist as an ordinary `jmp [mem]` instruction and the
-    * existing FF25/symbol-stub handling recomputes the displacement -- so this
-    * blob is purely the one-time synthesis vehicle (idempotent: re-synthesis is
-    * skipped once the section exists).
+    * M32 (intermediate, never executed) Emit stays the classic 6-byte
+    * `jmp *slot` (`ff 25` + absolute slot_vmaddr).
+    *
+    * M64 (the runnable transform output) Emit is a fixed 17-byte NULL-checking
+    * diagnostic trampoline (the slot may be NULL after a weak bind):
+    *   +0  4c 8b 1d <disp32>   mov  r11, [rip+slot]   ; r11 = PLT scratch
+    *   +7  4d 85 db            test r11, r11          ;   (not an arg / not AL)
+    *  +10  74 03               jz   .trap (+15)       ; NULL weak-import -> trap
+    *  +12  41 ff e3            jmp  r11               ; resolved -> tail-call
+    *  +15  0f 0b               ud2                    ; .trap (deterministic
+    *                                                  ;   EXC_BAD_INSTRUCTION,
+    *                                                  ;   NOT a bare 0x0 SIGSEGV)
+    * A NULL slot thus traps cleanly at a stable, in-`__jt_tramp` PC. The
+    * resolved fast path clobbers only r11 (caller-saved, PLT scratch), so it is
+    * register-faithful to the old `jmp *slot` for symbols that DO resolve.
+    *
+    * The trampoline is PURE CODE with no inline data: on any reparse
+    * (modify/convert) the `__jt_tramp` bytes re-decode through the TextParser
+    * whitelist as ordinary instructions and BOTH references re-resolve -- the
+    * `mov r11,[rip+slot]` to its __jt_ptrs slot (like the old jmp) and the `jz`
+    * to the ud2. (An earlier inline-name-after-ud2 variant was rejected: convert
+    * SHIFTS the __jt_tramp layout, so the name bytes mis-decoded as code and
+    * corrupted the trampolines.) The removed symbol's name is surfaced at
+    * TRANSLATE time (MACHO_TOOL_DEBUG log in lift_jump_table_targets) and is
+    * recoverable from a crash by mapping the faulting __jt_tramp PC to the Nth
+    * trampoline == Nth weak-import. `name` below is retained for a future
+    * reparse-stable runtime name table (see the known-gaps list); it is NOT emitted.
+    *
+    * Re-synthesis is skipped once the section exists (idempotent), and the
+    * already-emitted N_WEAK_REF on the undef nlist is preserved across reparse.
     */
    template <Bits bits>
    class JumpStubBlob: public SectionBlob<bits> {
    public:
       const SectionBlob<bits> *slot = nullptr; /*!< the __jt_ptrs slot to jump through */
+      std::string name; /*!< imported symbol's linker name (leading '_'); NOT
+                             emitted (the trampoline is pure code so it survives
+                             the convert/modify reparse). Retained for the future
+                             reparse-stable runtime name table -- see the known-gaps list
+                             -- and for diagnostics. */
 
-      virtual std::size_t size() const override { return 6; } /* ff 25 + disp32 */
+      virtual std::size_t size() const override {
+         /* M32 is the classic 6-byte `jmp *slot`. M64 is the fixed 17-byte
+          * NULL-checking diagnostic trampoline (pure code, no inline data).
+          * Keep in lockstep with Emit. */
+         if constexpr (bits == Bits::M64) { return 17; }
+         else { return 6; }
+      }
       virtual void Emit(Image& img, std::size_t offset) const override;
 
       static JumpStubBlob<bits> *Create(const Location& loc, ParseEnv<bits>& env,
-                                        const SectionBlob<bits> *slot) {
-         return new JumpStubBlob(loc, env, slot);
+                                        const SectionBlob<bits> *slot,
+                                        const std::string& name = std::string()) {
+         return new JumpStubBlob(loc, env, slot, name);
       }
 
       virtual JumpStubBlob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
@@ -485,8 +522,9 @@ namespace MachO {
        * direct brdisp assignment (ParseEnv::jump_table_undef_tramps), never via
        * a vmaddr resolve, so it must NOT register at the stub vmaddr (that slot
        * belongs to the dead __jump_table bytes). */
-      JumpStubBlob(const Location& loc, ParseEnv<bits>& env, const SectionBlob<bits> *slot):
-         SectionBlob<bits>(loc, env, /*add_to_map=*/false), slot(slot) {}
+      JumpStubBlob(const Location& loc, ParseEnv<bits>& env, const SectionBlob<bits> *slot,
+                   const std::string& name = std::string()):
+         SectionBlob<bits>(loc, env, /*add_to_map=*/false), slot(slot), name(name) {}
       JumpStubBlob(const JumpStubBlob<opposite<bits>>& other, TransformEnv<opposite<bits>>& env);
       template <Bits> friend class JumpStubBlob;
    };

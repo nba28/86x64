@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps synth-dyld-info
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps synth-dyld-info jt-weak-import
 all: run-only
 
 list:
@@ -93,6 +93,15 @@ change-deps: $(MACHO_TOOL)
 # (modern ld can't emit classic format); SKIPs if none is present.
 synth-dyld-info: $(MACHO_TOOL)
 	@bash synth_dyld_info_test.sh $(MACHO_TOOL)
+
+# jt-weak-import: regression test for the WEAK-IMPORT jump-table fix. Exercises
+# the classic i386 __IMPORT,__jump_table self-modifying stub path: undefined
+# imports are marked N_WEAK_REF (=> WEAK_IMPORT bind, so REMOVED symbols bind
+# NULL and the image LOADS) and get NULL-checking `ud2` diagnostic trampolines
+# that survive the convert reparse. Needs a real classic i386 __jump_table
+# binary (modern ld rewrites the stubs); SKIPs if none is present.
+jt-weak-import: $(MACHO_TOOL)
+	@bash jt_weak_import_test.sh $(MACHO_TOOL)
 
 # ObjC test group. Kept separate from the default `all` so the core
 # (asm/C) suite stays green while ObjC support is still landing. Builds each
