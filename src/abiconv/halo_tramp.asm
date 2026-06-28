@@ -40,4 +40,36 @@
 	jmp	r11
 %endmacro
 
-	MTSHIM	___mach_timebase_info,	_shim_mach_timebase_info
+; MTSHIM64 — identical frame handling, but the C impl returns a uint64_t (rax) and the i386
+; caller expects a 64-bit integer in edx:eax (high:low). After the call we split rax into
+; edx:eax; nothing between here and the i386 resume touches rdx/rax, so the value survives.
+%macro MTSHIM64 2               ; %1 = export symbol, %2 = C impl symbol
+	global	%1
+	extern	%2
+%1:
+	cmp	qword [rel __dyld_stub_binder_flag],	0
+	je	%%l1
+	mov	rsp,	qword [rel __dyld_stub_binder_flag]
+	add	rsp,	16
+	mov	qword [rel __dyld_stub_binder_flag],	0
+%%l1:
+	push	rbp
+	mov	rbp,	rsp
+	push	rdi
+	push	rsi
+	and	rsp,	~0xf
+	lea	rdi,	[rbp + 12]      ; &args[0]
+	call	%2                      ; rax = 64-bit i386 return value
+	mov	rdx,	rax             ; edx = high 32 bits (i386 64-bit return = edx:eax)
+	shr	rdx,	32
+	lea	rsp,	[rbp - 0x10]
+	pop	rsi
+	pop	rdi
+	leave
+	mov	r11d,	dword [rsp]     ; i386 return address (4 bytes)
+	add	rsp,	4
+	jmp	r11
+%endmacro
+
+	MTSHIM		___mach_timebase_info,	_shim_mach_timebase_info
+	MTSHIM64	___mach_absolute_time,	_shim_mach_absolute_time

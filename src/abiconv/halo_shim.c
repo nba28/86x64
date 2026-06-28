@@ -20,6 +20,7 @@
 // touching the shared abigen/CarbonShim lanes.
 //
 // MTSHIM convention (halo_tramp.asm): rdi -> &i386 args[0] (4-byte cdecl slots); uint32_t in eax.
+// MTSHIM64 (halo_tramp.asm) is the same but returns the C uint64_t in i386 edx:eax (high:low).
 
 #include <stdint.h>
 
@@ -31,4 +32,20 @@ extern int mach_timebase_info(void *info);
 uint32_t shim_mach_timebase_info(uint32_t *args) {
     void *info = (void *)(uintptr_t)args[0];   // i386 low-4GB pointer to the out struct
     return (uint32_t)mach_timebase_info(info);
+}
+
+// ---- mach_absolute_time(void) -> uint64_t ----
+// The 2nd Halo init wall (after mach_timebase_info): a present, non-removed libSystem symbol
+// abigen never declared (mach/mach_time.h is not in includes.h), so it bound DIRECT-to-native.
+// It takes no args, but the native x86_64 entry's 8-byte `ret` over-pops the translated i386
+// 4-byte cdecl return frame -> the popped return addr fuses with an adjacent i386-stack qword
+// into a bogus PC (lldb: pc=0xffffbc..0103e843, r11=mach_absolute_time). The MTSHIM64
+// trampoline alone fixes the crash (it unwinds the i386 4-byte frame correctly); returning via
+// MTSHIM64 (edx:eax) also keeps the FULL 64-bit monotonic counter intact (i386 64-bit return
+// convention) instead of truncating the high half to stale edx. Pure passthrough = exact.
+extern uint64_t mach_absolute_time(void);
+
+uint64_t shim_mach_absolute_time(uint32_t *args) {
+    (void)args;                       // no i386 arguments
+    return mach_absolute_time();
 }
