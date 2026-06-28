@@ -762,6 +762,19 @@ _x64_exc_longjmp:
 	;     (symtab-only; dyld two-level binds resolve via the trie) (quicktime_movie_shim.c) ---
 	MTSHIM	___NewMovieFromDataRef,               _shim_NewMovieFromDataRef
 
+	; --- keymgr process-wide pointer store + DWARF2 EH-section registration
+	;     (keymgr_shim.c). NOT removed — present natively but an i386->x86_64 ABI
+	;     trap: unbridged, the i386 crt's EH-frame registration passes a garbage
+	;     `void**result` out-pointer to native _keymgr_get_and_lock_processwide_ptr_2,
+	;     which stores through it (movq %rax,(%rbx)) and SIGSEGVs. The trampoline
+	;     marshals the cdecl args correctly; keymgr's keyed store is reimplemented
+	;     in keymgr_shim.c (vestigial under 86x64's own unwinder). Trampoline names
+	;     are `__` + the exact (multi-underscore) import symbol. ---
+	MTSHIM	_____keymgr_dwarf2_register_sections,      _shim_keymgr_dwarf2_register_sections
+	MTSHIM	____keymgr_get_and_lock_processwide_ptr,   _shim_keymgr_get_and_lock_processwide_ptr
+	MTSHIM	____keymgr_get_and_lock_processwide_ptr_2, _shim_keymgr_get_and_lock_processwide_ptr_2
+	MTSHIM	____keymgr_set_and_unlock_processwide_ptr, _shim_keymgr_set_and_unlock_processwide_ptr
+
 	; --- RTTI type_info vtable sentinels (used by cxx_shim.c's __dynamic_cast) ---
 	; Exported under the exact libstdc++ __cxxabiv1 vtable names so static-interpose
 	; redirects every translated typeinfo's vtable-ptr field (typeinfo+0) to one of

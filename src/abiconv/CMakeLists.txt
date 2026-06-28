@@ -333,6 +333,7 @@ add_library(abiconv SHARED
   osutil_shim.c
   py_shim.c
   quicktime_movie_shim.c
+  keymgr_shim.c
   lazy_bind.c
   objc_msgSend.asm
   objc_reverse.asm
