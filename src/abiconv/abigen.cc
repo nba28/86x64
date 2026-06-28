@@ -549,6 +549,18 @@ struct ABIConversion {
                emit_inst(os, "mov", "rdi", "rax");
                emit_inst(os, "call", "_x64_cstr_ret_low");
             }
+         } else if (rcanon.kind == CXType_LongLong ||
+                    rcanon.kind == CXType_ULongLong) {
+            /* 64-bit integer return: the i386 cdecl ABI returns it in edx:eax
+             * (eax=low, edx=high), but the x86_64 callee returned the whole
+             * value in rax. eax already aliases rax's low 32 bits; set edx to
+             * the high 32 so the i386 caller reads the full value. Without this
+             * a uint64-returning function (mach_absolute_time, mach_continuous_
+             * time, AudioGetCurrentHostTime, ...) leaves garbage in the high
+             * half — exactly the split that halo_shim's MTSHIM64 used to do by
+             * hand, now done universally for every 64-bit-int-returning shim. */
+            emit_inst(os, "mov", "rdx", "rax");
+            emit_inst(os, "shr", "rdx", "32");
          }
       }
 
