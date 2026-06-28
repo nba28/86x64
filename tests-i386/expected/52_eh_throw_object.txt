@@ -1,0 +1,3 @@
+caught E code=7
+done
+exit_code: 0

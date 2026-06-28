@@ -1,0 +1,4 @@
+guard dtor
+caught 5
+done
+exit_code: 0

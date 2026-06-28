@@ -1,0 +1,4 @@
+before throw
+caught int 42
+after catch
+exit_code: 0

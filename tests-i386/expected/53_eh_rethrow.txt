@@ -1,0 +1,4 @@
+inner caught, rethrow
+outer caught 99
+done
+exit_code: 0
