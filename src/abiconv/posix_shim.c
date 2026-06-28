@@ -167,9 +167,65 @@ static uint32_t dlsym_make_thunk(uint64_t native, const char *name) {
    return 0;
 }
 
+/* Prefer libabiconv's own interpose shim when one exists for the requested
+ * symbol. static-interpose binds a translated i386 import "_<name>" to the shim
+ * exported as "__" + "_<name>" (PREFIX "__"); a direct i386 call thus reaches the
+ * shim, which marshals the i386 cdecl frame AND reverse-wraps any callback
+ * argument. A symbol obtained via dlsym() must get the SAME shim: the generic
+ * marshalling thunk (dlsym_make_thunk) only forwards the call, so a CALLBACK
+ * passed through it is handed RAW to the native callee, which later invokes it
+ * with the x86_64 ABI -> the i386 cdecl frame is read as registers -> fault.
+ * (Civ IV: check_cxa_atexit dlsym's __cxa_atexit, registers the i386 callback
+ * cxa_atexit_check_1 raw, then native __cxa_finalize calls it x86_64-ABI ->
+ * jmp *0 at pc=0. With the shim, shim_cxa_atexit wraps the callback via
+ * x64_cb_wrap so native __cxa_finalize invokes a native trampoline that marshals
+ * back to the i386 callee.) Universal: triggers on "a shim is exported for this
+ * name", not on an app.
+ *
+ * dlsym(name) resolves nlist "_name"; the shim's nlist is "__" + "_name" =
+ * "___name". dlsym() prepends one '_', so we query "__" + name. The shim lives
+ * only in libabiconv, so we restrict the search to libabiconv's own image and
+ * require a low-4GB (i386-callable) result. */
+static uint32_t dlsym_shim_for(const char *name) {
+   if (!name || !*name) { return 0; }
+   static void *abi = NULL;
+   static int abi_ready = 0;
+   static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
+   os_unfair_lock_lock(&lk);
+   if (!abi_ready) {
+      Dl_info di;
+      if (dladdr((void *)&dlsym_shim_for, &di) && di.dli_fname) {
+         abi = dlopen(di.dli_fname, RTLD_NOLOAD | RTLD_LAZY);
+      }
+      abi_ready = 1;
+   }
+   void *h = abi;
+   os_unfair_lock_unlock(&lk);
+   if (!h) { return 0; }
+   char q[256];
+   int n = snprintf(q, sizeof q, "__%s", name);
+   if (n < 0 || (size_t)n >= sizeof q) { return 0; }
+   void *shim = dlsym(h, q);
+   if (!shim) { return 0; }
+   uint64_t v = (uint64_t)(uintptr_t)shim;
+   if (v >= 0x100000000ULL) { return 0; }   /* shim must be low-4GB callable */
+   return (uint32_t)v;
+}
+
 int32_t shim_dlsym(uint32_t *a) {
    void *h = dl_handle(a[0]);
    const char *name = a[1] ? (const char *)(uintptr_t)a[1] : NULL;
+   /* A symbol libabiconv shims must come back as the shim (correct ABI +
+    * callback reverse-wrapping), not a raw native marshalling thunk. */
+   uint32_t shimaddr = dlsym_shim_for(name);
+   if (shimaddr) {
+      if (posix_trace()) {
+         fprintf(stderr, "[posix] dlsym(\"%s\") -> libabiconv interpose shim "
+                 "@0x%x\n", name ? name : "(null)", shimaddr);
+         fflush(stderr);
+      }
+      return (int32_t)shimaddr;
+   }
    void *sym = dlsym(h, name);
    if (posix_trace()) {
       fprintf(stderr, "[posix] dlsym(%p, \"%s\") = %p\n",
