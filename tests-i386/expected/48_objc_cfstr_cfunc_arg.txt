@@ -1,0 +1,4 @@
+CFStringGetLength=15
+copy.len=15
+done
+exit_code: 0

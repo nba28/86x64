@@ -434,14 +434,32 @@ uint32_t x64_objc_bounce_cstr(const char *s) {
    return bp < 0x100000000UL ? (uint32_t)bp : 0;
 }
 
-/* 32-bit handle -> real 64-bit object. A value that is not an arena handle
- * is passed through zero-extended (nil, or an already-low raw value). */
+/* Forward decl: the i386-CFConstantString-constant resolver (defined far below
+ * with the other legacy bridges). x64_objc_unwrap needs it — see below. */
+static id i386_cfstr_to_real(uint32_t p);
+
+/* 32-bit handle / i386 value -> real 64-bit object for a native call.
+ *   - an arena PROXY HANDLE resolves to its real object (the common case);
+ *   - an i386/x86_64 CFConstantString @"..."/CFSTR("...") constant whose isa is
+ *     a wrapped proxy handle (the data-shadow of ___CFConstantStringClassReference)
+ *     is converted to a real immortal NSString: passing it RAW to native CF
+ *     makes CF read that handle as the object's Class -> "unknown class
+ *     0x800xxxxx" / __CF_IS_OBJC __builtin_trap. Detection (i386_cfstr_to_real)
+ *     keys on the constant's flags+exact-strlen layout, NEVER the isa and never
+ *     the app, so it cannot false-match a genuine void-ptr / `^v` data buffer
+ *     routed here (CFDictionary key/value, CFHash, the iWeb/iPhoto map families);
+ *   - anything else passes through zero-extended (nil / already-low raw value).
+ * This keeps the conservative void-ptr / `^v` C-bridge unwrap consistent with the full
+ * object resolver (unwrap_obj_arg) the objc_msgSend bridge and the CF-ref/objc
+ * typed-arg shims use. */
 uint64_t x64_objc_unwrap(uint32_t h) {
    if (h == 0) { return 0; }
    uintptr_t p = h;
    if (p >= g_arena_base && p < g_arena_end) {
       return *(uint64_t *)p;
    }
+   id cf = i386_cfstr_to_real(h);
+   if (cf) { return (uint64_t)(uintptr_t)cf; }
    return (uint64_t)h;
 }
 

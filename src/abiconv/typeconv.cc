@@ -648,19 +648,24 @@ void conversion::convert_fnptr(std::ostream& os, CXType pointee, const Location&
                             src, reg_width::D, dst, reg_width::Q);
 }
 
-/* An ObjC object / Class parameter. i386 -> x86_64: the i386 value is either
- * a low-4GB proxy-arena HANDLE (data-symbol shadows, wrapped returns) or an
- * already-usable low pointer (slid legacy CFString constants, registered
- * reverse-class objects) — x64_objc_unwrap resolves handles and passes raw
- * values through. x86_64 -> i386 (deep-copy-back of out-params like
- * NSError**): wrap the real 64-bit object into a handle the bridge unwraps
- * on the next message send (x64_objc_wrap dedupes, so handles are stable
- * per object and equality survives). */
+/* An ObjC object / Class parameter. i386 -> x86_64: the i386 value can be a
+ * low-4GB proxy-arena HANDLE (data-symbol shadows, wrapped returns), an i386
+ * legacy object/class, a shadow, an i386 block, OR an i386 CFConstantString
+ * @"..." constant whose isa is a wrapped proxy handle. Resolve them all with
+ * the SAME full resolver the objc_msgSend forward bridge uses for `@`/`#` args
+ * (_86x64_unwrap_obj_arg / unwrap_obj_arg) — the arena-only weak x64_objc_unwrap
+ * left non-arena values (e.g. a constant @"...") RAW, so native code read the
+ * wrapped-handle isa as a Class -> "unknown class 0x800xxxxx". x86_64 -> i386
+ * (deep-copy-back of out-params like NSError**): wrap the real 64-bit object
+ * into a handle the bridge unwraps on the next message send (x64_objc_wrap
+ * dedupes, so handles are stable per object and equality survives). */
 void conversion::convert_objc_ptr(std::ostream& os, const Location& src,
                                   const Location& dst) {
    if (from_arch == arch::i386 && to_arch == arch::x86_64) {
-      os << "\t; objc object arg: unwrap handle -> real object" << std::endl;
-      emit_runtime_bridge_call(os, "_x64_objc_unwrap", "",
+      os << "\t; objc object arg: resolve handle/legacy/cfstr/shadow -> real object"
+         << std::endl;
+      os << "\textern __86x64_unwrap_obj_arg" << std::endl;
+      emit_runtime_bridge_call(os, "__86x64_unwrap_obj_arg", "",
                                src, reg_width::D, dst, reg_width::Q);
    } else {
       os << "\t; objc object copy-back: wrap real object -> handle" << std::endl;
@@ -669,16 +674,25 @@ void conversion::convert_objc_ptr(std::ostream& os, const Location& src,
    }
 }
 
-/* An opaque CF-ref parameter (CFStringRef etc.). Forward: unwrap proxy-arena
- * handles to the real ref (x64_objc_unwrap passes raw values through).
+/* An opaque CF-ref parameter (CFStringRef etc.). Forward: resolve the i386 ref
+ * to its real native ref with the FULL object resolver (_86x64_unwrap_obj_arg)
+ * — proxy-arena handles, AND i386/x86_64 CFConstantString @"..." constants
+ * whose isa is a wrapped proxy handle (the data-shadow of
+ * ___CFConstantStringClassReference). The old arena-only x64_objc_unwrap passed
+ * such a constant RAW into native CF, which read the wrapped handle as the
+ * object's Class -> "unknown class 0x800xxxxx" / __CF_IS_OBJC __builtin_trap
+ * (Halo CFURLCreateCopyAppendingPathComponent, Civ IV CFStringCreateCopy).
+ * i386_cfstr_to_real keys on the constant's flags+exact-strlen layout, never
+ * the isa, so a genuine low native ref still passes through unchanged.
  * Copy-back: only re-wrap values above 4GB (a dyld-cache constant the i386
  * slot can't hold); low heap refs are stored raw as they always were —
  * wrapping every created ref would churn arena slots for nothing. */
 void conversion::convert_cf_ptr(std::ostream& os, const Location& src,
                                 const Location& dst) {
    if (from_arch == arch::i386 && to_arch == arch::x86_64) {
-      os << "\t; CF ref arg: unwrap handle -> real ref" << std::endl;
-      emit_runtime_bridge_call(os, "_x64_objc_unwrap", "",
+      os << "\t; CF ref arg: resolve handle/cfstr-constant -> real ref" << std::endl;
+      os << "\textern __86x64_unwrap_obj_arg" << std::endl;
+      emit_runtime_bridge_call(os, "__86x64_unwrap_obj_arg", "",
                                src, reg_width::D, dst, reg_width::Q);
    } else {
       os << "\t; CF ref copy-back: wrap only if >4GB" << std::endl;
