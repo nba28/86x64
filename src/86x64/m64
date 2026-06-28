@@ -396,7 +396,17 @@ def translate_bundle(bundle, args):
                   + ", ".join(failures))
     info(f"translated {len(plan_translate)} binaries")
 
-    # Post steps unless suppressed.
+    # Post steps unless suppressed. Order matches `m64 deploy` (rpath → shim →
+    # sign). rpath-fix rewrites every absolute LC_LOAD_DYLIB that points at a
+    # framework/dylib ACTUALLY bundled in Contents/Frameworks over to @rpath, so
+    # the bundle launches WITHOUT a global DYLD_FRAMEWORK_PATH — which otherwise
+    # shadows system frameworks' own internal deps with our bundled shims and
+    # aborts in native objc-init (0xbad4007 "missing from an installed root",
+    # see deploy_rpath_vs_dyld_framework_path). A (re)translate re-emits each
+    # binary from its original-ref i386 backup, so the absolute /Library//System
+    # refs reappear every run and MUST be re-swept here, not just at first deploy.
+    if not getattr(args, "no_rpath", False):
+        cmd_rpath_fix(argparse.Namespace(app=str(bundle), dry_run=args.dry_run))
     if not args.no_shim:
         cmd_shim(argparse.Namespace(app=str(bundle), targets=plan_translate,
                                     dry_run=args.dry_run))
@@ -828,6 +838,8 @@ def build_parser():
                    help="skip shimgen after translating the bundle")
     t.add_argument("--no-sign", action="store_true",
                    help="skip code-signing after translating the bundle")
+    t.add_argument("--no-rpath", action="store_true",
+                   help="skip the @rpath sweep (rewrite bundled-framework refs)")
     t.add_argument("--list", action="store_true",
                    help="just list what would be translated vs left native")
     t.add_argument("-j", "--jobs", type=int, default=1,
@@ -848,6 +860,7 @@ def build_parser():
     r.add_argument("--source", action="append", metavar="DIR")
     r.add_argument("--no-shim", action="store_true")
     r.add_argument("--no-sign", action="store_true")
+    r.add_argument("--no-rpath", action="store_true")
     r.add_argument("--list", action="store_true")
     r.add_argument("-j", "--jobs", type=int, default=1)
     r.add_argument("-k", "--keep", action="store_true")
