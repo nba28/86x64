@@ -1,0 +1,7 @@
+ok w1
+ok w2
+ok n1
+ok n2
+ok n3
+ok n4
+exit_code: 0

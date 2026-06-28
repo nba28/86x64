@@ -1112,6 +1112,26 @@ static int enc_tag_ctx(const char *tag, size_t n) {
    return CTX_NONE;
 }
 
+/* True if an aggregate body (the chars AFTER '=' up to `close`) is a non-empty
+ * run of ONLY floating-point scalars — 'd'/'f', with interleaved field-offset
+ * digits tolerated. Used to recognise an ANONYMOUS-tag CGFloat aggregate
+ * ({?=dddddd}, e.g. NSAffineTransformStruct, which is typedef'd from an unnamed
+ * struct so its tag is '?' and never matches enc_tag_ctx's named list): the
+ * native runtime spells each CGFloat field 'd' (double) but the legacy i386 ABI
+ * spells it 'f' (4-byte float), so the field widths must be reconciled exactly
+ * like the named CG/NS geometry structs. A nested aggregate or any non-FP
+ * member makes this return 0 (conservative: only a flat all-FP unnamed struct
+ * is treated as CGFloat). */
+static int enc_body_all_fp(const char *p, char close) {
+   int n = 0;
+   while (*p && *p != close) {
+      if (*p == 'd' || *p == 'f') { ++n; ++p; continue; }
+      if (*p >= '0' && *p <= '9') { ++p; continue; }   /* field-offset digit */
+      return 0;                                         /* non-FP / nested */
+   }
+   return n > 0;
+}
+
 /* scalar widths under a convention+context; *fp set for SSE-class scalars.
  * Returns 0 if c is not a scalar. */
 static int enc_scalar3(char c, int conv, int ctx, size_t *isz, size_t *ial,
@@ -1244,6 +1264,16 @@ static const char *enc_walk3(struct enc_ew *w, const char *t, int ctx,
       while (*p && *p != '=' && *p != close) { ++p; }
       int sub_ctx = (w->conv == CONV_NATIVE)
          ? enc_tag_ctx(tag, (size_t)(p - tag)) : CTX_NONE;
+      /* Anonymous-tag CGFloat aggregate: {?=dddddd} (NSAffineTransformStruct and
+       * other CGFloat-only structs typedef'd from an unnamed struct) never match
+       * the named-tag table, yet their 'd' fields are i386 4-byte CGFloats. A
+       * '?'-tagged all-floating-point body is treated as CGFloat context so each
+       * field widens i386(4B float)->native(8B double) and narrows back. */
+      if (sub_ctx == CTX_NONE && w->conv == CONV_NATIVE
+          && (size_t)(p - tag) == 1 && tag[0] == '?'
+          && *p == '=' && enc_body_all_fp(p + 1, close)) {
+         sub_ctx = CTX_CGFLOAT;
+      }
       if (sub_ctx == CTX_NONE && ctx != CTX_NONE) { sub_ctx = ctx; }
       size_t istart = *i_off, nstart = *n_off;
       size_t imax = istart, nmax = nstart;
@@ -4231,6 +4261,17 @@ static struct rmeth_ent *rmeth_lookup(Class c, SEL s) {
    return NULL;
 }
 
+/* The owning reverse-IMP entry for (start-class, sel): the dispatch path keys
+ * g_rmeth on the class that actually registered the legacy method, which for an
+ * inherited selector is an ancestor — so walk up exactly like reverse_prep. */
+static struct rmeth_ent *rmeth_find_owner(Class start, SEL s) {
+   for (Class c = start; c; c = class_getSuperclass(c)) {
+      struct rmeth_ent *e = rmeth_lookup(c, s);
+      if (e) { return e; }
+   }
+   return NULL;
+}
+
 static uint64_t legacy_instance_method_imp(Class c, SEL s) {
    /* Resolve through the raw __OBJC metadata (indexed in EVERY libabiconv copy),
     * NOT the per-copy g_rmeth table: the forward bridge runs in the caller's copy,
@@ -6528,6 +6569,62 @@ static int reverse_register_one(const struct legacy_objc_class *cls) {
    return 1;
 }
 
+/* Replay a reverse-registered legacy class's fragile-ObjC1 `+load`.
+ *
+ * The pre-ObjC2 runtime's call_load_methods() invoked +load at image load,
+ * superclass-first, after the class and its categories were attached.
+ * objc_registerClassPair() (and class_addMethod) do NOT trigger +load, so a
+ * legacy class that relies on +load for one-time setup/registration/swizzling
+ * would silently skip it. We invoke each class's own +load here.
+ *
+ * +load is a CLASS method, so it lives on the legacy metaclass (cls->isa). We
+ * call the translated i386 IMP through the same native->i386 path the block and
+ * C-callback bridges use (blk_call_i386, fresh low-4GB cdecl stack), passing
+ * self = the modern Class as a wrapped handle (so the IMP's `[self ...]`
+ * re-enters the forward bridge -> reverse bridge) and _cmd = 0 (+load bodies
+ * effectively never read _cmd). Ordering: `reg[]` restricts this to classes we
+ * actually registered (never a native/pre-existing class), `loaded[]` makes it
+ * run-once, and a class's superclass +load is forced first by recursion. Guard
+ * ABICONV_NO_LEGACY_LOAD disables the whole pass if a target's +load misbehaves
+ * under the bridge (it runs app code inside the dyld add-image callback). */
+static void invoke_legacy_load(const struct legacy_objc_class **defs,
+                               size_t ndefs, const char *reg, char *loaded,
+                               size_t i) {
+   if (loaded[i]) { return; }
+   loaded[i] = 1;
+   if (!reg[i]) { return; }                 /* only classes we registered */
+   const struct legacy_objc_class *cls = defs[i];
+   if (!legacy_cstr_ok(cls->name)) { return; }
+   /* superclass-first: run an in-image legacy superclass's +load before ours. */
+   if (legacy_cstr_ok(cls->super_class)) {
+      const char *sn = (const char *)(uintptr_t)cls->super_class;
+      for (size_t j = 0; j < ndefs; ++j) {
+         if (j == i || !legacy_cstr_ok(defs[j]->name)) { continue; }
+         if (strcmp((const char *)(uintptr_t)defs[j]->name, sn) == 0) {
+            invoke_legacy_load(defs, ndefs, reg, loaded, j);
+            break;
+         }
+      }
+   }
+   /* +load must be declared in this class's OWN metaclass method list (legacy
+    * metaclass = cls->isa); an inherited +load is the superclass's, run above. */
+   if (!ptr_ok(cls->isa, sizeof(struct legacy_objc_class))) { return; }
+   const struct legacy_objc_class *meta =
+      (const struct legacy_objc_class *)(uintptr_t)cls->isa;
+   uint64_t imp = find_method_in_lists(meta->methodLists, "load");
+   if (!imp || imp < 0x1000 || imp >= 0x100000000ULL) { return; }
+   Class modern = objc_getClass((const char *)(uintptr_t)cls->name);
+   if (!modern) { return; }
+   uint32_t self32 = x64_objc_wrap((uint64_t)(uintptr_t)modern);
+   uint32_t words[2] = { self32, 0u };       /* self, _cmd(=0) */
+   if (getenv("ABICONV_OBJC_SLIDE_VERBOSE")) {
+      fprintf(stderr, "objc_shim: +load %s imp=0x%llx\n",
+              (const char *)(uintptr_t)cls->name, (unsigned long long)imp);
+      fflush(stderr);
+   }
+   blk_call_i386((uint32_t)imp, 2, words);
+}
+
 static void reverse_register_image(const struct mach_header_64 *mh,
                                    intptr_t slide) {
    if (!mh) { return; }
@@ -6557,13 +6654,15 @@ static void reverse_register_image(const struct mach_header_64 *mh,
 
    /* iterate to fixpoint so superclasses register before subclasses */
    char done[CAP]; memset(done, 0, ndefs);
+   char reg[CAP];  memset(reg, 0, ndefs);   /* r==1: a class WE registered */
    uint32_t registered = 0;
    for (int pass = 0; pass < 64; ++pass) {
       int progress = 0;
       for (size_t i = 0; i < ndefs; ++i) {
          if (done[i]) { continue; }
          int r = reverse_register_one(defs[i]);
-         if (r != 0) { done[i] = 1; progress = 1; if (r == 1) { ++registered; } }
+         if (r != 0) { done[i] = 1; progress = 1;
+                       if (r == 1) { ++registered; reg[i] = 1; } }
       }
       if (!progress) { break; }
    }
@@ -6639,6 +6738,16 @@ static void reverse_register_image(const struct mach_header_64 *mh,
             if (meta) { reverse_add_methods(meta, cat->class_methods); }
          }
          ++cats_applied;
+      }
+   }
+
+   /* +load pass: replay each registered legacy class's fragile-ObjC1 +load,
+    * superclass-first, AFTER all classes and categories are attached (matching
+    * the old call_load_methods timing). See invoke_legacy_load. */
+   if (registered && !getenv("ABICONV_NO_LEGACY_LOAD")) {
+      char loaded[CAP]; memset(loaded, 0, ndefs);
+      for (size_t i = 0; i < ndefs; ++i) {
+         invoke_legacy_load(defs, ndefs, reg, loaded, i);
       }
    }
 
@@ -7074,12 +7183,16 @@ struct i386_method32 { uint32_t name; uint32_t types; uint32_t imp; };
 #define I386METH_CAP 8192u
 static Method   g_i386meth_key[I386METH_CAP];
 static uint32_t g_i386meth_val[I386METH_CAP];
+static Class    g_i386meth_cls[I386METH_CAP];   /* class this method was queried on */
 static uint32_t g_i386meth_cnt;
 
-static uint32_t i386_method_wrap(Method m) {
+static uint32_t i386_method_wrap(Method m, Class queried) {
    if (!m) { return 0; }
    for (uint32_t i = 0; i < g_i386meth_cnt; ++i) {
-      if (g_i386meth_key[i] == m) { return g_i386meth_val[i]; }
+      if (g_i386meth_key[i] == m) {
+         if (!g_i386meth_cls[i] && queried) { g_i386meth_cls[i] = queried; }
+         return g_i386meth_val[i];
+      }
    }
    struct i386_method32 *s = (struct i386_method32 *)malloc(sizeof(*s));
    if (!s || (uintptr_t)s >= 0x100000000UL) { return 0; }
@@ -7089,9 +7202,20 @@ static uint32_t i386_method_wrap(Method m) {
    if (g_i386meth_cnt < I386METH_CAP) {
       g_i386meth_key[g_i386meth_cnt] = m;
       g_i386meth_val[g_i386meth_cnt] = (uint32_t)(uintptr_t)s;
+      g_i386meth_cls[g_i386meth_cnt] = queried;
       g_i386meth_cnt++;
    }
    return (uint32_t)(uintptr_t)s;
+}
+
+/* The class a synthetic i386_method32 handle was queried on (class_get*Method),
+ * for recovering the (class,sel) key the reverse-IMP map uses. NULL if the
+ * handle came from copyMethodList (no class context) or isn't ours. */
+static Class i386_method_queried_class(uint32_t v) {
+   for (uint32_t i = 0; i < g_i386meth_cnt; ++i) {
+      if (g_i386meth_val[i] == v) { return g_i386meth_cls[i]; }
+   }
+   return NULL;
 }
 
 /* TOMBSTONE Method structs: class_get{Instance,Class}Method must hand i386
@@ -7164,7 +7288,7 @@ uint32_t shim_class_getInstanceMethod(uint32_t *a) {
    /* Absent method on a valid class+sel -> hand back a tombstone (non-NULL,
     * imp==0) so an unguarded i386 swizzler deref no-ops instead of faulting. */
    if (!m && cls && sel) { return i386_method_tombstone(sel); }
-   return i386_method_wrap(m);
+   return i386_method_wrap(m, (Class)cls);
 }
 
 uint32_t shim_class_getClassMethod(uint32_t *a) {
@@ -7172,7 +7296,7 @@ uint32_t shim_class_getClassMethod(uint32_t *a) {
    SEL sel = resolve_sel(a[1]);
    Method m = (cls && sel) ? class_getClassMethod((Class)cls, sel) : NULL;
    if (!m && cls && sel) { return i386_method_tombstone(sel); }
-   return i386_method_wrap(m);
+   return i386_method_wrap(m, object_getClass((id)cls));
 }
 
 uint32_t shim_class_copyMethodList(uint32_t *a) {
@@ -7228,6 +7352,51 @@ uint32_t shim_method_setImplementation(uint32_t *a) {
    fprintf(stderr, "[rt] method_setImplementation(m32=0x%08x, imp32=0x%08x) "
            "UNIMPLEMENTED -> 0\n", a[0], a[1]);
    fflush(stderr);
+   return 0;
+}
+
+/* method_exchangeImplementations(Method a, Method b) — atomically swap two
+ * methods' implementations (the textbook swizzle primitive).
+ *
+ * For reverse-registered LEGACY methods the modern Method's IMP is the shared
+ * _86x64_reverse_imp trampoline, which re-derives the i386 IMP from (class,sel)
+ * at dispatch — so the bare runtime exchange is a NO-OP (both slots hold the
+ * same trampoline) and, reached natively with our synthetic 12-byte
+ * i386_method32 args reinterpreted as 64-bit objc_method structs, it reads/
+ * writes the imp field at offset 16 PAST the struct and corrupts the heap — the
+ * observed swizzle SIGSEGV. The fix swaps the authoritative (class,sel)->legacy-
+ * IMP entries in g_rmeth so SEL-keyed dispatch honours the exchange, and ALSO
+ * runs the real exchange so the trampoline KIND (plain vs _stret) and libobjc's
+ * own Method/IMP identity follow. Native<->native exchanges fall straight
+ * through to the real runtime. Involutive: a second exchange restores both. */
+uint32_t shim_method_exchangeImplementations(uint32_t *a) {
+   Method m1 = i386_method_unwrap(a[0]);
+   Method m2 = i386_method_unwrap(a[1]);
+   if (!m1 || !m2 || m1 == m2) { return 0; }
+   SEL s1 = method_getName(m1), s2 = method_getName(m2);
+   Class q1 = i386_method_queried_class(a[0]);
+   Class q2 = i386_method_queried_class(a[1]);
+   struct rmeth_ent *e1 = (q1 && s1) ? rmeth_find_owner(q1, s1) : NULL;
+   struct rmeth_ent *e2 = (q2 && s2) ? rmeth_find_owner(q2, s2) : NULL;
+   if (e1 && e2) {
+      uint64_t ti = e1->imp; const char *tt = e1->types;
+      e1->imp = e2->imp; e1->types = e2->types;
+      e2->imp = ti;       e2->types = tt;
+      if (getenv("OBJC_BRIDGE_TRACE")) {
+         fprintf(stderr, "[rt] method_exchangeImplementations legacy %s <-> %s\n",
+                 s1 ? sel_getName(s1) : "?", s2 ? sel_getName(s2) : "?");
+         fflush(stderr);
+      }
+   } else if (e1 || e2) {
+      /* mixed legacy<->native: routing native dispatch to an i386 IMP (or vice
+       * versa) needs more than an imp swap; do the real exchange best-effort and
+       * flag it rather than silently mis-dispatch. */
+      fprintf(stderr, "[rt] method_exchangeImplementations mixed legacy/native "
+              "(%s <-> %s) — best effort\n",
+              s1 ? sel_getName(s1) : "?", s2 ? sel_getName(s2) : "?");
+      fflush(stderr);
+   }
+   method_exchangeImplementations(m1, m2);
    return 0;
 }
 

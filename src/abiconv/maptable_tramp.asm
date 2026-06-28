@@ -466,6 +466,7 @@ _x64_exc_longjmp:
 	MTSHIM	___method_getNumberOfArguments, _shim_method_getNumberOfArguments
 	MTSHIM	___method_getImplementation,    _shim_method_getImplementation
 	MTSHIM	___method_setImplementation,    _shim_method_setImplementation
+	MTSHIM	___method_exchangeImplementations, _shim_method_exchangeImplementations
 	MTSHIM	___method_copyReturnType,       _shim_method_copyReturnType
 	MTSHIM	___method_copyArgumentType,     _shim_method_copyArgumentType
 	MTSHIM	___objc_getClassList,           _shim_objc_getClassList

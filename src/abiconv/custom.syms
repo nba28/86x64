@@ -248,6 +248,7 @@ _method_getName
 _method_getNumberOfArguments
 _method_getTypeEncoding
 _method_setImplementation
+_method_exchangeImplementations
 _objc_allocateClassPair
 _objc_copyClassList
 _objc_getAssociatedObject
