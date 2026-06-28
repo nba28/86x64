@@ -120,6 +120,15 @@ def main():
                     help="libabiconv .asm whose already-emitted shims to exclude")
     ap.add_argument("--out-syms", required=True)
     ap.add_argument("--out-includes", required=True)
+    ap.add_argument("--out-ignore",
+                    help="write the already-shimmed (hand-shim) symbols, one _sym "
+                         "per line, for the modern abigen pass to UNION into its -i "
+                         "ignore file. Closes the 'protected only by header omission' "
+                         "collision: a hand-shimmed symbol (___sysctl in maptable_tramp.asm) "
+                         "that is ALSO a curated-framework export would, once a broader "
+                         "header (sys/sysctl.h) makes it parseable, be re-emitted as a "
+                         "second `global ___sym` -> duplicate-symbol link error. Ignoring "
+                         "every hand-shim symbol prevents that regardless of header coverage.")
     ap.add_argument("--report")
     a = ap.parse_args()
 
@@ -151,6 +160,15 @@ def main():
                 % (n_targets, len(per_leaf), len(all_imports), len(already), len(consider)))
         for s in consider:
             f.write(s + "\n")
+
+    # 2b. hand-shim ignore set: the symbols the --exclude-asm files already define.
+    #     The modern abigen pass unions this into its -i ignore file so a hand-shimmed
+    #     symbol that is ALSO a curated-framework export is never re-emitted.
+    if a.out_ignore:
+        with open(a.out_ignore, "w") as f:
+            f.write("# hand-shim symbols (from --exclude-asm) to add to abigen's -i ignore\n")
+            for s in sorted(already):
+                f.write(s + "\n")
 
     # 3. generated includes: umbrella headers for each discovered leaf we can map
     mapped, unmapped = [], []

@@ -118,6 +118,90 @@ add_custom_target(abiconv_syms
   DEPENDS abiconv.syms
   )
 
+# --- Universal import-driven coverage for the MODERN pass (Phase 1a) ---
+# The curated ABICONV_SYM_SOURCES list above was grown reactively, one framework
+# at a time, each time a target crashed on an unshimmed present-native symbol —
+# and any symbol no listed framework covered (mach_timebase_info from libSystem,
+# CGImageCreateWithImageInRect from CoreGraphics, ...) bound DIRECT-to-native and
+# mismarshalled (i386 cdecl stack args vs the native fn's SysV registers; the
+# native 8-byte ret over-pops the i386 4-byte frame -> fused PC). Those gaps used
+# to be patched with per-target hand shims (halo_shim.c). This pass makes the
+# coverage UNIVERSAL + import-driven: abigen_modern_manifest.py reads each target
+# app-code dylib's undefined externals (`nm -m`, which names each symbol's source
+# framework via the two-level bind), maps each source framework to its umbrella
+# header, and emits (a) the consider set (union of all targets' imports) and (b)
+# a generated header (includes_auto.h) #including those umbrellas so abigen has a
+# prototype to marshal from. abigen SELF-FILTERS: a removed-in-64-bit symbol has
+# no modern declaration -> abigen skips it -> the SEPARATE legacy pass handles it.
+#
+# ADDITIVE, low blast radius: the import-driven consider set is UNIONED with the
+# curated abiconv.syms (below), so every existing curated shim is preserved; this
+# only widens coverage. The translated app-code dylib (NOT the wrapper exec) is
+# the discovery input — it preserves the original import names (binds are
+# redirected at the opcode level, not in the nlist), so nm -arch x86_64 shows them.
+#
+# Why --exclude-asm maptable_tramp.asm (and NOT abiconv.asm): maptable_tramp.asm
+# hand-defines ~364 `MTSHIM ___sym` shims, 74 of which are NOT also in custom.syms
+# -- if the import set re-listed them abigen would emit a second `global ___sym`
+# and the link would fail with a duplicate symbol. Excluding the hand-shim asm
+# (the designed collision guard, same as the legacy pass) prevents that. We do
+# NOT exclude abiconv.asm: it is the modern pass's OWN output, so depending on it
+# here would be a build cycle (abiconv_import.syms -> abiconv.asm -> abiconv_all.syms
+# -> abiconv_import.syms); and it is redundant anyway, because abigen reads the
+# consider set into a std::set and ERASES each symbol on emit, so unioning the
+# import set with the curated abiconv.syms already prevents any double-emission
+# (abiconv.asm's shim set is a subset of abigen(abiconv.syms)).
+#
+# Targets contribute their imports; missing targets are skipped (EXISTS guard),
+# so this is portable. Extend the list when a new i386 target needs coverage.
+set(ABICONV_MODERN_TARGETS
+    "$ENV{HOME}/Downloads/iLife11/Quinn.app/Contents/MacOS/Quinn.dylib"
+    "$ENV{HOME}/projects/civ4/Civilization IV.app/Contents/MacOS/civ4.out.dylib"
+    "$ENV{HOME}/Downloads/iLife11/Halo.app/Contents/MacOS/Halo.dylib"
+    "$ENV{HOME}/Downloads/iLife11/Applications/iPhoto.app/Contents/MacOS/iPhoto.dylib"
+    "$ENV{HOME}/Downloads/iLife11/Applications/iWeb.app/Contents/MacOS/iWeb.dylib"
+    CACHE STRING "translated app-code dylibs whose imports drive the universal modern shim set")
+set(ABICONV_MODERN_TARGET_ARGS "")
+set(ABICONV_MODERN_TARGET_DEPS "")
+foreach(t IN LISTS ABICONV_MODERN_TARGETS)
+  list(APPEND ABICONV_MODERN_TARGET_ARGS --target "${t}")
+  if(EXISTS "${t}")
+    list(APPEND ABICONV_MODERN_TARGET_DEPS "${t}")
+  endif()
+endforeach()
+
+add_custom_command(OUTPUT abiconv_import.syms includes_auto.h abiconv_handshim.syms
+  COMMAND python3 ${CMAKE_SOURCE_DIR}/src/86x64/abigen_modern_manifest.py
+          ${ABICONV_MODERN_TARGET_ARGS}
+          --arch x86_64
+          --exclude-asm ${CMAKE_CURRENT_SOURCE_DIR}/maptable_tramp.asm
+          --out-syms abiconv_import.syms
+          --out-includes includes_auto.h
+          --out-ignore abiconv_handshim.syms
+  DEPENDS ${CMAKE_SOURCE_DIR}/src/86x64/abigen_modern_manifest.py
+          ${CMAKE_CURRENT_SOURCE_DIR}/maptable_tramp.asm
+          ${ABICONV_MODERN_TARGET_DEPS}
+  )
+
+# The final modern consider set = curated (print_exports_trie) UNION import-driven.
+# abigen's -s takes a single file and loads it into a std::set, so a plain cat is
+# a correct, dedup-safe union.
+add_custom_command(OUTPUT abiconv_all.syms
+  COMMAND cat abiconv.syms abiconv_import.syms > abiconv_all.syms
+  DEPENDS abiconv.syms abiconv_import.syms
+  )
+
+# The modern pass's -i ignore set = curated custom.syms UNION every hand-shim symbol
+# (abiconv_handshim.syms). Broadening the parsed headers (includes_auto.h) can make a
+# hand-shimmed symbol that is ALSO a curated-framework export newly parseable (e.g.
+# ___sysctl: a maptable_tramp.asm MTSHIM that is also a libsystem export, exposed once
+# <sys/sysctl.h> is parsed) — abigen would then emit a second `global ___sysctl` and the
+# link would fail. Ignoring every hand-shim symbol closes that gap permanently.
+add_custom_command(OUTPUT custom_all.syms
+  COMMAND cat ${CMAKE_CURRENT_SOURCE_DIR}/custom.syms abiconv_handshim.syms > custom_all.syms
+  DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/custom.syms abiconv_handshim.syms
+  )
+
 execute_process(
   COMMAND xcrun --show-sdk-path
   OUTPUT_VARIABLE ABICONV_SDK_PATH
@@ -145,9 +229,13 @@ endif()
 # include each other as <libxml/...>, so that directory must be on the header
 # search path for includes.h's <libxml/parser.h> (and its transitive includes)
 # to resolve. -isystem (not -I) so libxml2's own header warnings stay quiet.
+# Consider set = abiconv_all.syms (curated UNION import-driven). Headers parsed =
+# the hand-curated includes.h AND the import-driven includes_auto.h (abigen treats
+# each positional arg as an independent TU and erases each symbol from the consider
+# set on emit, so symbols declared in both headers are emitted exactly once).
 add_custom_command(OUTPUT abiconv.asm
-  COMMAND abigen -o abiconv.asm -s abiconv.syms -i ${CMAKE_CURRENT_SOURCE_DIR}/custom.syms --structfile ${CMAKE_CURRENT_SOURCE_DIR}/ignore.structs --data-shadow-file ${CMAKE_CURRENT_SOURCE_DIR}/data_shadows.syms --isysroot "${ABICONV_SDK_PATH}" -X -x -X objective-c -X -resource-dir -X "${ABICONV_CLANG_RESOURCE_DIR}" -X -isystem -X "${ABICONV_SDK_PATH}/usr/include/libxml2" ${CMAKE_CURRENT_SOURCE_DIR}/includes.h
-  DEPENDS abigen abiconv.syms ${CMAKE_CURRENT_SOURCE_DIR}/custom.syms ${CMAKE_CURRENT_SOURCE_DIR}/ignore.structs ${CMAKE_CURRENT_SOURCE_DIR}/data_shadows.syms ${CMAKE_CURRENT_SOURCE_DIR}/includes.h
+  COMMAND abigen -o abiconv.asm -s abiconv_all.syms -i custom_all.syms --structfile ${CMAKE_CURRENT_SOURCE_DIR}/ignore.structs --data-shadow-file ${CMAKE_CURRENT_SOURCE_DIR}/data_shadows.syms --isysroot "${ABICONV_SDK_PATH}" -X -x -X objective-c -X -resource-dir -X "${ABICONV_CLANG_RESOURCE_DIR}" -X -isystem -X "${ABICONV_SDK_PATH}/usr/include/libxml2" ${CMAKE_CURRENT_SOURCE_DIR}/includes.h ${CMAKE_CURRENT_BINARY_DIR}/includes_auto.h
+  DEPENDS abigen abiconv_all.syms custom_all.syms ${CMAKE_CURRENT_SOURCE_DIR}/ignore.structs ${CMAKE_CURRENT_SOURCE_DIR}/data_shadows.syms ${CMAKE_CURRENT_SOURCE_DIR}/includes.h ${CMAKE_CURRENT_BINARY_DIR}/includes_auto.h
   )
 
 add_custom_target(abiconv_asm DEPENDS abiconv.asm)
@@ -334,9 +422,10 @@ add_library(abiconv SHARED
   py_shim.c
   quicktime_movie_shim.c
   keymgr_shim.c
-  # Halo: native libSystem calls abigen's consider set never covered (single-purpose ABI
-  # shims, wired through halo_tramp.asm MTSHIM -> ___<sym> exports). See halo_shim.c header.
-  halo_shim.c
+  # (halo_shim.c / halo_tramp.asm RETIRED: mach_timebase_info / mach_absolute_time
+  # are now covered by the universal import-driven modern pass — libSystem maps to
+  # <mach/mach_time.h> in includes_auto.h, so abigen emits ___mach_timebase_info /
+  # ___mach_absolute_time directly. Phase 1a, see the import-driven block above.)
   lazy_bind.c
   objc_msgSend.asm
   objc_reverse.asm
@@ -345,7 +434,6 @@ add_library(abiconv SHARED
   dlsym_tramp.asm
   init_trampoline.asm
   maptable_tramp.asm
-  halo_tramp.asm
   eh_tramp.asm
   dyld_stub_binder.asm
   dyld_func_lookup.asm
