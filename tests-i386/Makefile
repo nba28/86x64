@@ -289,6 +289,14 @@ $(BUILD_DIR)/39_xml_memget_alloc.i386: $(BUILD_DIR)/39_xml_memget_alloc.o
 $(BUILD_DIR)/49_cgrect_byval.i386: $(BUILD_DIR)/49_cgrect_byval.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 50_cgaffine_sret: like 49, CoreGraphics isn't in the i386 sysroot, so the
+# CGAffineTransform* builders (CGAffineTransformMakeScale / MakeTranslation /
+# Translate / Concat / Invert) are undefined dynamic_lookup imports resolved at
+# translate time by static-interpose -> libabiconv's ___CGAffineTransform* shims
+# (the abigen FP-by-value-struct sret RETURN marshalling). Overrides %.i386.
+$(BUILD_DIR)/50_cgaffine_sret.i386: $(BUILD_DIR)/50_cgaffine_sret.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +
 # abi-insert + static-interpose + wrap. Bare `macho-tool transform` output
 # isn't standalone-runnable because the i386 entry semantics (high-address

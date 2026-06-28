@@ -213,6 +213,38 @@ struct ABIConversion {
       return widen;
    }
 
+   /* Detect a by-value struct RETURN that BOTH ABIs return through a hidden
+    * caller-allocated pointer (the MEMORY class), restricted to the homogeneous-
+    * FP geometry family so each field can be widened/narrowed exactly like the
+    * FP-struct ARG path. x86_64 SysV returns a >16-byte aggregate via a hidden
+    * pointer in rdi (the sret register) and hands it back in rax; the i386 cdecl
+    * ABI returns any struct larger than the 8-byte eax:edx pair the same way (the
+    * buffer address is the implicit FIRST stack arg, returned in eax). So
+    * CGRect (16B i386 / 32B x86_64) and CGAffineTransform (24B / 48B) qualify,
+    * while CGPoint/CGSize (8B / 16B, register-returned on both) do NOT. Returns
+    * true and fills *widen with the per-field flags (true = a CGFloat that is a
+    * 4-byte float on i386 and an 8-byte double on x86_64; false = a genuine 8-byte
+    * double); returns false for anything else (register-returned, integer/mixed,
+    * non-homogeneous, padded), leaving the caller's existing skip path in force.
+    * Triggers on the STRUCTURAL return shape, never a function name. */
+   bool fp_sret_return(std::vector<bool> *widen = nullptr) const {
+      const CXType ret = clang_getCanonicalType(clang_getResultType(function_type));
+      if (ret.kind != CXType_Record) { return false; }
+      std::vector<bool> w;
+      try {
+         w = fp_byval_struct_fields(ret);   /* homogeneous-FP only, else throws */
+      } catch (const std::invalid_argument&) {
+         return false;
+      }
+      /* MEMORY-return on BOTH ABIs: x86_64 >16 bytes (rdi sret, not xmm0:xmm1)
+       * AND i386 >8 bytes (hidden pointer, not eax:edx). */
+      if (sizeof_type(ret, arch::x86_64) <= 16 || sizeof_type(ret, arch::i386) <= 8) {
+         return false;
+      }
+      if (widen) { *widen = std::move(w); }
+      return true;
+   }
+
    /* Marshal one i386 FP field (a 4-byte CGFloat or an 8-byte double) at `src` to
     * an x86_64 double at `dst` (an xmm register or an 8-byte stack slot), widening
     * float->double when `widen`. A MEMORY (stack) destination bounces through
@@ -239,7 +271,10 @@ struct ABIConversion {
    /* assumes stack is 16-byte aligned */
    size_t stack_args_size() const {
       size_t size = 0;
-      unsigned reg_i = 0;
+      /* a homogeneous-FP MEMORY struct return (CGRect/CGAffineTransform) passes
+       * its hidden sret pointer in rdi, so the first GP register is taken and any
+       * INTEGER args shift down one — fewer fit in registers, more may spill. */
+      unsigned reg_i = fp_sret_return() ? 1 : 0;
       unsigned xmm_i = 0;
       
       for (unsigned argi = 0; argi < argc(); ++argi) {
@@ -468,26 +503,44 @@ struct ABIConversion {
       conversion from_conv(false, arch::x86_64, arch::i386,
                            {rsp, static_cast<int>(stack_args_size())}, label, ignore_structs);
       
-      emit_inst(os, "sub", "rsp", stack_data_size() + stack_args_size());
-      
+      /* By-value struct RETURN handling (the CG/NS geometry MEMORY-class family).
+       * x86_64 SysV returns CGRect (32B) / CGAffineTransform (48B) via a hidden
+       * pointer in rdi (the sret register) and i386 cdecl returns the same family
+       * via a caller-allocated hidden pointer whose address is the implicit FIRST
+       * i386 arg (handed back in eax). We reserve a native return buffer at the top
+       * of this frame, point rdi at it, run the call, then NARROW each x86_64
+       * double back into the i386 caller's 4-byte CGFloat field. fp_sret gates
+       * every piece; ret_widen carries the per-field flags (true = CGFloat
+       * float<->double, false = genuine 8-byte double). */
+      std::vector<bool> ret_widen;
+      const bool fp_sret = fp_sret_return(&ret_widen);
+      const CXType ret_canon =
+         clang_getCanonicalType(clang_getResultType(function_type));
+      const size_t sret_size =
+         fp_sret ? align_up<size_t>(sizeof_type(ret_canon, arch::x86_64), 16) : 0;
+      /* the native return buffer sits just ABOVE the outgoing stack args and the
+       * pointer-deep-copy scratch data, at the top of the reserved frame */
+      const size_t sret_buf_off = stack_args_size() + stack_data_size();
+
+      emit_inst(os, "sub", "rsp", stack_data_size() + stack_args_size() + sret_size);
+
       /* transfer arguments */
       param_info info(regs.begin(), regs.end(), 8);
+      /* the hidden sret pointer consumes rdi on the native side and occupies the
+       * i386 caller's first arg slot, so the real declared args start one i386 slot
+       * later and the first INTEGER arg shifts from rdi to rsi. */
+      if (fp_sret) { ++info.reg_it; }
       int param_it;
       int param_end = clang_getNumArgTypes(function_type);
-      MemoryLocation load_loc(rbp, 12);
+      MemoryLocation load_loc(rbp, fp_sret ? 16 : 12);
 
       std::stringstream to_ss;
       std::stringstream from_ss;
 
-      /* A by-value struct RETURN is sret on x86_64 (hidden pointer in rdi) and is
-       * NOT marshalled here. If the function also takes a by-value FP struct arg
-       * — which we DO now marshal — emitting a shim would mishandle the return,
-       * so skip it. Functions with only simple args + a struct return keep their
-       * pre-existing behavior (this guard fires solely for the newly-enabled
-       * FP-struct-arg combination). */
-      const bool ret_is_record =
-         clang_getCanonicalType(clang_getResultType(function_type)).kind
-            == CXType_Record;
+      /* A by-value struct RETURN that we do NOT recognize as a homogeneous-FP
+       * MEMORY sret (fp_sret) is still unmarshalled, so guard against pairing such
+       * a return with a newly-marshalled FP-struct ARG below (skip that combo). */
+      const bool ret_is_record = ret_canon.kind == CXType_Record;
 
       for (param_it = 0;
            param_it != param_end;
@@ -537,9 +590,9 @@ struct ABIConversion {
              * read at its i386 offset and widened to an x86_64 double. No
              * copy-back (the arg is by value). Throws -> skip the whole function. */
             const std::vector<bool> widen = fp_byval_struct_fields(type);
-            if (ret_is_record) {
+            if (ret_is_record && !fp_sret) {
                throw std::invalid_argument(
-                  "fp-struct arg with by-value struct (sret) return not supported");
+                  "fp-struct arg with non-FP/register-class struct return not supported");
             }
             const size_t n = widen.size();
             const bool in_regs = 8 * n <= 16 && (info.fp_idx + n) <= max_xmm_args;
@@ -557,6 +610,32 @@ struct ABIConversion {
                i386_off += w ? 4 : 8;     /* i386 field width (CGFloat 4 / double 8) */
             }
             load_loc += align_up<size_t>(static_cast<size_t>(i386_off), 4);
+            continue;
+         }
+
+         /* Scalar CGFloat arg. The modern (x86_64-host) parse canonicalizes
+          * CGFloat to `double`, so the generic REAL path below would read an
+          * 8-byte double from the i386 stack — but the i386 ABI passed CGFloat as
+          * a 4-byte `float`, mis-reading this arg AND shifting every later arg.
+          * Detect it by the AS-WRITTEN typedef name (like the struct-field path)
+          * and widen the 4-byte float to an 8-byte double (cvtss2sd) into the next
+          * xmm register (or an 8-byte stack slot). No copy-back (by value). This is
+          * the same structural i386-float -> x86_64-double fix as the FP-struct
+          * fields, applied to a bare scalar — universal across every CGFloat-taking
+          * C function (CGAffineTransformMakeScale/Rotation, CGColorCreateGenericGray,
+          * ...). stack_args_size() already sizes a REAL scalar identically (the
+          * x86_64 side is one xmm or one 8-byte slot either way), so the outgoing
+          * layout is unchanged; only the i386 read width (4 vs 8) differs. */
+         if (type.kind == CXType_Double && field_is_cgfloat(orig_type)) {
+            if (info.fp_idx != info.fp_end) {
+               SSELocation fdst(info.fp_idx++);
+               emit_fp_widen(to_ss, true, load_loc, fdst);
+            } else {
+               MemoryLocation fdst = stack_args;
+               emit_fp_widen(to_ss, true, load_loc, fdst);
+               stack_args += 8;
+            }
+            load_loc += 4;             /* i386 CGFloat width (float) */
             continue;
          }
 
@@ -629,7 +708,15 @@ struct ABIConversion {
 
       /* convert from i386 to x86_64 */
       os << to_ss.str();
-      
+
+      /* sret: point rdi at the native return buffer. Done after arg marshalling
+       * (no declared arg targets rdi — we skipped it above) and right before the
+       * call, so nothing clobbers it. */
+      if (fp_sret) {
+         emit_inst(os, "lea", "rdi",
+                   "[rsp + " + std::to_string(sret_buf_off) + "]");
+      }
+
       /* call */
       emit_call(os);
 
@@ -728,6 +815,38 @@ struct ABIConversion {
             emit_inst(os, "mov", "rdx", "rax");
             emit_inst(os, "shr", "rdx", "32");
          }
+      }
+
+      /* MEMORY-class FP-struct return (sret): the native callee wrote its
+       * widen.size() doubles into our return buffer (its address was passed in
+       * rdi); the i386 caller wants the corresponding 4-byte CGFloat fields in
+       * ITS buffer (the hidden first arg, still untouched at [rbp+12]) and that
+       * pointer back in eax. Narrow each double -> float (cvtsd2ss) into the i386
+       * buffer; a genuine 8-byte double field is copied verbatim. rcx and xmm0 are
+       * caller-saved and dead after the call, so both are free scratch here. */
+      if (fp_sret) {
+         os << "\t; narrow x86_64 FP-struct sret (doubles) -> i386 CGFloat buffer"
+            << std::endl;
+         emit_inst(os, "mov", "ecx", "dword [rbp + 12]");  /* i386 sret ptr (low-4GB) */
+         size_t x64_off = 0;
+         int i386_off = 0;
+         for (bool w : ret_widen) {
+            const std::string fsrc =
+               "qword [rsp + " + std::to_string(sret_buf_off + x64_off) + "]";
+            if (w) {
+               emit_inst(os, "cvtsd2ss", "xmm0", fsrc);
+               emit_inst(os, "movss",
+                         "dword [rcx + " + std::to_string(i386_off) + "]", "xmm0");
+               i386_off += 4;        /* i386 CGFloat width (float) */
+            } else {
+               emit_inst(os, "movsd", "xmm0", fsrc);
+               emit_inst(os, "movsd",
+                         "qword [rcx + " + std::to_string(i386_off) + "]", "xmm0");
+               i386_off += 8;        /* genuine double width */
+            }
+            x64_off += 8;            /* one x86_64 eightbyte per field */
+         }
+         emit_inst(os, "mov", "eax", "dword [rbp + 12]");  /* return i386 sret ptr */
       }
 
       // emit_inst(os, "add", "rsp", stack_data_size() + stack_args_size());
