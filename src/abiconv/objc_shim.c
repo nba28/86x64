@@ -5276,6 +5276,35 @@ static struct { uint32_t i386; id real; } g_cfstr_cache[2048];
 static unsigned       g_cfstr_cache_n;
 static os_unfair_lock g_cfstr_lock = OS_UNFAIR_LOCK_INIT;
 
+/* Slide of the loaded image whose mapped segments contain `addr`, or 0 if none
+ * (addr in no image, or the image loaded at its preferred vmaddr). Recovers an
+ * UNSLID absolute pointer embedded in a translated image — the CFConstantString
+ * `str` field, which objc_slide's slide_cfstrings range-checks against the
+ * __OBJC span and so skips when `str` points into __TEXT,__cstring. */
+static intptr_t image_slide_for_addr(uintptr_t addr) {
+   uint32_t nimg = _dyld_image_count();
+   for (uint32_t i = 0; i < nimg; ++i) {
+      const struct mach_header_64 *mh =
+         (const struct mach_header_64 *)_dyld_get_image_header(i);
+      if (!mh || mh->magic != MH_MAGIC_64) { continue; }
+      intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+      const struct load_command *lc =
+         (const struct load_command *)((const uint8_t *)mh + sizeof *mh);
+      for (uint32_t c = 0; c < mh->ncmds; ++c) {
+         if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg =
+               (const struct segment_command_64 *)lc;
+            uintptr_t lo = (uintptr_t)((int64_t)sg->vmaddr + (int64_t)slide);
+            if (sg->vmsize && addr >= lo && addr < lo + (uintptr_t)sg->vmsize) {
+               return slide;
+            }
+         }
+         lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
+      }
+   }
+   return 0;
+}
+
 static id i386_cfstr_to_real(uint32_t p) {
    if (!ptr_ok(p, 16)) { return (id)0; }
    uint32_t cstr, length;
@@ -5303,8 +5332,24 @@ static id i386_cfstr_to_real(uint32_t p) {
    } else {
       return (id)0;
    }
-   if (length >= (1u << 24) || !ptr_ok(cstr, (size_t)length + 1)) { return (id)0; }
-   const char *s = (const char *)(uintptr_t)cstr;
+   if (length >= (1u << 24)) { return (id)0; }
+   uintptr_t sp = (uintptr_t)cstr;
+   if (!ptr_ok(cstr, (size_t)length + 1)) {
+      /* The 32-byte record's `str` is an ABSOLUTE i386 vmaddr the translator
+       * embeds UNSLID (the i386 source has no dyld rebases). objc_slide's
+       * slide_cfstrings normally slides it, but it range-checks the value
+       * against the __OBJC span and skips a `str` that points into
+       * __TEXT,__cstring (below __OBJC) — leaving the unslid preferred address,
+       * which is unmapped at a non-preferred load. Recover it by the record's
+       * OWN image slide (Halo: CFURLCreateCopyAppendingPathComponent built a
+       * file path from such a constant). Read-only; keys on the same flags+
+       * strlen check below, so a coincidental non-constant can't survive. */
+      intptr_t sl = image_slide_for_addr((uintptr_t)p);
+      uintptr_t slid = (uintptr_t)cstr + (uintptr_t)sl;
+      if (!sl || !mem_readable(slid, (size_t)length + 1)) { return (id)0; }
+      sp = slid;
+   }
+   const char *s = (const char *)sp;
    if (strnlen(s, (size_t)length + 1) != length) { return (id)0; }  /* exact C string */
 
    os_unfair_lock_lock(&g_cfstr_lock);
