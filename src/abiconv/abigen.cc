@@ -135,6 +135,107 @@ struct ABIConversion {
       return decl.field_types;
    }
 
+   /* Detect a CGFloat field. The modern abigen pass parses headers as the host
+    * (x86_64), where `CGFloat` is a typedef for `double` and so canonicalizes to
+    * `double` — indistinguishable from a genuine `double` after canonicalization.
+    * But in the original i386 binary CGFloat was `float` (4 bytes). Detect it by
+    * the AS-WRITTEN typedef name on the (non-canonical) field type, so the field
+    * is read as a 4-byte float on the i386 side and widened to a double. */
+   static bool field_is_cgfloat(CXType field_type /* non-canonical */) {
+      CXString s = clang_getTypeSpelling(field_type);
+      const bool cg =
+         std::string(clang_getCString(s)).find("CGFloat") != std::string::npos;
+      clang_disposeString(s);
+      return cg;
+   }
+
+   /* Recursively flatten a homogeneous floating-point by-value struct into one
+    * `widen` flag per scalar field: true = an i386 4-byte float widened to an
+    * x86_64 8-byte double (a CGFloat); false = a genuine `double` (8 bytes on
+    * both ABIs). Recurses into nested structs (CGRect = {CGPoint, CGSize}). Sets
+    * `bad` (it never throws — this runs inside the libclang visitor callback) on
+    * any member that is not such an FP field. */
+   static void flatten_fp_fields(CXType record, std::vector<bool>& widen, bool& bad) {
+      CXCursor decl = clang_getTypeDeclaration(record);
+      CXCursor def = clang_getCursorDefinition(decl);
+      if (!clang_Cursor_isNull(def)) { decl = def; }
+      if (clang_getCursorKind(decl) != CXCursor_StructDecl) { bad = true; return; }
+      for_each(decl, [&] (CXCursor c, CXCursor) {
+         if (bad) { return CXChildVisit_Break; }
+         const CXCursorKind k = clang_getCursorKind(c);
+         if (k == CXCursor_FieldDecl) {
+            CXType ft = clang_getCursorType(c);              /* non-canonical */
+            CXType cft = clang_getCanonicalType(ft);
+            switch (cft.kind) {
+            case CXType_Record:
+               flatten_fp_fields(cft, widen, bad);
+               break;
+            case CXType_Double:                 /* CGFloat or genuine double */
+               widen.push_back(field_is_cgfloat(ft));
+               break;
+            default:
+               /* a genuine 4-byte float (two pack per eightbyte), or any int/
+                * pointer/bitfield member: not this homogeneous-8B-eightbyte path */
+               bad = true;
+               break;
+            }
+            if (bad) { return CXChildVisit_Break; }
+         } else if (k == CXCursor_StructDecl || k == CXCursor_UnionDecl ||
+                    clang_isAttribute(k)) {
+            /* nested record type declaration / attribute: no layout impact */
+         } else {
+            bad = true;
+            return CXChildVisit_Break;
+         }
+         return CXChildVisit_Continue;
+      });
+   }
+
+   /* A by-value struct of homogeneous 8-byte FP eightbytes — the CG/NS geometry
+    * family: CGPoint/CGSize {2}, CGRect/NSRect {4}, CGAffineTransform {6}. Each
+    * flattened field is one SSE eightbyte on x86_64. SysV classifies a <=16-byte
+    * (<=2 field) struct into SSE registers and a >16-byte one into MEMORY (the
+    * stack). The i386 caller passed the same struct with 4-byte CGFloat fields,
+    * so each field is read at its i386 offset and widened to a double. Returns
+    * the per-field widen flags; throws (caller skips the function) for anything
+    * else, leaving the previously-skipped set otherwise unchanged. */
+   static std::vector<bool> fp_byval_struct_fields(CXType record) {
+      std::vector<bool> widen;
+      bool bad = false;
+      flatten_fp_fields(clang_getCanonicalType(record), widen, bad);
+      if (bad || widen.empty()) {
+         throw std::invalid_argument("byval struct: not a homogeneous FP struct");
+      }
+      /* every field is exactly one 8-byte eightbyte on x86_64 (no padding/holes) */
+      if (sizeof_type(record, arch::x86_64) != 8 * widen.size()) {
+         throw std::invalid_argument("byval struct: unexpected FP layout/padding");
+      }
+      return widen;
+   }
+
+   /* Marshal one i386 FP field (a 4-byte CGFloat or an 8-byte double) at `src` to
+    * an x86_64 double at `dst` (an xmm register or an 8-byte stack slot), widening
+    * float->double when `widen`. A MEMORY (stack) destination bounces through
+    * xmm15 — never an argument register, and untouched by the conversion machinery
+    * and the runtime-bridge helpers (which save only xmm0-7). */
+   static void emit_fp_widen(std::ostream& os, bool widen, const MemoryLocation& src,
+                             const Location& dst) {
+      if (dst.kind() == Location::Kind::SSE) {
+         if (widen) {
+            emit_inst(os, "cvtss2sd", dst.op(reg_width::Q), src.op(reg_width::D));
+         } else {
+            emit_inst(os, "movsd", dst.op(reg_width::Q), src.op(reg_width::Q));
+         }
+      } else {
+         if (widen) {
+            emit_inst(os, "cvtss2sd", "xmm15", src.op(reg_width::D));
+         } else {
+            emit_inst(os, "movsd", "xmm15", src.op(reg_width::Q));
+         }
+         emit_inst(os, "movsd", dst.op(reg_width::Q), "xmm15");
+      }
+   }
+
    /* assumes stack is 16-byte aligned */
    size_t stack_args_size() const {
       size_t size = 0;
@@ -144,12 +245,30 @@ struct ABIConversion {
       for (unsigned argi = 0; argi < argc(); ++argi) {
          const CXType argtype = clang_getCanonicalType(clang_getArgType(function_type, argi));
          if (argtype.kind == CXType_Record) {
-            /* by-value integer struct (CFRange/NSRange/...): n INTEGER eightbytes
-             * -> n GP regs if they all fit, else the whole struct spills (SysV
-             * all-or-nothing). Mirrors the marshalling loop. Throws -> skip fn. */
-            const size_t n = integer_byval_struct_fields(argtype).size();
-            if (reg_i + n <= max_reg_args) {
-               reg_i += n;
+            /* by-value struct. An INTEGER struct (CFRange/NSRange: 1-2 longs)
+             * takes n INTEGER eightbytes -> n GP regs if they all fit, else the
+             * whole struct spills. A homogeneous FP struct takes n SSE eightbytes:
+             * <=16 bytes (<=2 fields) -> SSE regs, else MEMORY (stack). Each class
+             * follows SysV all-or-nothing. Mirrors the marshalling loop. Throws
+             * (neither shape) -> skip fn. */
+            bool is_int = true;
+            size_t n = 0;
+            try {
+               n = integer_byval_struct_fields(argtype).size();
+            } catch (const std::invalid_argument&) {
+               is_int = false;
+            }
+            if (is_int) {
+               if (reg_i + n <= max_reg_args) {
+                  reg_i += n;
+               } else {
+                  size += 8 * n;
+               }
+               continue;
+            }
+            n = fp_byval_struct_fields(argtype).size();   /* throws -> skip fn */
+            if (8 * n <= 16 && xmm_i + n <= max_xmm_args) {
+               xmm_i += n;
             } else {
                size += 8 * n;
             }
@@ -360,6 +479,16 @@ struct ABIConversion {
       std::stringstream to_ss;
       std::stringstream from_ss;
 
+      /* A by-value struct RETURN is sret on x86_64 (hidden pointer in rdi) and is
+       * NOT marshalled here. If the function also takes a by-value FP struct arg
+       * — which we DO now marshal — emitting a shim would mishandle the return,
+       * so skip it. Functions with only simple args + a struct return keep their
+       * pre-existing behavior (this guard fires solely for the newly-enabled
+       * FP-struct-arg combination). */
+      const bool ret_is_record =
+         clang_getCanonicalType(clang_getResultType(function_type)).kind
+            == CXType_Record;
+
       for (param_it = 0;
            param_it != param_end;
            ++param_it) {
@@ -368,29 +497,66 @@ struct ABIConversion {
          CXType type = handle_type(orig_type);
 
          if (type.kind == CXType_Record) {
-            /* by-value integer struct (CFRange/NSRange/...): marshal each field
-             * into its own GP register, widening the i386 4-byte field to the
-             * x86_64 8-byte eightbyte; or spill the whole struct to consecutive
-             * 8-byte stack slots when the GP regs can't hold it all (SysV
-             * all-or-nothing). No post-call copy-back (the arg is by value). */
-            record_decl::FieldTypes fields = integer_byval_struct_fields(type);
-            const size_t n = fields.size();
-            const bool in_regs =
-               static_cast<size_t>(std::distance(info.reg_it, info.reg_end)) >= n;
-            int foff = 0;
-            for (CXType ftype : fields) {
-               std::unique_ptr<Location> fdst;
+            /* by-value INTEGER struct (CFRange/NSRange: 1-2 long fields): marshal
+             * each field into its own GP register, widening the i386 4-byte field
+             * to the x86_64 8-byte eightbyte; or spill the whole struct to
+             * consecutive 8-byte stack slots when the GP regs can't hold it all
+             * (SysV all-or-nothing). No post-call copy-back (the arg is by value). */
+            bool is_int = true;
+            record_decl::FieldTypes fields;
+            try {
+               fields = integer_byval_struct_fields(type);
+            } catch (const std::invalid_argument&) {
+               is_int = false;
+            }
+            if (is_int) {
+               const size_t n = fields.size();
+               const bool in_regs =
+                  static_cast<size_t>(std::distance(info.reg_it, info.reg_end)) >= n;
+               int foff = 0;
+               for (CXType ftype : fields) {
+                  std::unique_ptr<Location> fdst;
+                  if (in_regs) {
+                     fdst = std::make_unique<RegisterLocation>(**info.reg_it++);
+                  } else {
+                     fdst = std::make_unique<MemoryLocation>(stack_args);
+                     stack_args += 8;
+                  }
+                  MemoryLocation fsrc = load_loc + foff;
+                  to_conv.convert(to_ss, ftype, fsrc, *fdst);
+                  foff += 4;              /* i386 field width (long = 4) */
+               }
+               load_loc += align_up<size_t>(sizeof_type(type, arch::i386), 4); /* 4*n */
+               continue;
+            }
+
+            /* by-value FLOATING-POINT struct (CGPoint/CGSize/CGRect/NSRect/
+             * CGAffineTransform): SSE-class (<=16 bytes) goes in consecutive xmm
+             * registers; MEMORY-class (>16 bytes) spills to consecutive 8-byte
+             * stack slots. Each i386 field (a 4-byte CGFloat or 8-byte double) is
+             * read at its i386 offset and widened to an x86_64 double. No
+             * copy-back (the arg is by value). Throws -> skip the whole function. */
+            const std::vector<bool> widen = fp_byval_struct_fields(type);
+            if (ret_is_record) {
+               throw std::invalid_argument(
+                  "fp-struct arg with by-value struct (sret) return not supported");
+            }
+            const size_t n = widen.size();
+            const bool in_regs = 8 * n <= 16 && (info.fp_idx + n) <= max_xmm_args;
+            int i386_off = 0;
+            for (bool w : widen) {
+               MemoryLocation fsrc = load_loc + i386_off;
                if (in_regs) {
-                  fdst = std::make_unique<RegisterLocation>(**info.reg_it++);
+                  SSELocation fdst(info.fp_idx++);
+                  emit_fp_widen(to_ss, w, fsrc, fdst);
                } else {
-                  fdst = std::make_unique<MemoryLocation>(stack_args);
+                  MemoryLocation fdst = stack_args;
+                  emit_fp_widen(to_ss, w, fsrc, fdst);
                   stack_args += 8;
                }
-               MemoryLocation fsrc = load_loc + foff;
-               to_conv.convert(to_ss, ftype, fsrc, *fdst);
-               foff += 4;                 /* i386 field width (long = 4) */
+               i386_off += w ? 4 : 8;     /* i386 field width (CGFloat 4 / double 8) */
             }
-            load_loc += align_up<size_t>(sizeof_type(type, arch::i386), 4); /* 4*n */
+            load_loc += align_up<size_t>(static_cast<size_t>(i386_off), 4);
             continue;
          }
 

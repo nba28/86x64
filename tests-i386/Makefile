@@ -281,6 +281,14 @@ $(BUILD_DIR)/36_stripped_func_pad.i386: $(BUILD_DIR)/36_stripped_func_pad.o
 $(BUILD_DIR)/39_xml_memget_alloc.i386: $(BUILD_DIR)/39_xml_memget_alloc.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 49_cgrect_byval: CoreGraphics isn't in the i386 sysroot, so the CG geometry
+# predicates (CGRectIsEmpty / CGPointEqualToPoint / CGRectContainsPoint) are
+# undefined dynamic_lookup imports resolved at translate time by static-interpose
+# -> libabiconv's ___CG* shims (the abigen FP-by-value-struct marshalling).
+# Overrides %.i386.
+$(BUILD_DIR)/49_cgrect_byval.i386: $(BUILD_DIR)/49_cgrect_byval.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +
 # abi-insert + static-interpose + wrap. Bare `macho-tool transform` output
 # isn't standalone-runnable because the i386 entry semantics (high-address
