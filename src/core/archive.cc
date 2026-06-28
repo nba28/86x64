@@ -448,7 +448,11 @@ namespace MachO {
           * landing pad is exactly entry+cs_lp, even though the M64 transform
           * later drops the PIC get_pc_thunk and the entry/prologue themselves
           * aren't in the pcmap.  So snap pc-begin to the nearest func_entry. */
-         std::vector<uint32_t> func_starts;
+         /* (post-Build loc.vmaddr, disk-faithful orig_vmaddr) per func entry.  The
+          * FDE pc-begin we parse is in (drifted) post-Build vmaddr space, so we
+          * snap it to the nearest entry BY loc.vmaddr, then take that entry's
+          * orig_vmaddr (the i386 layout coordinate) as the region. */
+         std::vector<std::pair<uint32_t,uint32_t>> func_starts; /* (loc.vmaddr, orig) */
          for (Segment<opposite<b>> *seg : other.segments()) {
             for (Section<opposite<b>> *s : seg->sections) {
                const std::string sn = s->name();
@@ -457,7 +461,8 @@ namespace MachO {
                for (const SectionBlob<opposite<b>> *blob : s->content) {
                   if (blob->func_entry &&
                       dynamic_cast<const Instruction<opposite<b>> *>(blob) != nullptr)
-                     func_starts.push_back((uint32_t) blob->loc.vmaddr);
+                     func_starts.emplace_back((uint32_t) blob->loc.vmaddr,
+                                              (uint32_t) blob->orig_vmaddr);
                }
             }
          }
@@ -554,24 +559,35 @@ namespace MachO {
                            uint32_t lsda = 0;
                            if (eh_read_encoded(buf, p, ci.L_enc, base + (uint32_t)p, lsda) &&
                                lsda != 0) {
-                              /* (1) region = nearest func_entry to the drifted
-                               * pc-begin (the true i386 function start the LSDA
-                               * offsets are relative to). */
+                              /* (1) region = disk-faithful orig of the func_entry
+                               * nearest (by post-Build vmaddr) to the drifted
+                               * pc-begin — the i386 function start the LSDA
+                               * offsets are relative to. */
                               uint32_t region = 0; int64_t bestd = INT64_MAX;
-                              for (uint32_t fs : func_starts) {
-                                 int64_t d = (int64_t)fs - (int64_t)pcbegin;
+                              for (const auto& fs : func_starts) {
+                                 int64_t d = (int64_t)fs.first - (int64_t)pcbegin;
                                  if (d < 0) d = -d;
-                                 if (d < bestd) { bestd = d; region = fs; }
+                                 if (d < bestd) { bestd = d; region = fs.second; }
                               }
                               /* (2) lsda_off = nearest position to the drifted
                                * LSDA pointer whose LSDA header actually parses. */
                               int32_t lsda_off = -1;
                               const int32_t want = (int32_t)(lsda - gxt_base);
-                              for (int32_t r = 0; r <= 16 && lsda_off < 0; r++) {
-                                 for (int sgn = 0; sgn < 2 && lsda_off < 0; sgn++) {
-                                    int32_t cand = want + (sgn ? -r : r);
-                                    if (cand < 0 || (size_t)cand >= gbuf.size()) continue;
-                                    if (eh_lsda_valid_at(gbuf, (size_t)cand)) lsda_off = cand;
+                              /* Two passes: first only accept the nearest position
+                               * whose @LPStart-encoding is DW_EH_PE_omit (0xff) —
+                               * the overwhelmingly common GCC/clang form and a
+                               * strong anchor that rejects a false-positive parse a
+                               * few bytes inside the previous LSDA's type table;
+                               * fall back to any valid header otherwise. */
+                              for (int pass = 0; pass < 2 && lsda_off < 0; pass++) {
+                                 for (int32_t r = 0; r <= 16 && lsda_off < 0; r++) {
+                                    for (int sgn = 0; sgn < 2 && lsda_off < 0; sgn++) {
+                                       int32_t cand = want + (sgn ? -r : r);
+                                       if (cand < 0 || (size_t)cand >= gbuf.size()) continue;
+                                       if (!eh_lsda_valid_at(gbuf, (size_t)cand)) continue;
+                                       if (pass == 0 && gbuf[cand] != 0xff) continue;
+                                       lsda_off = cand;
+                                    }
                                  }
                               }
                               if (bestd <= 96 && lsda_off >= 0) {

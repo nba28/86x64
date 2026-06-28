@@ -381,7 +381,9 @@ static int eh_scan_lsda(uint32_t lsda_addr, uint32_t region, uint32_t orig_pc,
          if (want_handler) return 0;               /* phase 1 ignores cleanups */
          *lp_orig = lp; *selector = 0; return 1;
       }
-      /* Walk the action chain. */
+      /* Walk the WHOLE action chain: a matching catch wins (install the handler);
+       * otherwise a cleanup applies (run dtors then continue via _Unwind_Resume).*/
+      int have_cleanup = 0;
       const uint8_t *ap = action_tab + (cs_act - 1);
       for (;;) {
          const uint8_t *aq = ap;
@@ -404,11 +406,16 @@ static int eh_scan_lsda(uint32_t lsda_addr, uint32_t region, uint32_t orig_pc,
                return 1;
             }
          } else if (ttype_index == 0) {            /* cleanup in the action chain */
-            if (!want_handler) { *lp_orig = lp; *selector = 0; return 1; }
+            have_cleanup = 1;
          }
          /* ttype_index < 0 => exception-spec; treated as no-match here. */
          if (next_off == 0) break;
          ap = after_idx + next_off;
+      }
+      if (have_cleanup && !want_handler) {         /* no catch matched: run cleanup */
+         EHLOG("cleanup: cs_lp=%#x region=%#x orig_pc=%#x -> lp_orig=%#x\n",
+               cs_lp, region, orig_pc, lp);
+         *lp_orig = lp; *selector = 0; return 1;
       }
       return 0;                                    /* call site found, no match */
    }
@@ -453,16 +460,55 @@ static void eh_terminate(struct eh_exception *h, const char *why) {
  * continuation from _Unwind_Resume (cleanups only count as install points; a
  * catch still installs).  On success eh_resume() is tail-called (noreturn);
  * otherwise returns (caller terminates). */
+/* Phase 1 (Itanium two-phase unwind): does ANY frame from `start_ebp` outward
+ * have a matching CATCH?  Walks the ebp chain without running anything; returns
+ * 1 if a handler exists.  Used so we only run cleanups (which may have side
+ * effects) when the exception will actually be caught — otherwise terminate. */
+static int eh_has_handler(struct eh_exception *h, uint32_t start_ebp, uint32_t start_ret) {
+   uint32_t ebp = start_ebp, ret = start_ret; int hops = 0;
+   while (ret && hops++ < 4096) {
+      struct eh_image *im = eh_image_for_pc((uintptr_t)ret);
+      if (!im) break;
+      uint32_t orig_pc = 0;
+      if (pc_trans_to_orig(im, (uintptr_t)ret, &orig_pc)) {
+         const struct lsda_ent *rec = eh_lsda_for_pc(im, (uintptr_t)ret);
+         if (rec && im->gxt_base) {
+            uint32_t lp = 0; int32_t sel = 0; uint32_t adj = 0;
+            if (eh_scan_lsda((uint32_t)(im->gxt_base + (intptr_t)rec->lsda_off),
+                             rec->orig_func, orig_pc, h->type_info,
+                             /*want_handler=*/1, &lp, &sel, &adj))
+               return 1;
+         }
+      }
+      if (!ebp) break;
+      uint32_t saved_ebp = *(const uint32_t *)(uintptr_t)ebp;
+      uint32_t caller_ret = *(const uint32_t *)(uintptr_t)(ebp + 4);
+      if (saved_ebp <= ebp) break;
+      ebp = saved_ebp; ret = caller_ret;
+   }
+   return 0;
+}
+
 /* `lp_esp` is the esp the landing pad must run with: the function's WORKING esp
  * (where it places call args), NOT the CFA.  For a frame-pointer function that
  * is the esp it had at the unwound call site = (the inner frame's ebp) + 8; for
- * the throwing frame itself it is the body esp captured at the throw call. */
+ * the throwing frame itself it is the body esp captured at the throw call.
+ *
+ * Phase 2: walk outward and resume the FIRST frame that has an action — a
+ * matching catch INSTALLS the handler (noreturn into the catch); a CLEANUP
+ * resumes the dtor landing pad, which runs and tail-calls _Unwind_Resume to
+ * re-enter here from the caller, so cleanups in every intervening frame run in
+ * order before the catch. */
 static void eh_raise_from(struct eh_exception *h, uint32_t start_ebp,
                           uint32_t start_ret, uint32_t start_esp) {
    eh_scan_images();
    if (g_img_n == 0) {
       eh_terminate(h, "no translator PC map (core __86x64_pcmap/__86x64_ehlsda "
                       "not yet emitted)");
+      return;
+   }
+   if (!eh_has_handler(h, start_ebp, start_ret)) {
+      eh_terminate(h, "no matching handler in any frame");
       return;
    }
 
@@ -483,15 +529,16 @@ static void eh_raise_from(struct eh_exception *h, uint32_t start_ebp,
          uint32_t lsda_addr = (uint32_t)(im->gxt_base + (intptr_t)rec->lsda_off);
          uint32_t lp_orig = 0; int32_t sel = 0; uint32_t adj = 0;
          if (eh_scan_lsda(lsda_addr, rec->orig_func, orig_pc, h->type_info,
-                          /*want_handler=*/1, &lp_orig, &sel, &adj)) {
+                          /*want_handler=*/0, &lp_orig, &sel, &adj)) {
             uintptr_t lp_trans = 0;
             if (!pc_orig_to_trans(im, lp_orig, &lp_trans)) {
-               EHLOG("handler LP orig=%#x has no trans mapping\n", lp_orig);
+               EHLOG("LP orig=%#x has no trans mapping\n", lp_orig);
                goto next;
             }
             if (sel != 0) { h->selector = sel; if (adj) h->adjusted = adj; }
-            EHLOG("install handler: frame ebp=%#x esp=%#x lp=%#lx sel=%d\n",
-                  ebp, lp_esp, (unsigned long)lp_trans, sel);
+            EHLOG("resume: frame ebp=%#x esp=%#x lp=%#lx sel=%d (%s)\n",
+                  ebp, lp_esp, (unsigned long)lp_trans, sel,
+                  sel ? "catch" : "cleanup");
             eh_resume((uint32_t)lp_trans, lp_esp, ebp, (uint32_t)(uintptr_t)h, (uint32_t)sel);
             /* noreturn */
          }
@@ -507,7 +554,7 @@ static void eh_raise_from(struct eh_exception *h, uint32_t start_ebp,
       ebp = saved_ebp;
       ret = caller_ret;
    }
-   /* No handler found anywhere. */
+   /* phase 1 promised a handler, so we shouldn't fall out; terminate if we do. */
 }
 
 /* ===================================================================== */

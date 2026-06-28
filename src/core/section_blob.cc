@@ -84,10 +84,14 @@ namespace MachO {
       env.add(&other, this);
       env.resolve(other.segment, &segment);
       func_entry = other.func_entry; /* preserve even-alignment intent i386->x86_64 */
-      /* Preserve the i386 source address: loc.vmaddr will be overwritten with the
-       * final x86_64 address at Build, so capture the original now for the
-       * __86x64_pcmap / __86x64_ehlsda emission (C++ exception unwinding). */
-      orig_vmaddr = other.loc.vmaddr;
+      /* Carry forward the source instruction's DISK-FAITHFUL i386 address that
+       * Section::Parse1 recorded during the initial sweep (section base + sum of
+       * raw decoded lengths).  We must NOT use other.loc.vmaddr here: by the time
+       * Transform runs the M32 archive has already been Built (transform.cc), so
+       * loc.vmaddr reflects the re-laid-out layout (even-alignment/padding) and
+       * drifts from the i386 layout the LSDA is keyed in.  orig_vmaddr is the
+       * pre-Build sweep value, untouched by Build/DetectPicAnchoredDisps. */
+      orig_vmaddr = other.orig_vmaddr;
    }
 
 

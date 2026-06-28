@@ -462,6 +462,16 @@ namespace MachO {
 
          elem->iter = content.insert(content.end(), elem);
 
+         /* Record this blob's DISK-FAITHFUL i386 address (the linear-sweep vmaddr,
+          * i.e. section base + the sum of raw decoded instruction lengths) for the
+          * C++ exception PC map.  Captured HERE, during the initial sweep, BEFORE
+          * Archive::Build (transform.cc Build()s the M32 archive before Transform)
+          * re-lays-out the blobs (even-alignment, padding) and DetectPicAnchoredDisps
+          * runs — both of which drift loc.vmaddr from the i386 layout the LSDA is
+          * keyed in.  Pure observation: nothing reads orig_vmaddr except the EH
+          * sections, so this does not change translation output. */
+         elem->orig_vmaddr = vmaddr;
+
          /* Update no-fall-through state for the next iteration (TextParser): an
           * emitted padding byte keeps us in the padding gap; otherwise consult
           * the just-decoded instruction's category (RET / unconditional JMP end
