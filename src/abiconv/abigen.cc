@@ -756,8 +756,25 @@ struct ABIConversion {
        * 16-aligned call frame here, so the call is ABI-safe; rdi was saved at
        * [rbp-8]. CF `^struct` returns are left untouched (no regression). */
       {
-         const CXType rcanon =
-            clang_getCanonicalType(clang_getResultType(function_type));
+         const CXType rorig = clang_getResultType(function_type);
+         const CXType rcanon = clang_getCanonicalType(rorig);
+         /* Conditional CF/opaque-pointer return wrap: a native CF/object ref
+          * that lives above 4GB (the CF heap, dyld-cache constants) TRUNCATES
+          * in the i386 caller's 4-byte eax. Mint a low-4GB proxy handle for it
+          * (the CF-arg unwrap, convert_cf_ptr, restores the real ref on the
+          * next call); a genuine low-4GB return (a data/context pointer, an
+          * i386 buffer) has a zero high half and passes through unchanged, so
+          * this is regression-safe. Shared by the named-CF-ref and raw-void*
+          * return cases below. The `.cfretlow` local label is unique per shim
+          * because at most one mutually-exclusive branch emits it. */
+         auto emit_cf_cond_ret_wrap = [&os]() {
+            emit_inst(os, "mov", "rdi", "rax");
+            emit_inst(os, "shr", "rdi", "32");
+            emit_inst(os, "jz", ".cfretlow");
+            emit_inst(os, "mov", "rdi", "rax");
+            emit_inst(os, "call", "_x64_objc_wrap");
+            os << ".cfretlow:" << std::endl;
+         };
          /* libclang models SEL as Pointer-to-ObjCSel (see typeconv
           * convert_pointer); catch both shapes */
          const bool ret_is_sel =
@@ -777,30 +794,44 @@ struct ABIConversion {
              * selector-name pointer the i386 caller can store and re-message */
             emit_inst(os, "mov", "rdi", "rax");
             emit_inst(os, "call", "_x64_objc_sel_wrap");
-         } else if (cf_opaque_ptr_type(rcanon)) {
-            /* opaque CF refs: a dyld-cache constant (CFSTR, kCF*) would
-             * truncate in the i386 caller's eax — wrap only those; low
+         } else if (cf_opaque_ptr_type(rcanon) || cf_void_ref_type(rorig)) {
+            /* Opaque CF refs (CFStringRef = `struct __CFString *`, ...) AND the
+             * void*-backed CFTypeRef / CFPropertyListRef typedefs (CFRetain,
+             * CFBundleGetValueForInfoDictionaryKey, ...). The latter is matched
+             * by the as-written typedef name (cf_void_ref_type) since its
+             * canonical type is a bare const void* indistinguishable from a
+             * non-object void* — so it is recognised here, off rorig, not the
+             * generic void* return case below. A dyld-cache/CF-heap ref above
+             * 4GB would truncate in the i386 caller's eax — wrap only those; low
              * heap refs stay raw (status quo, no arena churn). The CF-arg
              * unwrap (convert_cf_ptr) accepts both forms. */
-            emit_inst(os, "mov", "rdi", "rax");
-            emit_inst(os, "shr", "rdi", "32");
-            emit_inst(os, "jz", ".cfretlow");
-            emit_inst(os, "mov", "rdi", "rax");
-            emit_inst(os, "call", "_x64_objc_wrap");
-            os << ".cfretlow:" << std::endl;
+            emit_cf_cond_ret_wrap();
          } else if (rcanon.kind == CXType_Pointer) {
-            /* C-string return such as glGetString's const GLubyte ptr (a pointer
-             * to char or unsigned char): a >4GB native static string truncates
-             * to a wild pointer in the i386 caller's eax and faults when its
-             * bytes are read (strlen / initWithUTF8String:). Bounce a high
-             * return into a low-4GB copy; a low return (a pointer into a caller
-             * buffer, the strchr/strstr case) passes through unchanged. */
             const CXTypeKind pk =
                clang_getCanonicalType(clang_getPointeeType(rcanon)).kind;
             if (pk == CXType_Char_S || pk == CXType_Char_U ||
                 pk == CXType_SChar  || pk == CXType_UChar) {
+               /* C-string return such as glGetString's const GLubyte ptr (a
+                * pointer to char or unsigned char): a >4GB native static string
+                * truncates to a wild pointer in the i386 caller's eax and faults
+                * when its bytes are read (strlen / initWithUTF8String:). Bounce
+                * a high return into a low-4GB copy; a low return (a pointer into
+                * a caller buffer, the strchr/strstr case) passes through. */
                emit_inst(os, "mov", "rdi", "rax");
                emit_inst(os, "call", "_x64_cstr_ret_low");
+            } else if (pk == CXType_Void) {
+               /* raw `const void*` / `void*` return: the CF-collection accessors
+                * CFArrayGetValueAtIndex / CFDictionaryGetValue / CFSetGetValue
+                * (and CFBundleGetValueForInfoDictionaryKey) hand back the stored
+                * element as a bare void*. When that element is a native CF/object
+                * ref above 4GB it truncates in the i386 caller's eax and the next
+                * CFGetTypeID / CFRetain derefs the wild low-32 pointer (Halo's
+                * libabiconv `__CFGetTypeID` EXC_BAD_ACCESS wall). Conditionally
+                * wrap it exactly like the named-CFTypeRef case so the >4GB ref
+                * round-trips as a proxy handle (the CF-arg unwrap restores it on
+                * the next call); a genuine low data/context void* passes through
+                * unchanged, so this is regression-safe. */
+               emit_cf_cond_ret_wrap();
             }
          } else if (rcanon.kind == CXType_LongLong ||
                     rcanon.kind == CXType_ULongLong) {

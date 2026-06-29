@@ -297,6 +297,15 @@ $(BUILD_DIR)/49_cgrect_byval.i386: $(BUILD_DIR)/49_cgrect_byval.o
 $(BUILD_DIR)/50_cgaffine_sret.i386: $(BUILD_DIR)/50_cgaffine_sret.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 56_cf_collection_value_ret: CoreFoundation isn't in the base i386 sysroot, so
+# the CF collection builders/accessors (CFArrayCreateMutable / CFArrayAppendValue
+# / CFArrayGetValueAtIndex / CFDictionary* / CFGetTypeID) are undefined
+# dynamic_lookup imports resolved at translate time by static-interpose ->
+# libabiconv's ___CF* shims (the abigen RETURN-side const-void* CF wrap).
+# Overrides %.i386.
+$(BUILD_DIR)/56_cf_collection_value_ret.i386: $(BUILD_DIR)/56_cf_collection_value_ret.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +
 # abi-insert + static-interpose + wrap. Bare `macho-tool transform` output
 # isn't standalone-runnable because the i386 entry semantics (high-address
