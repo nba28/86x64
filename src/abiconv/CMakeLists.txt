@@ -156,7 +156,7 @@ add_custom_target(abiconv_syms
 # so this is portable. Extend the list when a new i386 target needs coverage.
 set(ABICONV_MODERN_TARGETS
     "$ENV{HOME}/Downloads/iLife11/Quinn.app/Contents/MacOS/Quinn.dylib"
-    "$ENV{HOME}/projects/civ4/Civilization IV.app/Contents/MacOS/civ4.out.dylib"
+    "$ENV{HOME}/Downloads/iLife11/civ4/Civilization IV.app/Contents/MacOS/civ4.out.dylib"
     "$ENV{HOME}/Downloads/iLife11/Halo.app/Contents/MacOS/Halo.dylib"
     "$ENV{HOME}/Downloads/iLife11/Applications/iPhoto.app/Contents/MacOS/iPhoto.dylib"
     "$ENV{HOME}/Downloads/iLife11/Applications/iWeb.app/Contents/MacOS/iWeb.dylib"
@@ -286,7 +286,7 @@ set(ABICONV_LEGACY_SDK "$ENV{HOME}/projects/Library/SDKs/MacOSX10.6.sdk"
 # Carbon-nib UI load — plus the QuickDraw/Window/Menu Mgr surface). Same stable
 # input + naming convention as ABICONV_MODERN_TARGETS above.
 set(ABICONV_LEGACY_TARGETS
-    "$ENV{HOME}/projects/civ4/Civilization IV.app/Contents/MacOS/civ4.out.dylib"
+    "$ENV{HOME}/Downloads/iLife11/civ4/Civilization IV.app/Contents/MacOS/civ4.out.dylib"
     CACHE STRING "translated app-code dylibs whose imports define the legacy shim set")
 set(ABICONV_LEGACY_TARGET_ARGS "")
 set(ABICONV_LEGACY_TARGET_DEPS "")
