@@ -6248,6 +6248,36 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
    }
    x64_cb_enter();   /* a legacy IMP is about to run (balanced in reverse_ret) */
 
+   /* Round-2 Quinn black-board gate trace. The capture proved FastDrawCells
+    * (-> CGContextSetAlpha) is NEVER reached: drawPieceInRect AND drawBoardInRect
+    * both open with `if (self->myPlayer == nil) return;` (myPlayer = QuinnBoardView
+    * ivar @ i386 offset 0x54). self32 is the i386 SHADOW the legacy IMP reads its
+    * ivars from (= get_or_create_shadow(self_,lookup)). For every reverse call into
+    * a *BoardView, log the shadow + myPlayer@0x54 (and, for setPlayer:, the player
+    * being written). This shows whether the shadow is STABLE across the view's
+    * calls and whether the player write ever lands on the shadow the draw guard
+    * reads — i.e. core (translated ivar) vs runtime (legacy-shadow aliasing). */
+   if (getenv("QUINN_CELL_TRACE") && !object_isClass(self_)) {
+      const char *cn = class_getName(lookup);
+      if (cn && strstr(cn, "BoardView")) {
+         const char *sn = (sel && mem_readable((uintptr_t)sel, 1)) ? sel_getName(sel)
+                                                                    : "(unreadable)";
+         uint32_t shadow = self32;
+         uint32_t myplayer = (shadow && mem_readable((uintptr_t)shadow + 0x54, 4))
+                              ? *(const uint32_t *)(uintptr_t)(shadow + 0x54) : 0xBADBAD;
+         fprintf(stderr, "[guard] %s[%s] shadow=0x%x myPlayer@0x54=0x%x\n",
+                 cn, sn, shadow, myplayer);
+         if (sn && !strcmp(sn, "setPlayer:"))
+            fprintf(stderr, "[guard]   -> setPlayer: writes newPlayer=0x%x into shadow"
+                    " 0x%x+0x54\n", plan->frame[head + 2], shadow);
+         if (sn && (!strcmp(sn, "drawPieceInRect:boardOpacity:cellDirtyRect:") ||
+                    !strcmp(sn, "drawBoardInRect:boardOpacity:cellDirtyRect:")) &&
+             myplayer == 0)
+            fprintf(stderr, "[guard]   -> GUARD BAILS (myPlayer nil): no FastDrawCells\n");
+         fflush(stderr);
+      }
+   }
+
    if (getenv("OBJC_BRIDGE_TRACE")) {
       fprintf(stderr, "[rev] t=%x %s[%s] imp=0x%llx self32=0x%x words=%u kind=%d "
               "%splan=%p lowstack=0x%llx tramp=%p\n",
