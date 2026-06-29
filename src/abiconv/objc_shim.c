@@ -6259,21 +6259,35 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
     * reads — i.e. core (translated ivar) vs runtime (legacy-shadow aliasing). */
    if (getenv("QUINN_CELL_TRACE") && !object_isClass(self_)) {
       const char *cn = class_getName(lookup);
-      if (cn && strstr(cn, "BoardView")) {
-         const char *sn = (sel && mem_readable((uintptr_t)sel, 1)) ? sel_getName(sel)
-                                                                    : "(unreadable)";
+      const char *sn = (sel && mem_readable((uintptr_t)sel, 1)) ? sel_getName(sel)
+                                                                 : "(unreadable)";
+      int board_cls = cn && strstr(cn, "BoardView");
+      /* Round-3: the board's draw methods are registered but AppKit never calls
+       * drawRect:/drawBoardInRect:/drawPieceInRect: -> the board is never
+       * invalidated/redrawn. The redraw chain is:
+       *   <game tick> -> *[boardDidChange:matrices:] -> [view setNeedsDisplayInCell*]
+       *               -> AppKit -> [view drawRect:] -> FastDrawCells.
+       * Trace the chain regardless of class so we find WHERE it stops: the
+       * model->view notification (boardDidChange) and the view invalidation
+       * (any *NeedsDisplay*), plus the per-move hook. board_cls calls keep the
+       * shadow+myPlayer detail. */
+      int chain_sel = sn && (strstr(sn, "boardDidChange") || strstr(sn, "NeedsDisplay")
+                             || strstr(sn, "pieceDidMove") || strstr(sn, "boardChanged")
+                             || !strcmp(sn, "boardDidChange:matrices:"));
+      if (board_cls || chain_sel) {
          uint32_t shadow = self32;
-         uint32_t myplayer = (shadow && mem_readable((uintptr_t)shadow + 0x54, 4))
-                              ? *(const uint32_t *)(uintptr_t)(shadow + 0x54) : 0xBADBAD;
-         fprintf(stderr, "[guard] %s[%s] shadow=0x%x myPlayer@0x54=0x%x\n",
-                 cn, sn, shadow, myplayer);
-         if (sn && !strcmp(sn, "setPlayer:"))
-            fprintf(stderr, "[guard]   -> setPlayer: writes newPlayer=0x%x into shadow"
-                    " 0x%x+0x54\n", plan->frame[head + 2], shadow);
-         if (sn && (!strcmp(sn, "drawPieceInRect:boardOpacity:cellDirtyRect:") ||
-                    !strcmp(sn, "drawBoardInRect:boardOpacity:cellDirtyRect:")) &&
-             myplayer == 0)
-            fprintf(stderr, "[guard]   -> GUARD BAILS (myPlayer nil): no FastDrawCells\n");
+         if (board_cls) {
+            uint32_t myplayer = (shadow && mem_readable((uintptr_t)shadow + 0x54, 4))
+                                ? *(const uint32_t *)(uintptr_t)(shadow + 0x54) : 0xBADBAD;
+            fprintf(stderr, "[guard] %s[%s] shadow=0x%x myPlayer@0x54=0x%x\n",
+                    cn ? cn : "?", sn, shadow, myplayer);
+            if (sn && !strcmp(sn, "setPlayer:"))
+               fprintf(stderr, "[guard]   -> setPlayer: writes newPlayer=0x%x into shadow"
+                       " 0x%x+0x54\n", plan->frame[head + 2], shadow);
+         } else {
+            fprintf(stderr, "[guard] REDRAW-CHAIN: %s[%s] self32=0x%x\n",
+                    cn ? cn : "?", sn, shadow);
+         }
          fflush(stderr);
       }
    }
