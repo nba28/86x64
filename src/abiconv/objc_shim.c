@@ -6552,6 +6552,52 @@ static struct geo_res geo_call(unsigned idx, const uint32_t *a32) {
               (double)f1, (double)f2, (double)f3, (double)f4);
       fflush(stderr);
    }
+   /* Focused Quinn cell-draw trace (clean signal vs the GEO_PTR_TRACE firehose).
+    * The operative block draw is _QuinnGeneralFastDrawCells: it calls
+    * CGContextSetAlpha ONCE per matrix (function entry), then per OCCUPIED cell
+    * either CGContextDrawImage (sprite cell, slot5=cell image) or
+    * CGContextFillRect (solid 0xFF cell), into the offscreen/current context.
+    * NSRectFill(UsingOperation) is the offscreen clear + the slow board path.
+    * This reveals (a) whether FastDrawCells is reached at all (any SetAlpha),
+    * (b) how many occupied cells it draws per matrix (the count between two
+    * SetAlphas), and (c) whether each cell sprite image unwraps to a real
+    * 64-bit CGImage. Zero output unless QUINN_CELL_TRACE is set. */
+   if (getenv("QUINN_CELL_TRACE")) {
+      static unsigned q_matrices, q_cells_in_matrix, q_total_cells;
+      const char *n = e->name;
+      if (!strcmp(n, "CGContextSetAlpha")) {
+         if (q_matrices)
+            fprintf(stderr, "[cell]   ^matrix #%u drew %u occupied cells\n",
+                    q_matrices, q_cells_in_matrix);
+         q_matrices++; q_cells_in_matrix = 0;
+         float al; memcpy(&al, &a32[1], 4);
+         fprintf(stderr, "[cell] SetAlpha(#%u) ctx=0x%08x alpha=%.3f\n",
+                 q_matrices, a32[0], (double)al);
+      } else if (!strcmp(n, "CGContextDrawImage")) {
+         q_cells_in_matrix++; q_total_cells++;
+         uint64_t real = geo_cfptr_arg(a32[5]);
+         float x,y,w,h; memcpy(&x,&a32[1],4); memcpy(&y,&a32[2],4);
+         memcpy(&w,&a32[3],4); memcpy(&h,&a32[4],4);
+         fprintf(stderr, "[cell] DrawImage ctx=0x%08x rect=[%.1f %.1f %.1f %.1f]"
+                 " img=0x%08x->0x%llx%s (total=%u)\n", a32[0],
+                 (double)x,(double)y,(double)w,(double)h, a32[5],
+                 (unsigned long long)real, real ? "" : " NULL!", q_total_cells);
+      } else if (!strcmp(n, "CGContextFillRect")) {
+         q_cells_in_matrix++; q_total_cells++;
+         float x,y,w,h; memcpy(&x,&a32[1],4); memcpy(&y,&a32[2],4);
+         memcpy(&w,&a32[3],4); memcpy(&h,&a32[4],4);
+         fprintf(stderr, "[cell] FillRect ctx=0x%08x rect=[%.1f %.1f %.1f %.1f]"
+                 " (total=%u)\n", a32[0],
+                 (double)x,(double)y,(double)w,(double)h, q_total_cells);
+      } else if (!strcmp(n, "NSRectFill") ||
+                 !strcmp(n, "NSRectFillUsingOperation")) {
+         float x,y,w,h; memcpy(&x,&a32[0],4); memcpy(&y,&a32[1],4);
+         memcpy(&w,&a32[2],4); memcpy(&h,&a32[3],4);
+         fprintf(stderr, "[cell] %s rect=[%.1f %.1f %.1f %.1f]\n", n,
+                 (double)x,(double)y,(double)w,(double)h);
+      }
+      fflush(stderr);
+   }
    char rb = *enc_skip_quals(ret);
    size_t risz = 0, rnsz = 0; uint8_t rsse[8] = {0}; unsigned rnebs = 0;
    int kind = 0;   /* 0 scalar/void, 1 wrap obj, 3 stret narrow, 4 fp,
