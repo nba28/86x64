@@ -32,6 +32,7 @@
 #include <mach/vm_prot.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
+#include <CoreFoundation/CoreFoundation.h>
 
 /* proxy arena (objc_shim.c): bridge a 64-bit handle/ptr <-> a 32-bit token the
  * i386 caller can hold, and bounce a 64-bit C-string into low-4GB. */
@@ -167,6 +168,37 @@ static uint32_t dlsym_make_thunk(uint64_t native, const char *name) {
    return 0;
 }
 
+/* Map a NATIVE address resolved by a lookup-by-name API (dlsym,
+ * CFBundleGetFunctionPointerForName, ...) to a value the i386 caller can hold
+ * and call. The caller hands the result straight to an i386 indirect call/jmp,
+ * which is only 32 bits wide: a raw >4GB native pointer truncates to garbage
+ * and the call faults (Civ IV: CFBundleGetFunctionPointerForName(System,
+ * "chdir") = 0x7ff8`1b1010c4, truncated to 0x1b1010c4, jmp *eax -> SIGSEGV in
+ * internal_chdir). Bind such a FUNCTION to a low-4GB i386-callable thunk that
+ * marshals the i386 cdecl frame into the native call. A low (translated)
+ * address is already callable and passes through; a >4GB DATA symbol keeps the
+ * arena-handle path (it is dereferenced, not called). Shared by every
+ * lookup-by-name shim so the function-vs-data discipline stays in one place. */
+static int32_t fnptr_lookup_result(uint64_t v, const char *name) {
+   if (v == 0) { return 0; }
+   if (v < 0x100000000ULL) { return (int32_t)(uint32_t)v; }  /* translated/low: callable */
+   /* High native address. A FUNCTION (executable page) can't be called by i386
+    * code directly; hand back a low-4GB callable thunk. A DATA symbol keeps the
+    * arena-handle path (it is dereferenced, not called). */
+   if (addr_is_executable(v)) {
+      uint32_t thunk = dlsym_make_thunk(v, name);
+      if (thunk) { return (int32_t)thunk; }
+      /* pool exhausted: fall through to the handle (better a later fault than
+       * silently returning 0 / a wrong call) */
+   }
+   if (posix_trace()) {
+      fprintf(stderr, "[posix] lookup: high DATA symbol %s=0x%llx wrapped as handle\n",
+              name ? name : "?", (unsigned long long)v);
+      fflush(stderr);
+   }
+   return (int32_t)x64_objc_wrap(v);
+}
+
 /* Prefer libabiconv's own interpose shim when one exists for the requested
  * symbol. static-interpose binds a translated i386 import "_<name>" to the shim
  * exported as "__" + "_<name>" (PREFIX "__"); a direct i386 call thus reaches the
@@ -232,27 +264,12 @@ int32_t shim_dlsym(uint32_t *a) {
               h, name ? name : "(null)", sym);
       fflush(stderr);
    }
-   uint64_t v = (uint64_t)(uintptr_t)sym;
-   if (v == 0) { return 0; }
-   if (v < 0x100000000ULL) { return (int32_t)(uint32_t)v; }  /* translated/low: callable */
-   /* High native address. A FUNCTION (executable page) can't be called by i386
-    * code directly (and wrapping it as a handle made the indirect call jump into
-    * proxy-arena data -> SIGBUS, e.g. iPhoto's BackupWrapper dlsym'ing
-    * BURegisterStartTimeMachineFromDock). Hand back a low-4GB callable thunk that
-    * marshals the i386 cdecl call into the native function. A DATA symbol keeps
-    * the arena-handle path (it is dereferenced, not called). */
-   if (addr_is_executable(v)) {
-      uint32_t thunk = dlsym_make_thunk(v, name);
-      if (thunk) { return (int32_t)thunk; }
-      /* pool exhausted: fall through to the handle (better a later fault than
-       * silently returning 0 / a wrong call) */
-   }
-   if (posix_trace()) {
-      fprintf(stderr, "[posix] dlsym: high DATA symbol %s=%p wrapped as handle\n",
-              name ? name : "?", sym);
-      fflush(stderr);
-   }
-   return (int32_t)x64_objc_wrap(v);
+   /* Bridge the resolved address to an i386-callable value: a >4GB native
+    * FUNCTION becomes a low-4GB callable thunk (wrapping it as a handle made the
+    * indirect call jump into proxy-arena data -> SIGBUS, e.g. iPhoto's
+    * BackupWrapper dlsym'ing BURegisterStartTimeMachineFromDock); a DATA symbol
+    * keeps the arena-handle path. */
+   return fnptr_lookup_result((uint64_t)(uintptr_t)sym, name);
 }
 
 int32_t shim_dlclose(uint32_t *a) {
@@ -264,6 +281,47 @@ int32_t shim_dlerror(uint32_t *a) {
    (void)a;
    const char *e = dlerror();
    return (int32_t)(e ? x64_objc_bounce_cstr(e) : 0);
+}
+
+/* ---- CoreFoundation bundle function lookup -------------------------------
+ * CFBundleGetFunctionPointerForName(bundle, name) is the CF analogue of dlsym:
+ * it returns a raw native function pointer the i386 caller then calls directly
+ * (CFBundle-as-dynamic-loader, the classic Carbon idiom). abigen's generated
+ * bridge marshalled the CFBundleRef/CFStringRef args correctly but returned the
+ * >4GB native pointer untouched, so the i386 caller truncated it to 32 bits and
+ * jumped to garbage — Civ IV's Aspyr BSD-compat layer (GetBSDProcAddress ->
+ * CFBundleGetFunctionPointerForName(System, "chdir") = 0x7ff8`1b1010c4, stored
+ * 32-bit in _bsd_chdir, then `jmp *eax` in internal_chdir -> 0x1b1010c4 ->
+ * EXC_BAD_ACCESS; whether the truncated low half lands unmapped (crash) or
+ * mapped (hang) just depends on the per-boot shared-cache slide).
+ *
+ * Hand-shim it as the exact CF counterpart of shim_dlsym: resolve the two
+ * object args through the SAME full resolver the abigen bridge used
+ * (_86x64_unwrap_obj_arg: arena handle / CFSTR constant / already-low ptr),
+ * call the real CF API, and route the returned native function pointer through
+ * fnptr_lookup_result so it comes back as a low-4GB i386-callable thunk.
+ * Universal: triggers on the structural property (a lookup-by-name API returned
+ * a native function pointer for i386 to call), not on any app — benefits every
+ * i386 target using this idiom (Civ IV, Halo, iPhoto). The other native
+ * function-pointer-by-name lookups (NSAddressOfSymbol,
+ * CFBundleGetFunctionPointersForNames) have the identical latent defect; see
+ * todo_gaps. */
+extern uint64_t _86x64_unwrap_obj_arg(uint32_t a);  /* objc_shim.c: full resolver */
+
+int32_t shim_CFBundleGetFunctionPointerForName(uint32_t *a) {
+   CFBundleRef bundle = (CFBundleRef)(uintptr_t)_86x64_unwrap_obj_arg(a[0]);
+   CFStringRef fname  = (CFStringRef)(uintptr_t)_86x64_unwrap_obj_arg(a[1]);
+   char nm[256];
+   nm[0] = '\0';
+   if (fname) { CFStringGetCString(fname, nm, sizeof nm, kCFStringEncodingUTF8); }
+   void *fp = bundle ? CFBundleGetFunctionPointerForName(bundle, fname) : NULL;
+   if (posix_trace()) {
+      fprintf(stderr, "[posix] CFBundleGetFunctionPointerForName(\"%s\") = %p\n",
+              nm[0] ? nm : "?", fp);
+      fflush(stderr);
+   }
+   return fnptr_lookup_result((uint64_t)(uintptr_t)fp,
+                              nm[0] ? nm : "CFBundleGetFunctionPointerForName");
 }
 
 /* open(const char *path, int oflag, ...):

@@ -84,6 +84,13 @@
 	MTSHIM	___dlclose,                   _shim_dlclose
 	MTSHIM	___dlerror,                   _shim_dlerror
 
+	;; CFBundleGetFunctionPointerForName: the CF analogue of dlsym. abigen's
+	;; bridge returned the >4GB native fn pointer untouched -> the i386 caller
+	;; truncated it to 32 bits and jumped to garbage (Civ IV GetBSDProcAddress
+	;; -> internal_chdir "chdir"). Shim wraps the result in a low-4GB callable
+	;; thunk. abigen excluded via custom.syms (_CFBundleGetFunctionPointerForName).
+	MTSHIM	___CFBundleGetFunctionPointerForName, _shim_CFBundleGetFunctionPointerForName
+
 	;; pthread TSD: abigen forwards straight to native, but macOS keys start
 	;; at 258 so key 0 means an UNCONSTRUCTED thread-local. getspecific(0)
 	;; must return NULL (not TSD slot 0 = pthread_self) and setspecific(0,..)

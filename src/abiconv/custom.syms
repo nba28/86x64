@@ -31,6 +31,15 @@ _dlsym
 _dlclose
 _dlerror
 
+# CFBundleGetFunctionPointerForName (posix_shim.c) — the CF analogue of dlsym:
+# returns a native function pointer the i386 caller calls directly. abigen's
+# bridge returned the >4GB pointer untruncated-but-unwrapped, so the i386 caller
+# truncated it to 32 bits and jumped to garbage (Civ IV GetBSDProcAddress ->
+# internal_chdir "chdir"). Hand-shimmed to wrap the result in a low-4GB callable
+# thunk (dlsym_make_thunk). Excluded here so abigen does not also emit a
+# colliding ___CFBundleGetFunctionPointerForName global.
+_CFBundleGetFunctionPointerForName
+
 _pthread_getspecific
 _pthread_setspecific
 
