@@ -275,9 +275,19 @@ set(ABICONV_LEGACY_SDK "$ENV{HOME}/projects/Library/SDKs/MacOSX10.6.sdk"
 # imports) ∩ (legacy framework exports) - (already shimmed). Missing targets are
 # skipped, so this is portable. Extend the list (semicolon-separated) when a new
 # i386 target needs legacy coverage, or clear it to consider the full surface.
+#
+# Point at the TRANSLATED app-code dylib (civ4.out.dylib), NOT the bundle's main
+# executable: after the first deploy the MacOS/<App> path becomes the x86_64
+# WRAPPER (whose imports are just libabiconv/libSystem -> a near-empty 14-symbol
+# consider set, silently disabling the legacy pass). The translated dylib keeps
+# the original legacy import names verbatim (binds are redirected at the opcode
+# level, not in the nlist), so nm -arch x86_64 lists Civ IV's real Carbon imports
+# (CreateNibReferenceWithCFBundle/CreateWindowFromNib/SetMenuBarFromNib/... — the
+# Carbon-nib UI load — plus the QuickDraw/Window/Menu Mgr surface). Same stable
+# input + naming convention as ABICONV_MODERN_TARGETS above.
 set(ABICONV_LEGACY_TARGETS
-    "$ENV{HOME}/projects/civ4/Civilization IV.app/Contents/MacOS/Civilization IV"
-    CACHE STRING "i386 target binaries whose imports define the legacy shim set")
+    "$ENV{HOME}/projects/civ4/Civilization IV.app/Contents/MacOS/civ4.out.dylib"
+    CACHE STRING "translated app-code dylibs whose imports define the legacy shim set")
 set(ABICONV_LEGACY_TARGET_ARGS "")
 set(ABICONV_LEGACY_TARGET_DEPS "")
 foreach(t IN LISTS ABICONV_LEGACY_TARGETS)
@@ -308,6 +318,11 @@ if(EXISTS ${ABICONV_LEGACY_SDK})
             --isysroot "${ABICONV_LEGACY_SDK}"
             -X -x -X objective-c -X -arch -X i386
             -X -resource-dir -X "${ABICONV_CLANG_RESOURCE_DIR}"
+            # Carbon's private sub-frameworks (HIToolbox, CarbonCore, ...) on the
+            # framework search path so includes_legacy.h can reach a sub-framework
+            # header the umbrella omits — specifically <HIToolbox/IBCarbonRuntime.h>
+            # (the 32-bit-only Carbon NIB loader, not in Carbon.h/HIToolbox.h).
+            -X -F -X "${ABICONV_LEGACY_SDK}/System/Library/Frameworks/Carbon.framework/Versions/A/Frameworks"
             ${CMAKE_CURRENT_SOURCE_DIR}/includes_legacy.h
     DEPENDS abigen abiconv_legacy.syms
             ${CMAKE_CURRENT_SOURCE_DIR}/custom.syms

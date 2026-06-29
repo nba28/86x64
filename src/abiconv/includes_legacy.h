@@ -33,6 +33,25 @@
  * are the DELETED class (shimgen-backed); the survivors call the live native. */
 #include <Carbon/Carbon.h>
 
+/* IBCarbonRuntime — the classic Carbon NIB loader: CreateNibReference,
+ * CreateNibReferenceWithCFBundle, CreateWindowFromNib, CreateMenuFromNib,
+ * CreateMenuBarFromNib, SetMenuBarFromNib, DisposeNibReference, ... These are
+ * 32-bit-only (`#if !__LP64__`), so the modern x86_64 pass never sees them; AND,
+ * unlike the rest of HIToolbox, this header is NOT pulled in by the
+ * Carbon.h/HIToolbox.h umbrella on any SDK — so without listing it explicitly
+ * abigen has no prototype and emits no shim, and the i386 `CreateNibReference*`
+ * call binds DIRECT-to-native (i386 cdecl stack args vs the native fn's SysV
+ * registers) -> garbage CFBundleRef -> CFBundleCopyResourceURL ->
+ * `_CFAssertMismatchedTypeID` ud2 (Civ IV's Carbon-nib UI load; any classic
+ * Carbon-nib app). The x86_64 impls SURVIVE in the live HIToolbox, so the
+ * emitted marshalling shims `call _CreateNibReference*` reach the real native
+ * functions; CFBundleRef/CFStringRef args unwrap via abigen's CF-record-ptr
+ * path (same as the already-working ___CFBundleCopyResourceURL family), and the
+ * opaque IBNibRef/IBNibRef* round-trips as a widened handle. Reached via the
+ * sub-framework search path (-F Carbon.framework/.../Frameworks) added to the
+ * legacy abigen invocation, since `<Carbon/IBCarbonRuntime.h>` does not exist. */
+#include <HIToolbox/IBCarbonRuntime.h>
+
 /* Listed explicitly so their decls are unambiguous even though Carbon
  * re-includes them (a function emitted while processing Carbon.h is erased from
  * the consider set, so it is not re-emitted here). */
