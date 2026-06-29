@@ -2698,6 +2698,108 @@ namespace MachO {
       }
 
       /*
+       * i386 effective-address wrap fidelity — emit a 0x67 address-size
+       * override on translated memory operands that keep an addressing
+       * register.
+       *
+       * An i386 memory operand `disp(base,index,scale)` computes its EA in a
+       * 32-bit address space: the sum WRAPS mod 2^32. A negative / sentinel
+       * index (e.g. pieceIndex = -1) relies on that wrap to land back
+       * in-bounds. Copied verbatim to x86_64 the base/index registers widen
+       * to 64-bit and the EA is computed in the FULL 64-bit address space —
+       * no wrap — so the SAME operand dereferences a >4 GB unmapped address
+       * and faults (Quinn -[QuinnGame setPieceIndex:…] `movl 0x..(,%rdx,8)`,
+       * -[KeyTypeCell isEntryAcceptable:] `movl 0x34(%rax,%rdx,4)`).
+       *
+       * Translated i386 operands only ever address the low 4 GB, so force a
+       * 32-bit EA with the 0x67 prefix. Per Intel SDM Vol.2 (LEA, Table 3-55:
+       * "32-bit effective address is calculated (using 67H prefix)"), in
+       * 64-bit mode 0x67 makes the CPU compute the EA with 32-bit registers,
+       * truncated mod 2^32 = exact i386 semantics.
+       *
+       * Trigger ONLY on a SCALED-INDEX operand — `[…+index*scale]`. The wrap
+       * pathology is `index*scale` overflowing 32 bits (a negative/sentinel
+       * index, e.g. -4 at scale 8 → +0x7ffffffe0) and needing to fold back
+       * mod 2^32; both Quinn instances carry such an index. A scaled index is
+       * an unmistakable i386 array/table access, so its address registers
+       * hold genuine i386 (zero-extended, <4 GB) values. Base-only operands
+       * (`[reg]`, `[reg+disp]`) are EXCLUDED: a bare base register can hold a
+       * native >4 GB pointer handed across the ABI (e.g. a C++ exception
+       * object from __cxa_allocate_exception / __cxa_begin_catch), and 0x67
+       * would truncate it — corrupting catch/cleanup paths.
+       *
+       * Also exclude RSP/RBP (the deliberately 64-bit-widened stack pointers
+       * — truncating them would corrupt stack-relative access) as base or
+       * index, and RIP (a RIP-relative operand reinterpreted under 0x67 would
+       * become an absolute disp32). PIC-anchored operands are rewritten to
+       * RIP-relative earlier and return their own encodings — they never
+       * reach this copy ctor.
+       */
+      if (bits == Bits::M64) {
+         const xed_operand_values_t *aops = xed_decoded_inst_operands(&xedd);
+         const unsigned nmem =
+            xed_decoded_inst_number_of_memory_operands(&xedd);
+         auto is_wide = [](xed_reg_enum_t r) {
+            return r == XED_REG_RSP || r == XED_REG_RBP || r == XED_REG_RIP ||
+                   r == XED_REG_ESP || r == XED_REG_EBP || r == XED_REG_EIP;
+         };
+         /* Exclude instructions that don't truly DEREFERENCE through the
+          * operand — modifying them only changes the encoding length, never
+          * corrects a fault:
+          *   - NOP / WIDENOP: the multi-byte alignment NOPs `0F 1F /0` carry a
+          *     SIB (base=index=rax, scale=1) that XED even reports with
+          *     mem_read=1, but the CPU never touches memory. Growing one by a
+          *     0x67 byte shifts code layout and corrupts exception
+          *     landing-pad / LSDA offsets (breaks C++ rethrow/cleanup).
+          *   - LEA: computes the address only; its 32-bit-operand result is
+          *     already truncated mod 2^32, so the wrap is a non-issue. */
+         const xed_category_enum_t cat = xed_decoded_inst_get_category(&xedd);
+         const bool non_deref =
+            cat == XED_CATEGORY_NOP || cat == XED_CATEGORY_WIDENOP ||
+            xed_decoded_inst_get_iclass(&xedd) == XED_ICLASS_LEA;
+         bool want_addr32 = false;
+         for (unsigned i = 0; i < nmem && !want_addr32 && !non_deref; ++i) {
+            const xed_reg_enum_t base  =
+               xed_decoded_inst_get_base_reg(aops, i);
+            const xed_reg_enum_t index =
+               xed_decoded_inst_get_index_reg(aops, i);
+            const bool has_scaled_index = (index != XED_REG_INVALID);
+            if (has_scaled_index && !is_wide(base) && !is_wide(index)) {
+               want_addr32 = true;
+            }
+         }
+         /* Skip if a 0x67 is already present (rare i386 addr-size override
+          * passing through verbatim) — scan the legacy-prefix run. */
+         if (want_addr32) {
+            for (uint8_t b : instbuf) {
+               if (b == 0x67) { want_addr32 = false; break; }
+               if (b == 0x66 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
+                   b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 ||
+                   b == 0x64 || b == 0x65) { continue; }  /* legacy prefix */
+               break;                                     /* opcode byte */
+            }
+         }
+         if (want_addr32) {
+            /* Insert 0x67 ahead of all bytes (no REX exists on i386
+             * pass-through, and legacy-prefix order is unconstrained), then
+             * commit only if it re-decodes to one instruction consuming the
+             * whole buffer — keeps `xedd` in sync with `instbuf` for the
+             * displacement patch in Emit. */
+            opcode_t trial = instbuf;
+            trial.insert(trial.begin(), 0x67);
+            xed_decoded_inst_t trial_xedd;
+            xed_decoded_inst_zero_set_mode(&trial_xedd, &dstate());
+            xed_decoded_inst_set_input_chip(&trial_xedd, XED_CHIP_INVALID);
+            if (xed_decode(&trial_xedd, trial.data(), trial.size())
+                   == XED_ERROR_NONE &&
+                xed_decoded_inst_get_length(&trial_xedd) == trial.size()) {
+               instbuf.swap(trial);
+               xedd = trial_xedd;
+            }
+         }
+      }
+
+      /*
        * Re-derive memdisp_absolute from the freshly decoded (transformed)
        * instruction rather than trusting the source's flag. The i386→x86_64
        * transform can change a memory operand's addressing mode: i386

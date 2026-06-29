@@ -309,12 +309,25 @@ static void fixup_translated_dylib_slots(void) {
 
                uint8_t *p = (uint8_t *)addr;
                for (size_t k = 0; k + 7 <= sz; ++k) {
-                  uint8_t op = p[k];
-                  uint8_t modrm = p[k + 1];
-                  uint8_t sib = p[k + 2];
-                  /* SIB byte must encode (scale=4, base=disp32) i.e. top 2
-                   * bits = 10 and low 3 bits = 101. */
-                  if ((sib & 0xC7) != 0x85) continue;
+                  /*
+                   * Optional 0x67 address-size override. The translator
+                   * prepends 0x67 to `[disp32 + idx*scale]` memory operands so
+                   * the i386 32-bit effective-address WRAP is preserved in
+                   * x86_64 (instruction.cc copy ctor — a negative/sentinel
+                   * index must wrap mod 2^32 instead of computing a >4GB EA).
+                   * The prefix shifts the opcode/ModRM/SIB/disp32 one byte, so
+                   * skip it here or the disp32 below would never be slid.
+                   */
+                  size_t pfx = (p[k] == 0x67) ? 1 : 0;
+                  if (k + pfx + 7 > sz) continue;
+                  uint8_t op = p[k + pfx];
+                  uint8_t modrm = p[k + pfx + 1];
+                  uint8_t sib = p[k + pfx + 2];
+                  /* SIB must encode base=disp32 (low 3 bits = 101) at scale=4
+                   * (0x85, 4-byte table entries) or scale=8 (0xC5, 8-byte
+                   * entries — e.g. Quinn's `movl disp(,%edx,8)`). Index any. */
+                  const uint8_t sc = sib & 0xC7;
+                  if (sc != 0x85 && sc != 0xC5) continue;
                   /* mod=00 rm=100 means "SIB follows with disp32 base" */
                   if ((modrm & 0xC7) != 0x04) continue;
                   int matched_pat = 0;
@@ -328,13 +341,13 @@ static void fixup_translated_dylib_slots(void) {
                   }
                   if (!matched_pat) continue;
                   uint32_t v;
-                  memcpy(&v, p + k + 3, sizeof v);
+                  memcpy(&v, p + k + pfx + 3, sizeof v);
                   if (v >= dylib_vmaddr_lo
                       && v <  dylib_vmaddr_hi) {
                      uint32_t patched_val = (uint32_t)((uintptr_t)v + slide);
-                     memcpy(p + k + 3, &patched_val, sizeof patched_val);
+                     memcpy(p + k + pfx + 3, &patched_val, sizeof patched_val);
                      ++patched;
-                     k += 6;  /* skip past this 7-byte instruction window */
+                     k += pfx + 6;  /* skip past this instruction window */
                   }
                }
 
