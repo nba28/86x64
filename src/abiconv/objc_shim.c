@@ -7320,6 +7320,20 @@ static const struct { const char *name; uint32_t mask; } g_cgfloat_sels[] = {
    { "scaleXBy:yBy:",            0x3 },  /* -[NSAffineTransform ...]: 2 CGFloats              */
    { "translateXBy:yBy:",        0x3 },  /* -[NSAffineTransform ...]: 2 CGFloats              */
    { "rotateByDegrees:",         0x1 },  /* -[NSAffineTransform ...]                          */
+   /* -[NSImage] compositing family: a CGFloat `fraction:` (opacity) at the END,
+    * AFTER CGPoint/CGRect struct args. Standalone 'd' the registry never learns
+    * (NSImage isn't declared by the app) -> read as an 8-byte double = a denormal
+    * ~0 -> the image composites fully TRANSPARENT. Quinn renders each falling/
+    * placed Tetris piece into an offscreen NSImage, then composites it with
+    * `drawAtPoint:fromRect:operation:fraction:(boardOpacity)` -> fraction~0 -> the
+    * blocks drew INVISIBLY (board chrome, drawn separately, stayed visible). The
+    * `fraction:` index varies by arity; masks below mark exactly that arg. */
+   { "drawAtPoint:fromRect:operation:fraction:",       0x8 }, /* pt,rect,op,FRAC -> arg3 */
+   { "drawInRect:fromRect:operation:fraction:",        0x8 }, /* rect,rect,op,FRAC -> arg3 */
+   { "compositeToPoint:fromRect:operation:fraction:",  0x8 }, /* pt,rect,op,FRAC -> arg3 */
+   { "compositeToPoint:operation:fraction:",           0x4 }, /* pt,op,FRAC -> arg2 */
+   { "dissolveToPoint:fromRect:fraction:",             0x4 }, /* pt,rect,FRAC -> arg2 */
+   { "dissolveToPoint:fraction:",                      0x2 }, /* pt,FRAC -> arg1 */
 };
 
 __attribute__((constructor))
