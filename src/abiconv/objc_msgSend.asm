@@ -194,6 +194,8 @@
    je %%satnarrow
    cmp ecx, 9
    je %%tokwrap
+   cmp ecx, 10
+   je %%opaquewrap
    ;; kinds 3/5/6: struct-return finisher. xmm0/xmm1 still hold the callee's
    ;; FP return payload and bind to the finisher's double params.
    mov rdi, rbx                    ; &plan
@@ -226,6 +228,18 @@
 %%tokwrap:
    mov rdi, rax                    ; 64-bit NSTrackingRectTag/NSToolTipTag token ->
    call _x64_objc_wrap             ; 32-bit arena handle (plain wrap, no object deref)
+   jmp %%ret
+%%opaquewrap:
+   ;; `^v` (void*) opaque-pointer return (e.g. graphicsPort -> CGContextRef).
+   ;; Conditionally wrap a >4GB native pointer into a 32-bit arena handle so the
+   ;; CGContext*/CF shims (convert_cf_ptr -> __86x64_unwrap_obj_arg) recover it; a
+   ;; <=4GB pointer is a genuine i386 buffer -> pass its low 32 bits through (eax),
+   ;; matching abigen's `.cfretlow`. No object deref (x64_objc_wrap stores verbatim).
+   mov rdi, rax
+   shr rdi, 32                     ; high 32 bits
+   jz %%ret                        ; <=4GB: rax's low half already aliases eax
+   mov rdi, rax
+   call _x64_objc_wrap             ; >4GB: mint low-4GB arena handle in eax
    jmp %%ret
 %%wrap:
    mov rdi, rax                    ; object return -> 32-bit handle

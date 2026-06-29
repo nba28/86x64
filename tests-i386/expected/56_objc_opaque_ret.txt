@@ -1,0 +1,3 @@
+ok opaque_voidptr_return_wrapped
+ok plain_voidptr_return_passthrough
+exit_code: 0

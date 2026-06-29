@@ -991,6 +991,23 @@ static int enc_is_cfptr(const char *t) {
    return *t == '=' && t[1] == '}';               /* `^{Name=}` — empty body */
 }
 
+/* A bare `^v` (`void *`, optionally const-qualified `r^v`) — an OPAQUE pointer
+ * with no struct shape. A native method returning one (e.g.
+ * -[NSGraphicsContext graphicsPort] -> CGContextRef) hands back a real 64-bit
+ * pointer the i386 caller truncates to eax. It is the RETURN-side counterpart of
+ * the `^v` ARG unwrap in fill_method_args, and is wrapped CONDITIONALLY (only a
+ * >4GB value, like abigen's `.cfretlow`) so genuine low-4GB `void*` buffers pass
+ * through untouched. A typed buffer (`^c`/`^i`/`^S`) or a struct pointer with a
+ * body (`^{T=...}`) is NOT matched — those are real i386-side <4GB pointers. */
+static int enc_is_opaque_voidptr(const char *t) {
+   if (!t) { return 0; }
+   while (*t && strchr(ENC_QUALS, *t)) { ++t; }
+   if (*t != '^') { return 0; }
+   ++t;
+   while (*t && strchr(ENC_QUALS, *t)) { ++t; }
+   return *t == 'v';
+}
+
 /* ---- struct layout walk over an ObjC type encoding ----
  * The legacy method's encoding carries i386 widths (notably CGFloat == 'f',
  * a 4-byte float). We need both the i386 layout (to read the struct the legacy
@@ -2178,7 +2195,10 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
     *   8 = 64-bit int    (remap the NSNotFound sentinel: native NSIntegerMax
     *                      0x7fffffffffffffff -> i386 NSIntegerMax 0x7fffffff so
     *                      32-bit `cmp eax,0x7fffffff` NSNotFound termination tests
-    *                      fire; all other values pass through rax/rdx unchanged) */
+    *                      fire; all other values pass through rax/rdx unchanged)
+    *   9 = token wrap    (plain >4GB token -> 32-bit arena handle, no obj deref)
+    *  10 = opaque void*  (`^v` return: conditionally wrap a >4GB native pointer
+    *                      into a 32-bit arena handle, low pointers pass through) */
    char *rt = m ? method_copyReturnType(m) : NULL;
    const int rconv = method_is_legacy(m) ? CONV_I386 : CONV_NATIVE;
    char rb = rt ? *enc_skip_quals(rt) : 0;
@@ -2188,6 +2208,17 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
       plan->ret_is_obj = 2;
    } else if (enc_is_objptr_struct(rt) || enc_is_cfptr(rt)) {
       plan->ret_is_obj = 1;          /* ^{Class=#...} obj / ^{CF=} ref -> wrap */
+   } else if (enc_is_opaque_voidptr(rt)) {
+      /* `^v` (void*) opaque-pointer return, e.g. -[NSGraphicsContext graphicsPort]
+       * -> CGContextRef. A >4GB native pointer truncates in the i386 caller's eax;
+       * conditionally wrap it (>4GB only, like abigen's `.cfretlow`) into a low-4GB
+       * arena handle so the opaque-pointer-consuming C shims recover the real
+       * pointer (CGContext* via convert_cf_ptr's __86x64_unwrap_obj_arg). The
+       * symmetric inverse of the `^v` ARG unwrap in fill_method_args. Quinn
+       * 3.5.7's _QuinnGeneralFastDrawCells fetches its draw context this way; the
+       * pre-fix truncated CGContextRef made every CGContextDrawImage/FillRect
+       * silently draw into an invalid context -> invisible Tetris blocks. */
+      plan->ret_is_obj = 10;
    } else if (rb == 'd' || (rb == 'f' && rconv == CONV_I386)) {
       /* CGFloat/double: the i386 caller dispatched via _fpret and reads st0.
        * A legacy 'f' (CGFloat) return arrives as a double too (the reverse
