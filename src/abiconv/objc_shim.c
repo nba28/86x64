@@ -6538,6 +6538,20 @@ static struct geo_res geo_call(unsigned idx, const uint32_t *a32) {
    const char *ret  = e->sig;
    const char *args = enc_skip_type(e->sig);
    unsigned ai = 0;
+   /* Narrow diagnostic (separate from the OBJC_BRIDGE_TRACE firehose): dump the
+    * first 6 i386 arg slots as hex + float so a brief play reveals the actual CG
+    * draw geometry/pointers reaching native (e.g. CGContextDrawImage ctx@slot0,
+    * rect@slots1-4, image@slot5). Quinn invisible-blocks investigation. */
+   if (getenv("GEO_PTR_TRACE")) {
+      float f1, f2, f3, f4;
+      memcpy(&f1, &a32[1], 4); memcpy(&f2, &a32[2], 4);
+      memcpy(&f3, &a32[3], 4); memcpy(&f4, &a32[4], 4);
+      fprintf(stderr, "[geoin] %s slots=[%08x %08x %08x %08x %08x %08x] "
+              "rectf=[%.2f %.2f %.2f %.2f]\n", e->name,
+              a32[0], a32[1], a32[2], a32[3], a32[4], a32[5],
+              (double)f1, (double)f2, (double)f3, (double)f4);
+      fflush(stderr);
+   }
    char rb = *enc_skip_quals(ret);
    size_t risz = 0, rnsz = 0; uint8_t rsse[8] = {0}; unsigned rnebs = 0;
    int kind = 0;   /* 0 scalar/void, 1 wrap obj, 3 stret narrow, 4 fp,
@@ -6560,7 +6574,15 @@ static struct geo_res geo_call(unsigned idx, const uint32_t *a32) {
    for (const char *t = args; *t; t = enc_skip_type(t)) {
       const char *tb = enc_skip_quals(t);
       if (*tb == '^') {            /* opaque CF/CG ptr arg -> handle-bridge */
-         mcur_put_gp(&plan, &cur, geo_cfptr_arg(a32[ai++]));
+         uint32_t praw = a32[ai++];
+         uint64_t preal = geo_cfptr_arg(praw);
+         if (getenv("GEO_PTR_TRACE")) {
+            fprintf(stderr, "[geoptr] %s ^arg raw=0x%08x -> real=0x%llx%s\n",
+                    e->name, praw, (unsigned long long)preal,
+                    preal == 0 ? "  (NULL!)" : "");
+            fflush(stderr);
+         }
+         mcur_put_gp(&plan, &cur, preal);
          continue;
       }
       marshal_arg_fwd(&plan, &cur, t, CONV_I386, a32, &ai);
