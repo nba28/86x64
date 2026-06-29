@@ -135,4 +135,12 @@ namespace MachO::opcode {
       return {0x44, 0x8b, byte};
    }
 
+   /* add r32, r11d  —  REX.R (0x44) + ADD r/m32,r32 (0x01) + ModRM mod=11
+    * reg=r11(3) rm=r32. e.g. `add eax, r11d` = 44 01 d8. */
+   opcode_t add_r32_r11d(xed_reg_enum_t r32) {
+      assert(r32 >= XED_REG_EAX && r32 <= XED_REG_EDI);
+      const uint8_t modrm = 0xc0 | (0x3 << 3) | (uint8_t)(r32 - XED_REG_EAX);
+      return {0x44, 0x01, modrm};
+   }
+
 }

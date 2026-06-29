@@ -673,6 +673,19 @@ namespace MachO {
       switch (xed_decoded_inst_get_iform_enum(&xedd)) {
       case XED_IFORM_PUSH_IMMz: /* push imm32 */
       case XED_IFORM_MOV_GPRv_IMMv:
+      /*
+       * `add reg, imm32` (general `81 /0 id` and the `05 id` eax short form)
+       * where imm32 is an absolute data address — the non-PIC pointer
+       * idiom `<reg>=index*stride; add $&table, <reg>`. Same fixed-load /
+       * in-segment probe as MOV/PUSH (the trailing imm32 is likewise the
+       * last 4 instruction bytes, so the shared body below applies). The
+       * Transform side expands these to `lea r11,[rip+disp]; add reg,r11d`
+       * (MOV becomes a plain lea since it fully defines the reg; add can't,
+       * the reg already carries the index). 16-bit forms are excluded by the
+       * 32-bit-immediate-width gate below, exactly as for MOV.
+       */
+      case XED_IFORM_ADD_GPRv_IMMz:
+      case XED_IFORM_ADD_OrAX_IMMz:
          {
             assert(imm == nullptr);
             const std::size_t imm_idx = instbuf.size() - sizeof(uint32_t);
@@ -1022,6 +1035,38 @@ namespace MachO {
                env.resolve(imm->pointee, &lea_inst->memdisp);
                lea_inst->memdisp_offset = imm->pointee_offset;
                return {lea_inst};
+            }
+
+         case XED_IFORM_ADD_GPRv_IMMz:
+         case XED_IFORM_ADD_OrAX_IMMz:
+            {
+               /* i386 | add r32, abs32_pointer
+                * -----|------------------------
+                * X86  | lea r11, [rip+disp32]   (r11 = slid &target)
+                *      | add r32, r11d           (r32 += low 32 of the ptr)
+                *
+                * Unlike MOV_GPRv_IMMv (which fully defines the dest and so
+                * becomes a bare lea), `add` must PRESERVE the index/base
+                * already live in r32, so the relocated address is computed
+                * in scratch r11 and added. r11d carries the whole pointer
+                * because the M64 archive is placed at vmaddr < 4GB. Same
+                * [EAX,EDI] guard as MOV (a 16-bit imm mis-marked as a ptr
+                * would yield an out-of-range reg). */
+               const auto r32 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+               if (r32 < XED_REG_EAX || r32 > XED_REG_EDI) {
+                  throw error("%s: ADD imm-ptr at vmaddr 0x%zx: reg0=%s out of "
+                              "[EAX,EDI] (likely 16-bit imm mis-marked pointer)",
+                              __FUNCTION__, this->loc.vmaddr,
+                              xed_reg_enum_t2str(r32));
+               }
+               auto lea_inst =
+                  new Instruction<opposite<bits>>(opcode::lea_r11_mem_rip_disp32());
+               lea_inst->memidx = 0;
+               env.resolve(imm->pointee, &lea_inst->memdisp);
+               lea_inst->memdisp_offset = imm->pointee_offset;
+               auto add_inst =
+                  new Instruction<opposite<bits>>(opcode::add_r32_r11d(r32));
+               return {lea_inst, add_inst};
             }
 
          /*

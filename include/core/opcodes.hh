@@ -68,6 +68,12 @@ namespace MachO {
       /* mov r11d, [r64] */
       opcode_t mov_r11d_mem_r64(xed_reg_enum_t r64);
 
+      /* add r32, r11d   (r32 += low 32 bits of r11). Used to transform the
+       * i386 `add reg, abs32_ptr` pointer-formation idiom: a preceding
+       * `lea r11,[rip+disp32]` computes the slid address of the target, then
+       * this adds it to the index/base already live in r32. */
+      opcode_t add_r32_r11d(xed_reg_enum_t r32);
+
       /* jmp r64 */
       opcode_t jmp_r64(xed_reg_enum_t r64);
 
