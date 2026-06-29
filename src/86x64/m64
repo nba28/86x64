@@ -364,6 +364,21 @@ def translate_bundle(bundle, args):
         warn("nothing to translate")
         return
 
+    # Snapshot the main executable's bundled @-relative LC_LOAD_DYLIBs BEFORE the
+    # re-emit. A main-exec (re)translate regenerates the wrapper from the i386
+    # backup, which carries only the binary's ORIGINAL deps — so any load baked
+    # in AFTER deploy (e.g. the FairPlay/geoshim + webnoop anti-tamper shims that
+    # MUST be present or iPhoto's dead-handshake VM hangs) is silently dropped.
+    # We re-inject whatever went missing after the post-steps run (below). Generic
+    # by construction: triggers on "a bundled @-relative load disappeared across
+    # re-emit", resolves the file in the bundle, and never names a specific shim.
+    wrapper_preserve = (Path(bundle) / main) if (main and main in plan_translate) else None
+    preserved_loads = set()
+    if wrapper_preserve:
+        preserved_loads = {d for d in _dylib_deps(wrapper_preserve)
+                           if d.startswith(("@rpath/", "@loader_path/",
+                                            "@executable_path/"))}
+
     # Run translate-bundle for each (optionally in parallel).
     failures = []
 
@@ -412,6 +427,35 @@ def translate_bundle(bundle, args):
                                     dry_run=args.dry_run))
     if not args.no_sign:
         cmd_sign(argparse.Namespace(app=str(bundle), dry_run=args.dry_run))
+
+    # Re-inject any bundled @-relative load the wrapper carried before this
+    # (re)translate but the regenerated wrapper dropped (see snapshot above). We
+    # only re-add a load whose dylib is ACTUALLY present in the bundle, and only
+    # when signing ran: macho-tool's insert lays linkedit out correctly on a
+    # SIGNED wrapper (inserting into a de-signed one mis-lays __text → SIGILL),
+    # so we splice into the just-signed wrapper and re-sign it ad-hoc after.
+    if wrapper_preserve and preserved_loads and not args.dry_run:
+        if args.no_sign:
+            warn("--no-sign: skipping bundled-load re-injection (needs a signed "
+                 "wrapper); re-run `m64 sign` then re-add the dropped loads")
+        else:
+            now = _dylib_deps(wrapper_preserve)
+            reinjected = []
+            for name in sorted(preserved_loads - now):
+                base = name.rsplit("/", 1)[-1]
+                if next(Path(bundle).rglob(base), None) is None:
+                    warn(f"dropped load {name} not bundled — not re-injecting")
+                    continue
+                tmp = str(wrapper_preserve) + ".reinject.tmp"
+                run([str(MACHO_TOOL), "--", "modify", "--insert",
+                     f"load-dylib,name={name}", str(wrapper_preserve), tmp])
+                os.chmod(tmp, 0o755)
+                os.replace(tmp, wrapper_preserve)
+                reinjected.append(name)
+            if reinjected:
+                run(["codesign", "-f", "-s", "-", str(wrapper_preserve)])
+                good("re-injected dropped bundled load(s): " + ", ".join(reinjected))
+
     info("done. try:  m64 run %s --exc" % Path(bundle).name)
 
 
@@ -436,6 +480,26 @@ def cmd_resync(args):
                        capture_output=True)
     if not args.dry_run:
         good(f"{len(copies)} copies synced + ad-hoc signed")
+
+
+def _dylib_deps(macho):
+    """Set of LC_LOAD_DYLIB install names of a Mach-O (via `otool -L`). The first
+    `otool` line is the file path itself; for an executable every remaining line
+    is a load command (executables carry no LC_ID), so this is exact for the
+    wrapper. Used to detect bundled @-relative loads that a wrapper re-emit
+    silently DROPS (e.g. post-deploy baked-in FairPlay/geoshim shims)."""
+    try:
+        p = subprocess.run(["otool", "-L", str(macho)],
+                           capture_output=True, text=True, errors="replace")
+    except OSError:
+        return set()
+    out = set()
+    for line in p.stdout.splitlines()[1:]:
+        line = line.strip()
+        if not line:
+            continue
+        out.add(line.split(" (", 1)[0].strip())   # drop " (compatibility …)"
+    return out
 
 
 def _native_bound_syms(macho):
