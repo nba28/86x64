@@ -3235,6 +3235,73 @@ static int bp_block_copy(struct objc_call_plan *plan, const uint32_t *args32,
    return 1;
 }
 
+/* -[NSData bytes] returns `const void *` (encoding `r^v`) into the data's buffer.
+ * For a NATIVE NSData (e.g. from [[NSUserDefaults standardUserDefaults]
+ * dataForKey:]) that buffer lives at a >4GB native address the i386 caller
+ * cannot hold: the bare-`^v` return wrap (commit 8aab6e4, needed for the
+ * graphicsPort/CGContextRef opaque-token family) turns it into a low-4GB ARENA
+ * HANDLE — correct for an opaque token passed BACK to native, but WRONG for a
+ * raw data buffer the app DEREFERENCES directly. Quinn's `ks_decrypt` reads the
+ * encrypted-highscore bytes straight off `[data bytes]`; given the handle it
+ * reads the arena slot as ciphertext -> garbage plaintext -> a corrupt
+ * length-prefix -> malloc(huge)=NULL -> memcpy(NULL) -> SIGSEGV at 0x0 in
+ * -[QuinnHighscoreDB read] on play. (Even WITHOUT the wrap the >4GB pointer
+ * truncates to eax -> equally unreadable; the bug is fundamental to `bytes`.)
+ *
+ * Fix: intercept `-[NSData bytes]` and return a LOW-4GB COPY of the bytes.
+ * libabiconv is native x86_64 so it can read the >4GB buffer directly; `malloc`
+ * here is the low-4GB shim heap. The low copy is cached on the receiver via an
+ * associated pointer (ASSIGN) so repeated `bytes` calls return the SAME low
+ * pointer (the documented read-lifetime/identity contract). The copy itself is
+ * never freed — one small leak per distinct NSData whose bytes are read, exactly
+ * like x64_cstr_ret_low's high->low bounce (a freeWhenDone wrapper would hand the
+ * shim-malloc'd buffer to native free on dealloc and abort). An NSData whose
+ * buffer is ALREADY <4GB (an i386-side dataWithBytesNoCopy:) passes through
+ * uncopied. Triggers on the NSData class + `bytes` selector, never the app.
+ * (mutableBytes is intentionally NOT handled — it needs write-back; no current
+ * target writes through it. See todo_gaps.) */
+static const char nsdata_lowbytes_key;
+static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
+   if (!sel || !real_self) { return 0; }
+   if (strcmp(sel_getName(sel), "bytes")) { return 0; }
+   Class nsdata = objc_getClass("NSData");
+   if (!nsdata) { return 0; }
+   typedef unsigned char (* msg_kind_t)(id, SEL, Class);
+   typedef const void *  (*msg_ptr_t)(id, SEL);
+   typedef unsigned long (*msg_len_t)(id, SEL);
+   if (!((msg_kind_t)objc_msgSend)(real_self, sel_registerName("isKindOfClass:"),
+                                   nsdata)) {
+      return 0;                              /* not an NSData: app `bytes`, leave it */
+   }
+   const void *low;
+   id cached = objc_getAssociatedObject(real_self, &nsdata_lowbytes_key);
+   if (cached) {
+      low = (const void *)cached;            /* cached low copy (ASSIGN: opaque ptr) */
+   } else {
+      const void *nb = ((msg_ptr_t)objc_msgSend)(real_self, sel);
+      unsigned long len = ((msg_len_t)objc_msgSend)(real_self,
+                                                    sel_registerName("length"));
+      if ((uintptr_t)nb < 0x100000000ULL || !nb) {
+         low = nb;                           /* already low-4GB (or nil): pass through */
+      } else {
+         void *lb = malloc(len ? len : 1);   /* low-4GB shim heap */
+         if (!lb || (uintptr_t)lb >= 0x100000000ULL) { return 0; }  /* no low mem */
+         memcpy(lb, nb, len);
+         objc_setAssociatedObject(real_self, &nsdata_lowbytes_key, (id)lb,
+                                  OBJC_ASSOCIATION_ASSIGN);
+         low = lb;
+      }
+   }
+   plan->reg[0]     = (uint32_t)(uintptr_t)low;
+   plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
+   plan->ret_is_obj = 0;                     /* scalar passthrough: eax = low ptr */
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[bp] NSData bytes -> low 0x%08x\n", plan->reg[0]);
+      fflush(stderr);
+   }
+   return 1;
+}
+
 void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
    appkit_compat_install();
@@ -3279,6 +3346,12 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
     * the layout). Detected structurally from args32[0]'s isa, independent of
     * how resolve_self mapped it. */
    if (bp_block_copy(plan, args32, sel))
+      return;
+
+   /* -[NSData bytes] on a >4GB native buffer -> return a low-4GB copy the i386
+    * caller can dereference (raw-C consumers like Quinn's ks_decrypt). Must run
+    * before the bare-`^v` return wrap would hand back an unreadable arena handle. */
+   if (bp_nsdata_bytes(plan, real_self, sel))
       return;
 
    /* NSFastEnumeration: convert the by-pointer state struct (x86_64 layout from

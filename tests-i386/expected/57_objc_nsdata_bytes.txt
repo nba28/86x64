@@ -1,0 +1,3 @@
+ok nsdata_bytes_lowcopy_equal
+ok nsdata_bytes_cached_stable
+exit_code: 0
