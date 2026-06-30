@@ -3302,6 +3302,54 @@ static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
    return 1;
 }
 
+/* +[NSData dataWithBytesNoCopy:length:(freeWhenDone:)] / -[NSData
+ * initWithBytesNoCopy:length:(freeWhenDone:)] with freeWhenDone=YES hands the
+ * NSData OWNERSHIP of the buffer: the NSData's -dealloc calls free() on it. When
+ * i386 code passes a buffer it `malloc`'d (Quinn's decrypt_bytes returns a
+ * malloc'd plaintext that -[QuinnHighscoreDB read] wraps via dataWithBytesNoCopy:
+ * to feed unarchiveObjectWithData:), that buffer came from the low-4GB SHIM heap;
+ * Foundation's native free() does not own it -> malloc_report ABORT at pool drain
+ * (-[NSConcreteData dealloc], crashlog Quinn-2026-06-30-020609.ips).
+ *
+ * Fix: redirect the NoCopy creators to their COPYING form (dataWithBytes:length:
+ * / initWithBytes:length:) so Foundation copies into its OWN native buffer that
+ * native free() can release. The original shim buffer is left unfreed — the app
+ * transferred ownership via freeWhenDone:YES so it will not free it either, and
+ * native must never free shim memory (a bounded leak, like bp_nsdata_bytes /
+ * x64_cstr_ret_low). freeWhenDone:NO is passed through untouched (the NSData
+ * never frees the buffer, so there is no abort). Triggers on the NoCopy selector
+ * + an NSData/NSMutableData receiver, never the app. */
+static int bp_nsdata_nocopy(struct objc_call_plan *plan, const uint32_t *args32,
+                            id real_self, SEL sel) {
+   if (!sel || !real_self) { return 0; }
+   const char *s = sel_getName(sel);
+   const char *repl;
+   int five;
+   if      (!strcmp(s, "dataWithBytesNoCopy:length:"))              { repl = "dataWithBytes:length:"; five = 0; }
+   else if (!strcmp(s, "dataWithBytesNoCopy:length:freeWhenDone:")) { repl = "dataWithBytes:length:"; five = 1; }
+   else if (!strcmp(s, "initWithBytesNoCopy:length:"))             { repl = "initWithBytes:length:"; five = 0; }
+   else if (!strcmp(s, "initWithBytesNoCopy:length:freeWhenDone:")){ repl = "initWithBytes:length:"; five = 1; }
+   else { return 0; }
+   uint32_t fwd = five ? args32[4] : 1;          /* 2-arg NoCopy defaults YES */
+   if (!fwd) { return 0; }                       /* freeWhenDone:NO: never freed -> safe */
+   SEL rsel = sel_registerName(repl);
+   if (!class_respondsToSelector(object_getClass(real_self), rsel)) {
+      return 0;                                  /* not NSData/NSMutableData */
+   }
+   const void  *buf = (const void *)(uintptr_t)args32[2];
+   unsigned long len = (unsigned long)args32[3];
+   typedef id (*msg_copy_t)(id, SEL, const void *, unsigned long);
+   id result = ((msg_copy_t)objc_msgSend)(real_self, rsel, buf, len);
+   plan->reg[0]     = result ? x64_objc_wrap((uint64_t)(uintptr_t)result) : 0;
+   plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
+   plan->ret_is_obj = 0;                         /* already a low-4GB handle */
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[bp] NSData %s -> native copy (len=%lu)\n", s, len);
+      fflush(stderr);
+   }
+   return 1;
+}
+
 void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
    appkit_compat_install();
@@ -3352,6 +3400,13 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
     * caller can dereference (raw-C consumers like Quinn's ks_decrypt). Must run
     * before the bare-`^v` return wrap would hand back an unreadable arena handle. */
    if (bp_nsdata_bytes(plan, real_self, sel))
+      return;
+
+   /* NSData taking ownership of an i386 shim-malloc'd buffer via
+    * dataWithBytesNoCopy:/initWithBytesNoCopy: freeWhenDone:YES -> redirect to the
+    * COPYING form so native free() never touches shim memory (else -dealloc
+    * aborts). */
+   if (bp_nsdata_nocopy(plan, args32, real_self, sel))
       return;
 
    /* NSFastEnumeration: convert the by-pointer state struct (x86_64 layout from

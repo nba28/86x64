@@ -1,0 +1,3 @@
+ok nsdata_nocopy_content
+ok nsdata_nocopy_no_abort
+exit_code: 0
