@@ -3263,32 +3263,52 @@ static int bp_block_copy(struct objc_call_plan *plan, const uint32_t *args32,
 static const char nsdata_lowbytes_key;
 static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
    if (!sel || !real_self) { return 0; }
-   if (strcmp(sel_getName(sel), "bytes")) { return 0; }
-   Class nsdata = objc_getClass("NSData");
-   if (!nsdata) { return 0; }
+   /* The raw-buffer accessors that return a >4GB native pointer the app then
+    * DEREFERENCES: -[NSData bytes] (raw C, Quinn ks_decrypt) and
+    * -[NSBitmapImageRep bitmapData] (fed to glTexImage2D -> the Quinn splash GL
+    * logo texture; encoding `^C`, so the 8aab6e4 `^v` wrap doesn't even catch it
+    * and it truncates to eax -> a garbage/black texture). Same low-copy cure,
+    * sized by the matching length accessor. */
+   const char *s = sel_getName(sel);
+   const char *clsname, *sizesel;
+   if      (!strcmp(s, "bytes"))      { clsname = "NSData";           sizesel = "length"; }
+   else if (!strcmp(s, "bitmapData")) { clsname = "NSBitmapImageRep"; sizesel = "bytesPerPlane"; }
+   else { return 0; }
+   Class cls = objc_getClass(clsname);
+   if (!cls) { return 0; }
    typedef unsigned char (* msg_kind_t)(id, SEL, Class);
    typedef const void *  (*msg_ptr_t)(id, SEL);
    typedef unsigned long (*msg_len_t)(id, SEL);
    if (!((msg_kind_t)objc_msgSend)(real_self, sel_registerName("isKindOfClass:"),
-                                   nsdata)) {
-      return 0;                              /* not an NSData: app `bytes`, leave it */
+                                   cls)) {
+      return 0;                              /* receiver isn't that class: app sel */
    }
+   /* `bytes` is cached (the app may hold the returned pointer; -[NSData bytes]
+    * is immutable so the copy stays valid). `bitmapData` is NOT cached: it is
+    * read once per glTexImage2D and the bitmap may be FILLED after an earlier
+    * read, so a cached early (empty) copy would upload a blank texture; a fresh
+    * copy reflects the current pixels (glTexImage2D copies immediately, so no
+    * held-pointer contract). */
+   int do_cache = !strcmp(s, "bytes");
    const void *low;
-   id cached = objc_getAssociatedObject(real_self, &nsdata_lowbytes_key);
+   id cached = do_cache ? objc_getAssociatedObject(real_self, &nsdata_lowbytes_key)
+                        : (id)0;
    if (cached) {
       low = (const void *)cached;            /* cached low copy (ASSIGN: opaque ptr) */
    } else {
       const void *nb = ((msg_ptr_t)objc_msgSend)(real_self, sel);
       unsigned long len = ((msg_len_t)objc_msgSend)(real_self,
-                                                    sel_registerName("length"));
+                                                    sel_registerName(sizesel));
       if ((uintptr_t)nb < 0x100000000ULL || !nb) {
          low = nb;                           /* already low-4GB (or nil): pass through */
       } else {
          void *lb = malloc(len ? len : 1);   /* low-4GB shim heap */
          if (!lb || (uintptr_t)lb >= 0x100000000ULL) { return 0; }  /* no low mem */
          memcpy(lb, nb, len);
-         objc_setAssociatedObject(real_self, &nsdata_lowbytes_key, (id)lb,
-                                  OBJC_ASSOCIATION_ASSIGN);
+         if (do_cache) {
+            objc_setAssociatedObject(real_self, &nsdata_lowbytes_key, (id)lb,
+                                     OBJC_ASSOCIATION_ASSIGN);
+         }
          low = lb;
       }
    }
@@ -3296,7 +3316,7 @@ static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
    plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
    plan->ret_is_obj = 0;                     /* scalar passthrough: eax = low ptr */
    if (getenv("OBJC_BRIDGE_TRACE")) {
-      fprintf(stderr, "[bp] NSData bytes -> low 0x%08x\n", plan->reg[0]);
+      fprintf(stderr, "[bp] %s -> low 0x%08x\n", s, plan->reg[0]);
       fflush(stderr);
    }
    return 1;
