@@ -61,6 +61,58 @@ namespace MachO {
          break;
       }
 
+      /*
+       * Structural GCC PIC-thunk scan (i386 only). ParseEnv::pic_thunks is
+       * otherwise populated BY NAME (`___i686.get_pc_thunk.<r>` nlists, Symtab
+       * ctor) so that a `call thunk` whose thunk lives in a DIFFERENT text
+       * section (GCC: thunks in __textcoal_nt, callers in __text) still
+       * establishes the PIC anchor — the detectors' section-local byte-scans
+       * only see their OWN section's blobs. A fully STRIPPED GCC binary (Halo:
+       * 0 defined text nlists) defeats the name seed: the cross-section thunk
+       * goes unrecognized, no anchor is established, and every anchored
+       * `[ebx+disp32]` whose disp aliases a segment falls through to the
+       * absolute-table rewrite `lea r11,[rip+target]; op [anchor_base+r11]` —
+       * double-counting the base (fault at anchor+target; Halo.dylib+0x1e36).
+       *
+       * Fix on STRUCTURE, not names: scan every executable text section's raw
+       * bytes for the canonical 4-byte thunk body
+       *     8b {04,0c,14,1c,2c,34,3c} 24 c3   (mov (%esp),%r32 ; ret)
+       * and record entry vmaddr -> GPR encoding. Semantically exact: CALLing
+       * any address with this body places the return address in %r32 and
+       * returns — i.e. it IS a get_pc_thunk regardless of symbols. Runs after
+       * LC construction and before any Parse1 (order-safe: raw image bytes,
+       * no parsed content needed). emplace() keeps name-seeded entries first
+       * (values agree anyway). M32 only — the idiom is i386 PIC; M64 re-parses
+       * (modify/convert) must not re-detect. reg==ESP (0x24) is excluded.
+       */
+      if constexpr (b == Bits::M32) {
+         for (LoadCommand<b> *cmd : load_commands) {
+            auto seg = dynamic_cast<Segment<b> *>(cmd);
+            if (seg == nullptr) continue;
+            if ((seg->segment_command.initprot & VM_PROT_EXECUTE) == 0) continue;
+            for (Section<b> *sect : seg->sections) {
+               if ((sect->sect.flags & (S_ATTR_PURE_INSTRUCTIONS |
+                                        S_ATTR_SOME_INSTRUCTIONS)) == 0) continue;
+               const uint32_t stype = sect->sect.flags & SECTION_TYPE;
+               if (stype == S_ZEROFILL || stype == S_GB_ZEROFILL) continue;
+               if (sect->sect.size < 4 || sect->sect.offset == 0) continue;
+               const std::size_t off_end = sect->sect.offset + sect->sect.size - 3;
+               for (std::size_t o = sect->sect.offset; o < off_end; ++o) {
+                  if (img.at<uint8_t>(o) != 0x8b) continue;
+                  const uint8_t modrm = img.at<uint8_t>(o + 1);
+                  if ((modrm & 0xC7) != 0x04) continue;      /* mod=00 rm=100 */
+                  const uint8_t reg = (modrm >> 3) & 0x07;
+                  if (reg == 4) continue;                    /* esp: not a thunk */
+                  if (img.at<uint8_t>(o + 2) != 0x24) continue; /* SIB: base=esp */
+                  if (img.at<uint8_t>(o + 3) != 0xc3) continue; /* ret */
+                  const std::size_t vm =
+                     sect->sect.addr + (o - sect->sect.offset);
+                  env.pic_thunks.emplace(vm, reg);
+               }
+            }
+         }
+      }
+
       for (LoadCommand<b> *cmd : load_commands) {
          cmd->Parse1(img, env);
       }

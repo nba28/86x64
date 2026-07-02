@@ -113,6 +113,28 @@ namespace MachO {
          return new Section<bits>(img, offset, env, NonLazySymbolPointer<bits>::Parse);
       } else if (stype == S_REGULAR) {
          /*
+          * Structural code-section detection, complementing the NAME
+          * whitelist above (which exists because __StaticInit doesn't always
+          * SET the attribute — a false-NEGATIVE concern). The attribute being
+          * PRESENT is definitive the other way: S_ATTR_PURE_INSTRUCTIONS on an
+          * S_REGULAR section in an EXECUTABLE segment means "only true machine
+          * instructions" (Mach-O semantics) — translate it as code. Without
+          * this, a code section under a name outside the whitelist passes
+          * through as raw bytes: its i386 `ret` executes as an x86_64 8-byte
+          * pop and control lands on a FUSED return address (observed:
+          * tests-i386/62, a get_pc_thunk in a custom __TEXT,__picthunk
+          * section). Applies at both bits — the M64 reparse (modify/convert)
+          * must re-decode such sections so rip-relative disps re-resolve
+          * against the final layout, exactly as __text does. Synthesized
+          * metadata sections (__86x64_pcmap/__86x64_xrel, flags 0) and
+          * __eh_frame (S_COALESCED, no instr attrs) are unaffected.
+          */
+         if ((flags & S_ATTR_PURE_INSTRUCTIONS) != 0 &&
+             env.current_segment != nullptr &&
+             (env.current_segment->segment_command.initprot & VM_PROT_EXECUTE)) {
+            return new Section<bits>(img, offset, env, TextParser);
+         }
+         /*
           * Regular data section. Use DataParser, which detects internal
           * pointers (4-byte aligned values that fall inside one of the
           * binary's segments) and tracks them as Immediate blobs. Without

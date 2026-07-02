@@ -288,6 +288,16 @@ $(BUILD_DIR)/36_stripped_func_pad.i386: $(BUILD_DIR)/36_stripped_func_pad.o
 	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
 	strip -x $@
 
+# 62_pic_xsection_thunk_stripped: STRIP local symbols so the cross-section
+# get_pc_thunk is UNNAMED (the Halo shape: fully-stripped GCC binary, thunk in
+# __textcoal_nt). The name-based ParseEnv::pic_thunks seed then finds nothing;
+# only the structural executable-section byte-scan (archive.cc) establishes the
+# anchor. Without the strip, the named-thunk seed would catch it and the test
+# would pass for the wrong reason. Overrides the generic %.i386 pattern rule.
+$(BUILD_DIR)/62_pic_xsection_thunk_stripped.i386: $(BUILD_DIR)/62_pic_xsection_thunk_stripped.o
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
+	strip -x $@
+
 # 39_xml_memget_alloc: the i386 sysroot ships no libxml2, so `_xmlMemGet` is an
 # undefined dynamic_lookup import (resolved at translate time by static-interpose
 # -> libabiconv's ___xmlMemGet shim, exactly as a real binary's libxml2 bind is).
