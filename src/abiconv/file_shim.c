@@ -72,41 +72,75 @@ static FILE  *(*real_freopen)(const char *, const char *, FILE *);
 static int    (*real_vfprintf)(FILE *, const char *, va_list);
 static int    (*real_vfscanf)(FILE *, const char *, va_list);
 
+/* Resolve one libc symbol for the pass-through pointers. RTLD_NEXT is the
+ * canonical interposer idiom but it searches only the images AFTER the
+ * CALLING image in dyld's order — for a co-located libabiconv copy loaded
+ * late (the libabiconv multi-copy gotcha: bundles carry one per directory),
+ * libSystem can precede it and RTLD_NEXT returns NULL. The wrappers then
+ * `call NULL` on first use (observed: unwrap_obj_arg's OBJC_BRIDGE_TRACE
+ * fprintf in Civ IV's second copy -> rip=0 SIGSEGV). Fall back to an
+ * explicit libSystem handle — NOT RTLD_DEFAULT, which can find THIS image's
+ * own interposing definition first and recurse. */
+static void *file_shim_dl(const char *name) {
+   void *p = dlsym(RTLD_NEXT, name);
+   if (!p) {
+      static void *libsystem;
+      if (!libsystem) {
+         libsystem = dlopen("/usr/lib/libSystem.B.dylib",
+                            RTLD_LAZY | RTLD_NOLOAD);
+      }
+      if (!libsystem) {   /* NOLOAD can miss; libSystem is always loadable */
+         libsystem = dlopen("/usr/lib/libSystem.B.dylib", RTLD_LAZY);
+      }
+      if (libsystem) { p = dlsym(libsystem, name); }
+   }
+   return p;
+}
+
 __attribute__((constructor))
 static void file_shim_init(void) {
-   real_fwrite    = dlsym(RTLD_NEXT, "fwrite");
-   real_fputs     = dlsym(RTLD_NEXT, "fputs");
-   real_fputc     = dlsym(RTLD_NEXT, "fputc");
-   real_putc      = dlsym(RTLD_NEXT, "putc");
-   real_fread     = dlsym(RTLD_NEXT, "fread");
-   real_fgets     = dlsym(RTLD_NEXT, "fgets");
-   real_fgetc     = dlsym(RTLD_NEXT, "fgetc");
-   real_getc      = dlsym(RTLD_NEXT, "getc");
-   real_ungetc    = dlsym(RTLD_NEXT, "ungetc");
-   real_feof      = dlsym(RTLD_NEXT, "feof");
-   real_ferror    = dlsym(RTLD_NEXT, "ferror");
-   real_clearerr  = dlsym(RTLD_NEXT, "clearerr");
-   real_fileno    = dlsym(RTLD_NEXT, "fileno");
-   real_fclose    = dlsym(RTLD_NEXT, "fclose");
-   real_fflush    = dlsym(RTLD_NEXT, "fflush");
-   real_fseek     = dlsym(RTLD_NEXT, "fseek");
-   real_ftell     = dlsym(RTLD_NEXT, "ftell");
-   real_fseeko    = dlsym(RTLD_NEXT, "fseeko");
-   real_ftello    = dlsym(RTLD_NEXT, "ftello");
-   real_rewind    = dlsym(RTLD_NEXT, "rewind");
-   real_fgetpos   = dlsym(RTLD_NEXT, "fgetpos");
-   real_fsetpos   = dlsym(RTLD_NEXT, "fsetpos");
-   real_setvbuf   = dlsym(RTLD_NEXT, "setvbuf");
-   real_setbuf    = dlsym(RTLD_NEXT, "setbuf");
-   real_fopen     = dlsym(RTLD_NEXT, "fopen");
-   real_fdopen    = dlsym(RTLD_NEXT, "fdopen");
-   real_freopen   = dlsym(RTLD_NEXT, "freopen");
-   real_vfprintf  = dlsym(RTLD_NEXT, "vfprintf");
-   real_vfscanf   = dlsym(RTLD_NEXT, "vfscanf");
+   real_fwrite    = file_shim_dl("fwrite");
+   real_fputs     = file_shim_dl("fputs");
+   real_fputc     = file_shim_dl("fputc");
+   real_putc      = file_shim_dl("putc");
+   real_fread     = file_shim_dl("fread");
+   real_fgets     = file_shim_dl("fgets");
+   real_fgetc     = file_shim_dl("fgetc");
+   real_getc      = file_shim_dl("getc");
+   real_ungetc    = file_shim_dl("ungetc");
+   real_feof      = file_shim_dl("feof");
+   real_ferror    = file_shim_dl("ferror");
+   real_clearerr  = file_shim_dl("clearerr");
+   real_fileno    = file_shim_dl("fileno");
+   real_fclose    = file_shim_dl("fclose");
+   real_fflush    = file_shim_dl("fflush");
+   real_fseek     = file_shim_dl("fseek");
+   real_ftell     = file_shim_dl("ftell");
+   real_fseeko    = file_shim_dl("fseeko");
+   real_ftello    = file_shim_dl("ftello");
+   real_rewind    = file_shim_dl("rewind");
+   real_fgetpos   = file_shim_dl("fgetpos");
+   real_fsetpos   = file_shim_dl("fsetpos");
+   real_setvbuf   = file_shim_dl("setvbuf");
+   real_setbuf    = file_shim_dl("setbuf");
+   real_fopen     = file_shim_dl("fopen");
+   real_fdopen    = file_shim_dl("fdopen");
+   real_freopen   = file_shim_dl("freopen");
+   real_vfprintf  = file_shim_dl("vfprintf");
+   real_vfscanf   = file_shim_dl("vfscanf");
    if (getenv("ABICONV_DEBUG")) {
       dprintf(2, "abiconv: file_shim_init real_fwrite=%p real_vfprintf=%p\n",
               (void *)real_fwrite, (void *)real_vfprintf);
    }
+}
+
+/* Lazy re-init: called from resolve_file (the chokepoint every FILE*-taking
+ * wrapper passes through) and the FILE-returning openers, so a call that
+ * precedes this copy's constructor (or a constructor whose RTLD_NEXT round
+ * yielded NULLs) never jumps through a NULL pass-through pointer. Cheap:
+ * one NULL test on the hot path. */
+static void file_shim_ensure(void) {
+   if (!real_vfprintf) { file_shim_init(); }
 }
 
 /* True if fp is one of our low-4GB shim FILE structs. Guards the magic read
@@ -125,6 +159,7 @@ static int is_shim(FILE *fp) {
  * returned unchanged.
  */
 static FILE *resolve_file(FILE *fp) {
+   file_shim_ensure();
    if (is_shim(fp)) return (FILE *)((struct shim_FILE *)fp)->real_fp;
    return fp;
 }
@@ -146,7 +181,13 @@ static FILE *wrap_file(FILE *real) {
 
 /* ----- output ------------------------------------------------------------- */
 
+/* NOTE: every wrapper calls file_shim_ensure() as its FIRST statement (not
+ * just inside resolve_file): C argument-evaluation order is unspecified, so
+ * `real_vfprintf(resolve_file(fp), ...)` may load the (still-NULL) function
+ * pointer into a register BEFORE resolve_file's lazy init runs — observed as
+ * `call 0` (rip=0) with a correctly-resolved FILE* already in rdi. */
 int fprintf(FILE *fp, const char *fmt, ...) {
+   file_shim_ensure();
    va_list ap; va_start(ap, fmt);
    int r = real_vfprintf(resolve_file(fp), fmt, ap);
    va_end(ap);
@@ -154,29 +195,33 @@ int fprintf(FILE *fp, const char *fmt, ...) {
 }
 
 int vfprintf(FILE *fp, const char *fmt, va_list ap) {
+   file_shim_ensure();
    return real_vfprintf(resolve_file(fp), fmt, ap);
 }
 
 size_t fwrite(const void *buf, size_t size, size_t n, FILE *fp) {
+   file_shim_ensure();
    return real_fwrite(buf, size, n, resolve_file(fp));
 }
 
-int fputs(const char *s, FILE *fp) { return real_fputs(s, resolve_file(fp)); }
-int fputc(int c, FILE *fp)         { return real_fputc(c, resolve_file(fp)); }
-int putc(int c, FILE *fp)          { return real_putc(c, resolve_file(fp)); }
+int fputs(const char *s, FILE *fp) { file_shim_ensure(); return real_fputs(s, resolve_file(fp)); }
+int fputc(int c, FILE *fp)         { file_shim_ensure(); return real_fputc(c, resolve_file(fp)); }
+int putc(int c, FILE *fp)          { file_shim_ensure(); return real_putc(c, resolve_file(fp)); }
 
 /* ----- input -------------------------------------------------------------- */
 
 size_t fread(void *buf, size_t size, size_t n, FILE *fp) {
+   file_shim_ensure();
    return real_fread(buf, size, n, resolve_file(fp));
 }
 
-char *fgets(char *buf, int n, FILE *fp) { return real_fgets(buf, n, resolve_file(fp)); }
-int   fgetc(FILE *fp)                   { return real_fgetc(resolve_file(fp)); }
-int   getc(FILE *fp)                    { return real_getc(resolve_file(fp)); }
-int   ungetc(int c, FILE *fp)           { return real_ungetc(c, resolve_file(fp)); }
+char *fgets(char *buf, int n, FILE *fp) { file_shim_ensure(); return real_fgets(buf, n, resolve_file(fp)); }
+int   fgetc(FILE *fp)                   { file_shim_ensure(); return real_fgetc(resolve_file(fp)); }
+int   getc(FILE *fp)                    { file_shim_ensure(); return real_getc(resolve_file(fp)); }
+int   ungetc(int c, FILE *fp)           { file_shim_ensure(); return real_ungetc(c, resolve_file(fp)); }
 
 int fscanf(FILE *fp, const char *fmt, ...) {
+   file_shim_ensure();
    va_list ap; va_start(ap, fmt);
    int r = real_vfscanf(resolve_file(fp), fmt, ap);
    va_end(ap);
@@ -184,26 +229,28 @@ int fscanf(FILE *fp, const char *fmt, ...) {
 }
 
 int vfscanf(FILE *fp, const char *fmt, va_list ap) {
+   file_shim_ensure();
    return real_vfscanf(resolve_file(fp), fmt, ap);
 }
 
 /* ----- positioning -------------------------------------------------------- */
 
-int   fseek(FILE *fp, long off, int whence)  { return real_fseek(resolve_file(fp), off, whence); }
-long  ftell(FILE *fp)                        { return real_ftell(resolve_file(fp)); }
-int   fseeko(FILE *fp, off_t off, int whence){ return real_fseeko(resolve_file(fp), off, whence); }
-off_t ftello(FILE *fp)                       { return real_ftello(resolve_file(fp)); }
-void  rewind(FILE *fp)                        { real_rewind(resolve_file(fp)); }
-int   fgetpos(FILE *fp, fpos_t *pos)         { return real_fgetpos(resolve_file(fp), pos); }
-int   fsetpos(FILE *fp, const fpos_t *pos)   { return real_fsetpos(resolve_file(fp), pos); }
+int   fseek(FILE *fp, long off, int whence)  { file_shim_ensure(); return real_fseek(resolve_file(fp), off, whence); }
+long  ftell(FILE *fp)                        { file_shim_ensure(); return real_ftell(resolve_file(fp)); }
+int   fseeko(FILE *fp, off_t off, int whence){ file_shim_ensure(); return real_fseeko(resolve_file(fp), off, whence); }
+off_t ftello(FILE *fp)                       { file_shim_ensure(); return real_ftello(resolve_file(fp)); }
+void  rewind(FILE *fp)                        { file_shim_ensure(); real_rewind(resolve_file(fp)); }
+int   fgetpos(FILE *fp, fpos_t *pos)         { file_shim_ensure(); return real_fgetpos(resolve_file(fp), pos); }
+int   fsetpos(FILE *fp, const fpos_t *pos)   { file_shim_ensure(); return real_fsetpos(resolve_file(fp), pos); }
 
 /* ----- status ------------------------------------------------------------- */
 
-int  feof(FILE *fp)     { return real_feof(resolve_file(fp)); }
-int  ferror(FILE *fp)   { return real_ferror(resolve_file(fp)); }
-void clearerr(FILE *fp) { real_clearerr(resolve_file(fp)); }
+int  feof(FILE *fp)     { file_shim_ensure(); return real_feof(resolve_file(fp)); }
+int  ferror(FILE *fp)   { file_shim_ensure(); return real_ferror(resolve_file(fp)); }
+void clearerr(FILE *fp) { file_shim_ensure(); real_clearerr(resolve_file(fp)); }
 
 int fileno(FILE *fp) {
+   file_shim_ensure();
    if (is_shim(fp)) return ((struct shim_FILE *)fp)->fd;
    return real_fileno(fp);
 }
@@ -211,13 +258,15 @@ int fileno(FILE *fp) {
 /* ----- buffering ---------------------------------------------------------- */
 
 int  setvbuf(FILE *fp, char *buf, int mode, size_t size) {
+   file_shim_ensure();
    return real_setvbuf(resolve_file(fp), buf, mode, size);
 }
-void setbuf(FILE *fp, char *buf) { real_setbuf(resolve_file(fp), buf); }
+void setbuf(FILE *fp, char *buf) { file_shim_ensure(); real_setbuf(resolve_file(fp), buf); }
 
 /* ----- open / close ------------------------------------------------------- */
 
 int fclose(FILE *fp) {
+   file_shim_ensure();
    /*
     * Don't allow closing the three stdio shims — that would close the
     * process's stderr/stdout/stdin fds and break subsequent output for the
@@ -232,14 +281,17 @@ int fclose(FILE *fp) {
 }
 
 FILE *fopen(const char *path, const char *mode) {
+   file_shim_ensure();
    return wrap_file(real_fopen(path, mode));
 }
 
 FILE *fdopen(int fd, const char *mode) {
+   file_shim_ensure();
    return wrap_file(real_fdopen(fd, mode));
 }
 
 FILE *freopen(const char *path, const char *mode, FILE *fp) {
+   file_shim_ensure();
    FILE *newreal = real_freopen(path, mode, resolve_file(fp));
    if (!newreal) return NULL;
    if (is_shim(fp)) {

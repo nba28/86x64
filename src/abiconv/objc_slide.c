@@ -1119,16 +1119,28 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
     * static initializers (n_init>0, ABICONV_RUN_INITS mode) must still run at
     * the END for a pure-C++ no-__OBJC image (e.g. Portal 2's libtier0), so we
     * branch around the __OBJC work instead of returning early. */
+   /* Slide __DATA,__cfstring str pointers (the x86_64 32-byte records
+    * macho-tool emits). MUST run OUTSIDE the objc_seg branch: a pure
+    * Carbon/C++ translated app (Civ IV, Portal 2 family) has CFSTR("...")
+    * constants — a __cfstring section — but NO __OBJC segment. Gated inside
+    * the old `if (objc_seg)`, their records kept UNSLID preferred `str`
+    * vmaddrs; i386_cfstr_to_real's slide-on-demand fallback only fires when
+    * the unslid address is UNREADABLE, so whenever another mapping covered
+    * the preferred page the recognizer read foreign bytes, failed the exact-
+    * strnlen check, and passed the RAW record to native CF -> objc_msgSend
+    * on isa = the wrapped class handle -> "Attempt to use unknown class
+    * 0x800xxxxx" _objc_fatal (Civ IV CFStringReplace, trace-verified:
+    * "[cfstr] 0x0d7165d0 REJECT strnlen cstr=0x10dae5f4 got=2"). Triggers
+    * on the structural presence of __cfstring, not on __OBJC. */
+   if (image_links_libabiconv(mh64) && slide != 0 && vmaddr_lo <= vmaddr_hi) {
+      slide_cfstrings(mh64, slide, vmaddr_lo, vmaddr_hi, imgname);
+   }
+
    if (objc_seg) {
 
-   /* Slide the __OBJC/__cfstring pointer slots if the image moved. When
+   /* Slide the __OBJC pointer slots if the image moved. When
     * slide==0 (loaded at preferred vmaddr) the slots are already correct. */
    if (slide != 0 && vmaddr_lo <= vmaddr_hi) {
-      /* Slide __DATA,__cfstring str pointers (the x86_64 32-byte records
-       * macho-tool emits). Independent of __OBJC, but translated ObjC apps
-       * always have both. */
-      slide_cfstrings(mh64, slide, vmaddr_lo, vmaddr_hi, imgname);
-
       if (g_verbose) {
          fprintf(stderr, "abiconv objc_slide: processing %s slide=0x%lx "
                  "__OBJC at vmaddr 0x%llx span [0x%llx,0x%llx)\n",

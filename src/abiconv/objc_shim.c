@@ -5509,27 +5509,59 @@ static id i386_cfstr_to_real(uint32_t p) {
       cstr   = *(const uint32_t *)(uintptr_t)(p + 16);
       length = *(const uint32_t *)(uintptr_t)(p + 24);
    } else {
+      /* Env-gated reject diagnostic (OBJC_BRIDGE_TRACE): a candidate whose
+       * first 8 bytes LOOK like a wrapped-handle isa (0x800xxxxx low /
+       * anything readable) but whose layout checks failed. Pin silent
+       * passthroughs (-> native "unknown class 0x800xxxxx" _objc_fatal)
+       * to the exact failed check. */
+      if (getenv("OBJC_BRIDGE_TRACE")) {
+         unsigned long long w0 = *(const unsigned long long *)(uintptr_t)p;
+         unsigned long long w1 =
+            ptr_ok(p, 16) ? *(const unsigned long long *)(uintptr_t)(p + 8) : 0;
+         fprintf(stderr, "[cfstr] 0x%08x REJECT layout isa=0x%llx w1=0x%llx\n",
+                 p, w0, w1);
+         fflush(stderr);
+      }
       return (id)0;
    }
    if (length >= (1u << 24)) { return (id)0; }
-   uintptr_t sp = (uintptr_t)cstr;
-   if (!ptr_ok(cstr, (size_t)length + 1)) {
-      /* The 32-byte record's `str` is an ABSOLUTE i386 vmaddr the translator
-       * embeds UNSLID (the i386 source has no dyld rebases). objc_slide's
-       * slide_cfstrings normally slides it, but it range-checks the value
-       * against the __OBJC span and skips a `str` that points into
-       * __TEXT,__cstring (below __OBJC) — leaving the unslid preferred address,
-       * which is unmapped at a non-preferred load. Recover it by the record's
-       * OWN image slide (Halo: CFURLCreateCopyAppendingPathComponent built a
-       * file path from such a constant). Read-only; keys on the same flags+
-       * strlen check below, so a coincidental non-constant can't survive. */
+   /* Locate the char payload. Two candidates, each validated by the same
+    * exact-C-string probe (readable AND strnlen == length — a coincidental
+    * non-constant can't survive it):
+    *   1. `str` AS-IS: correct when the record was slid (slide_cfstrings)
+    *      or the image loaded at its preferred base.
+    *   2. `str` + the record's OWN image slide: recovers a record whose str
+    *      escaped sliding (the i386 source has no dyld rebases, so macho-tool
+    *      embeds UNSLID vmaddrs; Halo's CFURL path constants hit this).
+    * Candidate 2 must be tried even when candidate 1 is READABLE: an unslid
+    * preferred address can land inside an unrelated live mapping, and
+    * trusting readability alone made the recognizer read foreign bytes, fail
+    * the strnlen probe, and pass the RAW record to native CF -> objc_msgSend
+    * on isa = the wrapped class handle -> "Attempt to use unknown class
+    * 0x800xxxxx" _objc_fatal (Civ IV CFStringReplace, trace-verified:
+    * "[cfstr] REJECT strnlen cstr=0x10dae5f4 got=2"). For an already-slid
+    * record candidate 2 is a double-slide -> fails the probe -> harmless. */
+   uintptr_t sp = 0;
+   if (ptr_ok(cstr, (size_t)length + 1) &&
+       strnlen((const char *)(uintptr_t)cstr, (size_t)length + 1) == length) {
+      sp = (uintptr_t)cstr;
+   } else {
       intptr_t sl = image_slide_for_addr((uintptr_t)p);
       uintptr_t slid = (uintptr_t)cstr + (uintptr_t)sl;
-      if (!sl || !mem_readable(slid, (size_t)length + 1)) { return (id)0; }
-      sp = slid;
+      if (sl != 0 && mem_readable(slid, (size_t)length + 1) &&
+          strnlen((const char *)slid, (size_t)length + 1) == length) {
+         sp = slid;
+      } else {
+         if (getenv("OBJC_BRIDGE_TRACE")) {
+            fprintf(stderr, "[cfstr] 0x%08x REJECT str cstr=0x%x len=%u "
+                    "slide=0x%lx slid=0x%lx\n", p, cstr, length,
+                    (unsigned long)sl, (unsigned long)slid);
+            fflush(stderr);
+         }
+         return (id)0;
+      }
    }
    const char *s = (const char *)sp;
-   if (strnlen(s, (size_t)length + 1) != length) { return (id)0; }  /* exact C string */
 
    os_unfair_lock_lock(&g_cfstr_lock);
    for (unsigned i = 0; i < g_cfstr_cache_n; ++i) {
