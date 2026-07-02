@@ -287,6 +287,7 @@ set(ABICONV_LEGACY_SDK "$ENV{HOME}/projects/Library/SDKs/MacOSX10.6.sdk"
 # input + naming convention as ABICONV_MODERN_TARGETS above.
 set(ABICONV_LEGACY_TARGETS
     "$ENV{HOME}/Downloads/iLife11/civ4/Civilization IV.app/Contents/MacOS/civ4.out.dylib"
+    "$ENV{HOME}/Downloads/iLife11/Halo.app/Contents/MacOS/Halo.dylib"
     CACHE STRING "translated app-code dylibs whose imports define the legacy shim set")
 set(ABICONV_LEGACY_TARGET_ARGS "")
 set(ABICONV_LEGACY_TARGET_DEPS "")
