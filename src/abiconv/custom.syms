@@ -280,6 +280,7 @@ ___cxa_guard_acquire
 ___cxa_guard_release
 ___cxa_guard_abort
 ___cxa_atexit
+__ZSt15set_new_handlerPFvvE
 __Znwm
 __Znam
 __ZnwmRKSt9nothrow_t

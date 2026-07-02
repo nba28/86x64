@@ -118,8 +118,32 @@ uint32_t shim_cxa_atexit(uint32_t *a) {
 
 /* ---------------- operator new / delete ---------------- */
 
+/* std::set_new_handler state — the handler is an i386 FUNCTION POINTER and
+ * stays entirely in the i386 world: translated C++ allocation goes through
+ * cxx_alloc below (the native new-handler chain is never consulted). Bound
+ * RAW, __ZSt15set_new_handlerPFvvE over-popped the 4-byte i386 frame (the
+ * fused-PC family; Halo audio startup at receive_samples). */
+static uint32_t cxx_new_handler32 = 0;
+
+uint32_t shim_ZSt15set_new_handler(uint32_t *a) {
+   uint32_t prev = cxx_new_handler32;
+   cxx_new_handler32 = a[0];
+   return prev;                    /* contract: return the PREVIOUS handler */
+}
+
 static uint32_t cxx_alloc(uint32_t size, int may_abort, const char *which) {
    void *p = malloc(size ? size : 1);     /* shim malloc -> low-4GB heap */
+   if (!p && cxx_new_handler32) {
+      /* libstdc++ contract: give the installed new-handler one chance to
+       * release memory, then retry. Route through the generic i386-callback
+       * trampoline (0 args, void return) so it runs on a low-4GB stack. */
+      static const struct cxa_cb_sig nh_sig = { 0, 0, { 0 } };
+      uint64_t tramp = x64_cb_wrap(cxx_new_handler32, &nh_sig);
+      if (tramp) {
+         ((void (*)(void))(uintptr_t)tramp)();
+         p = malloc(size ? size : 1);
+      }
+   }
    if (!p && may_abort) {
       fprintf(stderr, "[cxx] %s(%u) failed — legacy operator new cannot "
               "throw; aborting\n", which, size);

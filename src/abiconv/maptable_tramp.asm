@@ -559,6 +559,7 @@ _x64_exc_longjmp:
 	MTSHIM	_____cxa_guard_release, _shim_cxa_guard_release
 	MTSHIM	_____cxa_guard_abort,   _shim_cxa_guard_abort
 	MTSHIM	_____cxa_atexit,        _shim_cxa_atexit
+	MTSHIM	____ZSt15set_new_handlerPFvvE, _shim_ZSt15set_new_handler
 	MTSHIM	____Znwm,               _shim_Znwm
 	MTSHIM	____Znam,               _shim_Znam
 	MTSHIM	____ZnwmRKSt9nothrow_t, _shim_Znwm_nothrow
