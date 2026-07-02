@@ -586,6 +586,194 @@ static int repair_refs_from_file(const char *imgname,
  * WRITABLE, non-__OBJC sections,
  * skipping dyld-managed pointer sections (symbol-pointer / mod-init-func, which
  * are 8-byte and rebased elsewhere) and __cfstring (handled by slide_cfstrings). */
+/* Slide the CODE-embedded absolute addresses of a translated image:
+ *   - `[disp32(,idx,scale)]` absolute-indexed memory operands (i386 switch
+ *     dispatch, global-array reads AND writes) whose disp32 macho-tool
+ *     rewrote to the image's pre-slide M64 vmaddr at convert time;
+ *   - `mov [mem], imm32` stores whose imm32 is such an address;
+ *   - the 4-byte pointer slots of __TEXT,__const (switch jump tables).
+ * wrapper_setup.c's fixup_translated_dylib_slots does the same scan, but it
+ * only runs at WRAPPER ENTRY (build_i386_main_frame) — AFTER dyld inits, and
+ * in ABICONV_RUN_INITS mode the collected static ctors run at ADD-IMAGE time
+ * (end of slide_objc), i.e. BEFORE the wrapper's pass. Civ IV s21:
+ * NiAnimationSDM's ctor -> NiStaticDataManager::AddLibrary stores through
+ * `67 89 14 85 <disp32>` (mov [disp32+eax*4], edx; ms_apfnInitFunctions in
+ * __common) with the disp32 still unslid -> SIGSEGV at the preferred vmaddr.
+ * The store opcode 0x89 was ALSO missing from the wrapper's pattern table
+ * (only FF/4, FF/2, 8B, 03), so even the late pass never fixed it.
+ * This pass runs in the add-image callback, before any collected init.
+ * Idempotent vs the wrapper's later scan and across the N co-located
+ * libabiconv copies' callbacks: both patch only values inside the PRE-slide
+ * span [vmaddr_lo,vmaddr_hi); an already-slid value falls outside and is
+ * skipped. __TEXT pages are toggled RW and restored to RX exactly like the
+ * wrapper does. */
+static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
+                             uint64_t vmaddr_lo, uint64_t vmaddr_hi,
+                             const char *imgname) {
+   if (slide == 0 || vmaddr_lo >= vmaddr_hi) { return; }
+   const uint8_t *lcp = (const uint8_t *)(mh64 + 1);
+   for (uint32_t ci = 0; ci < mh64->ncmds; ci++) {
+      const struct load_command *lc = (const struct load_command *)lcp;
+      lcp += lc->cmdsize;
+      if (lc->cmd != LC_SEGMENT_64) { continue; }
+      const struct segment_command_64 *seg =
+         (const struct segment_command_64 *)lc;
+      if (strcmp(seg->segname, "__TEXT") != 0) { continue; }
+      const struct section_64 *sect = (const struct section_64 *)(seg + 1);
+      for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
+         const int is_text  = strncmp(sect->sectname, "__text",  16) == 0;
+         const int is_const = strncmp(sect->sectname, "__const", 16) == 0;
+         if ((!is_text && !is_const) || sect->size == 0) { continue; }
+
+         uintptr_t addr = (uintptr_t)(sect->addr + slide);
+         size_t sz = (size_t)sect->size;
+
+         /* IDEMPOTENCY GROUND TRUTH: the section's ON-DISK bytes. A site is
+          * patched ONLY IF its in-memory value still equals the file value
+          * (i.e. nobody patched it yet). The range check alone is NOT a
+          * sufficient guard: with a small |slide| (an image loaded near its
+          * preferred base) a once-slid value can land back inside the
+          * pre-slide span, and the N co-located libabiconv copies each run
+          * this callback — observed as libcrypto's 582 __TEXT,__const slots
+          * patched TWICE (v+2*slide). Disk-compare is cross-copy safe with
+          * no shared state, and also hardens the byte-pattern scan against
+          * false positives (a random in-range byte train that something
+          * already modified in memory is left alone). If the file cannot be
+          * read, SKIP the section rather than risk a double patch. */
+         uint8_t *orig = NULL;
+         {
+            int fd = open(imgname, O_RDONLY);
+            if (fd >= 0) {
+               orig = (uint8_t *)malloc(sz);
+               if (orig) {
+                  ssize_t got = pread(fd, orig, sz, (off_t)sect->offset);
+                  if (got != (ssize_t)sz) { free(orig); orig = NULL; }
+               }
+               close(fd);
+            }
+         }
+         if (!orig) {
+            if (g_verbose) {
+               fprintf(stderr, "abiconv text_abs32: cannot read on-disk "
+                       "%s,%s of %s — skipping\n", seg->segname,
+                       sect->sectname, imgname);
+            }
+            continue;
+         }
+         uintptr_t pg = addr & ~(uintptr_t)0xFFF;
+         size_t pglen = ((addr + sz + 0xFFF) & ~(uintptr_t)0xFFF) - pg;
+         if (mprotect((void *)pg, pglen, PROT_READ | PROT_WRITE) != 0) {
+            if (g_verbose) {
+               fprintf(stderr, "abiconv text_abs32: mprotect RW failed for "
+                       "%s,%s of %s: %s\n", seg->segname, sect->sectname,
+                       imgname, strerror(errno));
+            }
+            continue;
+         }
+
+         /* Patch helper predicate: current memory value == on-disk value
+          * (not yet patched) AND the disk value is a pre-slide intra-image
+          * address. All pattern MATCHING below runs on the ON-DISK bytes so
+          * a prior patch of a neighboring site can never desync the scan. */
+         size_t patched = 0;
+         uint8_t *mem = (uint8_t *)addr;
+         if (is_const) {
+            /* switch jump tables: aligned 4-byte pre-slide code pointers. */
+            size_t n = sz / 4;
+            for (size_t k = 0; k < n; k++) {
+               uint32_t fv, mv;
+               memcpy(&fv, orig + k * 4, 4);
+               memcpy(&mv, mem + k * 4, 4);
+               if (fv >= vmaddr_lo && fv < vmaddr_hi && mv == fv) {
+                  const uint32_t nv = (uint32_t)((uint64_t)fv + (uint64_t)slide);
+                  memcpy(mem + k * 4, &nv, 4);
+                  ++patched;
+               }
+            }
+         } else {
+            const uint8_t *p = orig;
+            /* Pass 1: `op modrm(mod=00,rm=100) sib(base=101,scale=4|8)
+             * disp32` — absolute-indexed memory operands, with the
+             * translator's optional 0x67 address-size prefix (32-bit EA
+             * wrap). Opcodes: FF/4 jmp, FF/2 call, 8B load, 03 add and —
+             * the one the wrapper's table lacked — 89 STORE. */
+            for (size_t k = 0; k + 7 <= sz; ++k) {
+               size_t pfx = (p[k] == 0x67) ? 1 : 0;
+               if (k + pfx + 7 > sz) { continue; }
+               const uint8_t op    = p[k + pfx];
+               const uint8_t modrm = p[k + pfx + 1];
+               const uint8_t sib   = p[k + pfx + 2];
+               const uint8_t sc = sib & 0xC7;
+               if (sc != 0x85 && sc != 0xC5) { continue; }
+               if ((modrm & 0xC7) != 0x04) { continue; }
+               int ok = 0;
+               if (op == 0xFF) {
+                  const uint8_t reg = modrm & 0x38;
+                  ok = (reg == 0x20 /* /4 jmp */) || (reg == 0x10 /* /2 call */);
+               } else {
+                  /* 8B load / 89 STORE / 03 add / 8D LEA (address-of-element:
+                   * Civ IV `lea eax,[disp32+rax*8]` computing
+                   * &FConsoleCmd::m_SigTypes[i], then passed to strcmp). */
+                  ok = (op == 0x8B) || (op == 0x03) || (op == 0x89) ||
+                       (op == 0x8D);
+               }
+               if (!ok) { continue; }
+               uint32_t fv, mv;
+               memcpy(&fv, p + k + pfx + 3, sizeof fv);
+               memcpy(&mv, mem + k + pfx + 3, sizeof mv);
+               if (fv >= vmaddr_lo && fv < vmaddr_hi && mv == fv) {
+                  const uint32_t nv = (uint32_t)((uint64_t)fv + (uint64_t)slide);
+                  memcpy(mem + k + pfx + 3, &nv, sizeof nv);
+                  ++patched;
+                  k += pfx + 6;
+               }
+            }
+            /* Pass 2: `c7 /0 ... imm32` — mov DWORD [mem], imm32 stores of
+             * pointer literals (arg staging / global installs). Same
+             * encodings the wrapper handles: rsp-SIB mod 0/1/2, and rm=101
+             * rip-rel / rbp+disp8 / rbp+disp32. */
+            for (size_t k = 0; k + 2 < sz; ++k) {
+               if (p[k] != 0xC7) { continue; }
+               if ((p[k + 1] & 0x38) != 0x00) { continue; }
+               const uint8_t mod = (p[k + 1] >> 6) & 0x3;
+               const uint8_t rm  = p[k + 1] & 0x7;
+               size_t imm_off = 0, inst_len = 0;
+               if (rm == 0x4) {
+                  if (k + 2 >= sz || p[k + 2] != 0x24) { continue; }
+                  if (mod == 0x0)      { imm_off = k + 3; inst_len = 7;  }
+                  else if (mod == 0x1) { imm_off = k + 4; inst_len = 8;  }
+                  else if (mod == 0x2) { imm_off = k + 7; inst_len = 11; }
+                  else { continue; }
+               } else if (rm == 0x5) {
+                  if (mod == 0x0)      { imm_off = k + 6; inst_len = 10; }
+                  else if (mod == 0x1) { imm_off = k + 3; inst_len = 7;  }
+                  else if (mod == 0x2) { imm_off = k + 6; inst_len = 10; }
+                  else { continue; }
+               } else { continue; }
+               if (imm_off + 4 > sz) { continue; }
+               uint32_t fv, mv;
+               memcpy(&fv, p + imm_off, sizeof fv);
+               memcpy(&mv, mem + imm_off, sizeof mv);
+               if (fv >= vmaddr_lo && fv < vmaddr_hi && mv == fv) {
+                  const uint32_t nv = (uint32_t)((uint64_t)fv + (uint64_t)slide);
+                  memcpy(mem + imm_off, &nv, sizeof nv);
+                  ++patched;
+                  k += inst_len - 1;
+               }
+            }
+         }
+         free(orig);
+
+         mprotect((void *)pg, pglen, PROT_READ | PROT_EXEC);
+         if (g_verbose) {
+            fprintf(stderr, "abiconv text_abs32: patched %zu abs32 site(s) "
+                    "in %s,%s of %s\n", patched, seg->segname,
+                    sect->sectname, imgname);
+         }
+      }
+   }
+}
+
 static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
                               uint64_t text_lo, uint64_t text_hi,
                               uint64_t vmaddr_lo, uint64_t vmaddr_hi,
@@ -1095,6 +1283,14 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
        * on any app. */
       slide_data_fnptrs(mh64, slide, text_lo, text_hi,
                         vmaddr_lo, vmaddr_hi, imgname);
+      /* Slide the CODE-embedded absolute [disp32(,idx,scale)] operands,
+       * mov-imm32 pointer stores, and __TEXT,__const jump tables BEFORE the
+       * collected static initializers run. wrapper_setup.c repeats this scan
+       * at wrapper entry (idempotent: only pre-slide-range values are
+       * patched), but that is too late for the ctors run here — Civ IV s21,
+       * NiStaticDataManager::AddLibrary's `mov [disp32+idx*4], reg` store
+       * faulted on the unslid preferred vmaddr of ms_apfnInitFunctions. */
+      patch_text_abs32(mh64, slide, vmaddr_lo, vmaddr_hi, imgname);
       /* Bind the classic external __DATA relocations dyld can't process (the
        * lifted C++ vtable/RTTI imports in __DATA,__86x64_xrel) before any C++
        * static ctor dereferences them. Universal: triggers only on the presence

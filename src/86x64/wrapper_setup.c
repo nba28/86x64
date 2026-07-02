@@ -303,6 +303,19 @@ static void fixup_translated_dylib_slots(void) {
                   { 0x8B, 0x00 },  /* matched as "8B + any ModR/M with mod=00,rm=100" */
                   /* 03 /r: add rN, [disp32 + idx*4] */
                   { 0x03, 0x00 },
+                  /* 89 /r: mov [disp32 + idx*4], rN — the STORE form. Missing
+                   * from this table until Civ IV s21: NiStaticDataManager::
+                   * AddLibrary writes its ms_apfnInitFunctions bss array via
+                   * `67 89 14 85 <disp32>` and the unslid disp32 SIGSEGV'd at
+                   * the preferred vmaddr. (objc_slide.c's patch_text_abs32
+                   * now also patches these at add-image time, BEFORE the
+                   * ABICONV_RUN_INITS ctors — this wrapper pass fires too
+                   * late for those; kept as the backstop for non-RUN_INITS
+                   * and post-main loads.) */
+                  { 0x89, 0x00 },
+                  /* 8D /r: lea rN, [disp32 + idx*scale] — address-of-element
+                   * (Civ IV: &FConsoleCmd::m_SigTypes[i] handed to strcmp). */
+                  { 0x8D, 0x00 },
                   /* sentinel */
                   { 0, 0 },
                };
