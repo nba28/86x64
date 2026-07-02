@@ -154,6 +154,18 @@ struct objc_shared_ctrl {
     * process-global), so any copy's forward bridge spills the full id list.
     * Open-addressed struct rvar_ent *, allocated by the first copy. */
    uint64_t        rvariadic;
+   /* Cross-copy registry of every copy's _86x64_reverse_imp(+_stret) address.
+    * method_is_legacy() decides marshalling CONVENTIONS (CONV_I386 vs
+    * CONV_NATIVE) by "is this Method's IMP a reverse trampoline" — but each
+    * libabiconv copy has its OWN trampoline address, so a per-copy equality
+    * test misses legacy methods a DIFFERENT copy registered (e.g. Quinn's
+    * bundled-framework ATViewAnimation vs Quinn.dylib's copy). The forward
+    * bridge then marshalled with NATIVE conventions ('f' as 4-byte float,
+    * 'q' as one slot) while the registering copy's reverse_prep rebuilt the
+    * i386 frame with LEGACY conventions ('f' widened double) -> setProgress:
+    * received a denormal ~0 -> Quinn splash rendered fully transparent.
+    * Each copy publishes its two trampolines at arena attach. */
+   uint64_t        rev_imps[16];
 };
 #define SUPER_HINT_SLOTS 64
 #define OBJC_CTRL_MAGIC 0x3836583634415243ULL  /* "86X64ARC" */
@@ -189,12 +201,39 @@ static struct map_ent *g_map        = NULL;
 static uintptr_t       g_arena_base = 0;
 static uintptr_t       g_arena_end  = 0;
 
+extern void _86x64_reverse_imp(void);        /* objc_reverse.asm */
+extern void _86x64_reverse_imp_stret(void);
+
+/* Publish THIS copy's reverse trampolines in the shared registry (see the
+ * rev_imps field comment). Idempotent; CAS-safe against racing copies. */
+static void rev_imp_publish(struct objc_shared_ctrl *c) {
+   uint64_t mine[2] = { (uint64_t)(uintptr_t)&_86x64_reverse_imp,
+                        (uint64_t)(uintptr_t)&_86x64_reverse_imp_stret };
+   for (int k = 0; k < 2; k++) {
+      for (unsigned i = 0; i < sizeof c->rev_imps / sizeof c->rev_imps[0]; i++) {
+         uint64_t cur = __atomic_load_n(&c->rev_imps[i], __ATOMIC_SEQ_CST);
+         if (cur == mine[k]) { break; }               /* already published */
+         if (cur == 0) {
+            uint64_t expect = 0;
+            if (__atomic_compare_exchange_n(&c->rev_imps[i], &expect, mine[k],
+                                            0, __ATOMIC_SEQ_CST, __ATOMIC_SEQ_CST)) {
+               break;
+            }
+            if (__atomic_load_n(&c->rev_imps[i], __ATOMIC_SEQ_CST) == mine[k]) {
+               break;                                  /* lost race to ourselves */
+            }
+         }
+      }
+   }
+}
+
 static void arena_attach(struct objc_shared_ctrl *c) {
    g_ctrl       = c;
    g_arena      = (uint64_t *)(uintptr_t)c->arena;
    g_arena_base = (uintptr_t)c->arena_base;
    g_arena_end  = (uintptr_t)c->arena_end;
    g_map        = c->map;
+   rev_imp_publish(c);
 }
 
 static void arena_init(void) {
@@ -1540,7 +1579,24 @@ extern void _86x64_reverse_imp_stret(void);
 static int method_is_legacy(Method m) {
    if (!m) { return 0; }
    IMP imp = method_getImplementation(m);
-   return imp == (IMP)_86x64_reverse_imp || imp == (IMP)_86x64_reverse_imp_stret;
+   if (imp == (IMP)_86x64_reverse_imp || imp == (IMP)_86x64_reverse_imp_stret) {
+      return 1;
+   }
+   /* A legacy method registered by a DIFFERENT libabiconv copy carries THAT
+    * copy's trampoline address — consult the shared registry (see rev_imps).
+    * Without this, forward marshalling used NATIVE conventions against a
+    * reverse side that rebuilds the frame with LEGACY ones ('f' float-vs-
+    * double, 'q' one-slot-vs-two) -> silently corrupted scalar args/returns
+    * (Quinn: ATViewAnimation setProgress:1.0 arrived as ~0 -> black splash). */
+   if (g_ctrl) {
+      for (unsigned i = 0; i < sizeof g_ctrl->rev_imps / sizeof g_ctrl->rev_imps[0];
+           i++) {
+         uint64_t v = g_ctrl->rev_imps[i];
+         if (!v) { break; }
+         if (v == (uint64_t)(uintptr_t)imp) { return 1; }
+      }
+   }
+   return 0;
 }
 
 /* Marshal ONE explicit argument from the i386 frame into the plan.
@@ -2897,7 +2953,78 @@ static const struct {
 
 extern void legacy_locale_compat_install(void);   /* maptable_shim.m */
 
+/* ---- legacy NSOpenGLView 1x-surface compat --------------------------------
+ * Modern layer-backed AppKit gives every NSOpenGLView a Retina-scaled (2x)
+ * drawable via _NSOpenGLViewBackingLayer, but LEGACY (translated 10.6-era)
+ * subclasses size their glViewport/glOrtho in POINTS — the 10.7+ opt-in
+ * `wantsBestResolutionOpenGLSurface` didn't exist for them, whose default
+ * contract was a points-sized (1x) drawable. With a 2x drawable their GL
+ * output lands in the bottom-left quarter of the surface (Quinn splash/board).
+ * Restore the 10.6 contract for exactly those instances: any view whose class
+ * chain below NSOpenGLView contains a reverse-registered legacy class gets
+ * (a) wantsBestResolutionOpenGLSurface == NO and (b) its GL backing layer's
+ * contentsScale clamped to 1.0. Native GL views are untouched. */
+static struct rcls_ent *rcls_lookup(Class c);          /* fwd (defined below) */
+static int glview_chain_is_legacy(Class c) {
+   Class oglv = objc_getClass("NSOpenGLView");
+   if (!oglv) { return 0; }
+   int below_oglv = 0;
+   for (Class k = c; k; k = class_getSuperclass(k)) {
+      if (k == oglv) { below_oglv = 1; break; }
+   }
+   if (!below_oglv) { return 0; }
+   for (Class k = c; k && k != oglv; k = class_getSuperclass(k)) {
+      if (rcls_lookup(k)) { return 1; }
+   }
+   return 0;
+}
+static IMP g_oglv_wbros;                 /* original wantsBestResolution... */
+static signed char oglv_wbros(id self, SEL _cmd) {
+   if (glview_chain_is_legacy(object_getClass(self))) { return 0; }
+   return g_oglv_wbros ? ((signed char(*)(id,SEL))g_oglv_wbros)(self, _cmd) : 0;
+}
+static IMP g_ogll_setScale;              /* super/prev setContentsScale: */
+static void ogll_setScale(id self, SEL _cmd, double s) {
+   id dlg = ((id(*)(id,SEL))objc_msgSend)(self, sel_registerName("delegate"));
+   if (dlg && glview_chain_is_legacy(object_getClass(dlg))) { s = 1.0; }
+   ((void(*)(id,SEL,double))g_ogll_setScale)(self, _cmd, s);
+}
+static void legacy_glview_1x_install(void) {
+   static int done_prop, done_layer;
+   if (!done_prop) {
+      Class oglv = objc_getClass("NSOpenGLView");
+      if (oglv) {
+         Method m = class_getInstanceMethod(
+            oglv, sel_registerName("wantsBestResolutionOpenGLSurface"));
+         if (m) {
+            g_oglv_wbros = method_getImplementation(m);
+            method_setImplementation(m, (IMP)oglv_wbros);
+         }
+         done_prop = 1;    /* class present: installed (or no such method) */
+      }
+   }
+   if (!done_layer) {
+      Class gll = objc_getClass("_NSOpenGLViewBackingLayer");
+      if (gll) {
+         SEL s = sel_registerName("setContentsScale:");
+         Method m = class_getInstanceMethod(gll, s);   /* may be CALayer's */
+         if (m) {
+            g_ogll_setScale = method_getImplementation(m);
+            /* add an OVERRIDE on the private subclass (patching the found
+             * Method directly could hit CALayer and affect every layer) */
+            if (!class_addMethod(gll, s, (IMP)ogll_setScale,
+                                 method_getTypeEncoding(m))) {
+               /* subclass already had its own: patch that one */
+               method_setImplementation(m, (IMP)ogll_setScale);
+            }
+            done_layer = 1;
+         }
+      }
+   }
+}
+
 static void appkit_compat_install(void) {
+   legacy_glview_1x_install();
    /* These self-guard (own env vars) and must keep retrying until THEIR
     * framework loads — NSColor/AppKit early, NSProFont/ProKit much later — so
     * run them BEFORE the `done` short-circuit (which only tracks the AppKit
@@ -3274,6 +3401,11 @@ static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
    if      (!strcmp(s, "bytes"))      { clsname = "NSData";           sizesel = "length"; }
    else if (!strcmp(s, "bitmapData")) { clsname = "NSBitmapImageRep"; sizesel = "bytesPerPlane"; }
    else { return 0; }
+   if (getenv("ABICONV_GL_TEXLOG") && !strcmp(s, "bitmapData")) {
+      fprintf(stderr, "[bmp] HOOK REACHED self=%p<%s>\n", (void*)real_self,
+              real_self ? object_getClassName(real_self) : "(nil)");
+      fflush(stderr);
+   }
    Class cls = objc_getClass(clsname);
    if (!cls) { return 0; }
    typedef unsigned char (* msg_kind_t)(id, SEL, Class);
@@ -3299,6 +3431,29 @@ static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
       const void *nb = ((msg_ptr_t)objc_msgSend)(real_self, sel);
       unsigned long len = ((msg_len_t)objc_msgSend)(real_self,
                                                     sel_registerName(sizesel));
+      if (getenv("ABICONV_GL_TEXLOG") && !strcmp(s, "bitmapData")) {
+         /* Diagnostic: native buffer, size accessor sanity, row distribution
+          * of non-zero content in the NATIVE buffer (before any copy). */
+         unsigned long bpr = ((msg_len_t)objc_msgSend)(real_self, sel_registerName("bytesPerRow"));
+         unsigned long pw  = ((msg_len_t)objc_msgSend)(real_self, sel_registerName("pixelsWide"));
+         unsigned long ph  = ((msg_len_t)objc_msgSend)(real_self, sel_registerName("pixelsHigh"));
+         unsigned long bpp = ((msg_len_t)objc_msgSend)(real_self, sel_registerName("bitsPerPixel"));
+         long r0=-1, r1=-1, nrows=0;
+         if (nb && bpr && ph && len >= bpr) {
+            const unsigned char *p = (const unsigned char*)nb;
+            unsigned long hh = len / bpr; if (hh > ph) hh = ph;
+            for (unsigned long y = 0; y < hh; y++) {
+               const unsigned char *row = p + y*bpr;
+               int rn = 0;
+               for (unsigned long x = 0; x < bpr; x++) if (row[x]) { rn = 1; break; }
+               if (rn) { if (r0 < 0) r0 = (long)y; r1 = (long)y; nrows++; }
+            }
+         }
+         fprintf(stderr, "[bmp] bitmapData self=%p<%s> nb=%p len(bytesPerPlane)=%lu bpr=%lu %lux%lu bpp=%lu nzrows=[%ld..%ld]n=%ld\n",
+                 (void*)real_self, object_getClassName(real_self), nb, len,
+                 bpr, pw, ph, bpp, r0, r1, (long)nrows);
+         fflush(stderr);
+      }
       if ((uintptr_t)nb < 0x100000000ULL || !nb) {
          low = nb;                           /* already low-4GB (or nil): pass through */
       } else {
@@ -3385,6 +3540,19 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
 
    id real_self = resolve_self(args32[0]);
    SEL sel = resolve_sel(args32[1]);
+
+   /* Quinn GL-upload diagnostic (env ABICONV_GL_TEXLOG): log the createTexture
+    * selector sends BEFORE any gating, with raw handle + resolution result. */
+   if (getenv("ABICONV_GL_TEXLOG") && sel) {
+      const char *sn = sel_getName(sel);
+      if (!strcmp(sn, "bitmapData") || !strcmp(sn, "bytesPerRow") ||
+          !strcmp(sn, "bytesPerPlane") || !strcmp(sn, "bitsPerPixel")) {
+         fprintf(stderr, "[bmp] prep sel=%s self32=0x%08x real=%p<%s>\n",
+                 sn, args32[0], (void*)real_self,
+                 real_self ? object_getClassName(real_self) : "(nil)");
+         fflush(stderr);
+      }
+   }
 
    /* breadcrumb (zero-I/O): record the send + i386 caller RA + stack pointer */
    {
@@ -6161,6 +6329,474 @@ void x64_rev_dump_ring(void) {
    fflush(stderr);
 }
 
+/* ======================================================================
+ * GL-drawable probe (env ABICONV_GL_PROBE) — Quinn black-splash diagnostic.
+ * QuinnSplashView (a legacy NSOpenGLView subclass) receives drawRect:, issues
+ * GL, and tail-calls [[self openGLContext] flushBuffer], yet nothing
+ * composites (content area is black). Swizzle the native NSOpenGLContext
+ * present/attach entry points and log the attached view + layer state so we
+ * can see whether the context has a valid drawable. Installed lazily on the
+ * first reverse-dispatch (AppKit is fully up by then). Inert unless the env
+ * var is set. Pure native ObjC/C — no legacy bridge re-entry.
+ * ==================================================================== */
+static IMP g_glp_flushBuffer, g_glp_setView, g_glp_makeCurrent, g_glp_clearDrawable;
+
+static void glp_dump_ctx(const char *tag, id ctx) {
+   if (!ctx) { fprintf(stderr, "[glp] %s ctx=nil\n", tag); return; }
+   id view = ((id(*)(id,SEL))objc_msgSend)(ctx, sel_registerName("view"));
+   const char *vc = view ? object_getClassName(view) : "(nil)";
+   long opaque = 0, wantsLayer = 0; void *layer = NULL, *win = NULL;
+   if (view) {
+      opaque     = ((long(*)(id,SEL))objc_msgSend)(view, sel_registerName("isOpaque"));
+      wantsLayer = ((long(*)(id,SEL))objc_msgSend)(view, sel_registerName("wantsLayer"));
+      layer      = (void*)((id(*)(id,SEL))objc_msgSend)(view, sel_registerName("layer"));
+      win        = (void*)((id(*)(id,SEL))objc_msgSend)(view, sel_registerName("window"));
+   }
+   /* view frame (NSRect via objc_msgSend_stret on x86_64 for >16B struct) */
+   struct { double x,y,w,h; } fr = {0,0,0,0};
+   if (view) {
+      ((void(*)(void*,id,SEL))objc_msgSend_stret)(&fr, view, sel_registerName("frame"));
+   }
+   void *cgl = (void*)((id(*)(id,SEL))objc_msgSend)(ctx, sel_registerName("CGLContextObj"));
+   const char *lc = layer ? object_getClassName((id)layer) : "(nil)";
+   fprintf(stderr,
+      "[glp] %s ctx=%p view=%p<%s> frame=%.0fx%.0f@(%.0f,%.0f) opaque=%ld "
+      "wantsLayer=%ld layer=%p<%s> window=%p cgl=%p\n",
+      tag, (void*)ctx, (void*)view, vc, fr.w, fr.h, fr.x, fr.y, opaque,
+      wantsLayer, layer, lc, win, cgl);
+   fflush(stderr);
+}
+
+/* Native GL entry points (libabiconv links OpenGL.framework — it hosts the
+ * ___gl* abigen shims). Sample the back buffer to see if GL actually rendered
+ * content before the swap. */
+extern unsigned glGetError(void);
+extern void glReadBuffer(unsigned);
+extern void glReadPixels(int,int,int,int,unsigned,unsigned,void*);
+extern void glFinish(void);
+extern void glClearColor(float,float,float,float);
+extern void glClear(unsigned);
+extern void glDrawBuffer(unsigned);
+extern void glDisable(unsigned);
+extern void glMatrixMode(unsigned);
+extern void glPushMatrix(void);
+extern void glPopMatrix(void);
+extern void glLoadIdentity(void);
+extern void glColor4f(float,float,float,float);
+extern void glBegin(unsigned);
+extern void glEnd(void);
+extern void glVertex3f(float,float,float);
+extern void glViewport(int,int,int,int);
+extern void glTexEnvi(unsigned,unsigned,int);
+extern void glEnable(unsigned);
+extern void glTexCoord2f(float,float);
+extern void glBindTexture(unsigned,unsigned);
+extern void glGetIntegerv(unsigned,int*);
+extern unsigned char glIsTexture(unsigned);
+extern void glGetTexLevelParameteriv(unsigned,int,unsigned,int*);
+extern void glGetTexParameteriv(unsigned,unsigned,int*);
+extern void glGetTexImage(unsigned,int,unsigned,unsigned,void*);
+#define GLP_GL_BACK 0x0405
+#define GLP_GL_RGBA 0x1908
+#define GLP_GL_UBYTE 0x1401
+#define GLP_GL_COLOR_BIT 0x4000
+/* (Removed dyld GL interposers: they never caught libabiconv's own stub calls,
+ * and interposing glGenTextures recursed via dlsym(RTLD_NEXT) when APPKIT's
+ * NSCGLSurface flush path called it -> stack overflow, crash 2026-07-02-210828.) */
+
+static void glp_flushBuffer(id self, SEL _cmd) {
+   static int n = 0;
+   if (getenv("ABICONV_GL_TESTCLEAR")) {
+      /* Overwrite the back buffer with solid red just before the swap: if the
+       * window turns red, the present path works and Quinn's own GL rendering
+       * is the culprit; if still black, presentation itself is broken. */
+      glDrawBuffer(GLP_GL_BACK);
+      glClearColor(1.f, 0.f, 0.f, 1.f);
+      glClear(GLP_GL_COLOR_BIT);
+      glFinish();
+   }
+   if (getenv("ABICONV_GL_TESTQUAD")) {
+      /* Overlay a solid green quad (no texture) over Quinn's render using
+       * native immediate mode + identity matrices. Green => geometry/raster
+       * work and Quinn's texture is empty; no green => a global GL-state issue
+       * suppresses all drawing. */
+      glDrawBuffer(GLP_GL_BACK);
+      glDisable(0x0DE1 /*TEXTURE_2D*/); glDisable(0x0BE2 /*BLEND*/);
+      glDisable(0x0B71 /*DEPTH_TEST*/); glDisable(0x0C11 /*SCISSOR_TEST*/);
+      glMatrixMode(0x1701 /*PROJECTION*/); glPushMatrix(); glLoadIdentity();
+      glMatrixMode(0x1700 /*MODELVIEW*/);  glPushMatrix(); glLoadIdentity();
+      glColor4f(0.f, 1.f, 0.f, 1.f);
+      glBegin(0x0007 /*QUADS*/);
+      glVertex3f(-0.8f,-0.8f,0.f); glVertex3f(0.8f,-0.8f,0.f);
+      glVertex3f(0.8f,0.8f,0.f);   glVertex3f(-0.8f,0.8f,0.f);
+      glEnd();
+      glPopMatrix(); glMatrixMode(0x1701); glPopMatrix();
+      glFinish();
+   }
+   if (getenv("ABICONV_GL_TESTTEX")) {
+      /* Draw a full-viewport quad textured with each candidate texture id and
+       * log which ids are live textures. If the logo appears, the texture data
+       * is valid and the bug is Quinn's matrices/viewport; if black, the
+       * texture upload produced empty data. */
+      /* Quinn uses GL_TEXTURE_RECTANGLE_ARB (0x84F5), non-normalized coords. */
+      #define GLP_RECT 0x84F5
+      int wq=0, hq=0;
+      static int logged = 0;
+      if (!logged) { logged = 1;
+         char b[256]; int p = 0;
+         for (unsigned t = 1; t <= 16; t++)
+            if (glIsTexture(t)) p += snprintf(b+p, sizeof(b)-p, "%u ", t);
+         fprintf(stderr, "[glp] liveTex={ %s}\n", b);
+         for (unsigned t = 1; t <= 13; t++) {
+            if (!glIsTexture(t)) continue;
+            glBindTexture(GLP_RECT, t);
+            int w=0,h=0,ifmt=0,minf=0,magf=0;
+            glGetTexLevelParameteriv(GLP_RECT,0,0x1000,&w);
+            glGetTexLevelParameteriv(GLP_RECT,0,0x1001,&h);
+            glGetTexLevelParameteriv(GLP_RECT,0,0x1003,&ifmt);
+            glGetTexParameteriv(GLP_RECT,0x2801,&minf);
+            glGetTexParameteriv(GLP_RECT,0x2800,&magf);
+            /* read back the pixels: count non-zero + row/col distribution */
+            long nzc = -1, nza = -1;
+            int r0=-1, r1=-1, nrows=0, c0=-1, c1=-1;
+            if (w > 0 && h > 0 && (long)w*h*4 < 8*1024*1024) {
+               unsigned char *buf = (unsigned char*)calloc((size_t)w*h, 4);
+               if (buf) {
+                  glGetTexImage(GLP_RECT,0,0x1908/*RGBA*/,0x1401/*UBYTE*/,buf);
+                  nzc = nza = 0;
+                  for (int y = 0; y < h; y++) {
+                     int rownz = 0;
+                     for (int x = 0; x < w; x++) {
+                        long i = (long)y*w + x;
+                        int nz = buf[i*4]|buf[i*4+1]|buf[i*4+2]|buf[i*4+3];
+                        if (buf[i*4]|buf[i*4+1]|buf[i*4+2]) nzc++;
+                        if (buf[i*4+3]) nza++;
+                        if (nz) { rownz = 1;
+                           if (c0 < 0 || x < c0) c0 = x;
+                           if (x > c1) c1 = x; }
+                     }
+                     if (rownz) { if (r0 < 0) r0 = y; r1 = y; nrows++; }
+                  }
+                  free(buf);
+               }
+            }
+            fprintf(stderr,"[glp]  RECTtex%u L0=%dx%d ifmt=0x%x nzRGBpx=%ld nzApx=%ld rows=[%d..%d]n=%d cols=[%d..%d]\n",
+                    t,w,h,ifmt,nzc,nza,r0,r1,nrows,c0,c1);
+         }
+         fflush(stderr);
+      }
+      const char *tid = getenv("ABICONV_GL_TEXID");
+      unsigned useid = tid ? (unsigned)atoi(tid) : 1u;
+      glBindTexture(GLP_RECT, useid);
+      glGetTexLevelParameteriv(GLP_RECT,0,0x1000,&wq);
+      glGetTexLevelParameteriv(GLP_RECT,0,0x1001,&hq);
+      glDrawBuffer(GLP_GL_BACK);
+      glViewport(0,0,1600,1400);          /* full drawable, bypass Quinn's 1x vp */
+      glDisable(0x0BE2 /*BLEND*/); glDisable(0x0B71 /*DEPTH*/);
+      glDisable(0x0C11 /*SCISSOR*/); glDisable(0x0DE1 /*TEXTURE_2D*/);
+      glEnable(GLP_RECT);
+      glTexEnvi(0x2300/*TEXTURE_ENV*/,0x2200/*ENV_MODE*/,0x1E01/*REPLACE*/);
+      glMatrixMode(0x1701); glPushMatrix(); glLoadIdentity();
+      glMatrixMode(0x1700); glPushMatrix(); glLoadIdentity();
+      glColor4f(1.f,1.f,1.f,1.f);
+      float fw = wq>0?(float)wq:1.f, fh = hq>0?(float)hq:1.f;
+      glBegin(0x0007);
+      glTexCoord2f(0,fh);   glVertex3f(-1.f,-1.f,0.f);
+      glTexCoord2f(fw,fh);  glVertex3f(1.f,-1.f,0.f);
+      glTexCoord2f(fw,0);   glVertex3f(1.f,1.f,0.f);
+      glTexCoord2f(0,0);    glVertex3f(-1.f,1.f,0.f);
+      glEnd();
+      glDisable(GLP_RECT);
+      glPopMatrix(); glMatrixMode(0x1701); glPopMatrix();
+      glFinish();
+   }
+   if (n < 8) {
+      glp_dump_ctx("flushBuffer", self);
+      /* Scan a grid of the back buffer for any non-black pixel. */
+      glFinish();
+      glReadBuffer(GLP_GL_BACK);
+      unsigned e0 = glGetError();
+      int W = 785, H = 702, nonblack = 0; unsigned char mx = 0;
+      for (int gy = 0; gy < 6; gy++) for (int gx = 0; gx < 6; gx++) {
+         unsigned char px[4] = {0,0,0,0};
+         glReadPixels((gx+1)*W/8, (gy+1)*H/8, 1, 1, GLP_GL_RGBA, GLP_GL_UBYTE, px);
+         if (px[0]|px[1]|px[2]) { nonblack++;
+            if (px[0]>mx) mx=px[0]; if (px[1]>mx) mx=px[1]; if (px[2]>mx) mx=px[2]; }
+      }
+      unsigned e1 = glGetError();
+      fprintf(stderr, "[glp] backbuffer scan: nonblack=%d/36 maxc=%u glErr(read)=0x%x/0x%x\n",
+              nonblack, mx, e0, e1); fflush(stderr);
+   }
+   n++;
+   ((void(*)(id,SEL))g_glp_flushBuffer)(self, _cmd);
+}
+static void glp_setView(id self, SEL _cmd, id v) {
+   fprintf(stderr, "[glp] setView: ctx=%p view=%p<%s>\n", (void*)self, (void*)v,
+           v ? object_getClassName(v) : "(nil)"); fflush(stderr);
+   ((void(*)(id,SEL,id))g_glp_setView)(self, _cmd, v);
+   glp_dump_ctx("post-setView", self);
+}
+static void glp_makeCurrent(id self, SEL _cmd) {
+   static int n = 0;
+   if (n++ < 4) { fprintf(stderr, "[glp] makeCurrentContext ctx=%p\n", (void*)self); fflush(stderr); }
+   ((void(*)(id,SEL))g_glp_makeCurrent)(self, _cmd);
+}
+static void glp_clearDrawable(id self, SEL _cmd) {
+   fprintf(stderr, "[glp] clearDrawable ctx=%p\n", (void*)self); fflush(stderr);
+   ((void(*)(id,SEL))g_glp_clearDrawable)(self, _cmd);
+}
+
+/* Pixel-format + context creation probes (hypothesis a: nil pf -> nil ctx). */
+static IMP g_glp_pfInit, g_glp_ctxInit, g_glp_openGLContext, g_glp_pixelFormat;
+static id glp_pfInit(id self, SEL _cmd, const uint32_t *attrs) {
+   char buf[512]; int p = 0;
+   buf[0] = 0;
+   if (attrs) {
+      for (int i = 0; i < 40 && attrs[i]; i++)
+         p += snprintf(buf+p, sizeof(buf)-p, "%u ", attrs[i]);
+   }
+   id r = ((id(*)(id,SEL,const uint32_t*))g_glp_pfInit)(self, _cmd, attrs);
+   fprintf(stderr, "[glp] NSOpenGLPixelFormat initWithAttributes:{ %s} -> %p\n",
+           buf, (void*)r); fflush(stderr);
+   return r;
+}
+static id glp_ctxInit(id self, SEL _cmd, id fmt, id share) {
+   id r = ((id(*)(id,SEL,id,id))g_glp_ctxInit)(self, _cmd, fmt, share);
+   fprintf(stderr, "[glp] NSOpenGLContext initWithFormat:%p shareContext:%p -> %p\n",
+           (void*)fmt, (void*)share, (void*)r); fflush(stderr);
+   return r;
+}
+static id glp_openGLContext(id self, SEL _cmd) {
+   id r = ((id(*)(id,SEL))g_glp_openGLContext)(self, _cmd);
+   static int n = 0;
+   if (n++ < 6)
+      fprintf(stderr, "[glp] -[%s openGLContext] -> ctx=%p\n",
+              object_getClassName(self), (void*)r), fflush(stderr);
+   return r;
+}
+static id glp_pixelFormat(id self, SEL _cmd) {
+   id r = ((id(*)(id,SEL))g_glp_pixelFormat)(self, _cmd);
+   static int n = 0;
+   if (n++ < 6)
+      fprintf(stderr, "[glp] -[%s pixelFormat] -> pf=%p\n",
+              object_getClassName(self), (void*)r), fflush(stderr);
+   return r;
+}
+
+static void glp_swz(Class C, const char *sel, IMP fn, IMP *slot) {
+   if (!C) return;
+   Method m = class_getInstanceMethod(C, sel_registerName(sel));
+   if (m) { *slot = method_getImplementation(m); method_setImplementation(m, fn); }
+   else fprintf(stderr, "[glp] no method %s on %s\n", sel, class_getName(C));
+}
+
+/* Force NSOpenGLView non-layer-backed (ABICONV_GL_NOLAYER test). setWantsLayer:
+ * / wantsLayer live on NSView, so the swizzled Method is SHARED by every view —
+ * coerce ONLY for NSOpenGLView instances (else the titlebar etc. break). */
+static IMP g_glp_setWantsLayer, g_glp_wantsLayer;
+static Class g_glp_nsoglview;
+static int glp_is_glview(id o) {
+   if (!g_glp_nsoglview) g_glp_nsoglview = objc_getClass("NSOpenGLView");
+   for (Class c = object_getClass(o); c; c = class_getSuperclass(c))
+      if (c == g_glp_nsoglview) return 1;
+   return 0;
+}
+static void glp_setWantsLayer(id self, SEL _cmd, BOOL want) {
+   if (glp_is_glview(self)) want = NO;
+   ((void(*)(id,SEL,BOOL))g_glp_setWantsLayer)(self, _cmd, want);
+}
+static BOOL glp_wantsLayer(id self, SEL _cmd) {
+   if (glp_is_glview(self)) return NO;
+   return ((BOOL(*)(id,SEL))g_glp_wantsLayer)(self, _cmd);
+}
+
+/* CI probe: log every CIContext drawImage (the actual splash render lane —
+ * QuinnSplashView drawRect: composites the logo via CIColorMatrix ->
+ * [CIContext drawImage:atPoint:fromRect:]) + sample the CIImage's CONTENT by
+ * rendering it into a scratch bitmap through a separate software CIContext. */
+static IMP g_glp_ciDrawAt, g_glp_ciDrawIn;
+static void glp_ci_sample(id ciimg, const char *tag) {
+   /* extent (CGRect, stret) */
+   struct { double x,y,w,h; } ex = {0,0,0,0};
+   ((void(*)(void*,id,SEL))objc_msgSend_stret)(&ex, ciimg, sel_registerName("extent"));
+   long nz = -1; unsigned maxb = 0;
+   int w = (int)ex.w, h = (int)ex.h;
+   const char *why = "";
+   if (w > 0 && h > 0 && w < 4096 && h < 4096) {
+      static id swctx;
+      if (!swctx) {
+         swctx = ((id(*)(id,SEL,id))objc_msgSend)((id)objc_getClass("CIContext"),
+                    sel_registerName("contextWithOptions:"), (id)0);
+         if (swctx) ((id(*)(id,SEL))objc_msgSend)(swctx, sel_registerName("retain"));
+      }
+      if (!swctx) { why = " NOCTX"; }
+      else {
+         CGRect b = CGRectMake(ex.x, ex.y, w, h);
+         CGImageRef cg = ((CGImageRef(*)(id,SEL,id,CGRect))objc_msgSend)(
+            swctx, sel_registerName("createCGImage:fromRect:"), ciimg, b);
+         if (!cg) { why = " NOCGIMG"; }
+         else {
+            CGDataProviderRef dp = CGImageGetDataProvider(cg);
+            CFDataRef data = dp ? CGDataProviderCopyData(dp) : NULL;
+            if (!data) { why = " NODATA"; }
+            else {
+               const unsigned char *p = CFDataGetBytePtr(data);
+               long n = CFDataGetLength(data);
+               nz = 0;
+               for (long i = 0; i < n; i++)
+                  if (p[i]) { nz++; if (p[i] > maxb) maxb = p[i]; }
+               CFRelease(data);
+            }
+            CGImageRelease(cg);
+         }
+      }
+   }
+   fprintf(stderr, "[ci] %s img=%p extent=%.0fx%.0f@(%.0f,%.0f) nzbytes=%ld max=%u%s\n",
+           tag, (void*)ciimg, ex.w, ex.h, ex.x, ex.y, nz, maxb, why);
+   fflush(stderr);
+}
+
+/* Sampler CONTROL: a natively-built solid red 8x8 CIImage must read non-zero
+ * through the same path, proving the sampler works. Runs once. */
+static void glp_ci_control(void) {
+   static int done; if (done) return; done = 1;
+   id c = ((id(*)(id,SEL,double,double,double,double))objc_msgSend)(
+      (id)objc_getClass("CIColor"), sel_registerName("colorWithRed:green:blue:alpha:"),
+      1.0, 0.0, 0.0, 1.0);
+   id img = ((id(*)(id,SEL,id))objc_msgSend)((id)objc_getClass("CIImage"),
+      sel_registerName("imageWithColor:"), c);
+   img = ((id(*)(id,SEL,CGRect))objc_msgSend)(img,
+      sel_registerName("imageByCroppingToRect:"), CGRectMake(0,0,8,8));
+   glp_ci_sample(img, "CONTROL(red8x8)");
+}
+static void glp_ciDrawAt(id self, SEL _cmd, id img, CGPoint p, CGRect from) {
+   static int n = 0;
+   if (n++ < 12) { glp_ci_control(); glp_ci_sample(img, "drawImage:atPoint:"); }
+   ((void(*)(id,SEL,id,CGPoint,CGRect))g_glp_ciDrawAt)(self, _cmd, img, p, from);
+}
+static void glp_ciDrawIn(id self, SEL _cmd, id img, CGRect in, CGRect from) {
+   static int n = 0;
+   if (n++ < 12) glp_ci_sample(img, "drawImage:inRect:");
+   ((void(*)(id,SEL,id,CGRect,CGRect))g_glp_ciDrawIn)(self, _cmd, img, in, from);
+}
+
+/* Value-level probes on the CI creators + the file loader. */
+static IMP g_glp_ciColor4, g_glp_ciColor3, g_glp_ciVec2, g_glp_ciVec4, g_glp_ciURL;
+static id glp_ciColor4(id self, SEL _cmd, double r, double g, double b, double a) {
+   id res = ((id(*)(id,SEL,double,double,double,double))g_glp_ciColor4)(self,_cmd,r,g,b,a);
+   fprintf(stderr, "[civ] colorWithRGBA(%g,%g,%g,%g) -> %p\n", r,g,b,a,(void*)res);
+   fflush(stderr); return res;
+}
+static id glp_ciColor3(id self, SEL _cmd, double r, double g, double b) {
+   id res = ((id(*)(id,SEL,double,double,double))g_glp_ciColor3)(self,_cmd,r,g,b);
+   fprintf(stderr, "[civ] colorWithRGB(%g,%g,%g) -> %p\n", r,g,b,(void*)res);
+   fflush(stderr); return res;
+}
+static id glp_ciVec2(id self, SEL _cmd, double x, double y) {
+   id res = ((id(*)(id,SEL,double,double))g_glp_ciVec2)(self,_cmd,x,y);
+   fprintf(stderr, "[civ] vectorXY(%g,%g) -> %p\n", x,y,(void*)res);
+   fflush(stderr); return res;
+}
+static id glp_ciVec4(id self, SEL _cmd, double x, double y, double z, double w2) {
+   id res = ((id(*)(id,SEL,double,double,double,double))g_glp_ciVec4)(self,_cmd,x,y,z,w2);
+   fprintf(stderr, "[civ] vectorXYZW(%g,%g,%g,%g) -> %p\n", x,y,z,w2,(void*)res);
+   fflush(stderr); return res;
+}
+/* Log every CIColorMatrix setValue:forKey: (key + value description). */
+static IMP g_glp_fltSVFK;
+static void glp_fltSVFK(id self, SEL _cmd, id val, id key) {
+   if (!strcmp(object_getClassName(self), "CIColorMatrix")) {
+      const char *ks = key ? ((const char*(*)(id,SEL))objc_msgSend)(key, sel_registerName("UTF8String")) : "?";
+      id d = val ? ((id(*)(id,SEL))objc_msgSend)(val, sel_registerName("description")) : 0;
+      const char *ds = d ? ((const char*(*)(id,SEL))objc_msgSend)(d, sel_registerName("UTF8String")) : "(nil)";
+      fprintf(stderr, "[cmx] set %s = %s\n", ks ? ks : "?", ds ? ds : "?");
+      fflush(stderr);
+   }
+   ((void(*)(id,SEL,id,id))g_glp_fltSVFK)(self, _cmd, val, key);
+}
+
+/* Sample every CIFilter outputImage fetch: pinpoints WHICH filter step drops
+ * the content (first ~24 fetches). */
+static IMP g_glp_fltVFK;
+static id glp_fltVFK(id self, SEL _cmd, id key) {
+   id res = ((id(*)(id,SEL,id))g_glp_fltVFK)(self, _cmd, key);
+   static int n = 0;
+   if (n < 24 && res && key) {
+      const char *ks = ((const char*(*)(id,SEL))objc_msgSend)(key, sel_registerName("UTF8String"));
+      if (ks && !strcmp(ks, "outputImage")) {
+         Class cimg = objc_getClass("CIImage");
+         char tag[128];
+         snprintf(tag, sizeof(tag), "  %s.output", object_getClassName(self));
+         int iskind = 0;
+         for (Class c = object_getClass(res); c; c = class_getSuperclass(c))
+            if (c == cimg) { iskind = 1; break; }
+         if (iskind) { n++; glp_ci_sample(res, tag); }
+      }
+   }
+   return res;
+}
+
+static id glp_ciURL(id self, SEL _cmd, id url) {
+   id res = ((id(*)(id,SEL,id))g_glp_ciURL)(self, _cmd, url);
+   id us = url ? ((id(*)(id,SEL))objc_msgSend)(url, sel_registerName("absoluteString")) : 0;
+   const char *ustr = us ? ((const char*(*)(id,SEL))objc_msgSend)(us, sel_registerName("UTF8String")) : "(nil)";
+   fprintf(stderr, "[civ] imageWithContentsOfURL:%s -> %p\n", ustr ? ustr : "?", (void*)res);
+   fflush(stderr);
+   if (res) glp_ci_sample(res, "  fileImage");
+   return res;
+}
+
+static void glp_install_once(void) {
+   static int done; if (done) return; done = 1;
+   Class CI = objc_getClass("CIContext");
+   if (CI) {
+      glp_swz(CI, "drawImage:atPoint:fromRect:", (IMP)glp_ciDrawAt, &g_glp_ciDrawAt);
+      glp_swz(CI, "drawImage:inRect:fromRect:",  (IMP)glp_ciDrawIn, &g_glp_ciDrawIn);
+   }
+   Class CIC = objc_getClass("CIColor"), CIV = objc_getClass("CIVector"),
+         CII = objc_getClass("CIImage");
+   if (CIC) {
+      glp_swz(object_getClass((id)CIC), "colorWithRed:green:blue:alpha:",
+              (IMP)glp_ciColor4, &g_glp_ciColor4);
+      glp_swz(object_getClass((id)CIC), "colorWithRed:green:blue:",
+              (IMP)glp_ciColor3, &g_glp_ciColor3);
+   }
+   if (CIV) {
+      glp_swz(object_getClass((id)CIV), "vectorWithX:Y:", (IMP)glp_ciVec2, &g_glp_ciVec2);
+      glp_swz(object_getClass((id)CIV), "vectorWithX:Y:Z:W:", (IMP)glp_ciVec4, &g_glp_ciVec4);
+   }
+   if (CII)
+      glp_swz(object_getClass((id)CII), "imageWithContentsOfURL:", (IMP)glp_ciURL, &g_glp_ciURL);
+   Class CIF = objc_getClass("CIFilter");
+   if (CIF) {
+      glp_swz(CIF, "valueForKey:", (IMP)glp_fltVFK, &g_glp_fltVFK);
+      glp_swz(CIF, "setValue:forKey:", (IMP)glp_fltSVFK, &g_glp_fltSVFK);
+   }
+   Class C = objc_getClass("NSOpenGLContext");
+   if (!C) { fprintf(stderr, "[glp] NSOpenGLContext class not found\n"); return; }
+   glp_swz(C, "flushBuffer",         (IMP)glp_flushBuffer,  &g_glp_flushBuffer);
+   glp_swz(C, "setView:",            (IMP)glp_setView,      &g_glp_setView);
+   glp_swz(C, "makeCurrentContext",  (IMP)glp_makeCurrent,  &g_glp_makeCurrent);
+   glp_swz(C, "clearDrawable",       (IMP)glp_clearDrawable,&g_glp_clearDrawable);
+   glp_swz(C, "initWithFormat:shareContext:", (IMP)glp_ctxInit, &g_glp_ctxInit);
+   glp_swz(objc_getClass("NSOpenGLPixelFormat"), "initWithAttributes:",
+           (IMP)glp_pfInit, &g_glp_pfInit);
+   glp_swz(objc_getClass("NSOpenGLView"), "openGLContext",
+           (IMP)glp_openGLContext, &g_glp_openGLContext);
+   glp_swz(objc_getClass("NSOpenGLView"), "pixelFormat",
+           (IMP)glp_pixelFormat, &g_glp_pixelFormat);
+   if (getenv("ABICONV_GL_NOLAYER")) {
+      glp_swz(objc_getClass("NSOpenGLView"), "setWantsLayer:",
+              (IMP)glp_setWantsLayer, &g_glp_setWantsLayer);
+      if (getenv("ABICONV_GL_NOLAYER_GETTER"))
+         glp_swz(objc_getClass("NSOpenGLView"), "wantsLayer",
+                 (IMP)glp_wantsLayer, &g_glp_wantsLayer);
+      fprintf(stderr, "[glp] NSOpenGLView setWantsLayer: coerced to NO%s\n",
+              getenv("ABICONV_GL_NOLAYER_GETTER") ? " (+getter)" : "");
+   }
+   fprintf(stderr, "[glp] NSOpenGLContext swizzles installed\n"); fflush(stderr);
+}
+
 void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
                          uint32_t is_stret) {
    /* objc_msgSend_stret shifts the register file by one: rdi is the hidden
@@ -6216,6 +6852,10 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
          }
       }
    }
+
+   /* GL-drawable probe: install NSOpenGLContext swizzles once, lazily (AppKit
+    * fully up here). See glp_install_once above. */
+   if (getenv("ABICONV_GL_PROBE")) glp_install_once();
 
    struct rmeth_ent *m = NULL;
    Class hint = reverse_take_super(self_, sel);
@@ -7663,6 +8303,38 @@ static const struct { const char *name; uint32_t mask; } g_cgfloat_sels[] = {
    { "compositeToPoint:operation:fraction:",           0x4 }, /* pt,op,FRAC -> arg2 */
    { "dissolveToPoint:fromRect:fraction:",             0x4 }, /* pt,rect,FRAC -> arg2 */
    { "dissolveToPoint:fraction:",                      0x2 }, /* pt,FRAC -> arg1 */
+   /* Core Image value-object creators: all-CGFloat arg lists (same denormal~0
+    * mechanism as the fraction: family above — unmasked they read as 8-byte
+    * doubles -> ~0). A transparent CIColor turns CIConstantColorGenerator +
+    * CISourceInCompositing composites fully EMPTY; a zero CIVector collapses
+    * CILinearGradient endpoints / CIColorMatrix vectors. (Quinn splash+board
+    * paint everything through exactly these: logo, credits, background
+    * gradient, opacity fades — all-black content areas, correct extents.) */
+   { "colorWithRed:green:blue:alpha:",  0xF }, /* +[CIColor / NSColor ...] */
+   { "colorWithRed:green:blue:",        0x7 }, /* +[CIColor ...]           */
+   { "vectorWithX:",                    0x1 }, /* +[CIVector ...]          */
+   { "vectorWithX:Y:",                  0x3 }, /* +[CIVector ...]          */
+   { "vectorWithX:Y:Z:",                0x7 }, /* +[CIVector ...]          */
+   { "vectorWithX:Y:Z:W:",              0xF }, /* +[CIVector ...]          */
+   /* NSFont size-taking creators (CGFloat point size). Unmasked, the native
+    * 'd' reads TWO i386 slots from the caller's ONE float slot -> a denormal
+    * ~0-point font -> zero-size text -> "Cannot lock focus on image ... size
+    * zero" NSImageCacheException (Quinn pausedImage lane). */
+   { "fontWithName:size:",          0x2 },
+   { "fontWithDescriptor:size:",    0x2 },
+   { "convertFont:toSize:",         0x2 }, /* -[NSFontManager ...] */
+   { "systemFontOfSize:",           0x1 },
+   { "boldSystemFontOfSize:",       0x1 },
+   { "userFontOfSize:",             0x1 },
+   { "userFixedPitchFontOfSize:",   0x1 },
+   { "labelFontOfSize:",            0x1 },
+   { "menuFontOfSize:",             0x1 },
+   { "menuBarFontOfSize:",          0x1 },
+   { "messageFontOfSize:",          0x1 },
+   { "paletteFontOfSize:",          0x1 },
+   { "titleBarFontOfSize:",         0x1 },
+   { "toolTipsFontOfSize:",         0x1 },
+   { "controlContentFontOfSize:",   0x1 },
 };
 
 __attribute__((constructor))
