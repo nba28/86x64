@@ -176,7 +176,34 @@ namespace MachO {
       return false;
    }
 
+   template <Bits bits>
+   bool ParseEnv<bits>::code_alias_is_constant(std::size_t vmaddr) const {
+      /* Gate disarmed for locals-stripped binaries: without symbols for the
+       * static functions we cannot discriminate a genuine mid-image code
+       * pointer from a constant, so callers keep their legacy permissive
+       * heuristics. */
+      if (!have_local_text_syms) { return false; }
+      /* A function ENTRY (fn-ptr table slot / vtable slot / ObjC1 IMP /
+       * callback immediate) — genuine pointer, not a constant. */
+      if (func_syms.count(vmaddr) != 0) { return false; }
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(vmaddr)) { continue; }
+            /* SECTION-granular: only targets inside a section flagged as
+             * containing instructions are gated. __TEXT's DATA sections
+             * (__cstring/__const/literals) and all data segments keep the
+             * callers' permissive treatment (selector refs, string pointers
+             * and switch tables legitimately target unsymboled bytes). */
+            return (sec->sect.flags &
+                    (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) != 0;
+         }
+         return false;   /* in segment but between/outside sections */
+      }
+      return false;
+   }
+
    template class ParseEnv<Bits::M32>;
    template class ParseEnv<Bits::M64>;
-   
+
 }

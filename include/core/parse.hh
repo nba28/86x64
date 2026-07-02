@@ -153,6 +153,22 @@ namespace MachO {
        * imm32 might be a baked-in absolute pointer vs. an integer constant. */
       bool vmaddr_in_const_section(std::size_t vmaddr) const;
 
+      /* CODE-target FUNCTION-ENTRY gate (see section.cc DataParser + the
+       * instruction-immediate heuristics in instruction.cc). True iff `vmaddr`
+       * merely ALIASES a mid-function address inside an
+       * S_ATTR_(PURE|SOME)_INSTRUCTIONS section — i.e. the binary keeps its
+       * local text symbols (have_local_text_syms), NO func_syms nlist exists
+       * exactly at `vmaddr`, and `vmaddr` lands in an instructions-flagged
+       * section. A genuine code pointer (fn-ptr table slot, vtable slot, ObjC1
+       * IMP, callback immediate) targets a function ENTRY and carries a symbol;
+       * a value with no symbol that lands mid-function is an integer constant
+       * (Quinn's {4,4}=0x00040004 piece size, Civ IV's `mov $0xffff,%edx`
+       * static-init priority) and must NOT be relocated. Returns false when
+       * the gate is disarmed (locals-stripped binary) or the target is not
+       * instructions-flagged (__cstring/__TEXT,__const/data stay permissive:
+       * callers keep their own heuristics for those). */
+      bool code_alias_is_constant(std::size_t vmaddr) const;
+
 
       ParseEnv(Archive<bits>& archive):
          archive(archive),

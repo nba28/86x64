@@ -254,6 +254,13 @@ $(BUILD_DIR)/16_data_mid_blob_write.o: $(SRC_DIR)/16_data_mid_blob_write.c | $(B
 $(BUILD_DIR)/60_data_const_text_alias.o: $(SRC_DIR)/60_data_const_text_alias.c | $(BUILD_DIR)
 	$(CC_I386) -fno-pic -c $< -o $@
 
+# 64_imm_const_text_alias: -fno-pic so integer/pointer IMMEDIATES are emitted
+# as bare absolute imm32 (`movl $0xffff,%edx` / `movl $imm,(%esp)` /
+# `movl $imm,abs32`) — the fixed-load-address shape whose heuristic relocation
+# the function-entry gate narrows (Civ IV static-init priority 0xffff).
+$(BUILD_DIR)/64_imm_const_text_alias.o: $(SRC_DIR)/64_imm_const_text_alias.c | $(BUILD_DIR)
+	$(CC_I386) -fno-pic -c $< -o $@
+
 # 20_callback_qsort: -fno-stack-protector suppresses __stack_chk_guard setup,
 # which the translator mishandles (PIC-relative load of the guard pointer gets
 # mis-resolved). The test exercises callback bridging, not stack protection.

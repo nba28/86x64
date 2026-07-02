@@ -1,0 +1,7 @@
+prio 0xffff
+packed 0x40004
+arg 0xffff
+cb called
+slot 0x40004
+cb called
+exit_code: 0

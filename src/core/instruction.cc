@@ -424,6 +424,14 @@ namespace MachO {
                         if (seg->contains_vmaddr(imm_val)) { imm_is_ptr = true; break; }
                      }
                   }
+                  /* CODE-target FUNCTION-ENTRY gate (shared with DataParser,
+                   * see ParseEnv::code_alias_is_constant): an imm32 that lands
+                   * MID-function inside an instructions section with no symbol
+                   * at its value is an integer constant, not a pointer. */
+                  if (imm_is_ptr && bits == Bits::M32 &&
+                      env.code_alias_is_constant(imm_val)) {
+                     imm_is_ptr = false;
+                  }
                   imm = Immediate<bits>::Parse(img, loc + imm_idx, env, imm_is_ptr);
                } else if (has_small_imm && dest_is_data) {
                   /* Relocate the absolute disp32 (the memory operand). The
@@ -740,6 +748,25 @@ namespace MachO {
                      if (seg->contains_vmaddr(imm_val)) { imm_is_ptr = true; break; }
                   }
                }
+               /* CODE-target FUNCTION-ENTRY gate (shared with DataParser, see
+                * ParseEnv::code_alias_is_constant): an imm32 that merely
+                * ALIASES a mid-function address inside an instructions section
+                * (no func_syms nlist at its value) is an integer constant.
+                * Civ IV: EVERY GCC static-init stub passes priority 0xffff in
+                * edx (`__GLOBAL__I_*: mov $0xffff,%edx; mov $1,%eax; jmp
+                * __static_initialization_and_destruction_0`); 0xffff aliases
+                * __text, so the old heuristic rewrote it to `lea edx,[rip+…]`
+                * -> the priority test `cmp $0xffff,%edx` failed -> ALL 1063
+                * C++ static ctors silently skipped -> first use of a
+                * never-constructed static std::set (MSG_Mac sCallbackList)
+                * crashed in _Rb_tree_decrement on the zeroed header (fault
+                * addr 0x4). A genuine code-pointer immediate (`push $_fn`
+                * callback, `mov $_fn,%reg`) targets a function ENTRY and
+                * carries a symbol -> still relocated. */
+               if (imm_is_ptr && bits == Bits::M32 &&
+                   env.code_alias_is_constant(imm_val)) {
+                  imm_is_ptr = false;
+               }
             }
             imm = Immediate<bits>::Parse(img, loc + imm_idx, env, imm_is_ptr);
          }
@@ -788,6 +815,17 @@ namespace MachO {
                              sizeof(seg->segment_command.segname)));
                   if (name == SEG_PAGEZERO || name == SEG_LINKEDIT) continue;
                   if (seg->contains_vmaddr(value)) { in_seg = true; break; }
+               }
+               /* CODE-target FUNCTION-ENTRY gate (shared with DataParser, see
+                * ParseEnv::code_alias_is_constant): a stack-arg imm32 that
+                * lands MID-function inside an instructions section with no
+                * symbol at its value is an integer argument (e.g.
+                * `movl $0xffff, 4(%esp)`), not a pointer. A callback-pointer
+                * arg (`movl $_fn, (%esp)`) targets a function entry and
+                * carries a symbol -> still relocated. */
+               if (in_seg && bits == Bits::M32 &&
+                   env.code_alias_is_constant(value)) {
+                  in_seg = false;
                }
                if (in_seg) {
                   imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);

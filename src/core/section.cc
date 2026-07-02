@@ -331,22 +331,14 @@ namespace MachO {
                 * requiring a func_syms hit here is exact, not heuristic, for
                 * locals-symboled binaries. Locals-stripped binaries keep the
                 * legacy permissive detection (gate disarmed). M32-only: the
-                * M64 convert re-parse must keep its established behavior. */
-               if (exec && bits == Bits::M32 && env.have_local_text_syms &&
-                   !is_text_const_sect &&
-                   env.func_syms.count(value) == 0) {
-                  bool target_is_instructions = false;
-                  for (Section<bits> *tsec : seg->sections) {
-                     if (!tsec->contains_vmaddr(value)) continue;
-                     target_is_instructions =
-                        (tsec->sect.flags &
-                         (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS))
-                        != 0;
-                     break;
-                  }
-                  if (target_is_instructions) {
-                     break;   /* mid-function code alias -> constant */
-                  }
+                * M64 convert re-parse must keep its established behavior.
+                * The predicate lives in ParseEnv::code_alias_is_constant and
+                * is SHARED with the instruction-IMMEDIATE heuristics in
+                * instruction.cc (same family: Civ IV's `mov $0xffff,%edx`
+                * static-init priority aliasing __text). */
+               if (exec && bits == Bits::M32 && !is_text_const_sect &&
+                   env.code_alias_is_constant(value)) {
+                  break;   /* mid-function code alias -> constant */
                }
                is_pointer = true;
                break;
