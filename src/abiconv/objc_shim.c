@@ -7451,6 +7451,47 @@ uint32_t shim_objc_exception_extract(uint32_t *a) {
    return d ? d->pointers[0] : 0;
 }
 
+/* ----------------------------------------------------------------------
+ * Classic Foundation NS_DURING (pre-@try SDKs — Quinn, Civ IV, and every
+ * i386 app built before the fragile runtime switched NS_DURING to expand to
+ * objc_exception_try_enter). NS_DURING/NS_HANDLER emitted the OLDER
+ * NSHandler2 spelling:
+ *
+ *     NSHandler2 h;                    // >= 88 bytes, on the caller's stack
+ *     _NSAddHandler2(&h);              // register (== objc_exception_try_enter)
+ *     if (_setjmp(&h) == 0) {          // jmp_buf at offset 0 of NSHandler2
+ *         <body>
+ *         _NSRemoveHandler2(&h);       // normal exit (== try_exit)
+ *     } else {
+ *         id e = _NSExceptionObjectFromHandler2(&h);  // (== extract)
+ *         <handler, reads e name/reason>
+ *     }
+ *
+ * This is the SAME per-thread setjmp-exception model as objc_exception_*,
+ * just an older name: the app passes &h to BOTH _NSAddHandler2 and _setjmp
+ * (verified in -[ATAnimation runFrom:to:]: `lea -0x70(%ebp),%ebx` fed to
+ * both), so the jmp_buf lives at offset 0 exactly like _objc_exception_data,
+ * and our exc_data32 layout (regs@0, magic@48, rstash@52, thrown@72,
+ * chain-next@76 = 88 bytes) fits inside the >=88-byte NSHandler2. Routing
+ * both spellings through the ONE per-thread exc_chain lets a single
+ * shim_objc_exception_throw longjmp back to whichever frame (NSHandler2 or
+ * @try) is on top — nesting the two mechanisms works for free.
+ *
+ * Unshimmed, `_NSAddHandler2` bound to NATIVE modern Foundation, which reads
+ * the handler ptr from %rdi (i386 passed it on the stack) and whose 8-byte
+ * `ret` over-pops the i386 4-byte return frame -> fused-PC SIGSEGV, fired
+ * even when NO exception is thrown (the Quinn play crash, r11=_NSAddHandler2).
+ * ---------------------------------------------------------------------- */
+uint32_t shim_NSAddHandler2(uint32_t *a) {
+   return shim_objc_exception_try_enter(a);
+}
+uint32_t shim_NSRemoveHandler2(uint32_t *a) {
+   return shim_objc_exception_try_exit(a);
+}
+uint32_t shim_NSExceptionObjectFromHandler2(uint32_t *a) {
+   return shim_objc_exception_extract(a);
+}
+
 /* int objc_exception_match(Class cls, id exception) — isKindOf walk. */
 uint32_t shim_objc_exception_match(uint32_t *a) {
    id cls = resolve_self(a[0]);

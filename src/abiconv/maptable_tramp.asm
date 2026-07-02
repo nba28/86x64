@@ -389,6 +389,17 @@
 	MTSHIM	___objc_exception_throw,     _shim_objc_exception_throw
 	MTSHIM	___class_nextMethodList,     _shim_class_nextMethodList
 	MTSHIM	____objc_setNilReceiver,     _shim_objc_setNilReceiver
+;; Classic Foundation NS_DURING (pre-@try SDKs — Quinn, Civ IV): the OLDER
+;; NSHandler2 spelling of the SAME setjmp-exception model. C names carry a
+;; leading underscore (_NSAddHandler2), so the mach-o import is __NSAddHandler2
+;; and static-interpose (PREFIX=__) redirects it to ____NSAddHandler2 here.
+;; These forward to the objc_exception_* chain logic (see objc_shim.c): both
+;; NSHandler2 and @try frames share ONE per-thread exc_chain + ____setjmp +
+;; shim_objc_exception_throw. Unshimmed, native _NSAddHandler2 over-pops the
+;; i386 4-byte frame -> fused-PC SIGSEGV (Quinn play crash, no throw needed).
+	MTSHIM	____NSAddHandler2,                 _shim_NSAddHandler2
+	MTSHIM	____NSRemoveHandler2,              _shim_NSRemoveHandler2
+	MTSHIM	____NSExceptionObjectFromHandler2, _shim_NSExceptionObjectFromHandler2
 ;; Not an interpose target: ____dealloc (the C variable) holds this tramp's
 ;; address; translated code calls it through the 4-byte function pointer.
 	MTSHIM	_x64_dealloc_vec_tramp,      _shim_dealloc_vec

@@ -1,0 +1,7 @@
+a: body ran
+a: normal exit
+b: caught name=BoomException reason=kaboom 42
+c: inner caught Inner
+c: outer caught Outer
+done failures=0
+exit_code: 0
