@@ -210,8 +210,13 @@ else
             | grep -vx 'dyld_stub_binder' | sort -u )
 fi
 
-# statically interpose imported symbols to libabiconv (both binding flavors)
-v "$ROOTDIR"/static-interpose.sh -l "$LIBABICONV" -n "$LIBABICONV_NAME" -p "__" -o "$INTERPOSE64" "$DOLLAR64" $SYMS || error
+# statically interpose imported symbols to libabiconv (both binding flavors).
+# stdin MUST be /dev/null: with an EMPTY $SYMS (nm -u found no undefineds,
+# e.g. an already-fully-redirected framework re-translate) static-interpose
+# falls back to reading symbols from stdin — inheriting a never-closing pipe
+# (background runs) hangs its `cat` forever (observed twice on Sparkle.i386,
+# 30–60min wedges).
+v "$ROOTDIR"/static-interpose.sh -l "$LIBABICONV" -n "$LIBABICONV_NAME" -p "__" -o "$INTERPOSE64" "$DOLLAR64" $SYMS < /dev/null || error
 
 if [ "$HAS_DYLD_INFO" -gt 0 ]; then
     # interpose dyld_stub_binder (modern lazy-binding entry point)
