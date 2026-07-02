@@ -6167,6 +6167,24 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
     * +initialize-style recursion). Validate it against the authoritative map;
     * fall back to the derived class if it doesn't name a legacy method. */
    Class lookup = object_getClass(self_);
+
+   /* Env-gated reverse-DISPATCH trace: ABICONV_REV_DISPATCH_TRACE=<substr>
+    * logs every native->legacy method dispatch whose selector contains
+    * <substr> ("=" alone or "*" logs all). Diagnostic for display-cycle
+    * questions of the form "does AppKit ever send drawRect:/drawWithFrame:
+    * to the app's legacy views?" (Quinn black-board). Read once. */
+   {
+      static const char *dt_filter; static int dt_init;
+      if (!dt_init) { dt_filter = getenv("ABICONV_REV_DISPATCH_TRACE"); dt_init = 1; }
+      if (dt_filter) {
+         const char *sn = sel_getName(sel);
+         if (dt_filter[0] == '\0' || dt_filter[0] == '*' || strstr(sn, dt_filter)) {
+            fprintf(stderr, "[rdis] %s[%s]\n", class_getName(lookup), sn);
+            fflush(stderr);
+         }
+      }
+   }
+
    struct rmeth_ent *m = NULL;
    Class hint = reverse_take_super(self_, sel);
    if (hint) {
