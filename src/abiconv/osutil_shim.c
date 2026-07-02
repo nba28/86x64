@@ -83,3 +83,18 @@ static void fill_mouse(QDPoint *pt) {
 }
 void shim_GetGlobalMouse(uint32_t *args) { fill_mouse((QDPoint *)PTR(0)); }
 void shim_GetMouse(uint32_t *args)       { fill_mouse((QDPoint *)PTR(0)); }
+
+// ---- ReadLocation: the classic PRAM geographic location ----
+// void ReadLocation(MachineLocation *loc) — reads the machine's latitude/
+// longitude/GMT-delta that classic Mac OS kept in PRAM. The struct (OSUtils.h,
+// pack(2)) is 12 bytes: Fract latitude(4), Fract longitude(4), union u(4,
+// `long gmtDelta` low 24 bits). Modern macOS keeps no PRAM location, and the
+// DOCUMENTED state for a machine whose location was never set is ALL ZEROS
+// (latitude 0, longitude 0, gmtDelta 0) — which is also what ReadLocation
+// returns on a fresh classic system. Zero-filling IS the real semantic here,
+// not a stub. (abigen skips the symbol because the pointee embeds a union
+// with a `long` member — 4 vs 8 bytes across the ABIs.)
+void shim_ReadLocation(uint32_t *args) {
+    uint8_t *loc = (uint8_t *)PTR(0);
+    if (loc) memset(loc, 0, 12);
+}

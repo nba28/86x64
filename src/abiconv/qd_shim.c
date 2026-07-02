@@ -146,3 +146,51 @@ uint32_t shim_QDRegisterNamedPixMapCursor(uint32_t *a)   { (void)a; return 0; } 
 uint32_t shim_QDSetNamedPixMapCursor(uint32_t *a)        { (void)a; return 0; }
 uint32_t shim_QDUnregisterNamedPixMapCursur(uint32_t *a) { (void)a; return 0; }  // (sic) Apple typo
 uint32_t shim_QDIsNamedPixMapCursorRegistered(uint32_t *a) { (void)a; return 0; } // Boolean false
+
+// ---- Point geometry (REAL implementations — exact classic math, not stubs) ----
+// These are pure arithmetic on Point/Rect; abigen cannot emit them because a
+// by-value Point ({SInt16 v,h} = ONE 4-byte i386 arg slot) is neither of its
+// supported by-value struct shapes (integer-long / homogeneous-FP). The packed
+// slot's memory image is {v @+0, h @+2}, so as a little-endian uint32:
+// low 16 bits = v, high 16 bits = h — identical to the x86_64 SysV packing.
+typedef struct { int16_t v, h; } QDPointG;
+#define PT_V(a) ((int16_t)((a) & 0xffffu))
+#define PT_H(a) ((int16_t)((a) >> 16))
+
+// AddPt/SubPt(Point src, Point *dst)
+void shim_AddPt(uint32_t *args) {
+    QDPointG *dst = (QDPointG *)PTR(1); if (!dst) return;
+    dst->v = (int16_t)(dst->v + PT_V(args[0]));
+    dst->h = (int16_t)(dst->h + PT_H(args[0]));
+}
+void shim_SubPt(uint32_t *args) {
+    QDPointG *dst = (QDPointG *)PTR(1); if (!dst) return;
+    dst->v = (int16_t)(dst->v - PT_V(args[0]));
+    dst->h = (int16_t)(dst->h - PT_H(args[0]));
+}
+// Boolean EqualPt(Point pt1, Point pt2): packed 4-byte images compare exactly.
+uint32_t shim_EqualPt(uint32_t *args) { return args[0] == args[1]; }
+
+// Boolean PtInRect(Point pt, const Rect *r): in iff top<=v<bottom, left<=h<right.
+uint32_t shim_PtInRect(uint32_t *args) {
+    const QDRect *r = (const QDRect *)PTR(1); if (!r) return 0;
+    int16_t v = PT_V(args[0]), h = PT_H(args[0]);
+    return (v >= r->top && v < r->bottom && h >= r->left && h < r->right) ? 1 : 0;
+}
+
+// long PinRect(const Rect *theRect, Point thePt) — pins the point inside the
+// rect (right/bottom pin at edge-1: a point ON those edges is outside). The
+// RESULT packing is the classic register convention and is the OPPOSITE of the
+// arg-slot image: HIGH-order word = v, LOW-order word = h (Inside Macintosh;
+// callers unpack with HiWord/LoWord).
+uint32_t shim_PinRect(uint32_t *args) {
+    const QDRect *r = (const QDRect *)PTR(0);
+    int16_t v = PT_V(args[1]), h = PT_H(args[1]);
+    if (r) {
+        if (v < r->top)         v = r->top;
+        if (v >= r->bottom)     v = (int16_t)(r->bottom - 1);
+        if (h < r->left)        h = r->left;
+        if (h >= r->right)      h = (int16_t)(r->right - 1);
+    }
+    return ((uint32_t)(uint16_t)v << 16) | (uint16_t)h;
+}

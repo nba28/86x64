@@ -679,6 +679,11 @@ _x64_exc_longjmp:
 	MTSHIM	___QDUnregisterNamedPixMapCursur,     _shim_QDUnregisterNamedPixMapCursur
 	MTSHIM	___RGBBackColor,                      _shim_RGBBackColor
 	MTSHIM	___RGBForeColor,                      _shim_RGBForeColor
+	MTSHIM	___AddPt,                             _shim_AddPt
+	MTSHIM	___SubPt,                             _shim_SubPt
+	MTSHIM	___EqualPt,                           _shim_EqualPt
+	MTSHIM	___PtInRect,                          _shim_PtInRect
+	MTSHIM	___PinRect,                           _shim_PinRect
 	MTSHIM	___SetClip,                           _shim_SetClip
 	MTSHIM	___SetGDevice,                        _shim_SetGDevice
 	MTSHIM	___SetOrigin,                         _shim_SetOrigin
@@ -693,6 +698,8 @@ _x64_exc_longjmp:
 	MTSHIM	___TextWidth,                         _shim_TextWidth
 	; --- Carbon HIToolbox UI + Display Mgr (carbon_ui_shim.c) ---
 	MTSHIM	___BeginUpdate,                       _shim_BeginUpdate
+	MTSHIM	___FindWindow,                        _shim_FindWindow
+	MTSHIM	___MenuSelect,                        _shim_MenuSelect
 	MTSHIM	___DMGetDeskRegion,                   _shim_DMGetDeskRegion
 	MTSHIM	___DMGetDisplayIDByGDevice,           _shim_DMGetDisplayIDByGDevice
 	MTSHIM	___DMGetGDeviceByDisplayID,           _shim_DMGetGDeviceByDisplayID
@@ -766,13 +773,20 @@ _x64_exc_longjmp:
 	MTSHIM	___HSetVol,                           _shim_HSetVol
 	MTSHIM	___PBHGetVInfoSync,                   _shim_PBHGetVInfoSync
 	MTSHIM	___PBMakeFSRefSync,                   _shim_PBMakeFSRefSync
+	MTSHIM	___PBHGetVolParmsSync,                _shim_PBHGetVolParmsSync
+	MTSHIM	___PBGetCatInfoSync,                  _shim_PBGetCatInfoSync
+	MTSHIM	___PBHCopyFileSync,                   _shim_PBHCopyFileSync
+	MTSHIM	___PBHGetDirAccessSync,               _shim_PBHGetDirAccessSync
 	MTSHIM	___SetEOF,                            _shim_SetEOF
 	MTSHIM	___SetFPos,                           _shim_SetFPos
 	; --- OS utilities, real impls (osutil_shim.c) ---
 	MTSHIM	___GetDateTime,                       _shim_GetDateTime
+	MTSHIM	___ReadLocation,                      _shim_ReadLocation
 	MTSHIM	___GetGlobalMouse,                    _shim_GetGlobalMouse
 	MTSHIM	___GetMouse,                          _shim_GetMouse
 	MTSHIM	___OTAtomicClearBit,                  _shim_OTAtomicClearBit
+	; --- Text Encoding Converter (tec_shim.c) ---
+	MTSHIM	___ConvertFromUnicodeToText,          _shim_ConvertFromUnicodeToText
 	MTSHIM	___c2pstrcpy,                         _shim_c2pstrcpy
 	MTSHIM	___p2cstrcpy,                         _shim_p2cstrcpy
 	; --- Python C-API name shim (py_shim.c) ---

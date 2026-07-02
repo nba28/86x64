@@ -63,3 +63,44 @@ uint32_t shim_DMGetDisplayIDByGDevice(uint32_t *args) {
 uint32_t shim_DMGetGDeviceByDisplayID(uint32_t *args) {
     uint32_t *out = (uint32_t *)PTR(1); if (out) *out = 0; return (uint32_t)UI_PARAM_ERR;
 }
+
+// ---- FindWindow / MenuSelect: FORWARD to the live native HIToolbox ----
+// Both survive in the modern x86_64 HIToolbox (deprecated, header-hidden behind
+// !__LP64__ — which is exactly why abigen has no prototype, and why their
+// by-value Point arg is inexpressible for it anyway). A by-value Point is a
+// 4-byte struct: the i386 caller passes it in one arg slot and x86_64 SysV
+// packs the identical byte image into the low 32 bits of the first integer
+// register, so the packed uint32 forwards VERBATIM. Resolved via dlsym (the
+// modern SDK .tbd may omit 32-bit-only exports the shared-cache binary still
+// carries; libabiconv links Carbon, so HIToolbox is in-process) with a
+// graceful classic fallback if truly absent.
+#include <dlfcn.h>
+extern uint32_t x64_objc_wrap(uint64_t real);   // objc_shim.c: low-4GB handle for >4GB ptrs
+
+// WindowPartCode FindWindow(Point thePoint, WindowRef *window)
+uint32_t shim_FindWindow(uint32_t *args) {
+    typedef int16_t (*fn_t)(uint32_t, void **);
+    static fn_t fn; static int looked;
+    if (!looked) { fn = (fn_t)dlsym(RTLD_DEFAULT, "FindWindow"); looked = 1; }
+    uint32_t *out32 = (uint32_t *)PTR(1);
+    if (!fn) {                       // absent: classic "hit nothing" answer
+        if (out32) *out32 = 0;       //   window = NULL
+        return 0;                    //   partcode = inDesk
+    }
+    void *win = 0;
+    int32_t part = fn(args[0], &win);
+    if (out32) {                     // native WindowRef may live above 4GB:
+        uint64_t w = (uint64_t)(uintptr_t)win;   // wrap it into a proxy handle
+        *out32 = (w >> 32) ? x64_objc_wrap(w) : (uint32_t)w;
+    }
+    return (uint32_t)part;
+}
+
+// SInt32 MenuSelect(Point startPt) — returns packed menuID(hi)/item(lo).
+uint32_t shim_MenuSelect(uint32_t *args) {
+    typedef int32_t (*fn_t)(uint32_t);
+    static fn_t fn; static int looked;
+    if (!looked) { fn = (fn_t)dlsym(RTLD_DEFAULT, "MenuSelect"); looked = 1; }
+    if (!fn) return 0;               // absent: "no selection made"
+    return (uint32_t)fn(args[0]);
+}

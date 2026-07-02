@@ -435,6 +435,7 @@ add_library(abiconv SHARED
   mlte_shim.c
   fmgr_shim.c
   osutil_shim.c
+  tec_shim.c
   py_shim.c
   quicktime_movie_shim.c
   keymgr_shim.c
