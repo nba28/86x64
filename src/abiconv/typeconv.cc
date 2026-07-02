@@ -749,6 +749,66 @@ static bool pointee_is_passthrough_scalar(CXType canon) {
    }
 }
 
+/* A pointer whose pointee is a RECORD with IDENTICAL memory layout under both
+ * ABIs can likewise pass straight through. Layout is identical iff every leaf
+ * field (recursing through nested records, unions and fixed-size arrays) is a
+ * fixed-width scalar of size <= 4 (bool/char/short/int/enum/float): those have
+ * the same size AND natural alignment (<= 4) on both ABIs, so every field
+ * offset and the total size coincide. 8-byte scalars (double/long long) are
+ * same-SIZE but i386 packs them 4-aligned inside structs where x86_64 uses
+ * 8-aligned -> offsets can differ -> excluded. long/pointer fields change size
+ * entirely -> excluded (those keep the bounce-buffer deep copy).
+ *
+ * This matters beyond economy: the deep copy stages exactly ONE element, so an
+ * ARRAY arg is truncated to its first entry (InstallEventHandler's
+ * `const EventTypeSpec inList[inNumTypes]` registered stack garbage beyond
+ * entry 0), and its post-call copy-back writes through the caller's pointer,
+ * SIGBUSing when the data is read-only (Halo keeps that list in
+ * __TEXT,__const -> KERN_PROTECTION_FAILURE on the copy-back store). The
+ * classic Carbon surface passes small all-scalar structs (Point, Rect,
+ * EventTypeSpec, RGBColor, EventRecord) by pointer pervasively. */
+static bool record_is_layout_identical(CXType canon);
+
+static bool field_type_is_layout_identical(CXType t) {
+   const CXType canon = clang_getCanonicalType(t);
+   switch (canon.kind) {
+   case CXType_Bool:
+   case CXType_UChar:  case CXType_Char_U:
+   case CXType_SChar:  case CXType_Char_S:
+   case CXType_UShort: case CXType_Short:
+   case CXType_UInt:   case CXType_Int:   case CXType_Enum:
+   case CXType_Float:
+      return true;
+   case CXType_ConstantArray:
+      return field_type_is_layout_identical(clang_getElementType(canon));
+   case CXType_Record:
+      return record_is_layout_identical(canon);
+   default:
+      return false;
+   }
+}
+
+static bool record_is_layout_identical(CXType canon) {
+   /* incomplete/opaque records (objc runtime structs, CF __CFString, forward
+    * decls) and empty structs report size <= 0: not passthrough material */
+   if (clang_Type_getSizeOf(canon) <= 0) {
+      return false;
+   }
+   bool ok = true;
+   clang_Type_visitFields(
+      canon,
+      [](CXCursor field, CXClientData data) -> CXVisitorResult {
+         bool *okp = static_cast<bool *>(data);
+         if (!field_type_is_layout_identical(clang_getCursorType(field))) {
+            *okp = false;
+            return CXVisit_Break;
+         }
+         return CXVisit_Continue;
+      },
+      &ok);
+   return ok;
+}
+
 void conversion::convert_pointer(std::ostream& os, CXType pointee, const Location& src_,
                                  const Location& dst_) {
    /* a pointer-to-function is NOT data to deep-copy (the old path handed the
@@ -808,6 +868,16 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
     * through the pointer, faulting (SIGBUS) when it targets read-only memory such
     * as a constant string's character data. */
    if (pointee_is_passthrough_scalar(pointee_canon)) {
+      convert_int(os, CXType_Pointer, src_, dst_);
+      return;
+   }
+
+   /* Layout-identical record pointee: same rationale and emit as the scalar
+    * passthrough above (see record_is_layout_identical). The opaque objc/CF
+    * record shapes were already routed away above; those are incomplete types
+    * the helper rejects anyway. */
+   if (pointee_canon.kind == CXType_Record &&
+       record_is_layout_identical(pointee_canon)) {
       convert_int(os, CXType_Pointer, src_, dst_);
       return;
    }
@@ -922,6 +992,22 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
       pop(os, reg_dst, src, dst);
 
    } else {
+      /* Post-call copy-back pass (!allocate). A CONST pointee has nothing to
+       * copy back — the callee contracts not to modify it — and writing
+       * through the caller's pointer FAULTS when the pointed-to data lives in
+       * read-only memory: a `static const` table lands in __TEXT,__const, so
+       * the copy-back store trips SIGBUS KERN_PROTECTION_FAILURE (Halo's
+       * `static const EventTypeSpec` list passed to InstallEventHandler; any
+       * `const struct *` arg backed by constant data). Emit nothing, but still
+       * advance the bounce-buffer cursor exactly as the copy-back emit would,
+       * keeping this pass's staging offsets in lockstep with the forward
+       * pass for every argument that follows. */
+      if (clang_isConstQualifiedType(pointee) ||
+          clang_isConstQualifiedType(clang_getCanonicalType(pointee))) {
+         data.align(pointee, from_arch);
+         data += sizeof_type(pointee, from_arch);
+         return;
+      }
       /* let dst pointer be */
       RegisterLocation reg_src(r12);
       MemoryLocation mem_src(r12, 0);
