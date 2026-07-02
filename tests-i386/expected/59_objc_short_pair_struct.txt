@@ -1,0 +1,5 @@
+ok size_w
+ok size_h
+ok rect
+ok direct
+exit_code: 0

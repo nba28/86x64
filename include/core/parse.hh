@@ -105,6 +105,18 @@ namespace MachO {
        * confusion in M64 re-parses). */
       std::set<std::size_t> func_syms;
 
+      /* True iff the LC_SYMTAB contains at least one LOCAL (non-N_EXT) N_SECT
+       * symbol whose address lies in an EXECUTABLE segment — i.e. the binary
+       * still carries symbols for its static/file-scope functions. This is the
+       * confidence signal for DataParser's exec-target pointer gate: when the
+       * statics are symboled, EVERY genuine code pointer baked into __DATA/
+       * __OBJC (fn-pointer tables, ObjC1 method IMPs) matches a func_syms
+       * entry, so a data word aliasing a mid-function text address can be
+       * safely rejected as a constant. Locals-stripped binaries leave this
+       * false and keep the legacy permissive detection (can't discriminate).
+       * Populated in the Symtab ctor alongside func_syms. */
+      bool have_local_text_syms = false;
+
       /* GCC PIC thunks (`___i686.get_pc_thunk.<r>`), keyed by the thunk's
        * entry vmaddr (= its nlist n_value) and valued by the x86 GPR encoding
        * (0=EAX,1=ECX,2=EDX,3=EBX,5=EBP,6=ESI,7=EDI) the thunk loads with the

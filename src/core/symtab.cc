@@ -78,6 +78,20 @@ namespace MachO {
          if (is_sect && nl.n_value != 0) {
             env.func_syms.insert(static_cast<std::size_t>(nl.n_value));
 
+            /* Local (non-N_EXT) defined symbol in an executable segment ⇒ the
+             * binary's static functions are still symboled. This arms
+             * DataParser's exec-target pointer gate (see ParseEnv::
+             * have_local_text_syms). */
+            if (!env.have_local_text_syms && (nl.n_type & N_EXT) == 0) {
+               for (Segment<bits> *seg : env.archive.segments()) {
+                  if ((seg->segment_command.initprot & VM_PROT_EXECUTE) != 0 &&
+                      seg->contains_vmaddr(nl.n_value)) {
+                     env.have_local_text_syms = true;
+                     break;
+                  }
+               }
+            }
+
             /* GCC PIC thunk?  `___i686.get_pc_thunk.<r>` is a defined N_SECT
              * leaf (`mov %r,(%esp); ret`) whose call is the separate-thunk PIC
              * anchor.  Record (entry vmaddr -> GPR encoding) GLOBALLY so a

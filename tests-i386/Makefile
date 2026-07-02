@@ -179,6 +179,13 @@ run-only: build-only
 
 sysroot:
 	@mkdir -p $(I386_SYSROOT)/usr/lib/system
+	@# headers: the install DVD carries no usr/include; stage the extracted
+	@# 10.6 SDK's headers (see memory asset_library_convention) so CC_I386's
+	@# -isysroot finds <stdio.h> etc. after a /tmp wipe.
+	@if [ ! -f "$(I386_SYSROOT)/usr/include/stdio.h" ] && \
+	    [ -d "$(HOME)/projects/Library/SDKs/MacOSX10.6.sdk/usr/include" ]; then \
+	  cp -R "$(HOME)/projects/Library/SDKs/MacOSX10.6.sdk/usr/include" "$(I386_SYSROOT)/usr/include"; \
+	fi
 	@for f in "$(SL_DVD)/usr/lib"/libSystem*.dylib; do \
 	  n=$$(basename "$$f"); \
 	  lipo -thin i386 "$$f" -output "$(I386_SYSROOT)/usr/lib/$$n" 2>/dev/null || true; \
@@ -238,6 +245,12 @@ $(BUILD_DIR)/12_static_byte_flag.o: $(SRC_DIR)/12_static_byte_flag.c | $(BUILD_D
 
 # 16_data_mid_blob_write: -fno-pic for the absolute mid-__data byte store.
 $(BUILD_DIR)/16_data_mid_blob_write.o: $(SRC_DIR)/16_data_mid_blob_write.c | $(BUILD_DIR)
+	$(CC_I386) -fno-pic -c $< -o $@
+
+# 60_data_const_text_alias: -fno-pic so the constants are read via absolute
+# [disp32] loads (the shape real fixed-address i386 apps like Quinn use). The
+# PIC-anchored mid-blob SHORT-read path has a separate known gap (todo_gaps).
+$(BUILD_DIR)/60_data_const_text_alias.o: $(SRC_DIR)/60_data_const_text_alias.c | $(BUILD_DIR)
 	$(CC_I386) -fno-pic -c $< -o $@
 
 # 20_callback_qsort: -fno-stack-protector suppresses __stack_chk_guard setup,

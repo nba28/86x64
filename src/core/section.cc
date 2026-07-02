@@ -239,11 +239,17 @@ namespace MachO {
        * Universal to every i386 ObjC binary (objc_symtab is part of the ABI).
        */
       bool in_objc_symbols = false;
+      /* __TEXT-resident data (i.e. __TEXT,__const) hosts switch jump tables
+       * whose entries point at MID-function basic blocks — no func_syms entry —
+       * so the exec-target function-entry gate below must not apply there. */
+      bool is_text_const_sect = false;
       if (env.current_section != nullptr) {
          const auto& cs = env.current_section->sect;
          in_objc_symbols =
             strncmp(cs.segname, SEG_OBJC, sizeof(cs.segname)) == 0 &&
             strncmp(cs.sectname, "__symbols", sizeof(cs.sectname)) == 0;
+         is_text_const_sect =
+            strncmp(cs.segname, SEG_TEXT, sizeof(cs.segname)) == 0;
       }
 
       bool is_pointer = false;
@@ -277,6 +283,48 @@ namespace MachO {
                }
                if (exec && in_objc_symbols) {
                   break;   /* objc_symtab count word aliasing __text -> constant */
+               }
+               /* CODE-target FUNCTION-ENTRY gate (M32, symboled binaries).
+                * A genuine pointer into an INSTRUCTIONS section baked into
+                * __DATA/__OBJC data is a function entry: a fn-pointer table
+                * slot, a C++ vtable slot, or an ObjC1 method-list IMP — all of
+                * which carry an N_SECT nlist (func_syms) when the binary keeps
+                * its local symbols (have_local_text_syms). A data word that
+                * merely ALIASES a mid-function __text address is a constant:
+                * small-struct packs like Quinn's IGSize {4,4} = 0x00040004,
+                * shape/bitmask tables (0x10000/0x20200/...), fixed-point
+                * values. Rebasing those "+segment delta" corrupts them with a
+                * slide-dependent value — Quinn's piece matrix became
+                * {w=8156,h=657} and -[QuinnMatrix usedRect] scanned 1.7MB off
+                * a 16-byte piece shape (SIGBUS, black board).
+                * SECTION-granular, not segment-: __TEXT also hosts DATA
+                * sections (__cstring/__const/literals) whose interior addrs
+                * selector-ref slots and string pointers legitimately target
+                * with NO symbol — only targets inside a section marked
+                * S_ATTR_(PURE|SOME)_INSTRUCTIONS are gated. Pointers to
+                * IMPORTED functions never take this path (the linker emits
+                * external relocs / symbol-ptr sections for them), and switch
+                * jump tables target mid-function basic blocks but live in
+                * __TEXT,__const or inline __text — never __DATA/__OBJC — so
+                * requiring a func_syms hit here is exact, not heuristic, for
+                * locals-symboled binaries. Locals-stripped binaries keep the
+                * legacy permissive detection (gate disarmed). M32-only: the
+                * M64 convert re-parse must keep its established behavior. */
+               if (exec && bits == Bits::M32 && env.have_local_text_syms &&
+                   !is_text_const_sect &&
+                   env.func_syms.count(value) == 0) {
+                  bool target_is_instructions = false;
+                  for (Section<bits> *tsec : seg->sections) {
+                     if (!tsec->contains_vmaddr(value)) continue;
+                     target_is_instructions =
+                        (tsec->sect.flags &
+                         (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS))
+                        != 0;
+                     break;
+                  }
+                  if (target_is_instructions) {
+                     break;   /* mid-function code alias -> constant */
+                  }
                }
                is_pointer = true;
                break;
