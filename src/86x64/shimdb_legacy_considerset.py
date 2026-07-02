@@ -69,6 +69,28 @@ def nm_undefined_imports(binary, arch):
         # `nm -u` lines are just the undefined name (optionally with a "(...)").
         if s and s[0].startswith("_"):
             syms.add(s[0])
+    # A translated target that was ALREADY retranslated against the current
+    # shim set imports `___X (from libabiconv)` (the baked redirect) instead of
+    # the raw `_X`. That import is positive PROOF the target calls `_X`, so
+    # normalize it back — otherwise a rebuild AFTER a retranslate drops every
+    # shim the previous build created (the consider set no longer sees the raw
+    # name), and the next resync deploys a libabiconv missing the very ___X
+    # exports the deployed dylib binds -> dyld "Symbol not found". Makes the
+    # import-driven set IDEMPOTENT across build->retranslate->build cycles.
+    # Scoped to the libabiconv two-level leaf (`nm -m`): a genuine triple-
+    # underscore import from elsewhere (libSystem's ___assert_rtn = C
+    # __assert_rtn) must NOT contribute a stripped phantom `_assert_rtn` —
+    # that name trips abigen's shim-name collision guard and suppresses the
+    # REAL ___assert_rtn shim.
+    outm = subprocess.run(["nm", "-m", "-arch", arch, binary],
+                          capture_output=True, text=True).stdout
+    import re as _re
+    pat = _re.compile(r"\(undefined[^)]*\)\s+(?:weak\s+)?external\s+(___\S+)\s+"
+                      r"\(from\s+libabiconv\)")
+    for line in outm.splitlines():
+        m = pat.search(line)
+        if m:
+            syms.add(m.group(1)[2:])
     return syms
 
 def nm_libabiconv_shims(libabiconv):

@@ -93,6 +93,20 @@ def nm_imports_with_framework(binary, arch):
         m = pat.search(line)
         if m:
             fw.setdefault(m.group(2).strip(), set()).add(m.group(1))
+            # A `___X (from libabiconv)` bind = ALREADY redirected to the
+            # libabiconv shim by a previous retranslate — positive proof the
+            # target calls `_X`. Normalize it back so the consider set stays
+            # IDEMPOTENT across build->retranslate->build cycles; without this,
+            # a rebuild after a retranslate drops the shims the previous build
+            # created and the next resync breaks the deployed dylib's ___X
+            # binds (dyld "Symbol not found"). Scoped to the libabiconv leaf:
+            # a genuine triple-underscore import from elsewhere (libSystem's
+            # ___assert_rtn = C __assert_rtn) must NOT contribute a stripped
+            # `_assert_rtn` — that phantom name trips abigen's shim-name
+            # collision guard and suppresses the REAL ___assert_rtn shim.
+            if m.group(1).startswith("___") and \
+               m.group(2).strip() == "libabiconv":
+                fw.setdefault(m.group(2).strip(), set()).add(m.group(1)[2:])
     return fw
 
 
