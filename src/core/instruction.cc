@@ -1624,42 +1624,97 @@ namespace MachO {
                      throw error("CALL_NEAR_MEMv with unexpected ModR/M 0x%02x at vmaddr 0x%zx",
                                  modrm, this->loc.vmaddr);
                   }
-                  mov_buf[op_idx] = 0x8B;
-                  mov_buf[op_idx + 1] = modrm & 0xC7;     /* reg -> eax */
-                  auto mov_inst = new Instruction<Bits::M64>(mov_buf);
-                  mov_inst->memidx = 0;
-                  /* mod=00 rm=101 in M32 = `[disp32]` (absolute); in M64
-                   * the same bytes decode as `[rip+disp32]`. We want the
-                   * disp resolved rip-relative so the load hits the
-                   * translated pointee at runtime. That's the default
-                   * (memdisp_absolute=false). For the SIB-no-base form
-                   * (rm=100, SIB base=101) it stays absolute — match what
-                   * JMP_MEMv does. */
-                  if ((modrm & 0xC7) == 0x04) {
-                     /* SIB present: check for no-base (SIB base=101 with
-                      * mod=00). */
-                     const uint8_t sib = mov_buf.at(op_idx + 2);
-                     if ((sib & 0x07) == 0x05) {
-                        mov_inst->memdisp_absolute = true;
+
+                  Instruction<Bits::M64> *mov_inst = nullptr;
+                  Instruction<Bits::M64> *pre_lea  = nullptr;
+                  if (pic_anchored && memdisp) {
+                     /* PIC-anchored `call *disp(%anchor[,idx,s])`: the parser
+                      * resolved memdisp to the target slot/table (anchor+disp).
+                      * The anchor register is a DEAD low-32 artifact in M64 (it
+                      * now holds the lea-r11 return address, not the i386 anchor
+                      * vmaddr), so the reg-relative narrowing below — which keeps
+                      * the anchor as the load base AND resolves memdisp into a
+                      * rip-relative disp — double-counts the base and lands on a
+                      * garbage address (crash calling the fn-ptr). Reach the
+                      * resolved blob DIRECTLY instead, mirroring the load/store
+                      * pic_anchored rewrite later in Transform:
+                      *   no live index : mov eax, [rip+slot]     (drop anchor)
+                      *   live index    : lea r11,[rip+base];
+                      *                   mov eax,[r11 + idx*s]   (keep index)
+                      * memdisp_offset carries any intra-blob byte offset from the
+                      * writable-__DATA containing fallback (section.cc). */
+                     const xed_reg_enum_t idxreg =
+                        xed_decoded_inst_get_index_reg(call_ops, 0);
+                     opcode_t rip_buf;
+                     for (std::size_t j = 0; j < op_idx; ++j) {
+                        rip_buf.push_back(mov_buf[j]); /* legacy prefixes (0x66) */
                      }
-                  }
-                  if (memdisp) {
-                     env.resolve(memdisp, &mov_inst->memdisp);
-                  }
-                  /* Preserve brdisp if any (rare for indirect call but the
-                   * parser may still have set it via the reloc table). */
-                  if (brdisp) {
-                     env.resolve(brdisp, &mov_inst->brdisp);
+                     if (idxreg == XED_REG_INVALID) {
+                        rip_buf.push_back(0x8B);       /* mov r32, r/m32 */
+                        rip_buf.push_back(0x05);       /* mod=00 reg=eax rm=101 */
+                        rip_buf.insert(rip_buf.end(), 4, (uint8_t)0x00);
+                        mov_inst = new Instruction<Bits::M64>(rip_buf);
+                        mov_inst->memidx = 0;
+                        mov_inst->memdisp_absolute = false;
+                        env.resolve(memdisp, &mov_inst->memdisp);
+                        mov_inst->memdisp_offset = memdisp_offset;
+                     } else {
+                        const uint8_t sib = mov_buf.at(op_idx + 2);
+                        const uint8_t scale_f = (sib >> 6) & 0x03;
+                        const uint8_t idx_f   = (sib >> 3) & 0x07;
+                        pre_lea = new Instruction<Bits::M64>(
+                           opcode::lea_r11_mem_rip_disp32());
+                        pre_lea->memidx = 0;
+                        env.resolve(memdisp, &pre_lea->memdisp);
+                        pre_lea->memdisp_offset = memdisp_offset;
+                        rip_buf.push_back(0x41);       /* REX.B -> r11 base */
+                        rip_buf.push_back(0x8B);
+                        rip_buf.push_back(0x04);       /* mod=00 reg=eax rm=100 (SIB) */
+                        rip_buf.push_back((uint8_t)((scale_f << 6) |
+                                                    (idx_f << 3) | 0x03)); /* base=r11 */
+                        mov_inst = new Instruction<Bits::M64>(rip_buf);
+                        mov_inst->memidx = 0;
+                     }
+                  } else {
+                     mov_buf[op_idx] = 0x8B;
+                     mov_buf[op_idx + 1] = modrm & 0xC7;     /* reg -> eax */
+                     mov_inst = new Instruction<Bits::M64>(mov_buf);
+                     mov_inst->memidx = 0;
+                     /* mod=00 rm=101 in M32 = `[disp32]` (absolute); in M64
+                      * the same bytes decode as `[rip+disp32]`. We want the
+                      * disp resolved rip-relative so the load hits the
+                      * translated pointee at runtime. That's the default
+                      * (memdisp_absolute=false). For the SIB-no-base form
+                      * (rm=100, SIB base=101) it stays absolute — match what
+                      * JMP_MEMv does. */
+                     if ((modrm & 0xC7) == 0x04) {
+                        /* SIB present: check for no-base (SIB base=101 with
+                         * mod=00). */
+                        const uint8_t sib = mov_buf.at(op_idx + 2);
+                        if ((sib & 0x07) == 0x05) {
+                           mov_inst->memdisp_absolute = true;
+                        }
+                     }
+                     if (memdisp) {
+                        env.resolve(memdisp, &mov_inst->memdisp);
+                     }
+                     /* Preserve brdisp if any (rare for indirect call but the
+                      * parser may still have set it via the reloc table). */
+                     if (brdisp) {
+                        env.resolve(brdisp, &mov_inst->brdisp);
+                     }
                   }
 
                   auto jmp_inst =
                      new Instruction<Bits::M64>(opcode::jmp_r64(XED_REG_RAX));
                   auto insts = call_op(jmp_inst);
                   /* call_op layout: lea, push_r32(r11d) (3 insts), jmp_inst,
-                   * ret_placeholder. Splice mov_inst right before jmp_inst. */
+                   * ret_placeholder. Splice mov_inst (preceded by pre_lea for
+                   * the indexed pic_anchored form) right before jmp_inst. */
                   auto it = insts.end();
                   --it; --it;
-                  insts.insert(it, mov_inst);
+                  auto mit = insts.insert(it, mov_inst);
+                  if (pre_lea) { insts.insert(mit, pre_lea); }
                   /* trap a `call [mem]` through a NULL fn-ptr slot (env-gated):
                    * after the 4-byte load into rax, before `jmp rax`. */
                   auto trap = null_trap(XED_REG_RAX);
@@ -1720,23 +1775,68 @@ namespace MachO {
                      throw error("JMP_MEMv with unexpected ModR/M 0x%02x at vmaddr 0x%zx",
                                  modrm, this->loc.vmaddr);
                   }
-                  mov_buf[op_idx] = 0x8B;             /* mov r32, r/m32 */
-                  mov_buf[op_idx + 1] = modrm & 0xC7; /* reg -> eax */
-                  auto mov_inst = new Instruction<Bits::M64>(mov_buf);
-                  mov_inst->memidx = 0;
-                  /* SIB no-base form (mod=00 rm=100, SIB base=101) is an
-                   * absolute disp32 in M64 too — keep it absolute (the
-                   * wrapper's runtime __text patcher applies the slide),
-                   * matching CALL_NEAR_MEMv. Other forms keep their
-                   * register-relative disp untouched. */
-                  if ((modrm & 0xC7) == 0x04) {
-                     const uint8_t sib = mov_buf.at(op_idx + 2);
-                     if ((sib & 0x07) == 0x05) {
-                        mov_inst->memdisp_absolute = true;
+                  Instruction<Bits::M64> *mov_inst = nullptr;
+                  Instruction<Bits::M64> *pre_lea  = nullptr;
+                  if (pic_anchored && memdisp) {
+                     /* PIC-anchored `jmp *disp(%anchor[,idx,s])` (tail-call
+                      * through an anchor-relative fn-ptr / jump-table). Same
+                      * root cause as the CALL_NEAR_MEMv case: the anchor base
+                      * is dead in M64, so reach the resolved blob rip-relative
+                      * instead of keeping the anchor + a rip-relative disp.
+                      *   no live index : mov eax, [rip+slot]     (drop anchor)
+                      *   live index    : lea r11,[rip+base];
+                      *                   mov eax,[r11 + idx*s]   (keep index) */
+                     const xed_reg_enum_t idxreg =
+                        xed_decoded_inst_get_index_reg(operands, 0);
+                     opcode_t rip_buf;
+                     for (std::size_t j = 0; j < op_idx; ++j) {
+                        rip_buf.push_back(mov_buf[j]); /* legacy prefixes (0x66) */
                      }
-                  }
-                  if (memdisp) {
-                     env.resolve(memdisp, &mov_inst->memdisp);
+                     if (idxreg == XED_REG_INVALID) {
+                        rip_buf.push_back(0x8B);       /* mov r32, r/m32 */
+                        rip_buf.push_back(0x05);       /* mod=00 reg=eax rm=101 */
+                        rip_buf.insert(rip_buf.end(), 4, (uint8_t)0x00);
+                        mov_inst = new Instruction<Bits::M64>(rip_buf);
+                        mov_inst->memidx = 0;
+                        mov_inst->memdisp_absolute = false;
+                        env.resolve(memdisp, &mov_inst->memdisp);
+                        mov_inst->memdisp_offset = memdisp_offset;
+                     } else {
+                        const uint8_t sib = mov_buf.at(op_idx + 2);
+                        const uint8_t scale_f = (sib >> 6) & 0x03;
+                        const uint8_t idx_f   = (sib >> 3) & 0x07;
+                        pre_lea = new Instruction<Bits::M64>(
+                           opcode::lea_r11_mem_rip_disp32());
+                        pre_lea->memidx = 0;
+                        env.resolve(memdisp, &pre_lea->memdisp);
+                        pre_lea->memdisp_offset = memdisp_offset;
+                        rip_buf.push_back(0x41);       /* REX.B -> r11 base */
+                        rip_buf.push_back(0x8B);
+                        rip_buf.push_back(0x04);       /* mod=00 reg=eax rm=100 (SIB) */
+                        rip_buf.push_back((uint8_t)((scale_f << 6) |
+                                                    (idx_f << 3) | 0x03)); /* base=r11 */
+                        mov_inst = new Instruction<Bits::M64>(rip_buf);
+                        mov_inst->memidx = 0;
+                     }
+                  } else {
+                     mov_buf[op_idx] = 0x8B;             /* mov r32, r/m32 */
+                     mov_buf[op_idx + 1] = modrm & 0xC7; /* reg -> eax */
+                     mov_inst = new Instruction<Bits::M64>(mov_buf);
+                     mov_inst->memidx = 0;
+                     /* SIB no-base form (mod=00 rm=100, SIB base=101) is an
+                      * absolute disp32 in M64 too — keep it absolute (the
+                      * wrapper's runtime __text patcher applies the slide),
+                      * matching CALL_NEAR_MEMv. Other forms keep their
+                      * register-relative disp untouched. */
+                     if ((modrm & 0xC7) == 0x04) {
+                        const uint8_t sib = mov_buf.at(op_idx + 2);
+                        if ((sib & 0x07) == 0x05) {
+                           mov_inst->memdisp_absolute = true;
+                        }
+                     }
+                     if (memdisp) {
+                        env.resolve(memdisp, &mov_inst->memdisp);
+                     }
                   }
 
                   auto jmp_inst = new Instruction<Bits::M64>(
@@ -1744,8 +1844,12 @@ namespace MachO {
                   /* trap a `jmp [mem]` (switch dispatch / tail-call fn-ptr)
                    * through a NULL slot (env-gated). */
                   auto trap = null_trap(XED_REG_RAX);
-                  if (trap.empty()) { return {mov_inst, jmp_inst}; }
+                  if (trap.empty()) {
+                     if (pre_lea) { return {pre_lea, mov_inst, jmp_inst}; }
+                     return {mov_inst, jmp_inst};
+                  }
                   trap.push_front(mov_inst);
+                  if (pre_lea) { trap.push_front(pre_lea); }
                   trap.push_back(jmp_inst);
                   return trap;
                }
@@ -2293,6 +2397,12 @@ namespace MachO {
                      (opcode::lea_r11_mem_rip_disp32());
                   lea_sib->memidx = 0;
                   env.resolve(memdisp, &lea_sib->memdisp);
+                  /* Carry any intra-blob byte offset (set by section.cc's
+                   * DetectPicAnchoredDisps writable-__DATA containing fallback
+                   * for a mid-blob anchored access) onto the base-computing
+                   * lea, so `r11 = containing_blob + offset` is the exact
+                   * table base. Normally 0 (boundary-aligned target). */
+                  lea_sib->memdisp_offset = memdisp_offset;
 
                   /* Rebuild main instruction:
                    *   prefixes + opcode + new ModR/M(mod=00,rm=04) +
@@ -2355,6 +2465,14 @@ namespace MachO {
                new_inst->memidx = 0;
                new_inst->memdisp_absolute = false; /* rip-relative */
                env.resolve(memdisp, &new_inst->memdisp);
+               /* Carry any intra-blob byte offset onto the synthesised
+                * rip-relative instruction. section.cc's DetectPicAnchoredDisps
+                * sets memdisp_offset when an anchored access reads an INTERIOR
+                * byte/short of a multi-byte __DATA blob (containing fallback);
+                * Emit adds it to the resolved blob vmaddr so the disp targets
+                * the exact byte instead of skewing to the next blob. Normally 0
+                * (boundary-aligned target) — a no-op for every other case. */
+               new_inst->memdisp_offset = memdisp_offset;
                return {new_inst};
             }
          pic_anchor_fallthrough:

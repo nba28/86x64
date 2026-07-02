@@ -965,6 +965,30 @@ namespace MachO {
                 * rip-relative — transform consumes the flag and
                 * synthesises a new rip-relative encoding. */
                inst->memdisp_absolute = false;
+
+               /* Mid-blob containing fallback (mirrors instruction.cc's
+                * [rip+disp] / [disp32] absolute paths). A PIC-anchored read of
+                * an INTERIOR byte/short of a multi-byte __DATA word — e.g.
+                * `movswl kSize+2(%anchor)` on a `{short,short}` global — makes
+                * `target` a vmaddr INSIDE a blob, not at its start.
+                * add_placeholder() parks that mid-blob placeholder just BEFORE
+                * the next blob in Parse2, so the emitted rip-relative disp
+                * skews to the neighbouring datum (+offset). Prefer the
+                * containing blob + byte offset so the emit targets the exact
+                * interior byte and survives the modify/convert re-layout. Gated
+                * to writable __DATA like the sibling paths (the containing-blob
+                * guess corrupts fragile-ABI __OBJC metadata — see
+                * ParseEnv::vmaddr_in_writable_data); override=true replaces the
+                * placeholder when a containing blob exists, else the placeholder
+                * resolution stands (e.g. a __bss zerofill target with no blob).
+                * The M32→M64 transform propagates memdisp_offset onto the
+                * synthesised rip-relative instruction. */
+               if (env.vmaddr_in_writable_data(target)) {
+                  env.vmaddr_resolver.resolve_containing(
+                     target,
+                     (const SectionBlob<bits> **)&inst->memdisp,
+                     &inst->memdisp_offset, /*override=*/true);
+               }
                break;
             }
          }

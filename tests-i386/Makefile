@@ -249,7 +249,8 @@ $(BUILD_DIR)/16_data_mid_blob_write.o: $(SRC_DIR)/16_data_mid_blob_write.c | $(B
 
 # 60_data_const_text_alias: -fno-pic so the constants are read via absolute
 # [disp32] loads (the shape real fixed-address i386 apps like Quinn use). The
-# PIC-anchored mid-blob SHORT-read path has a separate known gap (todo_gaps).
+# PIC-anchored variant of the same idioms (mid-blob SHORT read + anchor-relative
+# fn-ptr call) is now covered by 61_pic_anchor_short_read (default PIC rule).
 $(BUILD_DIR)/60_data_const_text_alias.o: $(SRC_DIR)/60_data_const_text_alias.c | $(BUILD_DIR)
 	$(CC_I386) -fno-pic -c $< -o $@
 
