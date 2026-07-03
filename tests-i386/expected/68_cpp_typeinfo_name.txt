@@ -1,0 +1,11 @@
+__ZTIb             name='b' vtable=set
+__ZTIw             name='w' vtable=set
+__ZTIx             name='x' vtable=set
+__ZTIi             name='i' vtable=set
+__ZTId             name='d' vtable=set
+__ZTIPKw           name='PKw' vtable=set
+__ZTIPKc           name='PKc' vtable=set
+__ZTISt9exception  name='St9exception' vtable=set
+__ZTISt13runtime_error name='St13runtime_error' vtable=set
+strcmp(b,w) < 0
+exit_code: 0

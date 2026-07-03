@@ -1416,5 +1416,14 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
 __attribute__((constructor))
 static void objc_slide_init(void) {
    if (getenv("ABICONV_OBJC_SLIDE_VERBOSE")) { g_verbose = 1; }
+   /* Fill the i386-layout libstdc++ RTTI typeinfos (cxx_typeinfo.c) BEFORE
+    * registering the add-image callback: _dyld_register_func_for_add_image runs
+    * slide_objc synchronously for already-mapped images, i.e. it runs the
+    * translated app's static initializers right here — and those (boost::python
+    * converter registration) read __ZTI* typeinfo __name fields. Mach-O does not
+    * honor constructor priorities, so we cannot rely on cxx_typeinfo.c's own
+    * constructor having run first; call it explicitly (idempotent). */
+   extern void _86x64_cxx_typeinfo_init(void);
+   _86x64_cxx_typeinfo_init();
    _dyld_register_func_for_add_image(&slide_objc);
 }

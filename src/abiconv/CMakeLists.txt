@@ -413,6 +413,7 @@ add_library(abiconv SHARED
   tls_shim.c
   pthread_sync_shim.c
   cxx_shim.c
+  cxx_typeinfo.c
   eh_shim.c
   proc_shim.c
   osatomic_shim.c
