@@ -1530,18 +1530,6 @@ static void objc_slide_init(void) {
     * may not have constructed yet — Civ IV s24). */
    extern void _86x64_cxx_typeinfo_init(void);
    _86x64_cxx_typeinfo_init();
-   /* Diagnostic gate (Fable-5 iPhoto regression bisect): the cross-copy typeinfo
-    * propagation (Civ IV s24) redirects/re-registers the i386-layout RTTI surface
-    * in EVERY co-located libabiconv copy. Targets with many copies AND native C++
-    * that throws/catches across the boundary (iPhoto: 14 copies + eOkaoFr OKAO)
-    * regressed to an uncaught-exception abort (libc++abi __class_type_info::
-    * can_catch fails to pointer-match a thrown typeinfo against the catch clause's,
-    * falls to name compare, terminates). Set ABICONV_NO_CXX_TYPEINFO_ALLCOPIES=1 to
-    * skip ONLY the all-copies walk (self-init still runs) to confirm that half of
-    * the regression without a full Jun29->Jul3 libabiconv bisect. UNIVERSAL: gated
-    * on the structural property (multi-copy + cross-image RTTI), not a target name. */
-   if (!getenv("ABICONV_NO_CXX_TYPEINFO_ALLCOPIES")) {
-      cxx_typeinfo_init_all_copies();
-   }
+   cxx_typeinfo_init_all_copies();
    _dyld_register_func_for_add_image(&slide_objc);
 }
