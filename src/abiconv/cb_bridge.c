@@ -109,8 +109,44 @@ void x64_cb_dump_ring(void) {
  * deduped on (fn, sig), so re-registering the same callback (timers
  * recreated per window, etc.) reuses its slot. NULL passes through as NULL
  * (optional callbacks). */
+/* If fn32 is the address of one of THIS copy's own callback trampolines,
+ * return its slot index (else -1). The program can hand a callback WE gave it
+ * (a cb trampoline address) back to another bridged API — a UPP passed on, a
+ * proc stored then re-registered. Wrapping such a pointer a SECOND time as if
+ * it were i386 code makes cb_dispatch invoke it via _86x64_call_i386, which
+ * lays a 4-byte i386 return frame and jmps to the (native) trampoline — whose
+ * native 8-byte `ret` then over-pops the frame and fuses the adjacent 4-byte
+ * argument (a stack pointer) into the high half of the return PC -> jump to a
+ * non-canonical address (Civ IV s28: rip=0x80935a28`02182977, low = the
+ * trampoline path's own .cback, high = an i386-stack address). The stubs are
+ * contiguous and monotonic (cb_tramp.asm emits _x64_cb_tramp_0..N-1 in order). */
+static int cb_tramp_slot(uint32_t fn32) {
+   uint64_t f = (uint64_t)fn32;
+   uint64_t lo = x64_cb_tramp_table[0];
+   uint64_t stride = x64_cb_tramp_table[1] - x64_cb_tramp_table[0];
+   uint64_t hi = x64_cb_tramp_table[x64_cb_nslots - 1] + stride;
+   if (f < lo || f >= hi || stride == 0) { return -1; }
+   return (int)((f - lo) / stride);
+}
+
 uint64_t x64_cb_wrap(uint32_t fn32, const x64_cb_sig *sig) {
    if (fn32 == 0) { return 0; }
+
+   /* Re-registration of a callback we already handed out: bind the ORIGINAL
+    * i386 function (recovered from the trampoline's slot) under the CURRENT
+    * signature, so dispatch enters real translated code — whose i386 4-byte
+    * `ret` idiom is high-half-clean — instead of jmp'ing to a native trampoline
+    * through the 4-byte frame that over-pops (s28). Using the current sig (not
+    * the slot's original) keeps marshalling correct if the same callback is
+    * registered with a different API's argument shape. The original fn is never
+    * itself a trampoline (it was screened here at first wrap), so the recursion
+    * bottoms out immediately. */
+   int osl = cb_tramp_slot(fn32);
+   if (osl >= 0) {
+      uint32_t orig = ((uint32_t)osl < g_nbind) ? g_bind[osl].fn32 : 0;
+      if (orig && orig != fn32) { return x64_cb_wrap(orig, sig); }
+      return (uint64_t)fn32;   /* degenerate: hand the native stub straight back */
+   }
 
    os_unfair_lock_lock(&g_bind_lock);
    for (uint32_t i = 0; i < g_nbind; ++i) {
