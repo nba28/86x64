@@ -332,10 +332,17 @@ static void fixup_translated_dylib_slots(void) {
                    * skip it here or the disp32 below would never be slid.
                    */
                   size_t pfx = (p[k] == 0x67) ? 1 : 0;
-                  if (k + pfx + 7 > sz) continue;
-                  uint8_t op = p[k + pfx];
-                  uint8_t modrm = p[k + pfx + 1];
-                  uint8_t sib = p[k + pfx + 2];
+                  /* Optional two-byte-opcode escape (0x0F). The sign/zero-extend
+                   * loads movsbl/movswl (0F BE/BF) and movzbl/movzwl (0F B6/B7)
+                   * also use `[disp32 + idx*scale]` (e.g. Quinn's
+                   * -[QuinnGame incrementScore...]'s `movswl disp(,%eax,8)` into
+                   * __TEXT,__const). The 0F escape shifts ModRM/SIB/disp32 one
+                   * byte, so account for it or the disp32 below is never slid. */
+                  size_t esc = (k + pfx < sz && p[k + pfx] == 0x0F) ? 1 : 0;
+                  if (k + pfx + esc + 7 > sz) continue;
+                  uint8_t op = p[k + pfx + esc];
+                  uint8_t modrm = p[k + pfx + esc + 1];
+                  uint8_t sib = p[k + pfx + esc + 2];
                   /* SIB must encode base=disp32 (low 3 bits = 101) at scale=4
                    * (0x85, 4-byte table entries) or scale=8 (0xC5, 8-byte
                    * entries — e.g. Quinn's `movl disp(,%edx,8)`). Index any. */
@@ -344,23 +351,30 @@ static void fixup_translated_dylib_slots(void) {
                   /* mod=00 rm=100 means "SIB follows with disp32 base" */
                   if ((modrm & 0xC7) != 0x04) continue;
                   int matched_pat = 0;
-                  for (int q = 0; patterns[q].op; ++q) {
-                     if (op != patterns[q].op) continue;
-                     /* When patterns.modrm != 0, the /N reg field must match. */
-                     if (patterns[q].modrm != 0
-                         && (modrm & 0x38) != (patterns[q].modrm & 0x38)) continue;
-                     matched_pat = 1;
-                     break;
+                  if (esc) {
+                     /* movsx/movzx two-byte loads (any dest reg /r): the
+                      * disp32-base SIB above already disambiguates the form. */
+                     matched_pat = (op == 0xBE || op == 0xBF
+                                    || op == 0xB6 || op == 0xB7);
+                  } else {
+                     for (int q = 0; patterns[q].op; ++q) {
+                        if (op != patterns[q].op) continue;
+                        /* When patterns.modrm != 0, the /N reg field must match. */
+                        if (patterns[q].modrm != 0
+                            && (modrm & 0x38) != (patterns[q].modrm & 0x38)) continue;
+                        matched_pat = 1;
+                        break;
+                     }
                   }
                   if (!matched_pat) continue;
                   uint32_t v;
-                  memcpy(&v, p + k + pfx + 3, sizeof v);
+                  memcpy(&v, p + k + pfx + esc + 3, sizeof v);
                   if (v >= dylib_vmaddr_lo
                       && v <  dylib_vmaddr_hi) {
                      uint32_t patched_val = (uint32_t)((uintptr_t)v + slide);
-                     memcpy(p + k + pfx + 3, &patched_val, sizeof patched_val);
+                     memcpy(p + k + pfx + esc + 3, &patched_val, sizeof patched_val);
                      ++patched;
-                     k += pfx + 6;  /* skip past this instruction window */
+                     k += pfx + esc + 6;  /* skip past this instruction window */
                   }
                }
 

@@ -699,15 +699,24 @@ static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
              * the one the wrapper's table lacked — 89 STORE. */
             for (size_t k = 0; k + 7 <= sz; ++k) {
                size_t pfx = (p[k] == 0x67) ? 1 : 0;
-               if (k + pfx + 7 > sz) { continue; }
-               const uint8_t op    = p[k + pfx];
-               const uint8_t modrm = p[k + pfx + 1];
-               const uint8_t sib   = p[k + pfx + 2];
+               /* Optional two-byte-opcode escape (0x0F): movsbl/movswl
+                * (0F BE/BF) and movzbl/movzwl (0F B6/B7) also index a disp32
+                * table (Quinn's -[QuinnGame incrementScore...]
+                * `movswl disp(,%eax,8)` into __TEXT,__const). The 0F shifts
+                * ModRM/SIB/disp32 one byte. */
+               size_t esc = (k + pfx < sz && p[k + pfx] == 0x0F) ? 1 : 0;
+               if (k + pfx + esc + 7 > sz) { continue; }
+               const uint8_t op    = p[k + pfx + esc];
+               const uint8_t modrm = p[k + pfx + esc + 1];
+               const uint8_t sib   = p[k + pfx + esc + 2];
                const uint8_t sc = sib & 0xC7;
                if (sc != 0x85 && sc != 0xC5) { continue; }
                if ((modrm & 0xC7) != 0x04) { continue; }
                int ok = 0;
-               if (op == 0xFF) {
+               if (esc) {
+                  /* movsx/movzx two-byte loads (any dest reg /r) */
+                  ok = (op == 0xBE || op == 0xBF || op == 0xB6 || op == 0xB7);
+               } else if (op == 0xFF) {
                   const uint8_t reg = modrm & 0x38;
                   ok = (reg == 0x20 /* /4 jmp */) || (reg == 0x10 /* /2 call */);
                } else {
@@ -719,13 +728,13 @@ static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
                }
                if (!ok) { continue; }
                uint32_t fv, mv;
-               memcpy(&fv, p + k + pfx + 3, sizeof fv);
-               memcpy(&mv, mem + k + pfx + 3, sizeof mv);
+               memcpy(&fv, p + k + pfx + esc + 3, sizeof fv);
+               memcpy(&mv, mem + k + pfx + esc + 3, sizeof mv);
                if (fv >= vmaddr_lo && fv < vmaddr_hi && mv == fv) {
                   const uint32_t nv = (uint32_t)((uint64_t)fv + (uint64_t)slide);
-                  memcpy(mem + k + pfx + 3, &nv, sizeof nv);
+                  memcpy(mem + k + pfx + esc + 3, &nv, sizeof nv);
                   ++patched;
-                  k += pfx + 6;
+                  k += pfx + esc + 6;
                }
             }
             /* Pass 2: `c7 /0 ... imm32` — mov DWORD [mem], imm32 stores of

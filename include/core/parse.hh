@@ -147,6 +147,17 @@ namespace MachO {
        * +[NSObject isLogEnabled] legacy category lookup). */
       bool vmaddr_in_writable_data(std::size_t vmaddr) const;
 
+      /* True iff `vmaddr` lands in any real image segment EXCEPT __PAGEZERO,
+       * __LINKEDIT and the ObjC fragile-ABI `__OBJC` metadata segment. Unlike
+       * vmaddr_in_writable_data this ALSO admits read-only const/literal
+       * segments (`__TEXT` const tables). Gates the mid-blob containing-fallback
+       * for an INDEXED memory operand (`[disp32 + index*scale]`), whose disp32
+       * is unambiguously a dereferenced table base (never an integer constant),
+       * so a mid-blob offset into the containing const/data blob is always
+       * meaningful — only __OBJC's structurally-parsed metadata must be spared
+       * (see vmaddr_in_writable_data). */
+      bool vmaddr_in_indexed_table_target(std::size_t vmaddr) const;
+
       /* True iff vmaddr falls in a constant/string/code section that is a
        * high-confidence pointer target (__cstring/__cfstring/__const/__text/
        * __objc* etc.). Used to disambiguate a `mov [reg+disp], imm32` whose

@@ -543,9 +543,15 @@ namespace MachO {
                    * lands inside a multi-byte blob misses exact-key resolve and
                    * ships a stale disp into read-only __TEXT (the 9th-blocker
                    * null-memdisp class). Attach to the containing blob + offset.
-                   * Gated to writable __DATA (excludes __OBJC) like the other
-                   * containing fallbacks — see ParseEnv::vmaddr_in_writable_data. */
-                  if (env.vmaddr_in_writable_data((std::size_t)disp)) {
+                   * Admits ANY non-__OBJC segment (writable __DATA AND read-only
+                   * const/literal tables): unlike the bare-immediate heuristics,
+                   * this operand's disp32 is a DEREFERENCED table base, never an
+                   * integer constant, so a mid-blob const-table offset is always
+                   * valid. The old writable-only gate stranded const tables:
+                   * Quinn's -[QuinnGame incrementScoreWithLastHeight:...]'s
+                   * `movswl 0xb2f42(,%eax,8)` into __TEXT,__const shipped the raw
+                   * i386 address -> SIGSEGV reading 0xb2f62 on a line-clear. */
+                  if (env.vmaddr_in_indexed_table_target((std::size_t)disp)) {
                      env.vmaddr_resolver.resolve_containing(
                         (std::size_t)disp,
                         (const SectionBlob<bits> **)&this->memdisp,

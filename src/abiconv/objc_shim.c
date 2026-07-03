@@ -3518,6 +3518,78 @@ static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
    return 1;
 }
 
+/* -[NSView getRectsBeingDrawn:count:] hands the caller, via two out-parameters,
+ * a pointer to an AppKit-owned array of NSRect plus a count (the dirty-rect
+ * optimisation an app's drawRect: uses to redraw only invalidated cells). Two
+ * things break the i386 caller on x86_64:
+ *   1. the `const NSRect **` AppKit writes is a >4GB native address, but the
+ *      i386 caller stores it into a 4-byte stack slot -> truncation to a low
+ *      garbage address it then dereferences (Quinn: fault 0x760730 in
+ *      -[QuinnLocalBoardView drawRect:], the low-32 of a 0x6000_0076_0730 native
+ *      rect array).
+ *   2. NSRect is 4xCGFloat: 16 bytes (float) on i386 but 32 bytes (double) on
+ *      x86_64, so even an untruncated pointer would index a 32-byte-stride,
+ *      double-field array as if it were 16-byte float rects.
+ * Fix: call native with our OWN 64-bit out-buffers, then materialise a low-4GB
+ * array of i386-layout (float) NSRects and write its 32-bit address + a 32-bit
+ * count into the i386 out-param slots. The low buffer is cached (grow-only) on
+ * the receiver: the returned array is valid only for the current drawRect:, so a
+ * per-view reused buffer honours the lifetime contract and avoids a per-frame
+ * leak. Universal: triggers on the standard AppKit selector, not the app. */
+struct grect_i386 { float x, y, w, h; };
+struct grect_buf  { uint64_t cap; struct grect_i386 rects[]; };
+static const char nsview_getrects_key;
+static int bp_getrects(struct objc_call_plan *plan, const uint32_t *args32,
+                       id real_self, SEL sel) {
+   if (!sel || !real_self) { return 0; }
+   if (strcmp(sel_getName(sel), "getRectsBeingDrawn:count:")) { return 0; }
+   Class nsview = objc_getClass("NSView");
+   if (!nsview) { return 0; }
+   typedef unsigned char (*msg_kind_t)(id, SEL, Class);
+   if (!((msg_kind_t)objc_msgSend)(real_self, sel_registerName("isKindOfClass:"),
+                                   nsview)) {
+      return 0;                              /* not an NSView: app selector */
+   }
+   /* native call with our own 64-bit buffers (never the i386 4-byte slots) */
+   const CGRect *nrects = NULL;
+   long ncount = 0;
+   typedef void (*grd_t)(id, SEL, const CGRect **, long *);
+   ((grd_t)objc_msgSend)(real_self, sel, &nrects, &ncount);
+   if (ncount < 0) { ncount = 0; }
+   /* grow-only low-4GB buffer cached on the receiver */
+   struct grect_buf *b =
+      (struct grect_buf *)objc_getAssociatedObject(real_self, &nsview_getrects_key);
+   if (!b || b->cap < (uint64_t)ncount) {
+      size_t n = ncount ? (size_t)ncount : 1;
+      struct grect_buf *nb =
+         malloc(sizeof(struct grect_buf) + n * sizeof(struct grect_i386));
+      if (!nb || (uintptr_t)nb >= 0x100000000ULL) { return 0; }  /* no low mem */
+      nb->cap = n;
+      objc_setAssociatedObject(real_self, &nsview_getrects_key, (id)nb,
+                               OBJC_ASSOCIATION_ASSIGN);
+      b = nb;
+   }
+   for (long i = 0; i < ncount; ++i) {
+      b->rects[i].x = (float)nrects[i].origin.x;
+      b->rects[i].y = (float)nrects[i].origin.y;
+      b->rects[i].w = (float)nrects[i].size.width;
+      b->rects[i].h = (float)nrects[i].size.height;
+   }
+   /* write the i386-layout results into the caller's out-param slots (each a
+    * 4-byte i386 stack slot addressed by args32[2] / args32[3]) */
+   if (args32[2]) { *(uint32_t *)(uintptr_t)args32[2] = (uint32_t)(uintptr_t)b->rects; }
+   if (args32[3]) { *(uint32_t *)(uintptr_t)args32[3] = (uint32_t)ncount; }
+   plan->reg[0]     = 0;                      /* void return */
+   plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
+   plan->ret_is_obj = 0;
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[bp] getRectsBeingDrawn:count: -> %ld rects @ low 0x%08x\n",
+              ncount, (uint32_t)(uintptr_t)b->rects);
+      fflush(stderr);
+   }
+   return 1;
+}
+
 /* +[NSData dataWithBytesNoCopy:length:(freeWhenDone:)] / -[NSData
  * initWithBytesNoCopy:length:(freeWhenDone:)] with freeWhenDone=YES hands the
  * NSData OWNERSHIP of the buffer: the NSData's -dealloc calls free() on it. When
@@ -3629,6 +3701,14 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
     * caller can dereference (raw-C consumers like Quinn's ks_decrypt). Must run
     * before the bare-`^v` return wrap would hand back an unreadable arena handle. */
    if (bp_nsdata_bytes(plan, real_self, sel))
+      return;
+
+   /* -[NSView getRectsBeingDrawn:count:]: AppKit writes a >4GB pointer to a
+    * 32-byte-stride (double CGFloat) NSRect array + count into the caller's
+    * out-params; convert to a low-4GB 16-byte-stride (float) i386 NSRect array
+    * so the i386 drawRect: neither truncates the pointer nor misreads the
+    * stride/layout (see bp_getrects). */
+   if (bp_getrects(plan, args32, real_self, sel))
       return;
 
    /* NSData taking ownership of an i386 shim-malloc'd buffer via

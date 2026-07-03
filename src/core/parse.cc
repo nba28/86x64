@@ -148,6 +148,19 @@ namespace MachO {
    }
 
    template <Bits bits>
+   bool ParseEnv<bits>::vmaddr_in_indexed_table_target(std::size_t vmaddr) const {
+      for (Segment<bits> *seg : archive.segments()) {
+         const char *sn = seg->segment_command.segname;
+         const std::size_t snsz = sizeof(seg->segment_command.segname);
+         if (std::strncmp(sn, SEG_PAGEZERO, snsz) == 0) { continue; }
+         if (std::strncmp(sn, SEG_LINKEDIT, snsz) == 0) { continue; }
+         if (std::strncmp(sn, SEG_OBJC,     snsz) == 0) { continue; }
+         if (seg->contains_vmaddr(vmaddr)) { return true; }
+      }
+      return false;
+   }
+
+   template <Bits bits>
    bool ParseEnv<bits>::vmaddr_in_const_section(std::size_t vmaddr) const {
       for (Segment<bits> *seg : archive.segments()) {
          if (!seg->contains_vmaddr(vmaddr)) { continue; }
