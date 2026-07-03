@@ -3770,6 +3770,55 @@ static int bp_nsdata_nocopy(struct objc_call_plan *plan, const uint32_t *args32,
    }
    return 1;
 }
+/* QUINN_PLAY_TRACE: one focused, low-volume line per event relevant to the
+ * three remaining Quinn gameplay-rendering/input symptoms, so a SINGLE the tester
+ * play-test disambiguates all three. Called from BOTH bridge directions —
+ * forward (i386 -> native/self, objc_bridge_prep) and reverse (native ->
+ * legacy IMP, reverse prep) — because the interesting sends split across them:
+ *   INPUT (#3, dead board keys/mouse): keyDown:/keyUp:/flagsChanged:/
+ *     mouseDown:/mouseDragged: arrive as REVERSE dispatches (AppKit -> the
+ *     legacy QuinnController/QuinnMainWindow/board view). If these fire when
+ *     The tester presses arrows, input reaches the handler (marshalling/keycode
+ *     issue); if not, the responder chain never routes the event.
+ *   BOARD (#1, black well + no landed cells): drawRect: is a REVERSE dispatch;
+ *     the per-rect draw sub-methods drawBackgroundInRect: (white well,
+ *     UNCONDITIONAL) / drawBoardInRect:...(landed cells, gated) /
+ *     drawPieceInRect:...(the piece, gated) are FORWARD [self ...] sends from
+ *     inside drawRect:. Seeing which fire per tick localizes it: bg fires but
+ *     no white => the CGContext fill-color path; drawBoard absent while
+ *     drawPiece present => the animation gate suppresses cells; drawBoard
+ *     present but no cells => empty board matrix.
+ *   SIDEBAR (#2, no NEXT/SCORE): drawRect: on QuinnPlayerInfoView / *InfoCell.
+ * The forward getRectsBeingDrawn:count: count is already logged by bp_getrects.
+ * Whitelisted by exact selector name (+ any *InfoView/*InfoCell drawRect:), so
+ * the log stays tiny across a full session. Env-gated; zero cost when unset. */
+static int quinn_play_trace_enabled(void) {
+   static int v = -1;
+   if (v < 0) { v = getenv("QUINN_PLAY_TRACE") ? 1 : 0; }
+   return v;
+}
+static void quinn_play_trace(const char *dir, const char *cls, SEL sel) {
+   if (!quinn_play_trace_enabled() || !sel) { return; }
+   const char *s = sel_getName(sel);
+   if (!s) { return; }
+   static const char *const wl[] = {
+      "keyDown:", "keyUp:", "flagsChanged:", "mouseDown:", "mouseDragged:",
+      "mouseUp:", "becomeFirstResponder", "acceptsFirstResponder",
+      "resignFirstResponder", "makeFirstResponder:",
+      "drawRect:", "drawBackgroundInRect:",
+      "drawBoardInRect:boardOpacity:cellDirtyRect:",
+      "drawPieceInRect:boardOpacity:cellDirtyRect:",
+      "getRectsBeingDrawn:count:", "setNeedsDisplay:", "setNeedsDisplayInRect:",
+      "setNeedsDisplayInCellRect:", "setNeedsDisplayInCellRegion:", NULL };
+   int hit = 0;
+   for (int i = 0; wl[i]; ++i) { if (!strcmp(s, wl[i])) { hit = 1; break; } }
+   /* also catch the sidebar's own drawRect: on the PlayerInfo view/cells */
+   if (!hit && !strcmp(s, "drawRect:") && cls &&
+       (strstr(cls, "PlayerInfo") || strstr(cls, "LCDCell"))) { hit = 1; }
+   if (!hit) { return; }
+   fprintf(stderr, "[qpt:%s] %s %s\n", dir, cls ? cls : "(nil)", s);
+   fflush(stderr);
+}
 
 void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
@@ -3814,13 +3863,14 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
       c->tid = pthread_mach_thread_np(pthread_self()); c->valid = 1;
    }
 
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (getenv("OBJC_BRIDGE_TRACE") || quinn_play_trace_enabled()) {
       const char *cls_name = "(nil)";
       if (real_self) {
          Class c = object_getClass(real_self);
          if (c) cls_name = class_getName(c);
       }
-      trace_args("send", cls_name, sel, args32);
+      if (getenv("OBJC_BRIDGE_TRACE")) { trace_args("send", cls_name, sel, args32); }
+      quinn_play_trace("fwd", cls_name, sel);
    }
 
    /* i386 block as the receiver of copy/retain/release etc.: handle inline so
@@ -7403,6 +7453,7 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
               (void *)_86x64_reverse_imp);
       fflush(stderr);
    }
+   quinn_play_trace("rev", class_getName(lookup), sel);
 }
 
 unsigned __int128 _86x64_reverse_ret(struct reverse_plan *plan,
