@@ -111,8 +111,32 @@ namespace MachO {
           * the value, so __text functions still resolve through transform.
           */
          return new Section<bits>(img, offset, env, NonLazySymbolPointer<bits>::Parse);
-      } else if (stype == S_REGULAR) {
+      } else if (stype == S_REGULAR || stype == S_COALESCED) {
          /*
+          * S_COALESCED (0xb) is the linker-dedup type for WEAK symbols — C++
+          * template/inline instantiations. Its *content* is ordinary
+          * initialized data, identical to S_REGULAR, so it must take the same
+          * path: __DATA,__const_coal holds RTTI typeinfo objects (i386 layout
+          * {vtable@0, __name@4, __base_type@8}) and __DATA,__datacoal_nt holds
+          * coalesced globals — both carry INTERNAL pointers (typeinfo __name ->
+          * a __ZTS string in __TEXT,__const_coal, __base_type -> another __ZTI,
+          * vtable slots -> code) that are baked absolute in a non-PIE i386 exec
+          * and must be pointer-detected + rebased to the shifted x86_64 layout.
+          * Falling through to the opaque DataBlob default (below) left every
+          * typeinfo __name a STALE i386 vmaddr; the runtime slide_data_fnptrs
+          * then skips it (value is below the translated image base), so
+          * type_info::name() returns a wild/NULL pointer and boost::python's
+          * strcmp-keyed converter registry SIGSEGVs on registration (Civ IV
+          * s24: strcmp(0,0) in _Rb_tree<...registration>::insert_unique reading
+          * std::string / std::wstring typeinfo names).  The is_data /
+          * is_text_const gate inside this block keeps the treatment SECTION-
+          * granular: __DATA,__const_coal / __datacoal_nt -> DataParser (fixed),
+          * while __TEXT,__const_coal (the __ZTS cstrings) and __TEXT,__eh_frame
+          * (both S_COALESCED, in the executable segment) stay opaque as before.
+          * __TEXT,__textcoal_nt (S_COALESCED + instruction attrs, real code) is
+          * routed to TextParser by the NAME whitelist above and never reaches
+          * here.  Universal: any C++ binary with weak typeinfos/vtables/statics.
+          *
           * Structural code-section detection, complementing the NAME
           * whitelist above (which exists because __StaticInit doesn't always
           * SET the attribute — a false-NEGATIVE concern). The attribute being
