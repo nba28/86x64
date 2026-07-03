@@ -1,0 +1,51 @@
+== ctors ==
+default '' (0)
+cstr 'hello' (5)
+copy 'hello' (5)
+== COW append (s1 shared with s2) ==
+s1 'hello world' (11)
+s2 'hello' (5)
+== assign ==
+op= 'hello world' (11)
+assign cstr 'xyz' (3)
+== operator+ ==
+ss + 'foobar' (6)
+cs + 'pre-foobar' (10)
+== substr ==
+substr(6,5) 'world' (5)
+substr(0,5) 'hello' (5)
+substr(6,99) 'world' (5)
+== find/compare ==
+find 'o' @0    = 4
+find "world"   = 6
+rfind 'o'      = 7
+find 'z'       = -1
+cmp abc<abd    = 1
+cmp abc==abc   = 0
+cmp abc<abd    = -1
+== COW leak via begin ==
+b1 'hello' (5)
+b2 'Jello' (5)
+== operator[] ==
+ix[1]='a' 'hallo' (5)
+== push_back/reserve/resize ==
+push_back 'abc' (3)
+reserve(100) 'abc' (3)
+resize(5,Z) 'abcZZ' (5)
+resize(2,?) 'ab' (2)
+== erase/replace/clear ==
+erase(5,6) 'hello' (5)
+replace(0,1,J) 'Jello' (5)
+replace(1,0,XY) 'JXYello' (7)
+clear '' (0)
+== wstring ==
+wcstr w[104,101,108,108,111]
+wappend w[104,101,108,108,111,33,33]
+wsubstr(1,3) w[101,108,108]
+wcompare eq    = 0
+== list ==
+hooked: 1 2 3
+unhook B: 1 3
+transfer: 1 3 4 5
+done
+exit_code: 0

@@ -439,6 +439,9 @@ add_library(abiconv SHARED
   py_shim.c
   quicktime_movie_shim.c
   keymgr_shim.c
+  # libstdc++ i386 COW std::string/std::wstring surface (cow_string_tramp.asm
+  # keeps its own MTSHIM + MTSHIM_SRET; wired the same way as the other modules).
+  cow_string_shim.c
   # (halo_shim.c / halo_tramp.asm RETIRED: mach_timebase_info / mach_absolute_time
   # are now covered by the universal import-driven modern pass — libSystem maps to
   # <mach/mach_time.h> in includes_auto.h, so abigen emits ___mach_timebase_info /
@@ -451,6 +454,7 @@ add_library(abiconv SHARED
   dlsym_tramp.asm
   init_trampoline.asm
   maptable_tramp.asm
+  cow_string_tramp.asm
   eh_tramp.asm
   dyld_stub_binder.asm
   dyld_func_lookup.asm
