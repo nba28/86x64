@@ -1189,6 +1189,7 @@ static void patch_import_pointers(const struct mach_header_64 *mh64,
 }
 
 static void slide_objc(const struct mach_header *mh, intptr_t slide);
+static void cxx_typeinfo_init_all_copies(void);
 
 /* Bottom-up dependency ordering for the run-inits path: before an image's
  * collected static initializers run, recursively process each of its TRANSLATED
@@ -1397,6 +1398,11 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
     * wrapped-stub initializers and never populates init_targets. */
    if (n_init > 0) {
       process_deps(mh64);
+      /* And every mapped copy of this runtime: the initializers below may read
+       * redirected __ZTI* typeinfos bound to a libabiconv copy dyld has not
+       * constructed yet (multi-copy deploys, Civ IV s24).  Image-count gated,
+       * idempotent. */
+      cxx_typeinfo_init_all_copies();
    }
 
    /* Run the collected translated static initializers LAST — after every
@@ -1413,6 +1419,57 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    }
 }
 
+/* Fill the i386-layout libstdc++ RTTI typeinfo surface (cxx_typeinfo.c) of
+ * EVERY mapped copy of this runtime, not just our own image (Civ IV s24).
+ *
+ * Multi-copy deploys co-locate one libabiconv per directory that hosts a
+ * translated binary (the libabiconv multi-copy gotcha); each translated image's
+ * @loader_path data binds resolve to ITS OWN co-located copy.  dyld constructs
+ * the copies in dependency order, but the FIRST copy whose constructor runs
+ * registers the add-image callback and thereby runs EVERY translated image's
+ * static initializers right then — before dyld has constructed the OTHER
+ * copies.  An app static init that reads a redirected __ZTI* typeinfo bound to
+ * a not-yet-constructed copy sees a zero-filled object: typeid(T).name()
+ * returns NULL without faulting, boost::python-style registrations cache the
+ * NULL, and the eventual name strcmp derefs 0 (Civ IV s24: strcmp(0,0) in
+ * converter registration insert_unique).
+ *
+ * Fix: before any translated initializer runs, walk the mapped images and
+ * explicitly run the (idempotent, done-guarded) typeinfo init of every copy of
+ * ourselves.  "Copy of ourselves" is identified by sharing our own basename —
+ * derived from dladdr on this image, no hardcoded install names — and probed
+ * with dlopen(RTLD_NOLOAD)+dlsym, so a renamed runtime family still matches
+ * and non-copies are skipped.  Gated on the image count so repeat calls after
+ * new dlopens stay cheap.  Only inits DESIGNED idempotent may be cross-called
+ * this way (dyld will still run the other copy's constructors later); if
+ * another zero-until-constructor surface shows up, add it next to the
+ * _86x64_cxx_typeinfo_init call below rather than inventing a new walk. */
+static void cxx_typeinfo_init_all_copies(void) {
+   static uint32_t seen_images = 0;
+   uint32_t n = _dyld_image_count();
+   if (n == seen_images) { return; }
+   seen_images = n;
+   Dl_info self;
+   if (!dladdr((void *)&cxx_typeinfo_init_all_copies, &self) ||
+       self.dli_fname == NULL) {
+      return;
+   }
+   const char *self_base = strrchr(self.dli_fname, '/');
+   self_base = self_base ? self_base + 1 : self.dli_fname;
+   for (uint32_t i = 0; i < n; i++) {
+      const char *path = _dyld_get_image_name(i);
+      if (path == NULL) { continue; }
+      const char *base = strrchr(path, '/');
+      base = base ? base + 1 : path;
+      if (strcmp(base, self_base) != 0) { continue; }
+      void *h = dlopen(path, RTLD_NOLOAD | RTLD_LAZY);
+      if (h == NULL) { continue; }
+      void (*fn)(void) = (void (*)(void))dlsym(h, "_86x64_cxx_typeinfo_init");
+      if (fn != NULL) { fn(); }
+      dlclose(h);
+   }
+}
+
 __attribute__((constructor))
 static void objc_slide_init(void) {
    if (getenv("ABICONV_OBJC_SLIDE_VERBOSE")) { g_verbose = 1; }
@@ -1422,8 +1479,12 @@ static void objc_slide_init(void) {
     * translated app's static initializers right here — and those (boost::python
     * converter registration) read __ZTI* typeinfo __name fields. Mach-O does not
     * honor constructor priorities, so we cannot rely on cxx_typeinfo.c's own
-    * constructor having run first; call it explicitly (idempotent). */
+    * constructor having run first; call it explicitly (idempotent), and do the
+    * same for every OTHER mapped copy of this runtime (multi-copy deploys; the
+    * translated images' typeinfo binds resolve per @loader_path to copies dyld
+    * may not have constructed yet — Civ IV s24). */
    extern void _86x64_cxx_typeinfo_init(void);
    _86x64_cxx_typeinfo_init();
+   cxx_typeinfo_init_all_copies();
    _dyld_register_func_for_add_image(&slide_objc);
 }
