@@ -247,6 +247,12 @@ v "$MACHO_TOOL" convert --archive DYLIB $SYNTH_DYLD_INFO "$DYLD64" "$DYLIB64" ||
 # post-step; folding it in so every consumer doesn't have to know.
 python3 "$ROOTDIR/remove_dup_lc_id_dylib.py" "$DYLIB64" >/dev/null || error
 
+# Weaken dangling zero-bind LC_LOAD_DYLIB deps (over-linked frameworks that no
+# longer exist on modern macOS, e.g. QuickTime): flip to LC_LOAD_WEAK_DYLIB so
+# dyld skips an ABSENT dep instead of failing the whole load. In-place 4-byte
+# cmd flips; identical behavior for present deps. See _weaken_dangling_deps.py.
+python3 "$ROOTDIR/_weaken_dangling_deps.py" "$DYLIB64" || error
+
 # If no wrapper requested (dylib-only mode), we're done.
 if [ ! -f "$WRAPPER_OBJ" ]; then
     [ "$VERBOSE" ] && echo "86x64: dylib-only mode, output at $DYLIB64"
