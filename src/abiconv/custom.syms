@@ -117,6 +117,8 @@ _NSRunCriticalAlertPanel
 _NSRunInformationalAlertPanel
 _NSGetAlertPanel
 
+_CFStringCreateWithFormat
+
 _NSUnionRect
 _NSIntersectionRect
 _NSInsetRect

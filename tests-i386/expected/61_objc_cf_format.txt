@@ -1,0 +1,3 @@
+hello there 42 world!
+plain
+exit_code: 0

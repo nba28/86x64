@@ -2129,6 +2129,47 @@ uint32_t shim_NSGetAlertPanel(const uint32_t *a) {
    return alert_panel_common("NSGetAlertPanel", a, 1);
 }
 
+/* ---- Variadic CF formatting (Halo wall) ----
+ * CFStringCreateWithFormat is VARIADIC, so abigen skips it and the
+ * translated bind went straight into native CoreFoundation with i386 cdecl
+ * STACK varargs — native read the SysV registers (garbage) and crashed
+ * inside CFStringCreateWithFormatAndArguments. Same cure as the alert
+ * panels: unwrap the fixed args, expand the CF-style format + i386 varargs
+ * through fill_format_varargs (positional %N$ + %@ handle resolution), and
+ * make the native variadic call from the converted plan slots.
+ * i386 arg block: a[0]=alloc a[1]=formatOptions a[2]=format a[3...]=varargs */
+uint32_t shim_CFStringCreateWithFormat(const uint32_t *a) {
+   CFAllocatorRef  alloc = (CFAllocatorRef)(uintptr_t)unwrap_obj_arg(a[0]);
+   CFDictionaryRef opts  = (CFDictionaryRef)(uintptr_t)unwrap_obj_arg(a[1]);
+   uint64_t fmt = unwrap_obj_arg(a[2]);
+   if (!fmt) { return 0; }
+   char fmtbuf[2048];
+   if (!format_cstr(fmt, fmtbuf, sizeof fmtbuf) || !strchr(fmtbuf, '%')) {
+      /* no directives (or unreadable format): plain copy semantics */
+      CFStringRef s = CFStringCreateCopy(alloc, (CFStringRef)(uintptr_t)fmt);
+      return s ? x64_objc_wrap((uint64_t)(uintptr_t)s) : 0;
+   }
+   struct objc_call_plan plan;
+   memset(&plan, 0, sizeof plan);
+   /* GP slots 0..2 = alloc/options/format of the native call below */
+   fill_format_varargs(&plan, a + 3, /*ai=*/0, /*gp=*/3,
+                       /*gp_cap=*/6 + PLAN_STACK_MAX, fmtbuf, /*cur=*/NULL);
+   /* a true variadic prototype so the compiler zeroes al (no XMM varargs —
+    * fill_format_varargs drops float conversions, the known alert-panel gap) */
+   CFStringRef s = ((CFStringRef (*)(CFAllocatorRef, CFDictionaryRef,
+                                     CFStringRef, ...))CFStringCreateWithFormat)(
+      alloc, opts, (CFStringRef)(uintptr_t)fmt,
+      plan.reg[3], plan.reg[4], plan.reg[5],
+      plan.stack[0], plan.stack[1], plan.stack[2], plan.stack[3],
+      plan.stack[4], plan.stack[5], plan.stack[6], plan.stack[7]);
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[cfformat] CFStringCreateWithFormat fmt=\"%s\" -> %p\n",
+              fmtbuf, (void *)s);
+      fflush(stderr);
+   }
+   return s ? x64_objc_wrap((uint64_t)(uintptr_t)s) : 0;
+}
+
 /*
  * Common core for all msgSend variants. The shape:
  *   - real_self is already resolved (by variant-specific entry below);

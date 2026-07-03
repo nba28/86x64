@@ -162,6 +162,9 @@
 	MTSHIM	___NSRunCriticalAlertPanel,      _shim_NSRunCriticalAlertPanel
 	MTSHIM	___NSRunInformationalAlertPanel, _shim_NSRunInformationalAlertPanel
 	MTSHIM	___NSGetAlertPanel,              _shim_NSGetAlertPanel
+	;; Variadic CF formatting (same class as the panels: abigen skips
+	;; variadics, so the raw native bind read registers for i386 stack varargs).
+	MTSHIM	___CFStringCreateWithFormat,     _shim_CFStringCreateWithFormat
 	;; CFRetain/CFRelease must no-op on our IOKit tokens (else the token
 	;; leaks into real CF and faults). Token-aware override; passthrough else.
 	MTSHIM	___CFRetain,                         _shim_CFRetain
