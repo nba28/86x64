@@ -5017,6 +5017,12 @@ struct reverse_plan {
     * +320; these live in the 560-byte plan reservation's slack). */
    uint32_t    wb_active;    /* +328 1 if sync_inherited_ivars pushed a frame */
    uint32_t    wb_mark;      /* +332 g_snap index at this call's frame start */
+   /* C-only diagnostic (ABICONV_REV_RET_TRACE, default-off): the sel + lookup
+    * class of this reverse call, so reverse_ret can log the widened return value
+    * against the selector. Past +320, inside the 560-byte reservation slack —
+    * the asm never reads these. */
+   uint64_t    trace_sel;    /* +336 SEL (0 = not a captured legacy IMP call) */
+   uint64_t    trace_lookup; /* +344 Class */
 };
 
 extern void _86x64_reverse_imp(void);        /* objc_reverse.asm */
@@ -7158,6 +7164,7 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
    plan->stret_types = NULL;
    plan->fp_out[0] = plan->fp_out[1] = 0;
    plan->wb_active = 0;     /* no inherited-ivar frame unless we reach the sync */
+   plan->trace_sel = 0;     /* set at the rev-ring capture below for valid IMPs */
 
    /* A pending super-dispatch hint for exactly this (self,sel) overrides the
     * derived-class lookup so [super sel] runs the SUPER's legacy method, not
@@ -7439,6 +7446,8 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
       c->lowstack_top = plan->lowstack_top; c->tid = pthread_mach_thread_np(pthread_self());
       c->depth = depth; c->frame_words = w; c->valid = 1;
    }
+   plan->trace_sel    = (uint64_t)(uintptr_t)sel;     /* ABICONV_REV_RET_TRACE */
+   plan->trace_lookup = (uint64_t)(uintptr_t)lookup;
    x64_cb_enter();   /* a legacy IMP is about to run (balanced in reverse_ret) */
 
    /* Round-2 Quinn black-board gate trace. The capture proved FastDrawCells
@@ -7556,6 +7565,26 @@ unsigned __int128 _86x64_reverse_ret(struct reverse_plan *plan,
       }
    }
    else { r = (unsigned __int128)eax; }                     /* scalar */
+   /* Env-gated reverse-RETURN trace: ABICONV_REV_RET_TRACE=<substr> logs the
+    * widened return value of every reverse-bridged legacy IMP whose selector
+    * contains <substr> ("" or "*" logs all). Diagnostic for "does a legacy
+    * data-source method feed the outline/table a wrong count/BOOL?" — logs the
+    * RAW i386 return (eax:edx, so a garbage high byte on a BOOL or a truncated
+    * NSInteger is visible) and the widened result r. Default-off = inert. */
+   {
+      static const char *rt_filter; static int rt_init;
+      if (!rt_init) { rt_filter = getenv("ABICONV_REV_RET_TRACE"); rt_init = 1; }
+      if (rt_filter && plan->trace_sel) {
+         const char *sn = sel_getName((SEL)(uintptr_t)plan->trace_sel);
+         if (rt_filter[0] == '\0' || rt_filter[0] == '*' || strstr(sn, rt_filter)) {
+            Class lk = (Class)(uintptr_t)plan->trace_lookup;
+            fprintf(stderr, "[rret] %s[%s] kind=%d eax=0x%x edx=0x%x -> 0x%llx\n",
+                    lk ? class_getName(lk) : "?", sn, plan->ret_kind,
+                    eax, edx, (unsigned long long)(uint64_t)r);
+            fflush(stderr);
+         }
+      }
+   }
    if (getenv("OBJC_BRIDGE_TRACE")) {
       fprintf(stderr, "[revret] t=%x plan=%p kind=%d eax=0x%x edx=0x%x -> 0x%llx\n",
               pthread_mach_thread_np(pthread_self()),
