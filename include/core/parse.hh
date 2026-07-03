@@ -134,6 +134,28 @@ namespace MachO {
        * xed into this header; the consumers map it back to xed_reg_enum_t. */
       std::unordered_map<std::size_t, uint8_t> pic_thunks;
 
+      /* Absolute pointer-immediate VALUES relocated during the M32 parse: the
+       * base address of a fixed-load-address `mov/add/push $&data` idiom that
+       * the instruction-immediate heuristic moved to the translated layout.
+       * Recorded so a later `cmp reg, $&data_end` that BOUNDS a pointer loop
+       * (its immediate = base + table_size) can be relocated by the same delta.
+       * If only the base moves and the sentinel keeps its raw i386 value, the
+       * loop iterator starts at the slid base and never reaches the stale
+       * sentinel -> runs off the end of the table (Halo static-init table walk:
+       * `mov $tbl,%ebx; loop: ...; cmp $tbl_end,%ebx; jne loop` calls a virtual
+       * method through each entry, overruns into a NULL slot -> `jmp *0`).
+       * Populated in address order by the linear sweep, so a base at a lower
+       * vmaddr than the loop's cmp is present when the cmp is parsed. */
+      std::set<std::size_t> relocated_ptr_imms;
+
+      /* True iff `vmaddr` sits at or above a relocated pointer-immediate base
+       * (relocated_ptr_imms) that lies in the SAME segment — i.e. it plausibly
+       * bounds a table whose base was already relocated. Gates the CMP-immediate
+       * relocation (see the instruction.cc CMP_*_IMMz case) so that only a
+       * genuine table-end sentinel moves, never a bare loop-count constant that
+       * merely aliases a data vmaddr. */
+      bool imm_bounds_relocated_table(std::size_t vmaddr) const;
+
       Placeholder<bits> *add_placeholder(std::size_t vmaddr);
       void do_resolve();
 

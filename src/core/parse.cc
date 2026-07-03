@@ -148,6 +148,27 @@ namespace MachO {
    }
 
    template <Bits bits>
+   bool ParseEnv<bits>::imm_bounds_relocated_table(std::size_t vmaddr) const {
+      /* Find a relocated pointer-immediate base B <= vmaddr (the loop base) and
+       * require B and vmaddr to lie in the SAME segment — a table's base and its
+       * one-past-the-end sentinel are in the same data segment by construction.
+       * relocated_ptr_imms is sorted, so the greatest B <= vmaddr is the nearest
+       * candidate base; if it shares vmaddr's segment the immediate is a table
+       * bound, otherwise it is an unrelated constant. */
+      if (relocated_ptr_imms.empty()) { return false; }
+      auto it = relocated_ptr_imms.upper_bound(vmaddr);
+      if (it == relocated_ptr_imms.begin()) { return false; }
+      --it;                          /* greatest base <= vmaddr */
+      const std::size_t base = *it;
+      for (Segment<bits> *seg : archive.segments()) {
+         if (seg->contains_vmaddr(base)) {
+            return seg->contains_vmaddr(vmaddr);
+         }
+      }
+      return false;
+   }
+
+   template <Bits bits>
    bool ParseEnv<bits>::vmaddr_in_indexed_table_target(std::size_t vmaddr) const {
       for (Segment<bits> *seg : archive.segments()) {
          const char *sn = seg->segment_command.segname;

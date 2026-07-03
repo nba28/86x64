@@ -74,6 +74,13 @@ namespace MachO {
        * this adds it to the index/base already live in r32. */
       opcode_t add_r32_r11d(xed_reg_enum_t r32);
 
+      /* `cmp r32, r11d` (39 /r, REX.R selects r11 as the reg source). Pairs with
+       * lea_r11_mem_rip_disp32 to relocate a pointer-loop end sentinel: the i386
+       * `cmp r32, $&table_end` becomes `lea r11,[rip+disp32]; cmp r32, r11d` so
+       * the comparison uses the slid one-past-the-end address (see the
+       * instruction.cc CMP_*_IMMz transform). */
+      opcode_t cmp_r32_r11d(xed_reg_enum_t r32);
+
       /* jmp r64 */
       opcode_t jmp_r64(xed_reg_enum_t r64);
 

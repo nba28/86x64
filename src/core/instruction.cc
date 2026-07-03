@@ -773,6 +773,49 @@ namespace MachO {
                    env.code_alias_is_constant(imm_val)) {
                   imm_is_ptr = false;
                }
+               /* Record a relocated base so a later loop-bounding `cmp reg,
+                * $&table_end` can move with it (see the CMP_*_IMMz case). */
+               if (imm_is_ptr && bits == Bits::M32) {
+                  env.relocated_ptr_imms.insert(imm_val);
+               }
+            }
+            imm = Immediate<bits>::Parse(img, loc + imm_idx, env, imm_is_ptr);
+         }
+         break;
+
+      /*
+       * `cmp r32, imm32` (81 /7 id) / `cmp eax, imm32` (3d id) that bounds a
+       * pointer LOOP: the immediate is the one-past-the-end address of a table
+       * whose BASE was loaded by a relocated `mov reg, $&table` immediate. The
+       * base moves to the translated layout but a raw sentinel does not, so the
+       * loop iterator (a slid pointer) never equals the stale end value and runs
+       * off the end of the table -> a virtual call through a NULL/garbage slot
+       * (Halo static-init: `mov $tbl,%ebx; L: mov (%ebx),%edx; call *[edx+0x10];
+       * add $4,%ebx; cmp $tbl_end,%ebx; jne L` -> `jmp *0`). Relocate the
+       * sentinel by the same delta. Gated HARD (imm_bounds_relocated_table):
+       * only when a relocated base sits at/below this value in the SAME segment,
+       * so a bare loop-count constant that merely aliases a data vmaddr is left
+       * alone (cmp against integers is far more common than the ADD pointer
+       * idiom, hence the extra gate over the MOV/ADD/PUSH family above). The
+       * Transform emits `lea r11,[rip+disp]; cmp r32, r11d`. */
+      case XED_IFORM_CMP_GPRv_IMMz:
+      case XED_IFORM_CMP_OrAX_IMMz:
+         {
+            assert(imm == nullptr);
+            const std::size_t imm_idx = instbuf.size() - sizeof(uint32_t);
+            bool imm_is_ptr = false;
+            const bool fixed_load_addr =
+               env.archive.header.filetype == MH_EXECUTE &&
+               (env.archive.header.flags & MH_PIE) == 0;
+            if (fixed_load_addr && bits == Bits::M32 &&
+                xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
+               const uint32_t imm_val =
+                  img.template at<uint32_t>(loc.offset + imm_idx);
+               if (imm_val >= 0x1000 && imm_val < 0x80000000U &&
+                   !env.code_alias_is_constant(imm_val) &&
+                   env.imm_bounds_relocated_table(imm_val)) {
+                  imm_is_ptr = true;
+               }
             }
             imm = Immediate<bits>::Parse(img, loc + imm_idx, env, imm_is_ptr);
          }
@@ -1111,6 +1154,34 @@ namespace MachO {
                auto add_inst =
                   new Instruction<opposite<bits>>(opcode::add_r32_r11d(r32));
                return {lea_inst, add_inst};
+            }
+
+         case XED_IFORM_CMP_GPRv_IMMz:
+         case XED_IFORM_CMP_OrAX_IMMz:
+            {
+               /* i386 | cmp r32, abs32_pointer   (loop end sentinel)
+                * -----|---------------------------------------------
+                * X86  | lea r11, [rip+disp32]     (r11 = slid &table_end)
+                *      | cmp r32, r11d             (bound the slid iterator)
+                *
+                * Only reached when the imm was marked a pointer (the
+                * imm_bounds_relocated_table gate in Parse). Same [EAX,EDI]
+                * guard as ADD; CMP_OrAX is always EAX. */
+               const auto r32 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+               if (r32 < XED_REG_EAX || r32 > XED_REG_EDI) {
+                  throw error("%s: CMP imm-ptr at vmaddr 0x%zx: reg0=%s out of "
+                              "[EAX,EDI] (likely 16-bit imm mis-marked pointer)",
+                              __FUNCTION__, this->loc.vmaddr,
+                              xed_reg_enum_t2str(r32));
+               }
+               auto lea_inst =
+                  new Instruction<opposite<bits>>(opcode::lea_r11_mem_rip_disp32());
+               lea_inst->memidx = 0;
+               env.resolve(imm->pointee, &lea_inst->memdisp);
+               lea_inst->memdisp_offset = imm->pointee_offset;
+               auto cmp_inst =
+                  new Instruction<opposite<bits>>(opcode::cmp_r32_r11d(r32));
+               return {lea_inst, cmp_inst};
             }
 
          /*
