@@ -3237,6 +3237,11 @@ static int bp_fast_enum(struct objc_call_plan *plan, const uint32_t *args32,
    return 1;
 }
 
+/* Defined in maptable_shim.m (an ObjC unit — objc_shim.c is plain C, so the
+ * @try/@catch that swallows modern-AppKit's invalid-tag NSException cannot live
+ * here). Does `[self sel:tag]` inside @try/@catch. */
+extern void x64_safe_remove_rect(id self, SEL sel, long tag);
+
 /* NSTrackingRectTag / NSToolTipTag round-trip (the remove side). These tags are
  * 64-bit NSIntegers on x86_64 but 32-bit on i386: -[NSView addTrackingRect:owner:
  * userData:assumeInside:] / -[NSView addToolTipRect:owner:userData:] RETURN a tag
@@ -3277,8 +3282,23 @@ static int bp_track_tag(struct objc_call_plan *plan, const uint32_t *args32,
     * which aborts the app before it ever reaches the matching addTrackingRect:.
     * No-op the 0 tag to restore the leniency the legacy code depends on. Nonzero
     * tags round-trip through the arena (wrapped on the add* return, kind 9). */
-   if (tag != 0)
-      ((void (*)(id, SEL, long))objc_msgSend)(real_self, sel, tag);
+   if (tag != 0) {
+      /* Old macOS silently ignored removeTrackingRect:/removeToolTipRect: for a
+       * STALE/already-removed tag too (not only tag 0): the "remove the old one
+       * before adding a new one" idiom keeps a tag whose tracking rect AppKit may
+       * have already discarded on a window change / view teardown / re-layout.
+       * Modern AppKit instead THROWS NSInternalInconsistencyException
+       * ("0x... is an invalid NSTrackingRectTag"), aborting the whole app
+       * (observed: iPhoto startup, tag 0x600003e95040 = a gone _NSTrackingArea-
+       * AKViewHelper). x64_safe_remove_rect (maptable_shim.m — this file is plain
+       * C, the @try/@catch must live in an ObjC unit) swallows that ONE exception
+       * to restore the legacy leniency — a no-op remove of an already-gone tag is
+       * exactly what the i386 code expects. Dead/invalid surface must DEGRADE, not
+       * crash. The throw unwinds only NATIVE frames (AppKit -> here), so no
+       * reverse-IMP frame / rsp-stash entry is abandoned. Universal: any i386 app
+       * removing tracking/tooltip rects across a view/window lifecycle. */
+      x64_safe_remove_rect(real_self, sel, (long)tag);
+   }
    plan->reg[0] = plan->reg[1] = plan->reg[2] = 0;
    plan->reg[3] = plan->reg[4] = plan->reg[5] = 0;
    plan->nreg = 1;

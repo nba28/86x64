@@ -521,3 +521,26 @@ void legacy_locale_compat_install(void) {
               (unsigned long)[g_legacy_locale count], (void *)g_orig_objectForKey);
    }
 }
+
+/* x64_safe_remove_rect — call [self sel:tag] guarded by @try/@catch.
+ *
+ * objc_shim.c's bp_track_tag (NSTrackingRectTag/NSToolTipTag remove side) needs
+ * to swallow the modern-AppKit NSInternalInconsistencyException thrown when a
+ * STALE/already-removed tag is passed to -[NSView removeTrackingRect:] /
+ * -removeToolTipRect:. Old macOS (the i386 era) silently ignored an invalid
+ * remove; modern AppKit throws and aborts the app (iPhoto startup: a gone
+ * _NSTrackingAreaAKViewHelper tag from the "remove old before adding new" idiom).
+ * objc_shim.c is plain C, so the @try/@catch lives here (an ObjC unit) and it
+ * calls this. The throw unwinds only NATIVE frames (AppKit -> here), so no
+ * reverse-IMP frame / rsp-stash entry is abandoned. Dead/invalid surface must
+ * DEGRADE, not crash. Universal: any i386 app removing tracking/tooltip rects. */
+void x64_safe_remove_rect(id self, SEL sel, long tag) {
+   @try {
+      ((void (*)(id, SEL, long))objc_msgSend)(self, sel, tag);
+   } @catch (NSException *e) {
+      if (getenv("ABICONV_TAG_TRACE"))
+         fprintf(stderr, "[tag] remove tag=0x%lx threw %s -> ignored "
+                 "(legacy silent-invalid-remove leniency)\n",
+                 (unsigned long)tag, [[e name] UTF8String]);
+   }
+}
