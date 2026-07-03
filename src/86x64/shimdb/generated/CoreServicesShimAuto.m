@@ -1,24 +1,22 @@
 #import <Cocoa/Cocoa.h>
 #include <stdio.h>
+#include <stdlib.h>
+#include <pthread.h>
 
-static void shim_note(const char *s) { fprintf(stderr, "[shimauto:%s] %s\n", "CoreServices", s); }
+static void shim_note(const char *sym) {
+  static const char *seen[2048]; static int n;
+  static pthread_mutex_t mtx = PTHREAD_MUTEX_INITIALIZER;
+  pthread_mutex_lock(&mtx);
+  for (int i = 0; i < n; i++)
+    if (seen[i] == sym) { pthread_mutex_unlock(&mtx); return; }
+  if (n < 2048) seen[n++] = sym;
+  fprintf(stderr, "[shimauto:%s] %s: removed-OS symbol CALLED with no curated impl -- returning 0 (write one in shimdb/impl/ if its behavior matters)\n", "CoreServices", sym);
+  if (getenv("SHIMGEN_STUB_ABORT")) abort();
+  pthread_mutex_unlock(&mtx);
+}
 
-long BlockMoveData(long a, long b, long c_, long d, long e, long f) { shim_note("BlockMoveData called (auto-stub)"); return 0; }
+long NavLoad(long a, long b, long c_, long d, long e, long f) { shim_note("NavLoad"); return 0; }
 
-long FSMakeFSSpec(long a, long b, long c_, long d, long e, long f) { shim_note("FSMakeFSSpec called (auto-stub)"); return 0; }
+long NavServicesCanRun(long a, long b, long c_, long d, long e, long f) { shim_note("NavServicesCanRun"); return 0; }
 
-long FSMatchAliasNoUI(long a, long b, long c_, long d, long e, long f) { shim_note("FSMatchAliasNoUI called (auto-stub)"); return 0; }
-
-long FSpMakeFSRef(long a, long b, long c_, long d, long e, long f) { shim_note("FSpMakeFSRef called (auto-stub)"); return 0; }
-
-long PBCatSearchSync(long a, long b, long c_, long d, long e, long f) { shim_note("PBCatSearchSync called (auto-stub)"); return 0; }
-
-long PBGetCatInfoSync(long a, long b, long c_, long d, long e, long f) { shim_note("PBGetCatInfoSync called (auto-stub)"); return 0; }
-
-long PBHGetFInfoSync(long a, long b, long c_, long d, long e, long f) { shim_note("PBHGetFInfoSync called (auto-stub)"); return 0; }
-
-long PBHGetVolParmsSync(long a, long b, long c_, long d, long e, long f) { shim_note("PBHGetVolParmsSync called (auto-stub)"); return 0; }
-
-long PBHGetVolSync(long a, long b, long c_, long d, long e, long f) { shim_note("PBHGetVolSync called (auto-stub)"); return 0; }
-
-long ResolveAlias(long a, long b, long c_, long d, long e, long f) { shim_note("ResolveAlias called (auto-stub)"); return 0; }
+long NavUnload(long a, long b, long c_, long d, long e, long f) { shim_note("NavUnload"); return 0; }
