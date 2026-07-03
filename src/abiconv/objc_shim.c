@@ -7192,27 +7192,45 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
    struct rmeth_ent *m = NULL;
    Class hint = reverse_take_super(self_, sel);
    if (hint) {
-      struct rmeth_ent *hm = rmeth_lookup(hint, sel);
-      if (hm) {
-         lookup = hint;
-         m = hm;
-         if (getenv("OBJC_SUPER_TRACE"))
-            fprintf(stderr, "[prep] HINT HIT self=%p sel=%s -> %s\n",
-                    (void*)self_, sel_getName(sel), class_getName(lookup));
-      }
-   }
-   if (!m) { m = rmeth_lookup(lookup, sel); }
-   /* Inherited reverse method: the receiver's class never registered this sel
-    * — a reverse-registered legacy SUPERCLASS did, and the modern runtime
-    * reached its _86x64_reverse_imp by ordinary inheritance (e.g. native
-    * -[NSDocument initWithType:error:] sending init to an ArchiveDocument
-    * whose init lives on a legacy ancestor). Walk the modern superclass chain
-    * for the owning entry; the shadow below still uses the receiver's own
-    * class, whose fragile-ABI layout embeds the ancestor's ivars first. */
-   if (!m) {
-      for (Class c = class_getSuperclass(lookup); c; c = class_getSuperclass(c)) {
+      /* [super sel]: resolve sel from the HINT (super) class UPWARD its own
+       * superclass chain, and NEVER from the receiver's class. The receiver's
+       * class is the SUBCLASS that just executed [super sel]; re-dispatching sel
+       * there re-runs that same override -> infinite recursion. This bites when
+       * the super class does not define its OWN legacy override of sel but
+       * INHERITS it (from a legacy ancestor, or a native class): the old code
+       * looked sel up only ON the hint class, missed, then fell through to
+       * rmeth_lookup(receiver_class,sel) which re-found the subclass override
+       * (iPhoto: MWAlbumDetailView:CAVariableGridView:CAGridView:NSView, where
+       * only MWAlbumDetailView defines a legacy awakeFromNib -> [super
+       * awakeFromNib] recursed 1000+ deep -> reverse rsp-stash overflow). Walking
+       * hint's chain finds the owning legacy ancestor if any (a hit at c==hint
+       * keeps the s10 +[...initialize] case working); if NONE, sel is native on
+       * the super side and legacy_imp stays 0 (reverse_ret returns nil) — the
+       * correct no-op for [super sel] into a native ancestor (e.g. -[NSView
+       * awakeFromNib]). Universal: any legacy [super sel] whose super inherits
+       * sel rather than defining its own legacy override. */
+      for (Class c = hint; c; c = class_getSuperclass(c)) {
          m = rmeth_lookup(c, sel);
-         if (m) break;
+         if (m) { lookup = c; break; }
+      }
+      if (getenv("OBJC_SUPER_TRACE"))
+         fprintf(stderr, "[prep] SUPER self=%p sel=%s hint=%s -> %s\n",
+                 (void*)self_, sel_getName(sel), class_getName(hint),
+                 m ? class_getName(lookup) : "(native super -> nil)");
+   } else {
+      m = rmeth_lookup(lookup, sel);
+      /* Inherited reverse method: the receiver's class never registered this sel
+       * — a reverse-registered legacy SUPERCLASS did, and the modern runtime
+       * reached its _86x64_reverse_imp by ordinary inheritance (e.g. native
+       * -[NSDocument initWithType:error:] sending init to an ArchiveDocument
+       * whose init lives on a legacy ancestor). Walk the modern superclass chain
+       * for the owning entry; the shadow below still uses the receiver's own
+       * class, whose fragile-ABI layout embeds the ancestor's ivars first. */
+      if (!m) {
+         for (Class c = class_getSuperclass(lookup); c; c = class_getSuperclass(c)) {
+            m = rmeth_lookup(c, sel);
+            if (m) break;
+         }
       }
    }
    /* An entry whose imp is not a plausible code address (a junk legacy method
@@ -7220,20 +7238,25 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
     * back to the no-legacy-method path (returns nil) rather than crash. */
    if (m && m->imp < 0x1000) { m = NULL; }
    if (!m) {
-      /* No legacy method. Reached two ways: a registration gap, or native code
-       * invoking the shared tramp address NOT as an objc IMP (direct IMP-cache
-       * call with nil receiver, block-invoke confusion, ...) — regs[0]/[1] are
-       * then not self/sel at all. legacy_imp=0 makes the asm SKIP the i386
-       * call and return 0 via reverse_ret (which also frees the lowstack);
-       * jmp'ing to 0 here used to kill the process. regs[7] = the native
-       * caller's return address, for identifying the caller. */
-      fprintf(stderr, "objc_shim: reverse_prep: no legacy method for %s[%s] "
-              "(caller ra=%p self=%p sel=%p)\n",
-              class_getName(lookup),
-              (sel && mem_readable((uintptr_t)sel, 1)) ? sel_getName(sel)
-                                                       : "(unreadable)",
-              (void *)(uintptr_t)regs[7], (void *)self_, (void *)sel);
-      fflush(stderr);
+      /* No legacy method. For a [super sel] into a NATIVE ancestor (hint set,
+       * the walk above found no legacy owner) this is EXPECTED — return nil
+       * quietly; the native super method (e.g. -[NSView awakeFromNib]) is a
+       * no-op for our purposes. Otherwise it is a registration gap, or native
+       * code invoking the shared tramp address NOT as an objc IMP (direct
+       * IMP-cache call with nil receiver, block-invoke confusion, ...) —
+       * regs[0]/[1] are then not self/sel at all; warn. legacy_imp=0 makes the
+       * asm SKIP the i386 call and return 0 via reverse_ret (which also frees
+       * the lowstack); jmp'ing to 0 here used to kill the process. regs[7] = the
+       * native caller's return address, for identifying the caller. */
+      if (!hint) {
+         fprintf(stderr, "objc_shim: reverse_prep: no legacy method for %s[%s] "
+                 "(caller ra=%p self=%p sel=%p)\n",
+                 class_getName(lookup),
+                 (sel && mem_readable((uintptr_t)sel, 1)) ? sel_getName(sel)
+                                                          : "(unreadable)",
+                 (void *)(uintptr_t)regs[7], (void *)self_, (void *)sel);
+         fflush(stderr);
+      }
       plan->legacy_imp = 0;
       return;
    }
