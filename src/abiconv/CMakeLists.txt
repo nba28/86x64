@@ -406,6 +406,7 @@ add_library(abiconv SHARED
   file_shim.c
   malloc_shim.c
   mmap_shim.c
+  gestalt_shim.c
   objc_shim.c
   objc_slide.c
   maptable_shim.m
