@@ -46,6 +46,7 @@ enum {
 
 #define kGraphicsImporterType   kFourCC('g','r','i','p')
 #define kGraphicsExporterType    kFourCC('g','r','e','x')
+#define kSoundDecompressorType   kFourCC('s','d','e','c')
 
 /* ---- i386 <-> native pointer helpers ----------------------------------- */
 /* An i386 pointer arg is a low-4GB address valid in this process. */

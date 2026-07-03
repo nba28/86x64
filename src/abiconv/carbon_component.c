@@ -268,6 +268,35 @@ uint32_t shim_GetComponentInfo(uint32_t *a)
    return cmNoErr;
 }
 
+/* ---- standard-capability PRESENCE backends -----------------------------
+ * Legacy QuickTime apps commonly gate startup on the EXISTENCE of standard
+ * component families — e.g. Civ IV, after its Gestalt('qtim') version check,
+ * does FindNextComponent for a sound decompressor ('sdec'/'.mp3'), a JPEG
+ * graphics importer ('grip'/'JPEG') and a JPEG graphics exporter ('grex'), and
+ * shows a "requires QuickTime" alert + exits if ANY is absent. The importer is
+ * backed for real by quicktime_image.c (ImageIO); the other two families have
+ * no real backend yet, so the probe returns 0 and the app quits.
+ *
+ * Register PRESENCE backends for those families so the existence probe (and
+ * CountComponents) reports the standard QuickTime capability set as available.
+ * These carry no open/close hook: open_component() then hands back a bare
+ * instance, which is correct for the probe-only path (the app tests the
+ * FindNextComponent result and never operates on it here). If an app later
+ * actually OPENS one to decode/encode media, that call is a separate concern —
+ * a real ImageIO exporter / AudioToolbox decoder would slot in via
+ * cm_register_backend exactly like the 'grip' importer, replacing this stub.
+ *
+ * Universal: triggers on the standard component TYPE (a QuickTime capability
+ * the modern OS no longer registers), never on an app name. */
+__attribute__((constructor))
+static void cm_register_presence_backends(void)
+{
+   cm_register_backend(kSoundDecompressorType, 0, 0, NULL, NULL,
+                       "QuickTime sound decompressor (presence)");
+   cm_register_backend(kGraphicsExporterType, 0, 0, NULL, NULL,
+                       "QuickTime graphics exporter (presence)");
+}
+
 /* Component ResolveComponentAlias(Component c); — no aliasing, identity. */
 uint32_t shim_ResolveComponentAlias(uint32_t *a) { return a[0]; }
 
