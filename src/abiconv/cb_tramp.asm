@@ -11,7 +11,13 @@
 ;; translated callback via _86x64_call_i386 (objc_reverse.asm). Same
 ;; save-everything-then-let-C-decide design as __86x64_reverse_imp.
 
-%define CB_SLOTS 512
+;; Pool size. Each slot is a ~10-byte stub + an 8-byte table entry, so a large
+;; pool is cheap (8192 -> ~150 KB of .text/.data). A big Carbon/GUI target binds
+;; one slot per DISTINCT (i386 fn, signature) callback — controls, dialog item
+;; procs, timers, event handlers — and Civ IV's nib/UI construction alone needs
+;; well over the old 512 (past which x64_cb_wrap returned 0 and Carbon called a
+;; NULL callback -> rip=0). Keep CB_SLOTS and cb_bridge.c's g_bind[] in lockstep.
+%define CB_SLOTS 8192
 
    segment .text
    extern _x64_cb_dispatch

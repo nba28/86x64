@@ -56,7 +56,7 @@ typedef struct {
    const x64_cb_sig *sig;
 } cb_binding;
 
-static cb_binding     g_bind[512];     /* >= x64_cb_nslots; checked at bind */
+static cb_binding     g_bind[8192];    /* MUST match cb_tramp.asm CB_SLOTS */
 static uint32_t       g_nbind;
 static os_unfair_lock g_bind_lock = OS_UNFAIR_LOCK_INIT;
 
