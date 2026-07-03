@@ -698,11 +698,29 @@ static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
              * wrap). Opcodes: FF/4 jmp, FF/2 call, 8B load, 03 add and —
              * the one the wrapper's table lacked — 89 STORE. */
             for (size_t k = 0; k + 7 <= sz; ++k) {
-               size_t pfx = (p[k] == 0x67) ? 1 : 0;
+               /* Prefix window: the translator's optional 0x67 address-size
+                * prefix (32-bit EA wrap) plus at most one SSE mandatory
+                * prefix (F2 movsd / F3 movss / 66 packed|movd|op16), in
+                * either order. Observed in the wild:
+                * `67 F2 0F 10 04 C5 disp32` — Quinn -[QuinnGame enableTimer]
+                * loading its NSTimer interval from the per-level speed table
+                * (`movsd disp(,%eax,8), %xmm0`). */
+               size_t pfx = 0;
+               uint8_t ssepfx = 0;
+               int seen67 = 0;
+               while (k + pfx < sz && pfx < 2) {
+                  const uint8_t pb = p[k + pfx];
+                  if (pb == 0x67 && !seen67) { seen67 = 1; ++pfx; continue; }
+                  if ((pb == 0xF2 || pb == 0xF3 || pb == 0x66) && !ssepfx) {
+                     ssepfx = pb; ++pfx; continue;
+                  }
+                  break;
+               }
                /* Optional two-byte-opcode escape (0x0F): movsbl/movswl
                 * (0F BE/BF) and movzbl/movzwl (0F B6/B7) also index a disp32
                 * table (Quinn's -[QuinnGame incrementScore...]
-                * `movswl disp(,%eax,8)` into __TEXT,__const). The 0F shifts
+                * `movswl disp(,%eax,8)` into __TEXT,__const), as do the SSE
+                * scalar/packed memory forms below. The 0F shifts
                 * ModRM/SIB/disp32 one byte. */
                size_t esc = (k + pfx < sz && p[k + pfx] == 0x0F) ? 1 : 0;
                if (k + pfx + esc + 7 > sz) { continue; }
@@ -714,8 +732,35 @@ static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
                if ((modrm & 0xC7) != 0x04) { continue; }
                int ok = 0;
                if (esc) {
-                  /* movsx/movzx two-byte loads (any dest reg /r) */
-                  ok = (op == 0xBE || op == 0xBF || op == 0xB6 || op == 0xB7);
+                  /* Two-byte (0F) table accesses:
+                   *  - movsx/movzx integer loads (BE/BF/B6/B7);
+                   *  - SSE loads/stores/converts/compares/arith with a
+                   *    memory operand: movss/movsd/movups/movaps and the
+                   *    66-prefixed pd forms (10/11/28/29), cvtsi2ss/sd,
+                   *    cvttss/sd2si, ucomiss/sd (2A/2C/2D/2E/2F),
+                   *    sqrt/logic/arith/min/max (51,54-5F incl. cvt 5A),
+                   *    movd/movdqa/movdqu/movq (6E/6F/7E/7F/D6), cvtdq (E6).
+                   *    Quinn's -[QuinnGame enableTimer] reads its repeating
+                   *    NSTimer interval via `movsd disp(,%eax,8)` — this slot
+                   *    missing left the rebased disp32 UNSLID, the load read
+                   *    garbage, and the tiny-positive interval on a repeating
+                   *    timer tripped CF's "A CFRunLoopTimer with an interval
+                   *    of 0 is set to repeat" ud2 in __CFRunLoopDoTimer
+                   *    (deterministic SIGILL at fire time). */
+                  ok = (op == 0xBE || op == 0xBF || op == 0xB6 || op == 0xB7) ||
+                       (op == 0x10 || op == 0x11 || op == 0x28 || op == 0x29) ||
+                       (op == 0x2A || op == 0x2C || op == 0x2D || op == 0x2E ||
+                        op == 0x2F) ||
+                       (op == 0x51 || (op >= 0x54 && op <= 0x5F)) ||
+                       (op == 0x6E || op == 0x6F || op == 0x7E || op == 0x7F ||
+                        op == 0xD6 || op == 0xE6);
+               } else if (op >= 0xD8 && op <= 0xDF) {
+                  /* x87 escape opcodes: fld/fst/fadd/fmul/... with a memory
+                   * operand — the pre-SSE compilers' indexed FP-table form
+                   * (`fldl disp(,%eax,8)` = DD 04 C5 disp32). Any /r: the reg
+                   * field selects the x87 operation; every mod=00 rm=100
+                   * SIB-base=disp32 form is a table access needing the slide. */
+                  ok = 1;
                } else if (op == 0xFF) {
                   const uint8_t reg = modrm & 0x38;
                   ok = (reg == 0x20 /* /4 jmp */) || (reg == 0x10 /* /2 call */);

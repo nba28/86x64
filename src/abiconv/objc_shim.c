@@ -3362,6 +3362,139 @@ static int bp_conforms_protocol(struct objc_call_plan *plan, const uint32_t *arg
    return 1;
 }
 
+/* -[NSInvocation setArgument:atIndex:] / getArgument:atIndex: /
+ * setReturnValue: / getReturnValue: carry an OPAQUE `void*` buffer whose
+ * interpretation comes from the invocation's method SIGNATURE, so the generic
+ * arg marshaller sees only `^v` and passes the raw i386 buffer through. For a
+ * POINTER-typed slot ('@','#',':','*','^') that is wrong in both directions:
+ *   - set: the i386 buffer holds a 4-byte i386 value (arena handle / legacy
+ *     object / i386 SEL / i386 pointer); native NSInvocation memcpys the
+ *     slot's native size (8 bytes — also over-reading 4 bytes past the
+ *     caller's slot) into its frame and later USES the value natively:
+ *     -retainArguments retains it, -invoke passes it to the target IMP. A raw
+ *     arena handle left in an '@' slot makes libobjc read the arena SLOT as
+ *     the object's isa -> garbage "Class" -> crash. (Quinn's reflection
+ *     invocation, -[QuinnBoardView didDrawInRect:]: the snapshot NSImage's
+ *     handle 0x8000b560 was retained by -retainArguments; isa = arena slot =
+ *     the real NSImage ptr; the fake Class's cache pointer = the image's
+ *     _size.width = 208.0 -> SIGSEGV at 0x406a000000000000, the IEEE-754
+ *     bits of 208.0.)
+ *   - get: the 8-byte native value would be written over / truncated into
+ *     the caller's 4-byte i386 slot.
+ * Translate the value through the SAME converters the typed arg marshaller
+ * uses (unwrap_obj_arg / conv_sel_arg / x64_objc_unwrap on set; wrap-if-high
+ * on get). Scalar and struct slots pass through untouched: NSInvocation
+ * copies by the signature's own size, and a legacy-registered method's
+ * signature keeps i386 widths (e.g. a float NSRect stays 16 bytes), so the
+ * raw buffer already matches. Triggers on the NSInvocation selector shape +
+ * receiver class, never the app. */
+static int bp_invocation_arg(struct objc_call_plan *plan, const uint32_t *args32,
+                             id real_self, SEL sel) {
+   static SEL s_seta, s_geta, s_setr, s_getr;
+   if (!s_seta) {
+      s_seta = sel_registerName("setArgument:atIndex:");
+      s_geta = sel_registerName("getArgument:atIndex:");
+      s_setr = sel_registerName("setReturnValue:");
+      s_getr = sel_registerName("getReturnValue:");
+   }
+   const int is_set  = (sel == s_seta), is_get  = (sel == s_geta);
+   const int is_sret = (sel == s_setr), is_gret = (sel == s_getr);
+   if (!is_set && !is_get && !is_sret && !is_gret) { return 0; }
+   if (!real_self) { return 0; }
+   /* receiver must be an NSInvocation (walk the chain; no msgSend needed) */
+   Class inv_cls = objc_getClass("NSInvocation");
+   int is_inv = 0;
+   for (Class c = object_getClass(real_self); c; c = class_getSuperclass(c)) {
+      if (c == inv_cls) { is_inv = 1; break; }
+   }
+   if (!is_inv) { return 0; }
+   /* a legacy override keeps the i386 path end-to-end */
+   if (method_is_legacy(class_getInstanceMethod(object_getClass(real_self), sel)))
+      return 0;
+
+   const uint32_t buf32 = args32[2];
+   if (!buf32) { return 0; }                 /* let native raise, as before */
+   const uint32_t idx = (is_set || is_get) ? args32[3] : 0;
+
+   /* the slot's type comes from the invocation's own signature */
+   id sig = ((id (*)(id, SEL))objc_msgSend)(
+      real_self, sel_registerName("methodSignature"));
+   if (!sig) { return 0; }
+   const char *enc = NULL;
+   if (is_set || is_get) {
+      unsigned long nargs = ((unsigned long (*)(id, SEL))objc_msgSend)(
+         sig, sel_registerName("numberOfArguments"));
+      if ((unsigned long)idx >= nargs) { return 0; }   /* native throws */
+      enc = ((const char *(*)(id, SEL, unsigned long))objc_msgSend)(
+         sig, sel_registerName("getArgumentTypeAtIndex:"), (unsigned long)idx);
+   } else {
+      enc = ((const char *(*)(id, SEL))objc_msgSend)(
+         sig, sel_registerName("methodReturnType"));
+   }
+   if (!enc) { return 0; }
+   const char b = *enc_skip_quals(enc);
+   /* pointer-shaped slots only; every other type's bytes already match the
+    * signature-declared width on both sides */
+   if (!(b == '@' || b == '#' || b == ':' || b == '*' || b == '^')) { return 0; }
+
+   const int trace = getenv("OBJC_BRIDGE_TRACE") != NULL;
+   uint64_t tmp = 0;
+   if (is_set || is_sret) {
+      const uint32_t v32 = *(const uint32_t *)(uintptr_t)buf32;
+      if (b == '@' || b == '#') { tmp = unwrap_obj_arg(v32); }
+      else if (b == ':')        { tmp = (uint64_t)(uintptr_t)conv_sel_arg(v32); }
+      else                      { tmp = x64_objc_unwrap(v32); }  /* '*'/'^':
+                                    identity for genuine i386 pointers,
+                                    unwraps a ^v-wrapped 64-bit token */
+      if (is_set) {
+         ((void (*)(id, SEL, void *, unsigned long))objc_msgSend)(
+            real_self, sel, &tmp, (unsigned long)idx);
+      } else {
+         ((void (*)(id, SEL, void *))objc_msgSend)(real_self, sel, &tmp);
+      }
+      if (trace) {
+         fprintf(stderr, "[bp] invocation %s idx=%u enc=\"%s\" "
+                 "0x%08x -> 0x%llx\n", sel_getName(sel), idx, enc, v32,
+                 (unsigned long long)tmp);
+         fflush(stderr);
+      }
+   } else {
+      if (is_get) {
+         ((void (*)(id, SEL, void *, unsigned long))objc_msgSend)(
+            real_self, sel, &tmp, (unsigned long)idx);
+      } else {
+         ((void (*)(id, SEL, void *))objc_msgSend)(real_self, sel, &tmp);
+      }
+      uint32_t out;
+      if (tmp == 0) {
+         out = 0;
+      } else if (b == ':') {
+         /* a real SEL is a C-string pointer; bounce a >4GB one to a low copy
+          * of its name (legacy sel handling matches by name) */
+         out = (tmp < 0x100000000ULL)
+                  ? (uint32_t)tmp
+                  : x64_objc_bounce_cstr(sel_getName((SEL)(uintptr_t)tmp));
+      } else if (tmp < 0x100000000ULL) {
+         out = (uint32_t)tmp;
+      } else {
+         out = x64_objc_wrap(tmp);
+      }
+      *(uint32_t *)(uintptr_t)buf32 = out;
+      if (trace) {
+         fprintf(stderr, "[bp] invocation %s idx=%u enc=\"%s\" "
+                 "0x%llx -> 0x%08x\n", sel_getName(sel), idx, enc,
+                 (unsigned long long)tmp, out);
+         fflush(stderr);
+      }
+   }
+   plan->reg[0] = plan->reg[1] = plan->reg[2] = 0;
+   plan->reg[3] = plan->reg[4] = plan->reg[5] = 0;
+   plan->nreg = 1;
+   plan->ret_is_obj = 0;                     /* void return */
+   plan->target = (uint64_t)(uintptr_t)x64_ret_identity;
+   return 1;
+}
+
 /* plan.target helper: returns its first argument verbatim. bp_block_copy puts
  * the precomputed i386 result in reg[0] and points plan.target here so the
  * msgSend asm returns it (ret_kind 0 = scalar) without calling objc_msgSend. */
@@ -3733,6 +3866,14 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
     * the modern Protocol by name before asking natively (else libobjc strcmps a
     * garbage protocol-name pointer and crashes). */
    if (bp_conforms_protocol(plan, args32, real_self, sel))
+      return;
+
+   /* NSInvocation opaque-buffer argument/return accessors: translate
+    * pointer-typed slots ('@' '#' ':' '*' '^') between the i386 4-byte value
+    * and the real 8-byte native value per the invocation's signature (see
+    * bp_invocation_arg — Quinn's reflection-invocation retainArguments
+    * crash: a raw arena handle retained as an object). */
+   if (bp_invocation_arg(plan, args32, real_self, sel))
       return;
 
    /* Legacy class-method dispatch fallback. Two distinct cases need it, both

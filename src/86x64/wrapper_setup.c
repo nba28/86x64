@@ -331,13 +331,32 @@ static void fixup_translated_dylib_slots(void) {
                    * The prefix shifts the opcode/ModRM/SIB/disp32 one byte, so
                    * skip it here or the disp32 below would never be slid.
                    */
-                  size_t pfx = (p[k] == 0x67) ? 1 : 0;
+                  /* Prefix window: the 0x67 address-size override plus at most
+                   * one SSE mandatory prefix (F2 movsd / F3 movss / 66), in
+                   * either order — e.g. `67 F2 0F 10 04 C5 disp32` (Quinn
+                   * -[QuinnGame enableTimer] `movsd disp(,%eax,8), %xmm0`
+                   * loading its repeating-NSTimer interval from the per-level
+                   * speed table; unslid it read garbage and the tiny-positive
+                   * interval tripped CF's "interval of 0 is set to repeat"
+                   * ud2 in __CFRunLoopDoTimer). */
+                  size_t pfx = 0;
+                  uint8_t ssepfx = 0;
+                  int seen67 = 0;
+                  while (k + pfx < sz && pfx < 2) {
+                     const uint8_t pb = p[k + pfx];
+                     if (pb == 0x67 && !seen67) { seen67 = 1; ++pfx; continue; }
+                     if ((pb == 0xF2 || pb == 0xF3 || pb == 0x66) && !ssepfx) {
+                        ssepfx = pb; ++pfx; continue;
+                     }
+                     break;
+                  }
                   /* Optional two-byte-opcode escape (0x0F). The sign/zero-extend
                    * loads movsbl/movswl (0F BE/BF) and movzbl/movzwl (0F B6/B7)
                    * also use `[disp32 + idx*scale]` (e.g. Quinn's
                    * -[QuinnGame incrementScore...]'s `movswl disp(,%eax,8)` into
-                   * __TEXT,__const). The 0F escape shifts ModRM/SIB/disp32 one
-                   * byte, so account for it or the disp32 below is never slid. */
+                   * __TEXT,__const), as do the SSE scalar/packed memory forms.
+                   * The 0F escape shifts ModRM/SIB/disp32 one byte, so account
+                   * for it or the disp32 below is never slid. */
                   size_t esc = (k + pfx < sz && p[k + pfx] == 0x0F) ? 1 : 0;
                   if (k + pfx + esc + 7 > sz) continue;
                   uint8_t op = p[k + pfx + esc];
@@ -352,10 +371,28 @@ static void fixup_translated_dylib_slots(void) {
                   if ((modrm & 0xC7) != 0x04) continue;
                   int matched_pat = 0;
                   if (esc) {
-                     /* movsx/movzx two-byte loads (any dest reg /r): the
-                      * disp32-base SIB above already disambiguates the form. */
+                     /* Two-byte (0F) table accesses: movsx/movzx integer loads
+                      * (BE/BF/B6/B7) and the SSE memory-operand family —
+                      * movss/movsd/movups/movaps + 66-prefixed pd forms
+                      * (10/11/28/29), cvtsi2ss/sd, cvttss/sd2si, ucomiss/sd
+                      * (2A/2C/2D/2E/2F), sqrt/logic/arith/min/max (51,54-5F),
+                      * movd/movdqa/movdqu/movq (6E/6F/7E/7F/D6), cvtdq (E6).
+                      * The disp32-base SIB above already disambiguates. */
                      matched_pat = (op == 0xBE || op == 0xBF
-                                    || op == 0xB6 || op == 0xB7);
+                                    || op == 0xB6 || op == 0xB7)
+                                   || (op == 0x10 || op == 0x11
+                                       || op == 0x28 || op == 0x29)
+                                   || (op == 0x2A || op == 0x2C || op == 0x2D
+                                       || op == 0x2E || op == 0x2F)
+                                   || (op == 0x51 || (op >= 0x54 && op <= 0x5F))
+                                   || (op == 0x6E || op == 0x6F || op == 0x7E
+                                       || op == 0x7F || op == 0xD6
+                                       || op == 0xE6);
+                  } else if (op >= 0xD8 && op <= 0xDF) {
+                     /* x87 escape opcodes: fld/fst/fadd/... memory forms — the
+                      * pre-SSE compilers' indexed FP-table access
+                      * (`fldl disp(,%eax,8)` = DD 04 C5 disp32). Any /r. */
+                     matched_pat = 1;
                   } else {
                      for (int q = 0; patterns[q].op; ++q) {
                         if (op != patterns[q].op) continue;

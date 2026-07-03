@@ -1,0 +1,5 @@
+ok invocation_retain_survives
+ok invocation_invoke_object
+ok invocation_invoke_rect_nocrash
+ok invocation_get_roundtrip
+exit_code: 0
