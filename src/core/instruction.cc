@@ -873,7 +873,8 @@ namespace MachO {
                 * arg (`movl $_fn, (%esp)`) targets a function entry and
                 * carries a symbol -> still relocated. */
                if (in_seg && bits == Bits::M32 &&
-                   env.code_alias_is_constant(value)) {
+                   (env.code_alias_is_constant(value) ||
+                    env.stackarg_imm_is_code_constant(value))) {
                   in_seg = false;
                }
                if (in_seg) {

@@ -224,6 +224,21 @@ namespace MachO {
        * callers keep their own heuristics for those). */
       bool code_alias_is_constant(std::size_t vmaddr) const;
 
+      /* STRIPPED-BINARY stack-arg fallback (used only by instruction.cc's
+       * esp/ebp `movl $imm,N(%esp/%ebp)` heuristic). code_alias_is_constant is
+       * deliberately disarmed for locals-stripped images — without symbols it
+       * cannot tell a genuine mid-image code pointer from a constant. But a
+       * STACK-ARG imm32 that aliases an instructions-flagged section is a
+       * code-aliasing integer constant, never a data pointer: genuine data/
+       * string args target __cstring/__const/__data, and a -no_pie/PIC image
+       * (no rebase metadata) has no absolute code-pointer immediates at all, so
+       * this has no false-negatives there. True iff !have_local_text_syms AND
+       * `vmaddr` lands in an S_ATTR_(PURE|SOME)_INSTRUCTIONS section. (Halo's
+       * CPU-speed check: the divisor 1000000 = 0xF4240 aliased i386 __TEXT ->
+       * mis-relocated + load-slid to 49557824 -> MHz 2400 read as 48 -> a false
+       * "insufficient CPU" renderer nag. Regression: 74_stripped_stackarg_const.) */
+      bool stackarg_imm_is_code_constant(std::size_t vmaddr) const;
+
 
       ParseEnv(Archive<bits>& archive):
          archive(archive),

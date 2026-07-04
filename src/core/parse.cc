@@ -237,6 +237,25 @@ namespace MachO {
       return false;
    }
 
+   template <Bits bits>
+   bool ParseEnv<bits>::stackarg_imm_is_code_constant(std::size_t vmaddr) const {
+      /* Only the disarmed (locals-stripped) path — with symbols present
+       * code_alias_is_constant already discriminates. See the declaration in
+       * parse.hh for why a stack-arg imm32 aliasing a code section is a
+       * constant, not a pointer, for a -no_pie/PIC stripped binary. */
+      if (have_local_text_syms) { return false; }
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(vmaddr)) { continue; }
+            return (sec->sect.flags &
+                    (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) != 0;
+         }
+         return false;   /* in segment but between/outside sections */
+      }
+      return false;
+   }
+
    template class ParseEnv<Bits::M32>;
    template class ParseEnv<Bits::M64>;
 
