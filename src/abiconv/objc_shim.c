@@ -5431,6 +5431,146 @@ struct ivar_snap {
 static __thread struct ivar_snap *g_snap;
 static __thread uint32_t g_snap_n, g_snap_cap;
 
+/* Push one dirty-tracking snapshot frame (shared by the inherited-ivar sync and
+ * the own-ivar/outlet sync below). g_snap grows LIFO; ivar_wb_flush reads it. */
+static void ivar_snap_push(uint8_t *real_slot, uint8_t *shadow_slot, uint32_t val,
+                           uint8_t kind, uint8_t i386_sz, uint8_t msz, uint8_t msign) {
+   if (g_snap_n == g_snap_cap) {
+      uint32_t nc = g_snap_cap ? g_snap_cap * 2 : 64;
+      struct ivar_snap *ns = realloc(g_snap, (size_t)nc * sizeof *ns);
+      if (!ns) { return; }                    /* OOM: skip write-back tracking */
+      g_snap = ns; g_snap_cap = nc;
+   }
+   struct ivar_snap *s = &g_snap[g_snap_n++];
+   s->real_slot = real_slot; s->shadow_slot = shadow_slot; s->snap = val;
+   s->kind = kind; s->i386_sz = i386_sz; s->msz = msz; s->msign = msign;
+}
+
+/* ---- legacy class OWN object-ivar (nib outlet) registration + R->S sync -----
+ * A reverse-registered legacy class is built via objc_allocateClassPair(...,0)
+ * with NO ivars, so the modern runtime can't find "myBoardView"/"myPlayerInfoView"
+ * etc.: -[NSNibOutletConnector establishConnection] -> object_setInstanceVariable
+ * -> class_getInstanceVariable == NULL -> logs "missing setter or instance
+ * variable" and leaves the outlet nil (Quinn: board fills the window + the stats
+ * sidebar & image wells never wire up; classic-ObjC1 nib apps at large). We
+ * register each legacy class's OWN object-typed ivars on the modern class
+ * (class_addIvar), so the nib connector writes the connected NATIVE object into
+ * the real object R at a modern offset; then, on each reverse dispatch, we mirror
+ * those connected slots into the i386 SHADOW S the translated IMP reads (native
+ * ptr -> wrapped 32-bit handle) at the classic i386 offset. Only slots the nib
+ * actually connected (R non-nil) are mirrored, so ivars a legacy IMP manages
+ * purely in the shadow are never disturbed (no regression to the shadow-only
+ * ExtendedApplication/iPhoto path). The existing ivar_wb_flush 'P' write-back
+ * carries an IMP's reassignment back to R. UNIVERSAL: any classic-ObjC1 outlet.
+ * Gate ABICONV_NO_OUTLET_IVARS restores the old no-ivar behavior. */
+struct own_ivar {
+   const char *name;      /* legacy ivar name (app __OBJC cstring, persistent) */
+   uint32_t    i386_off;  /* classic ivar offset (translated IMP reads here)   */
+   int32_t     moff;      /* modern ivar offset in R (resolved post-register)  */
+};
+struct own_ivars_ent {
+   Class            cls;
+   struct own_ivar *iv;
+   uint32_t         n, cap;
+};
+#define OWN_CAP 4096u                          /* power of two */
+static struct own_ivars_ent g_own[OWN_CAP];    /* per-copy: only the registering
+                                                * copy runs registration + sync  */
+static uint32_t own_hash(Class c) {
+   uint64_t h = (uint64_t)(uintptr_t)c * 2654435761ULL;
+   return (uint32_t)((h ^ (h >> 32)) & (OWN_CAP - 1));
+}
+static struct own_ivars_ent *own_lookup(Class c) {
+   uint32_t i = own_hash(c);
+   for (uint32_t n = 0; n < OWN_CAP; ++n) {
+      if (!g_own[i].cls) { return NULL; }
+      if (g_own[i].cls == c) { return &g_own[i]; }
+      i = (i + 1) & (OWN_CAP - 1);
+   }
+   return NULL;
+}
+static struct own_ivars_ent *own_intern(Class c) {   /* find or create slot */
+   uint32_t i = own_hash(c);
+   for (uint32_t n = 0; n < OWN_CAP; ++n) {
+      if (g_own[i].cls == c) { return &g_own[i]; }
+      if (!g_own[i].cls) { g_own[i].cls = c; return &g_own[i]; }
+      i = (i + 1) & (OWN_CAP - 1);
+   }
+   return NULL;
+}
+
+/* Registration (before objc_registerClassPair): add each OWN object ivar to the
+ * modern class so the nib outlet connector can find & write it. */
+static void reverse_add_ivars(Class target, const struct legacy_objc_class *cls) {
+   static int disabled = -1;
+   if (disabled < 0) { disabled = getenv("ABICONV_NO_OUTLET_IVARS") ? 1 : 0; }
+   if (disabled) { return; }
+   if (!cls->ivars ||
+       !ptr_ok(cls->ivars, sizeof(struct legacy_objc_ivar_list))) { return; }
+   const struct legacy_objc_ivar_list *ivl =
+      (const struct legacy_objc_ivar_list *)(uintptr_t)cls->ivars;
+   int32_t cnt = ivl->ivar_count;
+   if (cnt <= 0 || cnt > 4096) { return; }
+   if (!ptr_ok(cls->ivars, sizeof(struct legacy_objc_ivar_list)
+                           + (size_t)cnt * sizeof(struct legacy_objc_ivar))) { return; }
+   const struct legacy_objc_ivar *ivs = (const struct legacy_objc_ivar *)(ivl + 1);
+   Class super = class_getSuperclass(target);
+   struct own_ivars_ent *e = NULL;
+   for (int32_t k = 0; k < cnt; ++k) {
+      if (!legacy_cstr_ok(ivs[k].name) || !legacy_cstr_ok(ivs[k].type)) { continue; }
+      const char *name = (const char *)(uintptr_t)ivs[k].name;
+      const char *type = (const char *)(uintptr_t)ivs[k].type;
+      if (type[0] != '@' && type[0] != '#') { continue; }  /* only connectable objects */
+      /* don't shadow an inherited ivar (native super sync owns those). */
+      if (super && class_getInstanceVariable(super, name)) { continue; }
+      if (!class_addIvar(target, name, sizeof(id),
+                         (uint8_t)__builtin_ctz((unsigned)sizeof(id)), type)) { continue; }
+      if (!e) { e = own_intern(target); if (!e) { return; } }
+      if (e->n == e->cap) {
+         uint32_t nc = e->cap ? e->cap * 2 : 8;
+         struct own_ivar *ni = realloc(e->iv, (size_t)nc * sizeof *ni);
+         if (!ni) { return; }
+         e->iv = ni; e->cap = nc;
+      }
+      e->iv[e->n].name = name;
+      e->iv[e->n].i386_off = ivs[k].offset;
+      e->iv[e->n].moff = -1;
+      e->n++;
+   }
+}
+
+/* Resolve modern ivar offsets (valid only after objc_registerClassPair). */
+static void own_resolve_offsets(Class target) {
+   struct own_ivars_ent *e = own_lookup(target);
+   if (!e) { return; }
+   for (uint32_t k = 0; k < e->n; ++k) {
+      Ivar iv = class_getInstanceVariable(target, e->iv[k].name);
+      e->iv[k].moff = iv ? (int32_t)ivar_getOffset(iv) : -1;
+   }
+}
+
+/* SYNC (reverse-dispatch entry): mirror class c's nib-connected OWN object
+ * ivars from the real object R into the i386 shadow S. Only non-nil (actually
+ * connected) slots are mirrored; a wrapped handle is deposited so the IMP's
+ * `[outlet ...]` round-trips through the forward bridge. Snapshotted for
+ * ivar_wb_flush so an IMP reassignment carries back to R. */
+static void push_own_object_ivars(uint8_t *sh, id real, Class c) {
+   struct own_ivars_ent *e = own_lookup(c);
+   if (!e) { return; }
+   for (uint32_t k = 0; k < e->n; ++k) {
+      struct own_ivar *iv = &e->iv[k];
+      if (iv->moff < 0 || iv->i386_off > 0x8000u) { continue; }
+      uint8_t *src = (uint8_t *)real + iv->moff;    /* R modern slot (8B ptr) */
+      if (!mem_readable((uintptr_t)src, 8)) { continue; }
+      uint64_t p; memcpy(&p, src, 8);
+      if (!p) { continue; }                          /* not connected: leave shadow */
+      uint32_t val = x64_objc_wrap(p);
+      uint8_t *dst = sh + iv->i386_off;              /* S i386 slot (4B handle) */
+      memcpy(dst, &val, 4);
+      ivar_snap_push(src, dst, val, 'P', 4, 8, 0);
+   }
+}
+
 /* ENTRY: refresh the shadow's inherited-ivar region from the real object and
  * push a dirty-tracking frame onto the thread-local snapshot stack. */
 static void sync_inherited_ivars(struct reverse_plan *plan, uint32_t shadow,
@@ -5439,6 +5579,12 @@ static void sync_inherited_ivars(struct reverse_plan *plan, uint32_t shadow,
    if (!shadow || !real || !cls) { return; }
    uint8_t *sh = (uint8_t *)(uintptr_t)shadow;
    uint32_t mark = g_snap_n;
+   /* The leaf legacy class + any LEGACY ancestor: mirror their nib-connected OWN
+    * object ivars (outlets) from the real object into the shadow, so the IMP's
+    * direct reads see the connected views/controllers, not the zeroed shadow. */
+   for (Class c = cls; c; c = class_getSuperclass(c)) {
+      if (rcls_lookup(c)) { push_own_object_ivars(sh, real, c); }
+   }
    /* Skip the leaf legacy class and any LEGACY ancestor (their ivars are the
     * shadow's OWN region, written by the legacy IMPs directly); sync only the
     * NATIVE ancestors, whose ivars live in the real object. */
@@ -8293,6 +8439,8 @@ static int reverse_register_one(const struct legacy_objc_class *cls) {
    if (!super) { return 0; }                  /* super not registered yet */
    Class newcls = objc_allocateClassPair(super, name, 0);
    if (!newcls) { return -1; }
+   /* own object ivars (nib outlets) — must precede objc_registerClassPair */
+   reverse_add_ivars(newcls, cls);
    /* instance methods */
    reverse_add_methods(newcls, cls->methodLists);
    /* class methods live on the metaclass; legacy metaclass = cls->isa */
@@ -8303,6 +8451,7 @@ static int reverse_register_one(const struct legacy_objc_class *cls) {
       reverse_add_methods(newmeta, meta->methodLists);
    }
    objc_registerClassPair(newcls);
+   own_resolve_offsets(newcls);    /* modern ivar offsets valid post-register */
    rcls_insert(newcls, (uint32_t)(uintptr_t)cls, cls->instance_size);
    return 1;
 }
