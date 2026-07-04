@@ -564,6 +564,90 @@ static int repair_refs_from_file(const char *imgname,
    return 1;
 }
 
+/* Repair the SEL-name + type-encoding pointer slots inside classic ObjC1
+ * method-list sections (__inst_meth / __cls_meth / __cat_inst_meth /
+ * __cat_cls_meth) from the ON-DISK original.
+ *
+ * Same root cause as repair_refs_from_file, one level deeper. libobjc's old-ABI
+ * reader (map_images, BEFORE this callback) uniques method-name selectors by
+ * writing the 8-byte native SEL into the classic 4-byte legacy_objc_method.name
+ * slot (name at +0); the write spans 8 bytes, so the high half (0x00007ff8…)
+ * spills into the adjacent .types slot (+4). reverse_add_methods (objc_shim.c)
+ * later READS meth.name as a cstring and SKIPS any method whose name fails
+ * legacy_cstr_ok, and reads meth.types for the ObjC encoding — so a clobbered
+ * category method (iPhoto -[ArchiveAlbum projectUUID], a category accessor) is
+ * either never registered ("unrecognized selector") or registered with a bogus
+ * encoding. The corruption is heap/ASLR-layout dependent (the clobber value),
+ * hence intermittent; and, like the refs, it is independent of the image slide.
+ * The in-place slide cannot recover a clobbered slot; the file is pristine.
+ *
+ * We walk each PACKED method_list { uint32 obsolete; int32 count; method[count] }
+ * (method = { name, types, imp }, i386 4-byte stride) using the file — its
+ * count fields are integers and are never SEL-clobbered (the 8-byte name write
+ * only reaches name+types of its OWN entry, never a list header or imp) — and
+ * restore each entry's name(+0) and types(+4) slots to original+slide.
+ * imp(+8) is PRESERVED: it is never clobbered (outside the 8-byte name write)
+ * and holds the authoritative translated IMP that reverse_add_methods records
+ * for reverse dispatch. Idempotent (only rewrites a slot whose live value
+ * differs) and fully bounded against the section; a malformed count stops the
+ * walk (fail-safe: under-repair rather than corrupt). Runs in the same phase as
+ * repair_refs_from_file — after the in-place slide, BEFORE the legacy-class
+ * indexing/registration that consumes these lists. */
+static int repair_method_lists_from_file(const char *imgname,
+                                         const char *sectname,
+                                         uint64_t vmaddr, uint64_t fileoff,
+                                         uint64_t size, intptr_t slide,
+                                         uint64_t vmaddr_lo, uint64_t vmaddr_hi) {
+   if (size < 8 || !imgname) { return 0; }
+   int fd = open(imgname, O_RDONLY);
+   if (fd < 0) { return 0; }
+   struct stat stb;
+   if (fstat(fd, &stb) != 0 || (uint64_t)stb.st_size < fileoff + size) {
+      close(fd); return 0;
+   }
+   void *fmap = mmap(NULL, (size_t)(fileoff + size), PROT_READ, MAP_PRIVATE, fd, 0);
+   close(fd);
+   if (fmap == MAP_FAILED) { return 0; }
+   const uint32_t *orig = (const uint32_t *)((uintptr_t)fmap + fileoff);
+
+   void *base = (void *)(uintptr_t)(vmaddr + slide);
+   const size_t page = 4096;
+   uintptr_t a = (uintptr_t)base, e = a + size;
+   uintptr_t aa = a & ~(uintptr_t)(page - 1);
+   size_t la = ((e + page - 1) & ~(uintptr_t)(page - 1)) - aa;
+   if (mprotect((void *)aa, la, PROT_READ | PROT_WRITE) != 0) {
+      munmap(fmap, (size_t)(fileoff + size)); return 0;
+   }
+   uint32_t *live = (uint32_t *)base;
+   size_t n = size / 4;                 /* whole-section 4-byte slot count */
+   size_t i = 0, fixed = 0, lists = 0;
+   /* Walk packed method_lists from the pristine file image. */
+   while (i + 2 <= n) {
+      int32_t count = (int32_t)orig[i + 1];        /* header: [obsolete][count] */
+      if (count <= 0 || count > 100000) { break; } /* malformed -> fail-safe stop */
+      size_t entries = i + 2;
+      if ((size_t)count > (n - entries) / 3) { break; }  /* overflow guard */
+      for (int32_t k = 0; k < count; ++k) {
+         size_t nm = entries + (size_t)k * 3;       /* name(+0), types(+1); imp(+2) kept */
+         for (size_t s = nm; s <= nm + 1; ++s) {
+            uint32_t ov = orig[s];
+            uint32_t want = (ov >= vmaddr_lo && ov < vmaddr_hi)
+                                ? (uint32_t)((uint64_t)ov + (uint64_t)slide) : ov;
+            if (live[s] != want) { live[s] = want; ++fixed; }
+         }
+      }
+      i = entries + (size_t)count * 3;
+      ++lists;
+   }
+   if (g_verbose && fixed) {
+      fprintf(stderr, "abiconv objc_slide: repaired %zu name/types slots across "
+              "%zu method-lists in __OBJC,%s of %s from file\n",
+              fixed, lists, sectname, imgname);
+   }
+   munmap(fmap, (size_t)(fileoff + size));
+   return 1;
+}
+
 /* Slide 4-byte __DATA pointer slots that point into this image's own __TEXT —
  * i.e. C++ vtable entries and function-pointer tables (and switch/PIC fnptr
  * arrays). macho-tool emits these as 4-byte `Immediate` blobs holding the new
@@ -1495,10 +1579,24 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
          (const struct section_64 *)(objc_seg + 1);
       for (uint32_t i = 0; i < objc_seg->nsects; i++, sect++) {
          if (strncmp(sect->sectname, "__message_refs", 16) == 0
-             || strncmp(sect->sectname, "__cls_refs", 16) == 0) {
+             || strncmp(sect->sectname, "__cls_refs", 16) == 0
+             /* __category structs are all-pointer (name/class_name/
+              * instance_methods/class_methods/protocols) — a flat pointer-array
+              * repair is exactly correct and guards the category->method-list
+              * pointer the reverse registration follows. */
+             || strncmp(sect->sectname, "__category", 16) == 0) {
             repair_refs_from_file(imgname, sect->sectname, sect->addr,
                                   sect->offset, sect->size, slide,
                                   vmaddr_lo, vmaddr_hi);
+         } else if (strncmp(sect->sectname, "__inst_meth", 16) == 0
+                    || strncmp(sect->sectname, "__cls_meth", 16) == 0
+                    || strncmp(sect->sectname, "__cat_inst_meth", 16) == 0
+                    || strncmp(sect->sectname, "__cat_cls_meth", 16) == 0) {
+            /* Method lists carry an integer count field, so they need the
+             * structure-aware name/types repair (not the flat one). */
+            repair_method_lists_from_file(imgname, sect->sectname, sect->addr,
+                                          sect->offset, sect->size, slide,
+                                          vmaddr_lo, vmaddr_hi);
          }
       }
    }
