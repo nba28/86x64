@@ -49,7 +49,7 @@ void     x64_cb_leave(void);
 extern const uint64_t x64_cb_tramp_table[];  /* cb_tramp.asm */
 extern const uint64_t x64_cb_nslots;
 
-#define CB_LOWSTACK_SZ (256u * 1024u)
+#define CB_LOWSTACK_SZ (4u * 1024u * 1024u)  /* was 256KB: deep native (QuickTime) call chains from callbacks need real stack */
 
 typedef struct {
    uint32_t          fn32;
