@@ -1,0 +1,4 @@
+udivdi3_2400: 2400
+cpufreq: r=0 hi=0 pass=1
+cpufreq_check: PASS
+exit_code: 0
