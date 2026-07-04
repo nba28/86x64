@@ -12,6 +12,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>   /* malloc == libabiconv low-4GB heap (malloc_shim.c) */
 
 #define PTR(n) ((void *)(uintptr_t)args[(n)])
 #define SND_NO_ERR (0)
@@ -31,17 +32,26 @@ uint32_t shim_SndChannelStatus(uint32_t *args) {
 }
 
 // SndNewChannel(SndChannelPtr *chan, short synth, SInt32 init, SndCallBackUPP userRoutine):
-// the channel ALLOCATOR. Unlike the fire-and-forget commands above it must hand back a valid
-// SndChannelPtr; we cannot fabricate one (the caller stores it in a 32-bit slot and may deref
-// it). So NULL the out channel and report no sound hardware — the caller takes its "no Sound
-// Manager" path and never issues SndPlay/SndDoCommand on a bogus channel. Civ IV's real audio
-// is the bundled OpenAL, so this disables only the dead classic path.
+// the channel ALLOCATOR. Report noErr and hand back a persistent zeroed dummy channel from the
+// low-4GB heap. Returning an error here fails apps that GATE launch on SndNewChannel succeeding
+// — Halo's "CantAllocSndChannel" capability self-check does `if (SndNewChannel(...) != noErr)
+// { alert; _exit; }` (0x2aaa1a), so notEnoughHardwareErr would hard-quit it. A dummy channel is
+// safe: our Snd* commands (SndPlay / SndDoCommand / SndDoImmediate / SndDisposeChannel /
+// SndChannelStatus) no-op regardless of the channel pointer, and the block is zeroed so any
+// field deref (e.g. an app reading chan->qLength before Dispose) reads benign 0s. Allocated
+// once and kept for process lifetime (a few hundred bytes). Civ IV (real audio = bundled
+// OpenAL) now takes the classic "sound OK" path but only issues the no-op Snd* commands, so no
+// bogus-channel deref occurs — the earlier NULL/error behavior is superseded.
 // ★This was the 1 Sound Manager symbol missed by the original probe: it is in CarbonSound's
 // SYMTAB (which the nm-based bundled-export subtraction wrongly cleared) but the bind targets
 // Carbon, where it is removed — the same symtab-vs-trie trap as _NewMovieFromDataRef.
-#define SND_NO_HARDWARE (-201)   // notEnoughHardwareErr
 uint32_t shim_SndNewChannel(uint32_t *args) {
     uint32_t *chan = (uint32_t *)PTR(0);
-    if (chan) *chan = 0;          // out SndChannelPtr -> NULL
-    return (uint32_t)SND_NO_HARDWARE;
+    static uint32_t g_dummy;   // low-4GB SndChannel handle, 0 until first alloc
+    if (!g_dummy) {
+        void *p = malloc(512);            // libabiconv low-4GB heap
+        if (p) { memset(p, 0, 512); g_dummy = (uint32_t)(uintptr_t)p; }
+    }
+    if (chan) *chan = g_dummy;             // non-NULL, zeroed, safe to deref/Dispose
+    return SND_NO_ERR;
 }
