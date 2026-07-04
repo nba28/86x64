@@ -364,6 +364,30 @@ namespace MachO {
                    env.code_alias_is_constant(value)) {
                   break;   /* mid-function code alias -> constant */
                }
+               /* CLASSIC-RELOC AUTHORITATIVE GATE (M32 classic images). A
+                * slidable classic image's genuine absolute internal pointers
+                * ALL carry LC_DYSYMTAB local relocations — dyld could not
+                * slide the image otherwise — so when the image has a live
+                * local-reloc table (and no LC_DYLD_INFO rebase stream: see
+                * Dysymtab::lift_local_relocs) membership is EXACT: a slot
+                * with no reloc is a constant, whatever its value aliases.
+                * Kills the mass false positives the in-range heuristic
+                * produces in packed-constant const data (Portal 2
+                * engine.dylib __TEXT,__const: all 637 in-range hits were
+                * packed int16 pairs / ASCII / floats with zero relocs —
+                * g_SideVertCorners {1,0} = 0x00010000 became a slid text
+                * address, wild SIGBUS store in InitPowerInfo_R). This gate
+                * covers __TEXT,__const, where the func-entry gate above is
+                * deliberately disarmed, AND locals-stripped classic dylibs,
+                * where it can't arm. Slots WITH a reloc fall through to the
+                * existing detection unchanged, so this only ever REMOVES
+                * false positives. Reloc-less fixed-address execs stay on the
+                * heuristics. M32-only: the M64 convert re-parse keeps its
+                * established behavior. */
+               if (bits == Bits::M32 && env.have_classic_local_relocs &&
+                   env.local_reloc_addrs.count(loc.vmaddr) == 0) {
+                  break;   /* linker recorded no reloc here -> constant */
+               }
                is_pointer = true;
                break;
             }

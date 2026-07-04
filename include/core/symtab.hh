@@ -192,6 +192,12 @@ namespace MachO {
        * parse). See the XrelEntry comment + Archive::inject_xrel_section. */
       void lift_external_relocs(const Image& img, ParseEnv<bits>& env);
 
+      /* Lift the classic LOCAL relocation table (locreloff/nlocrel) into
+       * env.local_reloc_addrs — the authoritative which-data-words-are-
+       * pointers map for DataParser (called at parse). See
+       * ParseEnv::local_reloc_addrs. */
+      void lift_local_relocs(const Image& img, ParseEnv<bits>& env);
+
       /* Lift classic self-modifying CALL-stub sections (S_SYMBOL_STUBS +
        * S_ATTR_SELF_MODIFYING_CODE — i386 `__IMPORT,__jump_table`) into
        * env.jump_table_targets, mapping each DEFINED stub's vmaddr to the

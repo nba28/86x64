@@ -175,6 +175,7 @@ namespace MachO {
                                          dysymtab.nindirectsyms))
    {
       lift_external_relocs(img, env);
+      lift_local_relocs(img, env);
       lift_jump_table_targets(img, env);
    }
 
@@ -266,6 +267,72 @@ namespace MachO {
          /* Resolve the slot's blob by vmaddr (deferred; fires in do_resolve). */
          env.vmaddr_resolver.resolve(slot_vmaddr, &xrel_entries.back().slot);
       }
+   }
+
+   /* Lift the classic LOCAL relocation table (locreloff/nlocrel) into
+    * env.local_reloc_addrs, DataParser's authoritative internal-pointer map
+    * (see ParseEnv::local_reloc_addrs). relocBase per the Mach-O spec: the
+    * first segment's vmaddr, or the first WRITABLE segment's for
+    * MH_SPLIT_SEGS images (whose read-only segments hold no pointers by
+    * construction). Scattered entries (R_SCATTERED, 24-bit r_address) are
+    * recorded too, except GENERIC_RELOC_PAIR followers whose r_address is not
+    * a slot address. Arms have_classic_local_relocs ONLY when the image
+    * carries no LC_DYLD_INFO rebase stream: in a hybrid, dyld consumes the
+    * rebase opcodes and the classic table may be empty/partial, so the
+    * heuristics stay in charge there. MH_OBJECT is skipped (its r_address is
+    * section-relative, and .o files never take this pipeline anyway). */
+   template <Bits bits>
+   void Dysymtab<bits>::lift_local_relocs(const Image& img, ParseEnv<bits>& env) {
+      if (dysymtab.nlocrel == 0 || dysymtab.locreloff == 0) { return; }
+
+      const auto& hdr = img.at<mach_header_t<bits>>(0);
+      if (hdr.filetype == MH_OBJECT) { return; }
+
+      /* Hybrid (classic relocs + LC_DYLD_INFO rebase stream)? Rebase opcodes
+       * are the pointer truth there — do not arm the authoritative gate. */
+      {
+         std::size_t lc_off = sizeof(mach_header_t<bits>);
+         for (uint32_t i = 0; i < hdr.ncmds; ++i) {
+            const auto& lc = img.at<load_command>(lc_off);
+            if (lc.cmd == LC_DYLD_INFO || lc.cmd == LC_DYLD_INFO_ONLY) {
+               const auto& di = img.at<dyld_info_command>(lc_off);
+               if (di.rebase_size != 0) { return; }
+            }
+            lc_off += lc.cmdsize;
+         }
+      }
+
+      std::size_t reloc_base = 0;
+      {
+         const auto& segs = env.archive.segments();
+         if ((hdr.flags & MH_SPLIT_SEGS) != 0) {
+            for (Segment<bits> *seg : segs) {
+               if ((seg->segment_command.initprot & VM_PROT_WRITE) != 0) {
+                  reloc_base = seg->segment_command.vmaddr;
+                  break;
+               }
+            }
+         } else if (!segs.empty()) {
+            reloc_base = segs.front()->segment_command.vmaddr;
+         }
+      }
+
+      for (uint32_t i = 0; i < dysymtab.nlocrel; ++i) {
+         const std::size_t off = dysymtab.locreloff + i * sizeof(relocation_info);
+         if (off + sizeof(relocation_info) > img.size()) { break; }
+         if (img.at<uint32_t>(off) & R_SCATTERED) {
+            const auto& sri = img.at<scattered_relocation_info>(off);
+            if (sri.r_type == GENERIC_RELOC_PAIR) { continue; }
+            env.local_reloc_addrs.insert(
+               reloc_base + static_cast<std::size_t>(sri.r_address));
+         } else {
+            const auto& ri = img.at<relocation_info>(off);
+            if (ri.r_extern) { continue; } /* import binding, not a rebase slot */
+            env.local_reloc_addrs.insert(
+               reloc_base + static_cast<uint32_t>(ri.r_address));
+         }
+      }
+      env.have_classic_local_relocs = !env.local_reloc_addrs.empty();
    }
 
    /* Classic i386 `__IMPORT,__jump_table` (S_SYMBOL_STUBS +

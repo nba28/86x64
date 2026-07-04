@@ -117,6 +117,28 @@ namespace MachO {
        * Populated in the Symtab ctor alongside func_syms. */
       bool have_local_text_syms = false;
 
+      /* CLASSIC-RELOC AUTHORITATIVE POINTER MAP (M32 classic images): the
+       * vmaddr of every slot covered by the LC_DYSYMTAB LOCAL relocation
+       * table (locreloff/nlocrel; scattered entries included, PAIR followers
+       * skipped). A slidable classic image's genuine absolute INTERNAL
+       * pointers ALL carry a local reloc — dyld could not slide them
+       * otherwise — so when this map is armed it is EXACT, not heuristic: a
+       * 4-aligned data word whose value merely aliases a segment's vmaddr
+       * range but has no entry here is an integer/packed constant. (Portal 2
+       * engine.dylib: 637/637 in-range heuristic hits inside __TEXT,__const
+       * had NO reloc — packed int16 pairs like g_SideVertCorners {1,0} =
+       * 0x00010000, ASCII string bytes, floats — and rebasing them corrupted
+       * the displacement-map tables: wild SIGBUS store in InitPowerInfo_R.)
+       * Armed (have_classic_local_relocs) only for genuinely classic images:
+       * nlocrel > 0 AND no LC_DYLD_INFO rebase stream — a hybrid's pointer
+       * truth lives in its rebase opcodes instead. Populated by
+       * Dysymtab::lift_local_relocs (LC-construction phase, ready before any
+       * Section::Parse1); consumed by DataParser's pointer detection.
+       * Fixed-address execs carry no relocs at all (nlocrel == 0), stay
+       * disarmed, and keep the heuristics + func-entry gate. */
+      std::set<std::size_t> local_reloc_addrs;
+      bool have_classic_local_relocs = false;
+
       /* GCC PIC thunks (`___i686.get_pc_thunk.<r>`), keyed by the thunk's
        * entry vmaddr (= its nlist n_value) and valued by the x86 GPR encoding
        * (0=EAX,1=ECX,2=EDX,3=EBX,5=EBP,6=ESI,7=EDI) the thunk loads with the
