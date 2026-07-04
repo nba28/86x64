@@ -1,0 +1,4 @@
+ok responds_cat
+ok base
+ok cat_dispatch
+exit_code: 0
