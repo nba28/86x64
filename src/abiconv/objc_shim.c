@@ -3790,6 +3790,47 @@ static int bp_nsdata_nocopy(struct objc_call_plan *plan, const uint32_t *args32,
    }
    return 1;
 }
+
+/* Deprecated -[NSFileManager removeFileAtPath:handler:] (Mac OS X 10.0-era,
+ * still called by iPhoto's account-config path cleanup on a background thread)
+ * crashes in modern Foundation: its compat impl (_removeFileAtPath:handler:
+ * shouldDeleteFork:) runs -[NSString fileSystemRepresentation], which builds a
+ * VM-backed NSData (initWithBytes:length:copy:freeWhenDone:bytesAreVM:) whose
+ * -[NSConcreteData bytes] then pthread_mutex_lock()s a mutex at a NULL base ->
+ * SIGSEGV addr=0x8 (repro'd ~8% on boot / opening Preferences; the path string
+ * lengths are sane, so it is the deprecated compat path itself, not corrupt
+ * data). The MODERN -[NSFileManager removeItemAtPath:error:] takes a different,
+ * working internal path — iPhoto itself calls it elsewhere without crashing.
+ * Redirect the deprecated call to the modern one (dropping the unused
+ * error-callback delegate, passing error:NULL) and return the BOOL.
+ *
+ * A bare selector swap won't do: removeFileAtPath:handler:'s 2nd arg is an
+ * object (the handler delegate) while removeItemAtPath:error:'s is an out
+ * NSError** — not arg-compatible — so we resolve the path arg and re-dispatch.
+ * Universal: any i386 app calling the deprecated handler method. Keyed on the
+ * selector. */
+static int bp_deprecated_removefile(struct objc_call_plan *plan,
+                                    const uint32_t *args32,
+                                    id real_self, SEL sel) {
+   if (!sel || !real_self) { return 0; }
+   if (strcmp(sel_getName(sel), "removeFileAtPath:handler:") != 0) { return 0; }
+   SEL rsel = sel_registerName("removeItemAtPath:error:");
+   if (!class_respondsToSelector(object_getClass(real_self), rsel)) { return 0; }
+   id path = (id)(uintptr_t)unwrap_obj_arg(args32[2]);
+   typedef signed char (*rm_t)(id, SEL, id, void *);
+   signed char ok = ((rm_t)objc_msgSend)(real_self, rsel, path, (void *)0);
+   plan->reg[0] = (uint64_t)(unsigned char)ok;              /* BOOL in eax */
+   plan->reg[1] = plan->reg[2] = plan->reg[3] = plan->reg[4] = plan->reg[5] = 0;
+   plan->nreg = 1;
+   plan->ret_is_obj = 0;
+   plan->target = (uint64_t)(uintptr_t)x64_ret_identity;
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[bp] removeFileAtPath:handler: -> removeItemAtPath:error: ok=%d\n",
+              (int)ok);
+      fflush(stderr);
+   }
+   return 1;
+}
 /* QUINN_PLAY_TRACE: one focused, low-volume line per event relevant to the
  * three remaining Quinn gameplay-rendering/input symptoms, so a SINGLE the tester
  * play-test disambiguates all three. Called from BOTH bridge directions —
@@ -3919,6 +3960,13 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
     * COPYING form so native free() never touches shim memory (else -dealloc
     * aborts). */
    if (bp_nsdata_nocopy(plan, args32, real_self, sel))
+      return;
+
+   /* Deprecated -[NSFileManager removeFileAtPath:handler:] -> modern
+    * removeItemAtPath:error: (the 10.0-era compat path null-locks a VM-backed
+    * NSData in -[NSString fileSystemRepresentation]; iPhoto account-config
+    * background thread, ~8% at boot/prefs). See bp_deprecated_removefile. */
+   if (bp_deprecated_removefile(plan, args32, real_self, sel))
       return;
 
    /* NSFastEnumeration: convert the by-pointer state struct (x86_64 layout from
