@@ -287,3 +287,85 @@ int32_t shim_pthread_rwlock_destroy(uint32_t *a) {
    free(r);
    return (int32_t)rc;
 }
+
+/* ---- pthread_once --------------------------------------------------------- */
+/*
+ * abigen forwards _pthread_once straight to native pthread_once, which is wrong
+ * two ways: (a) the i386 once-control block is `{ long __sig; char __opaque[4] }`
+ * (8 bytes, 4-byte sig) — NOT a valid native os_once_t, so native pthread_once's
+ * gate machinery reads a corrupt token and calls _os_once_gate_corruption_abort
+ * (Civ IV s30, the wall exposed once import_repair cleared s29's rip=0: the
+ * translated QuickTime internalGetPerThreadStorage -> _pthread_once path);
+ * (b) the init routine is an i386 `void(void)` code pointer that native
+ * pthread_once would invoke with the x86_64 ABI + an 8-byte `ret` over-popping
+ * the i386 4-byte frame.
+ *
+ * Fix (same family as the mutex/cond/rwlock shims): run the once semantics
+ * ourselves, keyed on the STABLE low-4GB address of the i386 control block, and
+ * invoke the i386 init routine through _86x64_call_i386 on a fresh low-4GB stack
+ * (identical to the generic callback bridge). Concurrent callers on the same
+ * control block block on the entry lock until the first init completes — the
+ * POSIX pthread_once contract. Universal: keyed on the sync-handle shape, not on
+ * any app; any translated i386 program's pthread_once is corrected.
+ */
+
+/* objc_reverse.asm: lay `nwords` i386 cdecl args + a return frame on the
+ * provided low-4GB stack, enter the translated fn, return its eax. */
+uint32_t _86x64_call_i386(uint64_t fn, uint64_t nwords, const uint32_t *words,
+                          uint64_t lowstack_top);
+
+#define PSX_ONCE_STACK_SZ (1u * 1024u * 1024u)
+
+struct psx_once {
+   uint32_t        key;        /* i386 control-block address (stable, <4GB) */
+   int             done;       /* 1 once the init routine has completed */
+   pthread_mutex_t lk;         /* serializes first-init; POSIX once contract */
+   struct psx_once *next;
+};
+static struct psx_once *g_once_head;    /* under g_reg_lock */
+
+static struct psx_once *once_entry(uint32_t key) {
+   struct psx_once *e;
+   pthread_mutex_lock(&g_reg_lock);
+   for (e = g_once_head; e; e = e->next) {
+      if (e->key == key) { pthread_mutex_unlock(&g_reg_lock); return e; }
+   }
+   e = (struct psx_once *)calloc(1, sizeof(*e));
+   if (e) {
+      e->key = key;
+      pthread_mutex_init(&e->lk, NULL);
+      e->next = g_once_head;
+      g_once_head = e;
+   }
+   pthread_mutex_unlock(&g_reg_lock);
+   return e;
+}
+
+int32_t shim_pthread_once(uint32_t *a);
+int32_t shim_pthread_once(uint32_t *a) {
+   /* a[0] = pthread_once_t*, a[1] = void(*init)(void) — both i386 addresses. */
+   const uint32_t once = a[0];
+   const uint32_t init = a[1];
+   if (once == 0 || init == 0) { return 0; }
+
+   struct psx_once *e = once_entry(once);
+   if (e == NULL) { return -1; }
+   if (__atomic_load_n(&e->done, __ATOMIC_ACQUIRE)) { return 0; }
+
+   pthread_mutex_lock(&e->lk);
+   if (!e->done) {
+      void *stk = malloc(PSX_ONCE_STACK_SZ);   /* low-4GB (this copy's malloc) */
+      if (stk == NULL) { pthread_mutex_unlock(&e->lk); return -1; }
+      const uint64_t top =
+         ((uint64_t)(uintptr_t)stk + PSX_ONCE_STACK_SZ) & ~0xfULL;
+      if (psx_trace()) {
+         fprintf(stderr, "[psx_once] key=0x%x init=0x%x (first run)\n",
+                 once, init);
+      }
+      _86x64_call_i386((uint64_t)init, 0, NULL, top);
+      free(stk);
+      __atomic_store_n(&e->done, 1, __ATOMIC_RELEASE);
+   }
+   pthread_mutex_unlock(&e->lk);
+   return 0;
+}

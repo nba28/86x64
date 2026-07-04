@@ -149,6 +149,13 @@
 	MTSHIM	___pthread_rwlock_trywrlock,  _shim_pthread_rwlock_trywrlock
 	MTSHIM	___pthread_rwlock_unlock,     _shim_pthread_rwlock_unlock
 	MTSHIM	___pthread_rwlock_destroy,    _shim_pthread_rwlock_destroy
+	;; pthread_once: the i386 once-control block ({long __sig; opaque} = 8B,
+	;; 4-byte sig) is NOT a valid native os_once_t, and its init routine is an
+	;; i386 void(void) fn ptr. abigen's forward to native pthread_once trips
+	;; _os_once_gate_corruption_abort (Civ IV s30). pthread_sync_shim.c runs
+	;; the once semantics itself, keyed on the stable i386 control address, and
+	;; calls the init routine via _86x64_call_i386. Universal.
+	MTSHIM	___pthread_once,              _shim_pthread_once
 
 	;; Carbon Process Manager: ProcessInfoRec embeds pointers (i386/x86_64
 	;; layouts differ) and is in/out — abigen can't marshal it. proc_shim.c.

@@ -66,6 +66,9 @@ _pthread_rwlock_tryrdlock
 _pthread_rwlock_trywrlock
 _pthread_rwlock_unlock
 _pthread_rwlock_destroy
+# pthread_once: i386 once-control layout != native os_once_t + i386 init callback
+# (pthread_sync_shim.c runs the once itself, calls the init via _86x64_call_i386).
+_pthread_once
 
 __sprintf_chk
 
