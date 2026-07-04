@@ -128,6 +128,24 @@ static uint64_t ir_resolve(const char *name) {
    return (uint64_t)(uintptr_t)s;
 }
 
+/* libabiconv `__`+name marshalling shim ONLY (no native fallback). Used for the
+ * weak-NULL lazy repair: a shim entry handles the i386 4-byte-return frame, but
+ * a NATIVE function would over-pop it (s28 ABI), so the weak-NULL path must
+ * never fall back to native — it leaves the slot NULL instead (preserving weak-
+ * optional semantics for genuinely absent symbols). 0 = no shim. */
+static uint64_t ir_resolve_shim_only(const char *name) {
+   if (name == NULL || name[0] == '\0') { return 0; }
+   char buf[512];
+   size_t len = strlen(name);
+   if (len + 2 > sizeof(buf)) { return 0; }
+   buf[0] = '_';
+   memcpy(buf + 1, name, len + 1);
+   void *self = ir_self_handle();
+   if (self == NULL) { return 0; }
+   void *s = dlsym(self, buf);
+   return (uint64_t)(uintptr_t)s;
+}
+
 void _86x64_import_repair(const struct mach_header_64 *mh64, intptr_t slide,
                           const char *imgname);
 
@@ -218,7 +236,25 @@ void _86x64_import_repair(const struct mach_header_64 *mh64, intptr_t slide,
             const char *name = strs + nl->n_un.n_strx;
             const uint64_t v = slots[k];
             if (lazy) {
-               if (v < helper_lo || v >= helper_hi) { continue; } /* bound */
+               if (v >= helper_lo && v < helper_hi) {
+                  /* still points into __stub_helper: never bound (half-wired
+                   * artifact) -> full repair below (shim or native). */
+               } else if (v == 0) {
+                  /* WEAK bind that dyld resolved to NULL — a removed symbol
+                   * (e.g. translated QuickTime's __InitHLTB from HIToolbox,
+                   * removed from modern macOS). Redirect to a libabiconv `__`+
+                   * name marshalling shim ONLY when one exists: the shim's
+                   * MTSHIM trampoline handles the i386 4-byte-return frame,
+                   * whereas a NATIVE function would 8-byte over-pop it (s28 ABI
+                   * family). No shim -> leave the legit weak-optional NULL. This
+                   * closes the gap where a properly-wired route-C image weak-
+                   * NULLs a removed import that libabiconv actually covers. */
+                  const uint64_t ws = ir_resolve_shim_only(name);
+                  if (ws != 0) { slots[k] = ws; n_unbound++; n_shim++; }
+                  continue;
+               } else {
+                  continue;   /* genuinely bound */
+               }
             } else {
                if (v != 0) { continue; }                          /* bound */
                if (strcmp(name, "dyld_stub_binder") == 0) {
