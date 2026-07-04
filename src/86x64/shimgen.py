@@ -69,6 +69,55 @@ def flat_sign(path):
              "--identifier", os.path.basename(path), t])
         shutil.copy2(t, path)
 
+_sdk_cache = None
+def sdk_path():
+    global _sdk_cache
+    if _sdk_cache is None:
+        r = run(["xcrun", "--show-sdk-path"])
+        _sdk_cache = r.stdout.strip() if r.returncode == 0 else ""
+    return _sdk_cache
+
+def strip_allowable_clients(src_tbd, dst_tbd):
+    """Copy a .tbd, dropping every `allowable-clients:` block. A restricted
+    sub-framework (HIToolbox/CarbonSound/NavigationServices under Carbon) lists
+    only Apple frameworks as allowable clients, so ld refuses to let a generated
+    shim -reexport_framework it directly ("not an allowed client of it"). The
+    allowable-clients constraint is advisory link-time metadata; a copy with it
+    removed lets ld emit the re-export (the LC_REEXPORT_DYLIB still names the
+    real framework, so dyld loads the genuine one at runtime)."""
+    out, skip_indent = [], None
+    for line in open(src_tbd):
+        stripped = line.lstrip(" ")
+        indent = len(line) - len(stripped)
+        if skip_indent is not None:
+            # inside the block: skip while more-indented than the key line
+            if stripped.strip() and indent <= skip_indent:
+                skip_indent = None            # block ended; fall through
+            else:
+                continue
+        if stripped.startswith("allowable-clients:"):
+            skip_indent = indent
+            continue
+        out.append(line)
+    with open(dst_tbd, "w") as f:
+        f.write("".join(out))
+
+def reexport_flags_stripped_tbd(dep_path, fw, gen_dir):
+    """Fallback for a restricted sub-framework: reexport against a copy of its
+    SDK .tbd with allowable-clients stripped. Returns clang flags, or [] if no
+    tbd is found (then the caller keeps the stubs-only fallback)."""
+    sdk = sdk_path()
+    if not sdk or not dep_path.startswith("/"):
+        return []
+    tbd = sdk + dep_path + ".tbd"
+    if not os.path.exists(tbd):
+        return []
+    rex_dir = os.path.join(gen_dir, "reexport_tbd")
+    fw_dir_stub = os.path.join(rex_dir, f"{fw}.framework")
+    os.makedirs(fw_dir_stub, exist_ok=True)
+    strip_allowable_clients(tbd, os.path.join(fw_dir_stub, f"{fw}.tbd"))
+    return ["-F", rex_dir, "-Wl,-reexport_framework," + fw]
+
 def deps_of(binary):
     """[(dep_path, version_suffix)] from LC_LOAD_DYLIB (LC_ID excluded)."""
     out = run(["otool", "-L", binary]).stdout.splitlines()[1:]
@@ -625,13 +674,30 @@ def main():
                 cmd += ["-Wl,-reexport_framework," + fw]
         r = run(cmd)
         if r.returncode != 0 and any(a.startswith("-Wl,-reexport") for a in cmd):
-            # SDK may lack the tbd (framework gone) or refuse direct linkage
-            # (sub-framework): fall back to stubs-only, loudly — symbols
-            # reachable only via the re-export become missing.
-            print(f"WARN {shim_name}: re-export link failed, retrying "
-                  f"stubs-only:\n{r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ''}")
-            cmd = [a for a in cmd if not a.startswith("-Wl,-reexport")]
-            r = run(cmd)
+            # A restricted sub-framework (HIToolbox/CarbonSound/NavigationServices
+            # under Carbon) refuses direct -reexport_framework linkage ("not an
+            # allowed client of it"). Retry against a copy of its SDK .tbd with
+            # allowable-clients stripped BEFORE giving up: this keeps the present
+            # symbols reachable (the LC_REEXPORT_DYLIB still names the real
+            # framework, so dyld loads the genuine one). Without this the shim is
+            # stubs-only and the framework's PRESENT symbols regress to NULL
+            # (Civ IV s32: QuickTime's 114 present HIToolbox symbols would go
+            # NULL if HIToolboxShimAuto only stubbed the 115 removed ones).
+            tbd_flags = reexport_flags_stripped_tbd(ent["dep_path"], fw, gen_dir)
+            r2 = None
+            if tbd_flags:
+                base = [a for a in cmd if not a.startswith("-Wl,-reexport")]
+                r2 = run(base + tbd_flags)
+            if r2 is not None and r2.returncode == 0:
+                r = r2
+            else:
+                # SDK lacks the tbd (framework truly gone) or the strip did not
+                # help: fall back to stubs-only, loudly — symbols reachable only
+                # via the re-export become missing.
+                print(f"WARN {shim_name}: re-export link failed, retrying "
+                      f"stubs-only:\n{r.stderr.strip().splitlines()[-1] if r.stderr.strip() else ''}")
+                cmd = [a for a in cmd if not a.startswith("-Wl,-reexport")]
+                r = run(cmd)
         if r.returncode != 0:
             print(f"FAIL compile {shim_name}:\n{r.stderr[-2000:]}")
             continue
