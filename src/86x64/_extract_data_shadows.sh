@@ -48,9 +48,15 @@ fi
 #    (and our own already-shadowing libabiconv + generated *ShimAuto stubs),
 #    deny TRANSLATED (low) bundled frameworks, and drop any C++-mangled (__Z*)
 #    name as a backstop.
-DENY='libabiconv|libstdc\+\+|libc\+\+|libSystem|libsystem|libobjc|libgcc|ShimAuto'
+#    NB: a MODERN (LC_DYLD_INFO) target's non-lazy data pointers live in
+#    __DATA,__nl_symbol_ptr; a CLASSIC pre-10.6 target re-emitted via route-C
+#    keeps them in __IMPORT,__pointers (S_NON_LAZY_SYMBOL_POINTERS under the
+#    classic segname). Accept BOTH so iWork-'09-vintage frameworks are covered.
+#    The lazy call stubs (__IMPORT,__jump_table -> __jt_ptrs) are FUNCTION
+#    pointers, never movl-loaded, so they naturally drop out at step 3.
+DENY='libabiconv|libstdc\+\+|libc\+\+|libSystem|libsystem|libobjc|libgcc|libxml|ShimAuto'
 NONLAZY=$(otool -bind_info "$BIN" 2>/dev/null \
-          | awk '$2=="__nl_symbol_ptr"{print $(NF-1)" "$NF}' \
+          | awk '$2=="__nl_symbol_ptr"||$2=="__pointers"{print $(NF-1)" "$NF}' \
           | grep -vE "^[^ ]*($DENY)[^ ]* " \
           | awk -v trf="$TRFILE" 'BEGIN{while((getline l < trf)>0) if(l!="") tr[l]=1}
                                   !($1 in tr){print $2}' \

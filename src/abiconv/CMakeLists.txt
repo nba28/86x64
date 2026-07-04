@@ -160,6 +160,7 @@ set(ABICONV_MODERN_TARGETS
     "$ENV{HOME}/Downloads/iLife11/Halo.app/Contents/MacOS/Halo.dylib"
     "$ENV{HOME}/Downloads/iLife11/Applications/iPhoto.app/Contents/MacOS/iPhoto.dylib"
     "$ENV{HOME}/Downloads/iLife11/Applications/iWeb.app/Contents/MacOS/iWeb.dylib"
+    "$ENV{HOME}/Library/Application Support/Steam/steamapps/common/Portal 2/bin/osx32/engine.dylib"
     CACHE STRING "translated app-code dylibs whose imports drive the universal modern shim set")
 set(ABICONV_MODERN_TARGET_ARGS "")
 set(ABICONV_MODERN_TARGET_DEPS "")

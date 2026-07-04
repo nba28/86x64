@@ -577,3 +577,13 @@ _RKVersionProjectUuid
 _RKVersionShowInLibrary
 _RKVideoFileSubtype
 _RKWhitespaceSeparator
+# --- Numbers / iWork '09 (SFTabular etc.) — native-framework NSString* object
+#     constants read via a truncating 32-bit movl (extracted with the route-C-
+#     aware _extract_data_shadows.sh; AddressBook + WebKit). libxml2 non-object
+#     C globals (_xmlFree fnptr / _xmlIndentTreeOutput int) are DENY-excluded —
+#     they are not objects and must not be handle-wrapped.
+_ABGroupsUIDsPboardType
+_ABPeopleUIDsPboardType
+_WebActionNavigationTypeKey
+_kABNoteProperty
+_kABURLsProperty
