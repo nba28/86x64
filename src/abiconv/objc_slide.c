@@ -46,8 +46,12 @@
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <runetype.h>
 
 static int g_verbose = 0;
+
+/* The host libc's rune-locale table, used to seed the i386-layout copy below. */
+extern _RuneLocale _DefaultRuneLocale;
 
 /* Defined in objc_shim.c — index this image's legacy ObjC-1.0 classes so the
  * objc bridge can dispatch class messages to their own translated IMPs. */
@@ -1102,6 +1106,56 @@ static void patch_dyld_section(const struct mach_header_64 *mh64, intptr_t slide
 static uint64_t g_import_zero_word  = 0;
 static uint64_t g_import_errno_word = 0;
 
+/* Low-4GB i386-layout copy of `_DefaultRuneLocale` (the C rune-locale table the
+ * inlined <ctype.h> macros — isalnum/isspace/tolower/... — index directly). An
+ * i386 binary reads `__DefaultRuneLocale.__runetype[c]` as
+ * `movl <slot>,%eax; movl 0x34(%eax,%c,4),%eax` where <slot> is the classic
+ * __IMPORT,__pointers non-lazy slot bound to the 64-bit libSystem symbol; the
+ * 4-byte `movl` keeps only the low 32 bits of the >4GB &_DefaultRuneLocale ->
+ * garbage table base -> SIGSEGV in the ctype fast path (chars < 0x80). The
+ * >= 0x80 path calls ___maskrune (a shimmed FUNCTION) and already works, so only
+ * the inline table read faults. Quinn: -[KeyTypeCell isEntryAcceptable:]
+ * validating a typed Settings key ('a') faulted at &table+0x34+'a'*4
+ * (crashlog Quinn-2026-07-04-005805.ips, fault 0x5b061150 = low32(&table)+0x1b8).
+ *
+ * The i386 `_RuneLocale` layout differs from x86_64 (its two internal function
+ * pointers are 4 bytes, not 8), so the arrays sit 8 bytes earlier:
+ *   __invalid_rune @ 0x30, __runetype @ 0x34, __maplower @ 0x434, __mapupper
+ *   @ 0x834 (each 256 * 4-byte entries; __magic @ 0x00, __encoding @ 0x08 match).
+ * The _CTYPE_* bit values are ABI-stable, so the native __runetype/__maplower/
+ * __mapupper values are copied verbatim into the i386 offsets. Only c < 256 is
+ * read inline; c >= 256 goes through the native ___maskrune shim, so the ext
+ * ranges past __mapupper stay zero. patch_import_pointers redirects the slot to
+ * &g_i386_rune (a libabiconv static, hence < 4GB), so the i386 `movl` reads a
+ * valid low-4GB table base. UNIVERSAL: any i386 app using inline ctype macros. */
+#define I386_RUNE_MAGIC      0x000
+#define I386_RUNE_ENCODING   0x008
+#define I386_RUNE_INVALID    0x030
+#define I386_RUNE_RUNETYPE   0x034
+#define I386_RUNE_MAPLOWER   0x434
+#define I386_RUNE_MAPUPPER   0x834
+#define I386_RUNE_SIZE       0x1000       /* > __mapupper end (0xc34); tail zero */
+static uint8_t  g_i386_rune[I386_RUNE_SIZE];
+static int      g_i386_rune_ready = 0;
+
+static void i386_rune_build(void) {
+   if (g_i386_rune_ready) { return; }
+   const _RuneLocale *n = &_DefaultRuneLocale;
+   memset(g_i386_rune, 0, sizeof g_i386_rune);
+   memcpy(g_i386_rune + I386_RUNE_MAGIC,    n->__magic,    sizeof n->__magic);
+   memcpy(g_i386_rune + I386_RUNE_ENCODING, n->__encoding, sizeof n->__encoding);
+   memcpy(g_i386_rune + I386_RUNE_INVALID,  &n->__invalid_rune, 4);
+   for (int c = 0; c < 256; ++c) {
+      uint32_t rt = (uint32_t)n->__runetype[c];
+      int32_t  ml = (int32_t)n->__maplower[c];
+      int32_t  mu = (int32_t)n->__mapupper[c];
+      memcpy(g_i386_rune + I386_RUNE_RUNETYPE + c * 4, &rt, 4);
+      memcpy(g_i386_rune + I386_RUNE_MAPLOWER + c * 4, &ml, 4);
+      memcpy(g_i386_rune + I386_RUNE_MAPUPPER + c * 4, &mu, 4);
+   }
+   g_i386_rune_ready = 1;
+}
+
 /* Redirect the classic libc/crt-internal __IMPORT,__pointers slots whose i386
  * 4-byte `movl <slot>(%rip),%eax` read would truncate a 64-bit-bound libSystem
  * symbol address to its low 32 bits (then deref/write through the garbage) ->
@@ -1132,7 +1186,8 @@ static uint64_t g_import_errno_word = 0;
 static void patch_import_pointers(const struct mach_header_64 *mh64,
                                   intptr_t slide, const char *imgname) {
    if (((uintptr_t)&g_import_zero_word >> 32) ||
-       ((uintptr_t)&g_import_errno_word >> 32)) {
+       ((uintptr_t)&g_import_errno_word >> 32) ||
+       ((uintptr_t)&g_i386_rune[0] >> 32)) {
       if (g_verbose) {
          fprintf(stderr, "abiconv import_pointers: libabiconv >4GB; skip %s\n",
                  imgname);
@@ -1204,6 +1259,12 @@ static void patch_import_pointers(const struct mach_header_64 *mh64,
                   target = &g_import_zero_word;   /* deref->0 => crt skips hook */
                } else if (strcmp(name, "_errno") == 0) {
                   target = &g_import_errno_word;  /* `*errno = 0` lands here     */
+               } else if (strcmp(name, "__DefaultRuneLocale") == 0) {
+                  /* Point the slot at the low-4GB i386-layout rune table so the
+                   * inline ctype macros' `movl 0x34(%eax,%c,4)` read a valid
+                   * table base instead of the truncated 64-bit libSystem addr. */
+                  i386_rune_build();
+                  target = (uint64_t *)(void *)g_i386_rune;
                }
                if (!target) { continue; }
 

@@ -1,0 +1,2 @@
+ctype rune classify ok
+exit_code: 0
