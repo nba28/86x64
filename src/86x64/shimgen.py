@@ -134,6 +134,20 @@ def deps_of(binary):
         deps.append(path)
     return deps
 
+def is_translated_consumer(binary):
+    """True if `binary` is a macho-tool-translated image (links libabiconv). Such
+    a consumer must NOT be redirected to a native <FW>ShimAuto: its calls use the
+    i386 4-byte-return cdecl convention, and a native stub's 8-byte `ret`
+    over-pops that frame -> fused/garbage PC (the s28 ABI family; verified on Civ
+    IV / Halo translated QuickTime -> _InitHLTB). Removed symbols for a translated
+    consumer are covered by libabiconv's ___X i386-frame marshalling shims
+    (wired via static-interpose at translate time), not by native ShimAuto."""
+    for d in deps_of(binary):
+        leaf = d.rsplit("/", 1)[-1]
+        if "libabiconv" in leaf:
+            return True
+    return False
+
 def binds_of(binary):
     """{dylib_short_name: set(symbols)} from bind + lazy-bind tables."""
     res = {}
@@ -705,6 +719,15 @@ def main():
         print(f"generated {shim_name}: {len(covered)} impl + "
               f"{len(uncovered)} stub = {len(M)} symbols")
         for binary, dep in ent["dependents"]:
+            # A TRANSLATED consumer (links libabiconv) must never be redirected to
+            # a native ShimAuto: its i386 4-byte-return calls over-pop the stub's
+            # 8-byte `ret` (s28 ABI family). Leave its dep as-is; libabiconv's
+            # ___X marshalling shims (static-interpose) cover the removed symbols.
+            # The shim is still generated + signed for any NATIVE dependents.
+            if is_translated_consumer(binary):
+                print(f"  skip redirect (translated consumer, defer to "
+                      f"libabiconv): {os.path.basename(binary)} -> {shim_name}")
+                continue
             redirect_dep(app, binary, dep, f"{ref_prefix}{shim_name}")
 
     with open(OBSERVED_PATH, "w") as f:

@@ -436,6 +436,7 @@ add_library(abiconv SHARED
   # wired through maptable_tramp.asm MTSHIM -> ___<sym> exports). See each file's header.
   qd_shim.c
   carbon_ui_shim.c
+  qt_hitoolbox_shim.c
   upp_shim.c
   sndmgr_shim.c
   fontmgr_shim.c
