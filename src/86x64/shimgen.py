@@ -387,15 +387,30 @@ def gen_stub_source(fw_name, uncovered, index, observed):
             src += ["", f"@interface {name} : NSObject", "@end",
                     f"@implementation {name}", "@end"]
     for sym in sorted(funcs):
-        c = sym.lstrip("_")
-        if c in emitted:
-            continue
-        emitted.add(c)
-        if DANGEROUS_STUB_RE.search(c):
+        # Force the EXACT Mach-O symbol via an __asm label (mirrors the data
+        # path below) instead of relying on the C-name -> _C-name convention.
+        # `sym.lstrip("_")` as a bare C function name is WRONG for any symbol
+        # whose SOURCE C name itself begins with an underscore (Mach-O "__X" =>
+        # C "_X", e.g. QuickTime's `__InitHLTB` from HIToolbox): the naive stub
+        # defined `_InitHLTB` while the export list demanded `__InitHLTB`, so the
+        # whole <FW>ShimAuto.dylib failed to link and NONE of that framework's
+        # missing symbols got stubbed (a single mishandled symbol sank the
+        # entire shim). It also mishandles non-identifier symbols (e.g. `$`
+        # variants). The __asm label emits `sym` literally, exactly like data.
+        base = re.sub(r"[^A-Za-z0-9_]", "_", sym.lstrip("_")) or "fnsym"
+        if base[0].isdigit():
+            base = "_" + base
+        cname, i = base, 1
+        while cname in emitted:          # collision-safe: exports stay exact
+            cname, i = f"{base}_{i}", i + 1
+        emitted.add(cname)
+        if DANGEROUS_STUB_RE.search(cname):
             print(f"WARN {fw_name}: stubbing memory primitive {sym} as a "
                   f"NO-OP -- write a real impl in shimdb/impl/ (e.g. memmove).")
-        src += ["", f'long {c}(long a, long b, long c_, long d, long e, '
-                    f'long f) {{ shim_note("{c}"); return 0; }}']
+        src += ["", f'long {cname}(long a, long b, long c_, long d, long e, '
+                    f'long f) __asm("{sym}");',
+                f'long {cname}(long a, long b, long c_, long d, long e, '
+                f'long f) {{ shim_note("{sym}"); return 0; }}']
     for sym in sorted(data):
         base = re.sub(r"[^A-Za-z0-9_]", "_", sym.lstrip("_")) or "datasym"
         if base[0].isdigit():
