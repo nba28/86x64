@@ -70,6 +70,11 @@
 	MTSHIM	___sysctl,                    _shim_sysctl
 	MTSHIM	___sysctlbyname,              _shim_sysctlbyname
 
+	;; CGFunctionCreate: the gradient/shading evaluate callback needs
+	;; native-double<->i386-float in/out marshalling + low-4GB buffers
+	;; (cg_function_shim.c); the generic wrap truncated the >4GB out ptr.
+	MTSHIM	___CGFunctionCreate,          _shim_CGFunctionCreate
+
 	;; Carbon GetKeys override (keystate_shim.c): emulate a held key at launch
 	;; so a vendor "hold KEY to bypass" self-check (Halo's 'p') can be triggered
 	;; without a physical keypress (Finder consumes it). Default-off (env-gated);

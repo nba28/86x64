@@ -427,6 +427,7 @@ add_library(abiconv SHARED
   iokit_shim.c
   carbon_memory.c
   carbon_component.c
+  cg_function_shim.c
   quicktime_image.c
   imagecapture_shim.c
   carbon_fsspec_shim.c
