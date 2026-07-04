@@ -70,6 +70,13 @@
 	MTSHIM	___sysctl,                    _shim_sysctl
 	MTSHIM	___sysctlbyname,              _shim_sysctlbyname
 
+	;; Carbon GetKeys override (keystate_shim.c): emulate a held key at launch
+	;; so a vendor "hold KEY to bypass" self-check (Halo's 'p') can be triggered
+	;; without a physical keypress (Finder consumes it). Default-off (env-gated);
+	;; transparent passthrough to native GetKeys otherwise. Overriding here also
+	;; removes GetKeys from the abigen consider set.
+	MTSHIM	___GetKeys,                   _shim_GetKeys
+
 	;; variadic POSIX primitives abigen skips (the `...` arg). Reached via the
 	;; conformance-variant import (_open$UNIX2003 -> ___open) after static-
 	;; interpose strips the $UNIX2003/$INODE64 suffix.

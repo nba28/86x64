@@ -411,6 +411,7 @@ add_library(abiconv SHARED
   objc_slide.c
   maptable_shim.m
   sysctl_shim.c
+  keystate_shim.c
   posix_shim.c
   tls_shim.c
   pthread_sync_shim.c
