@@ -75,6 +75,18 @@
 	;; (cg_function_shim.c); the generic wrap truncated the >4GB out ptr.
 	MTSHIM	___CGFunctionCreate,          _shim_CGFunctionCreate
 
+	;; CGContextSet{Fill,Stroke}Color(ctx, const CGFloat components[]): the
+	;; variable-length CGFloat ARRAY form. i386 CGFloat=float(4B), native=
+	;; double(8B); abigen passed the array pointer raw so native read doubles
+	;; from a float buffer -> ~black fill (Quinn white well). cg_color_shim.c
+	;; converts float[n]->double[n], n = colour-space components+1 tracked via
+	;; the ColorSpace setters. (Scalar SetRGB/SetGray forms are already handled
+	;; by the GEOSHIM CGFloat classifier below.)
+	MTSHIM	___CGContextSetFillColorSpace,   _shim_CGContextSetFillColorSpace
+	MTSHIM	___CGContextSetStrokeColorSpace, _shim_CGContextSetStrokeColorSpace
+	MTSHIM	___CGContextSetFillColor,        _shim_CGContextSetFillColor
+	MTSHIM	___CGContextSetStrokeColor,      _shim_CGContextSetStrokeColor
+
 	;; Carbon GetKeys override (keystate_shim.c): emulate a held key at launch
 	;; so a vendor "hold KEY to bypass" self-check (Halo's 'p') can be triggered
 	;; without a physical keypress (Finder consumes it). Default-off (env-gated);

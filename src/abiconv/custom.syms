@@ -200,6 +200,10 @@ _CGContextSetRGBFillColor
 _CGContextSetRGBStrokeColor
 _CGContextSetGrayFillColor
 _CGContextSetGrayStrokeColor
+_CGContextSetFillColor
+_CGContextSetStrokeColor
+_CGContextSetFillColorSpace
+_CGContextSetStrokeColorSpace
 _CGContextDrawImage
 _CGColorCreateGenericRGB
 _CGContextGetClipBoundingBox

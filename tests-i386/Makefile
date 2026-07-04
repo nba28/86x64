@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps synth-dyld-info jt-weak-import
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color synth-dyld-info jt-weak-import
 all: run-only
 
 list:
@@ -86,6 +86,12 @@ list:
 # (native x86_64 cc, no i386 sysroot), so it runs anywhere macho-tool is built.
 change-deps: $(MACHO_TOOL)
 	@bash change_deps_test.sh $(MACHO_TOOL)
+
+# cg-color: regression guard for the forward CGFloat-array colour marshalling
+# fix (cg_color_shim.c). Self-contained (native x86_64 cc + CoreGraphics, no
+# i386 sysroot): converted double[] renders white, raw i386 float[] does not.
+cg-color:
+	@bash cg_color_test.sh
 
 # synth-dyld-info: regression test for `convert --synthesize-dyld-info` (route C:
 # classic LC_DYSYMTAB image -> canonical modern LC_DYLD_INFO_ONLY dylib that
