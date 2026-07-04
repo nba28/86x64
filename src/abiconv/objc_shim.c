@@ -5017,6 +5017,12 @@ struct reverse_plan {
     * +320; these live in the 560-byte plan reservation's slack). */
    uint32_t    wb_active;    /* +328 1 if sync_inherited_ivars pushed a frame */
    uint32_t    wb_mark;      /* +332 g_snap index at this call's frame start */
+   /* Native-super value-dispatch (fills 48211bb's gap): when a legacy [super sel]
+    * targets a NATIVE super method that RETURNS A VALUE, reverse_prep invokes it
+    * and stashes the native return here; reverse_ret returns it instead of nil.
+    * C-only, in the 560-byte reservation slack past +320 (asm never reads it). */
+   uint64_t    native_super_ret; /* +336 native super method's return (in rax) */
+   uint32_t    has_native_super; /* +344 1 = return native_super_ret, no i386 IMP */
 };
 
 extern void _86x64_reverse_imp(void);        /* objc_reverse.asm */
@@ -7158,6 +7164,7 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
    plan->stret_types = NULL;
    plan->fp_out[0] = plan->fp_out[1] = 0;
    plan->wb_active = 0;     /* no inherited-ivar frame unless we reach the sync */
+   plan->has_native_super = 0;   /* set only for a value-returning native super */
 
    /* A pending super-dispatch hint for exactly this (self,sel) overrides the
     * derived-class lookup so [super sel] runs the SUPER's legacy method, not
@@ -7213,10 +7220,43 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
          m = rmeth_lookup(c, sel);
          if (m) { lookup = c; break; }
       }
+      /* [super sel] into a NATIVE super that RETURNS A VALUE: invoke the true
+       * native super IMP and return ITS value. 48211bb returned nil here — right
+       * for a void no-op super (-[NSView awakeFromNib], which cured the recursion)
+       * but WRONG for a value getter: iPhoto -[AlbumView numberOfRows] calls
+       * [super numberOfRows] for NSOutlineView's real displayed row count, and
+       * nil made it undercount -> NSOutlineView expandItem: _locationOfRow:
+       * index>numRows assertion (the invisible-sidebar wall). Find the native
+       * IMP by walking hint upward, SKIPPING our reverse trampolines
+       * (method_is_legacy). Scope: 0-extra-arg, rax-returnable (non-void)
+       * getters — the common [super getter] shape. Arg-carrying or fp/struct-
+       * returning supers are left to the nil path (do not guess-marshal). The
+       * value is already native; the forward bridge that issued the [super sel]
+       * narrows/wraps it back to i386. Universal. */
+      if (!m) {
+         Method nm = NULL;
+         for (Class c = hint; c; c = class_getSuperclass(c)) {
+            Method mm = class_getInstanceMethod(c, sel);
+            if (!mm) { break; }
+            if (!method_is_legacy(mm)) { nm = mm; break; }
+         }
+         if (nm && method_getNumberOfArguments(nm) == 2) {
+            char rt[8] = {0};
+            method_getReturnType(nm, rt, sizeof rt);
+            if (rt[0] && strchr("cCsSiIlLqQB@#:*^", rt[0])) {
+               IMP nimp = method_getImplementation(nm);
+               plan->native_super_ret =
+                  ((uint64_t (*)(id, SEL))nimp)(self_, sel);
+               plan->has_native_super = 1;
+            }
+         }
+      }
       if (getenv("OBJC_SUPER_TRACE"))
          fprintf(stderr, "[prep] SUPER self=%p sel=%s hint=%s -> %s\n",
                  (void*)self_, sel_getName(sel), class_getName(hint),
-                 m ? class_getName(lookup) : "(native super -> nil)");
+                 m ? class_getName(lookup)
+                   : (plan->has_native_super ? "(native super value)"
+                                             : "(native super -> nil)"));
    } else {
       m = rmeth_lookup(lookup, sel);
       /* Inherited reverse method: the receiver's class never registered this sel
@@ -7511,6 +7551,17 @@ unsigned __int128 _86x64_reverse_ret(struct reverse_plan *plan,
    if (plan->wb_active) {
       ivar_wb_flush(plan->wb_mark);
       g_snap_n = plan->wb_mark;
+   }
+   /* Native-super value-dispatch: reverse_prep already invoked the native super
+    * IMP; return its native value directly (no i386-return widening — the value
+    * is already native, and the forward bridge that made the [super sel] call
+    * narrows/wraps it for the i386 caller). Free the lowstack like every path. */
+   if (plan->has_native_super) {
+      unsigned __int128 nr = (unsigned __int128)plan->native_super_ret;
+      if (plan->lowstack_base) {
+         rev_stack_free((void *)(uintptr_t)plan->lowstack_base);
+      }
+      return nr;
    }
    unsigned __int128 r;
    if (plan->ret_kind == 1) { r = unwrap_obj_arg(eax); }    /* object */
