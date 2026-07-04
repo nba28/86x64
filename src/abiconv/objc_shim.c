@@ -5024,9 +5024,11 @@ struct reverse_plan {
    uint64_t    native_super_ret; /* +336 native super method's return (in rax) */
    uint32_t    has_native_super; /* +344 1 = return native_super_ret, no i386 IMP */
    /* Reverse out-object copy-back (native `out id*` / `^@`): each such arg gets
-    * a low-4GB i386 scratch slot; reverse_ret unwraps the handle the i386 method
-    * wrote into it and stores the native object into the caller's native *id.
-    * Per-call (plan is stack-allocated) => reentrant. C-only slack past +320. */
+    * an i386-writable scratch slot (the out-ptr itself when it is <4GB, else a
+    * shim-malloc'd low-4GB slot); reverse_ret unwraps the handle the i386 method
+    * wrote into it and stores the full 64-bit native object into the caller's
+    * native *id (native_out). Freed only when native_out>=4GB (the malloc'd
+    * case). Per-call (plan is stack-allocated) => reentrant. C-only slack +320. */
    uint32_t    n_out_obj;        /* +348 count of out-object params this call */
    struct { uint32_t scratch; uint64_t native_out; } out_obj[4];  /* +352.. */
 };
@@ -7453,21 +7455,31 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
          }
       } else if (b == '^' && (tb[1] == '@' || tb[1] == '#')) {
          /* native `out id*` / `Class*` out-param (getObjectValue:'s obj,
-          * NSError**, ...). A >4GB native out-pointer cannot live in the i386
-          * 4-byte slot, and the i386 method writes an ARENA HANDLE into it that
-          * native then uses as an object -> objc_opt_isKindOfClass on a raw
-          * handle -> fault (iPhoto: AlbumViewCellFormatter getObjectValue: ->
-          * the cell's native _contents). Give the i386 method a low-4GB scratch
-          * slot, wrap the current native *id into it (so in/out params carry the
-          * live value), and register a copy-back (reverse_ret unwraps the handle
-          * the method wrote -> native object -> caller's *id). A low-4GB out-ptr
-          * (an i386->native->i386 round-trip) needs none of this and passes
-          * through raw. Universal: any legacy method with an out object-ptr. */
+          * NSError**, ...). The reverse bridge is entered ONLY from a NATIVE
+          * caller (native->legacy by definition), so the out-slot's consumer is
+          * ALWAYS native and expects a 64-bit id there -- REGARDLESS of the
+          * out-ptr's address. The i386 IMP can only write a 4-byte ARENA HANDLE,
+          * which native then uses as an object -> objc_opt_isKindOfClass on a raw
+          * handle -> fault (iPhoto: AlbumViewCellFormatter getObjectValue: -> the
+          * cell's native _contents; the real out-ptr is a LOW-4GB native stack
+          * local -- exactly why an address-range gate is the WRONG discriminator,
+          * the bug bd92b4a's >=4GB gate missed). So register a copy-back for
+          * EVERY out-id*: reverse_ret unwraps the handle the IMP wrote -> native
+          * object -> writes the full 64-bit ptr back into the caller's *id. Two
+          * cases for WHERE the i386 IMP writes: a <4GB out-ptr is i386-addressable
+          * so the IMP writes it in place (scratch = the out-ptr itself); a >=4GB
+          * out-ptr needs a low-4GB shim-malloc scratch. Both wrap the current
+          * native *id in (in/out) and unwrap out on copy-back. Universal: any
+          * legacy method with an out object-ptr (getObjectValue:, NSError**, ...). */
          uint64_t v; REV_GP(v);
          uint32_t *scr = NULL;
-         if (v >= 0x100000000ULL && plan->n_out_obj < 4) {
-            scr = (uint32_t *)malloc(4);              /* shim malloc -> low-4GB */
-            if (scr && (uintptr_t)scr >= 0x100000000ULL) { free(scr); scr = NULL; }
+         if (plan->n_out_obj < 4) {
+            if (v < 0x100000000ULL) {
+               scr = (uint32_t *)(uintptr_t)v;  /* i386 writes the low-4GB out-ptr in place */
+            } else {
+               scr = (uint32_t *)malloc(4);      /* >=4GB: low-4GB shim-malloc scratch */
+               if (scr && (uintptr_t)scr >= 0x100000000ULL) { free(scr); scr = NULL; }
+            }
          }
          if (scr) {
             uint64_t cur = mem_readable(v, 8)
@@ -7478,7 +7490,7 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
             plan->n_out_obj++;
             plan->frame[w++] = (uint32_t)(uintptr_t)scr;
          } else {
-            plan->frame[w++] = (uint32_t)v;   /* low-4GB out-ptr / table full / OOM */
+            plan->frame[w++] = (uint32_t)v;   /* table full / OOM: best-effort raw */
          }
       } else {
          uint64_t v; REV_GP(v);
@@ -7589,15 +7601,20 @@ unsigned __int128 _86x64_reverse_ret(struct reverse_plan *plan,
       g_snap_n = plan->wb_mark;
    }
    /* Reverse out-object copy-back: the i386 method wrote an arena handle into
-    * each `out id*` scratch slot; unwrap it to the native object and store into
-    * the caller's native *id (symmetric to the object-return unwrap below). Runs
-    * only for a real legacy-IMP call (n_out_obj is 0 on every other path). */
+    * each `out id*` scratch slot; unwrap it to the native object and store the
+    * FULL 64-bit ptr into the caller's native *id (symmetric to the object-return
+    * unwrap below; overwrites the handle + any stale upper bytes for a <4GB
+    * in-place slot). Runs only for a real legacy-IMP call (n_out_obj is 0 on
+    * every other path). Free ONLY a >=4GB scratch (that one was shim-malloc'd; a
+    * <4GB scratch IS the caller's out-ptr and must not be freed). */
    for (uint32_t oi = 0; oi < plan->n_out_obj; ++oi) {
       uint32_t h = *(const uint32_t *)(uintptr_t)plan->out_obj[oi].scratch;
       uint64_t obj = h ? unwrap_obj_arg(h) : 0;
       uint64_t *nout = (uint64_t *)(uintptr_t)plan->out_obj[oi].native_out;
       if (mem_readable((uintptr_t)nout, 8)) { *nout = obj; }
-      free((void *)(uintptr_t)plan->out_obj[oi].scratch);
+      if (plan->out_obj[oi].native_out >= 0x100000000ULL) {
+         free((void *)(uintptr_t)plan->out_obj[oi].scratch);
+      }
    }
    /* Native-super value-dispatch: reverse_prep already invoked the native super
     * IMP; return its native value directly (no i386-return widening — the value
