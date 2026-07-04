@@ -1296,6 +1296,11 @@ static void patch_import_pointers(const struct mach_header_64 *mh64,
 
 static void slide_objc(const struct mach_header *mh, intptr_t slide);
 static void cxx_typeinfo_init_all_copies(void);
+/* import_repair.c — eager repair of never-bound indirect-pointer slots in
+ * translated images (half-wired artifacts without the static-interpose /
+ * libabiconv wiring; Civ IV s29). */
+extern void _86x64_import_repair(const struct mach_header_64 *mh64,
+                                 intptr_t slide, const char *imgname);
 
 /* Bottom-up dependency ordering for the run-inits path: before an image's
  * collected static initializers run, recursively process each of its TRANSLATED
@@ -1379,6 +1384,17 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
       }
       p += lc->cmdsize;
    }
+
+   /* Repair never-bound indirect-pointer slots FIRST (import_repair.c).
+    * Deliberately NOT gated on image_links_libabiconv: the half-wired
+    * translated artifacts this cures (Civ IV s29, bundled QuickTime) have no
+    * libabiconv dependency at all — that missing wiring IS the defect. The
+    * repair itself gates structurally (macho-tool __TEXT layout base +
+    * post-load unbound slot state) and is inert for native images and for
+    * complete current-pipeline translations. Must precede the collected
+    * initializers below: a translated static init may call straight through
+    * an unbound stub (jmp *0). */
+   _86x64_import_repair(mh64, slide, imgname);
 
    /* Run translated static initializers on a low-4GB stack. Independent of
     * slide (the >4GB-stack bug bites even at the preferred vmaddr) AND of

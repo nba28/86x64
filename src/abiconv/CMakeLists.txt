@@ -454,6 +454,7 @@ add_library(abiconv SHARED
   # <mach/mach_time.h> in includes_auto.h, so abigen emits ___mach_timebase_info /
   # ___mach_absolute_time directly. Phase 1a, see the import-driven block above.)
   lazy_bind.c
+  import_repair.c
   objc_msgSend.asm
   objc_reverse.asm
   cb_tramp.asm
