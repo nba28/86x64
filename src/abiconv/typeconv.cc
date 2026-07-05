@@ -69,8 +69,10 @@ void record_decl::populate_fields() {
                switch (clang_getCursorKind(c)) {
                case CXCursor_FieldDecl:
                   {
-                     CXType type = clang_getCanonicalType(clang_getCursorType(c));
+                     CXType written = clang_getCursorType(c);
+                     CXType type = clang_getCanonicalType(written);
                      field_types.push_back(type);
+                     field_types_written.push_back(written);
                   }
                   break;
 
@@ -344,6 +346,45 @@ void conversion::convert_constant_array(std::ostream& os, CXType array, MemoryLo
    pop(os, rcx, src, dst);
 }
 
+/* True if `written` is a classic Mac OS Memory Manager Handle (or the
+ * AEDataStorage / opaque-Ptr* family): a typedef whose canonical type is a
+ * pointer-to-pointer (T**) AND whose typedef spelling names it a Handle. The
+ * app treats such a value as an OPAQUE token — a pointer to a relocatable
+ * master pointer — so a marshalling shim must pass the pointer VALUE (i386
+ * 4-byte low-4GB handle -> zero-extended to 8 bytes), NEVER dereference it.
+ *
+ * WHY (Civ IV 'oapp'-launch crash): AEDesc { DescType descriptorType;
+ * AEDataStorage dataHandle; } where AEDataStorage = Ptr* = char**.
+ * cb_is_cf_record_ptr does NOT catch it — `char` is a COMPLETE type, unlike the
+ * incomplete OpaqueXxx* records that Component instances / GWorld handles use —
+ * so convert_record deep-copied the field: convert_pointer(char**) dereferences
+ * the handle to read the master char*, and the handle is an opaque token, not a
+ * readable data pointer -> EXC_BAD_ACCESS (movl (%r12),%r14d, r12=garbage).
+ * Structural + name gated so a genuine `T** out` parameter (never spelled
+ * *Handle) is still deep-copied as a real out-pointer. Universal: any i386 app
+ * passing a Handle-bearing struct to a native-marshalled Toolbox function
+ * (AppleEvent 'oapp'/'odoc', Resource Manager, ...) is served. */
+static bool is_opaque_handle_type(CXType written) {
+   CXType canon = clang_getCanonicalType(written);
+   if (canon.kind != CXType_Pointer) { return false; }
+   CXType pointee = clang_getCanonicalType(clang_getPointeeType(canon));
+   if (pointee.kind != CXType_Pointer) { return false; }   /* must be T** */
+   CXType t = written;
+   for (int depth = 0; depth < 8 && t.kind == CXType_Typedef; ++depth) {
+      CXCursor d = clang_getTypeDeclaration(t);
+      CXString ns = clang_getCursorSpelling(d);
+      const char *cs = clang_getCString(ns);
+      const std::string name(cs ? cs : "");
+      clang_disposeString(ns);
+      if (name == "Handle" || name == "AEDataStorage" ||
+          (name.size() >= 6 && name.compare(name.size() - 6, 6, "Handle") == 0)) {
+         return true;
+      }
+      t = clang_getTypedefDeclUnderlyingType(d);
+   }
+   return false;
+}
+
 void conversion::convert_record(std::ostream& os, CXType record, MemoryLocation src,
                                 MemoryLocation dst) {
    record_decl decl(record);
@@ -352,11 +393,23 @@ void conversion::convert_record(std::ostream& os, CXType record, MemoryLocation 
    if (decl.cursor.kind != CXCursor_StructDecl) {
       throw std::invalid_argument("convert_record: union by value not supported");
    }
+   /* field_types (canonical) and field_types_written are populated in lockstep. */
+   auto wi = decl.field_types_written.begin();
    for (CXType field_type : decl.field_types) {
+      const CXType written =
+         (wi != decl.field_types_written.end()) ? *wi : field_type;
       src.align_field(field_type, from_arch);
       dst.align_field(field_type, to_arch);
-      
-      convert(os, field_type, src, dst);
+
+      if (is_opaque_handle_type(written)) {
+         /* Opaque Memory Manager Handle field: marshal the pointer VALUE, do
+          * NOT deep-copy/dereference it (see is_opaque_handle_type). */
+         os << "\t; opaque Handle field '" << to_string(written)
+            << "' -> pointer value (no deep-copy)" << std::endl;
+         convert_int(os, CXType_Pointer, src, dst);
+      } else {
+         convert(os, field_type, src, dst);
+      }
 
 #if 0
       std::cerr << to_string(record) << "," << to_string(field_type) << "," << src.index
@@ -366,6 +419,7 @@ void conversion::convert_record(std::ostream& os, CXType record, MemoryLocation 
       /* update src, dst */
       src += sizeof_type(field_type, from_arch);
       dst += sizeof_type(field_type, to_arch);
+      if (wi != decl.field_types_written.end()) { ++wi; }
    }
 }
 

@@ -50,9 +50,16 @@ void convert_type(std::ostream& os, CXType type, arch a, Location& src, Location
 
 struct record_decl {
    using FieldTypes = std::list<CXType>;
-   
+
    CXCursor cursor;
    FieldTypes field_types;
+   /* The AS-WRITTEN (non-canonicalized) type of each field, in lockstep with
+    * field_types. Canonicalization erases the typedef spelling, which some
+    * marshalling decisions need — notably recognizing a classic Memory Manager
+    * Handle field (AEDesc::dataHandle is AEDataStorage = Ptr* = char**), an
+    * OPAQUE token that must be marshalled as a pointer value, not deep-copied
+    * (a deep-copy dereferences the handle -> reads garbage). */
+   FieldTypes field_types_written;
    bool packed = false;
    bool unsupported = false; /* set if an unexpected member cursor was seen */
 

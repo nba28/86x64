@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color synth-dyld-info jt-weak-import dyld-multicopy carbon-nib
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color synth-dyld-info jt-weak-import dyld-multicopy carbon-nib stripped-stackarg-procptr handle-marshal
 all: run-only
 
 list:
@@ -116,6 +116,15 @@ dyld-multicopy: $(MACHO_TOOL)
 # c7 04 24 <i386 addr>). Needs the i386 sysroot; SKIPs without.
 stripped-stackarg-procptr: $(MACHO_TOOL)
 	@bash stripped_stackarg_procptr_test.sh $(MACHO_TOOL)
+
+# handle-marshal: regression for the opaque-Handle-in-struct marshalling fix
+# (abigen typeconv.cc; Civ IV 'oapp' AppleEvent crash — AEDesc::dataHandle is a
+# Memory Manager Handle that was deep-copied/dereferenced instead of marshalled
+# as an opaque pointer value). Self-contained (abigen parses a synthetic header;
+# no i386 sysroot). Asserts the Handle field is value-marshalled AND a genuine
+# int** field is still deep-copied (fix is name+structure scoped).
+handle-marshal:
+	@bash handle_marshal_test.sh
 
 # jt-weak-import: regression test for the WEAK-IMPORT jump-table fix. Exercises
 # the classic i386 __IMPORT,__jump_table self-modifying stub path: undefined
