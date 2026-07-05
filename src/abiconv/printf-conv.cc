@@ -402,6 +402,7 @@ extern "C" unsigned __sprintf_chk_conversion_f(const void *args32, void *args64,
    return printf_conversion_f(args32, args64, argtypes) + 3;
 }
 
+
 /* scanf family. The variadic arguments are all output pointers; the format
  * string tells us how many. The leading fixed argument differs per function:
  *   sscanf(str, fmt, ...)  — str then fmt
@@ -597,6 +598,84 @@ int __vsnprintf_chk_vshim(const uint32_t *a) {
    va_list va;
    build_native_va_list(fmt, ap, (sysv_va_list_tag *)(void *)va, args64, argtypes);
    return __vsnprintf_chk(str, size, flag, slen, fmt, va);
+}
+
+/* __snprintf_chk(str, maxlen, flag, os, fmt, ...) — the fortified snprintf clang
+ * emits for a known-size buffer. Route it through the SAME va_list path as
+ * __vsnprintf_chk so FLOATING-POINT varargs work: the inline-varargs register
+ * trampoline (vararg-conv-t.asm) only distributes GP args into rdi..r9 with al=0
+ * and never places a double into an xmm register, so `%g`/`%f` read garbage; and
+ * without ANY shim __snprintf_chk bound native -> i386 cdecl over-pop. Here the
+ * varargs are INLINE (not a passed va_list), so `ap` is the ADDRESS of the first
+ * vararg slot (&a[5]); build_native_va_list lays them into the overflow area a
+ * native va_arg(double) reads correctly. (tests-i386/78) */
+int __snprintf_chk_vshim(const uint32_t *a) {
+   char        *str  = (char *)(uintptr_t)a[0];
+   size_t       maxlen = (size_t)a[1];
+   int          flag = (int)a[2];
+   size_t       os   = (size_t)a[3];
+   const char  *fmt  = (const char *)(uintptr_t)a[4];
+   const uint32_t *ap = &a[5];        /* inline i386 varargs */
+   alignas(16) uint64_t args64[VA_SLOTS_MAX];
+   reg_width_t argtypes[VA_SLOTS_MAX];
+   va_list va;
+   build_native_va_list(fmt, ap, (sysv_va_list_tag *)(void *)va, args64, argtypes);
+   return __vsnprintf_chk(str, maxlen, flag, os, fmt, va);
+}
+
+/* The INLINE-varargs printf family, routed through the va_list path so FLOATING-
+ * POINT arguments work. The register trampoline (vararg-conv-t.asm) only ever
+ * distributes the converted args into the GP registers rdi..r9 with al=0 — it
+ * never places a double into an xmm register — so `%g`/`%f` read garbage (a
+ * translated `printf("%.2g", x)` printed 0 / a denormal). build_native_va_list
+ * instead lays every arg into the overflow area (gp_offset/fp_offset exhausted),
+ * which native va_arg(double) reads correctly. `ap` = &a[N] is the address of
+ * the first INLINE vararg slot (after the fixed args), distinct from the v*
+ * variants where a[N] is a passed va_list pointer. (tests-i386/78) */
+extern int vprintf(const char *, va_list);
+extern int vfprintf(FILE *, const char *, va_list);
+extern int vsprintf(char *, const char *, va_list);
+extern int vsnprintf(char *, size_t, const char *, va_list);
+extern int vasprintf(char **, const char *, va_list);
+extern int vdprintf(int, const char *, va_list);
+
+#define VA_BUILD(fmt_expr, ap_expr)                                          \
+   const char *fmt = (fmt_expr);                                            \
+   const uint32_t *ap = (ap_expr);                                         \
+   alignas(16) uint64_t args64[VA_SLOTS_MAX];                              \
+   reg_width_t argtypes[VA_SLOTS_MAX];                                     \
+   va_list va;                                                            \
+   build_native_va_list(fmt, ap, (sysv_va_list_tag *)(void *)va, args64, argtypes)
+
+int printf_vshim(const uint32_t *a) {
+   VA_BUILD((const char *)(uintptr_t)a[0], &a[1]);
+   return vprintf(fmt, va);
+}
+int fprintf_vshim(const uint32_t *a) {
+   FILE *fp = (FILE *)(uintptr_t)a[0];
+   VA_BUILD((const char *)(uintptr_t)a[1], &a[2]);
+   return vfprintf(fp, fmt, va);
+}
+int sprintf_vshim(const uint32_t *a) {
+   char *str = (char *)(uintptr_t)a[0];
+   VA_BUILD((const char *)(uintptr_t)a[1], &a[2]);
+   return vsprintf(str, fmt, va);
+}
+int snprintf_vshim(const uint32_t *a) {
+   char *str = (char *)(uintptr_t)a[0];
+   size_t size = (size_t)a[1];
+   VA_BUILD((const char *)(uintptr_t)a[2], &a[3]);
+   return vsnprintf(str, size, fmt, va);
+}
+int asprintf_vshim(const uint32_t *a) {
+   char **strp = (char **)(uintptr_t)a[0];
+   VA_BUILD((const char *)(uintptr_t)a[1], &a[2]);
+   return vasprintf(strp, fmt, va);
+}
+int dprintf_vshim(const uint32_t *a) {
+   int fd = (int)a[0];
+   VA_BUILD((const char *)(uintptr_t)a[1], &a[2]);
+   return vdprintf(fd, fmt, va);
 }
 
 } /* extern "C" */

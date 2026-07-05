@@ -87,6 +87,7 @@ _DetachResource
 _ReleaseResource
 
 __sprintf_chk
+__snprintf_chk
 
 _NSNextMapEnumeratorPair
 _NSEndMapTableEnumeration

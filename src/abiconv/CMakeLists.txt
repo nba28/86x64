@@ -345,12 +345,6 @@ macro(create_vararg_conv SYMBOL)
   target_compile_options(vararg_conv_${SYMBOL} PRIVATE "-DSYMBOL=${SYMBOL}")
 endmacro()
 
-create_vararg_conv(printf)
-create_vararg_conv(sprintf)
-create_vararg_conv(fprintf)
-create_vararg_conv(snprintf)
-create_vararg_conv(asprintf)
-create_vararg_conv(dprintf)
 create_vararg_conv(__sprintf_chk)
 create_vararg_conv(scanf)
 create_vararg_conv(sscanf)
@@ -377,17 +371,12 @@ create_custom_conv_template(exec.asm execvp)
 # v-printf family: the va_list variants. Each instantiates vva-conv-t.asm with
 # its symbol; the C shims live in printf-conv.cc.
 create_custom_conv_template(vva-conv-t.asm
-  vsnprintf vsprintf vfprintf vprintf vasprintf __vsnprintf_chk)
+  vsnprintf vsprintf vfprintf vprintf vasprintf __vsnprintf_chk __snprintf_chk
+  printf sprintf fprintf snprintf asprintf dprintf)
 
 add_library(abiconv SHARED
   abiconv.asm
   ${ABICONV_LEGACY_SRC}
-  $<TARGET_OBJECTS:vararg_conv_printf>
-  $<TARGET_OBJECTS:vararg_conv_sprintf>
-  $<TARGET_OBJECTS:vararg_conv_fprintf>
-  $<TARGET_OBJECTS:vararg_conv_snprintf>
-  $<TARGET_OBJECTS:vararg_conv_asprintf>
-  $<TARGET_OBJECTS:vararg_conv_dprintf>
   $<TARGET_OBJECTS:vararg_conv___sprintf_chk>
   $<TARGET_OBJECTS:vararg_conv_scanf>
   $<TARGET_OBJECTS:vararg_conv_sscanf>
@@ -402,6 +391,13 @@ add_library(abiconv SHARED
   $<TARGET_OBJECTS:custom_conv_vprintf>
   $<TARGET_OBJECTS:custom_conv_vasprintf>
   $<TARGET_OBJECTS:custom_conv___vsnprintf_chk>
+  $<TARGET_OBJECTS:custom_conv___snprintf_chk>
+  $<TARGET_OBJECTS:custom_conv_printf>
+  $<TARGET_OBJECTS:custom_conv_sprintf>
+  $<TARGET_OBJECTS:custom_conv_fprintf>
+  $<TARGET_OBJECTS:custom_conv_snprintf>
+  $<TARGET_OBJECTS:custom_conv_asprintf>
+  $<TARGET_OBJECTS:custom_conv_dprintf>
   printf-conv.cc
   prefs_shim.c
   file_shim.c
