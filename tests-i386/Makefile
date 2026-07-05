@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal
 all: run-only
 
 list:
@@ -92,6 +92,14 @@ change-deps: $(MACHO_TOOL)
 # i386 sysroot): converted double[] renders white, raw i386 float[] does not.
 cg-color:
 	@bash cg_color_test.sh
+
+# qd-pict: regression guard for the classic-PICT decode path (qd_gworld.c
+# shim_DrawPicture/QDPict*). Self-contained native x86_64 (no i386 sysroot):
+# strips a real system .pict's 512-byte file header to simulate an in-memory
+# PicHandle body, prepends the header, and decodes via ImageIO's com.apple.pict
+# reader — exactly what the shims do. SKIPs if no .pict is present.
+qd-pict:
+	@bash qd_pict_test.sh
 
 # synth-dyld-info: regression test for `convert --synthesize-dyld-info` (route C:
 # classic LC_DYSYMTAB image -> canonical modern LC_DYLD_INFO_ONLY dylib that

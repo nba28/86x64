@@ -54,11 +54,18 @@
 #include <dlfcn.h>
 #include <os/lock.h>
 #include <CoreGraphics/CoreGraphics.h>
+#include <ImageIO/ImageIO.h>
+#include <CoreFoundation/CoreFoundation.h>
 
 /* objc_shim.c proxy arena: 64-bit pointer <-> 32-bit i386 handle. A genuine
  * low value / NULL passes straight through, so a raw <4GB ref is unharmed. */
 extern uint32_t x64_objc_wrap(uint64_t real);
 extern uint64_t x64_objc_unwrap(uint32_t h);
+
+/* Resource Manager Handle shim (rm_shim.c): GetResource(ResType, short id) ->
+ * a low-4GB Handle holding a COPY of the resource bytes. GetPicture routes here
+ * to load 'PICT' resources for real. arg block: a[0]=ResType, a[1]=id. */
+extern uint32_t shim_GetResource(uint32_t *a);
 
 static int qd_trace(void)
 {
@@ -938,3 +945,180 @@ uint32_t shim_TestDeviceAttribute(uint32_t *a)
    uint32_t attr = a[1];
    return (attr == 0 || attr == 2 || attr == 5) ? 1 : 0;   /* screen/active */
 }
+
+/* ======================================================================== */
+/* PICT — classic Picture playback bridged to ImageIO                       */
+/* ======================================================================== */
+/* Modern macOS removed QuickDraw's PICT interpreter, BUT ImageIO still ships a
+ * read-only com.apple.pict decoder. An in-memory PicHandle holds the picture
+ * body ([SInt16 picSize][Rect picFrame][opcodes...]) WITHOUT the 512-byte PICT
+ * file header; prepend a zero header so ImageIO accepts it, then decode. */
+static CGImageRef pict_decode(const void *body, size_t len)
+{
+   if (!body || !len) return NULL;
+   CFMutableDataRef d = CFDataCreateMutable(NULL, 0);
+   if (!d) return NULL;
+   static const UInt8 hdr512[512] = { 0 };
+   CFDataAppendBytes(d, hdr512, 512);
+   CFDataAppendBytes(d, (const UInt8 *)body, (CFIndex)len);
+
+   CFStringRef k = CFSTR("kCGImageSourceTypeIdentifierHint");
+   CFStringRef v = CFSTR("com.apple.pict");
+   CFDictionaryRef opt = CFDictionaryCreate(NULL, (const void **)&k, (const void **)&v, 1,
+                                            &kCFTypeDictionaryKeyCallBacks,
+                                            &kCFTypeDictionaryValueCallBacks);
+   CGImageSourceRef src = CGImageSourceCreateWithData(d, opt);
+   CGImageRef img = src ? CGImageSourceCreateImageAtIndex(src, 0, NULL) : NULL;
+   if (src) CFRelease(src);
+   if (opt) CFRelease(opt);
+   CFRelease(d);
+   return img;
+}
+
+/* Draw a decoded CGImage into port `p` at QD-space rect (dst), flip-corrected. */
+static void draw_image_into_port(qd_port *p, CGImageRef img, const QDRect *dst)
+{
+   if (!p->ctx || !img) return;
+   QDRect dr = dst ? *dst : p->bounds;
+   double dx = dr.left, dw = dr.right - dr.left, dh = dr.bottom - dr.top, dy = dr.top;
+   CGContextSaveGState(p->ctx);
+   if (p->clip_nat) clip_ctx_to_native_rgn(p->ctx, p->clip_nat);
+   CGContextTranslateCTM(p->ctx, 0, dy + dh);
+   CGContextScaleCTM(p->ctx, 1, -1);
+   CGContextDrawImage(p->ctx, CGRectMake(dx, 0, dw, dh), img);
+   CGContextRestoreGState(p->ctx);
+   CGContextFlush(p->ctx);
+}
+
+/* void DrawPicture(PicHandle myPicture, const Rect *dstRect) */
+uint32_t shim_DrawPicture(uint32_t *a)
+{
+   qd_port *p = cur_port();
+   if (!p || !p->ctx || !a[0]) return 0;
+   void    *body = cm_handle_block(a[0]);
+   uint32_t len  = cm_handle_size(a[0]);
+   CGImageRef img = pict_decode(body, len);
+   if (!img) { QDLOG("DrawPicture: decode failed (len=%u)\n", len); return 0; }
+   draw_image_into_port(p, img, (const QDRect *)i386_ptr(a[1]));
+   QDLOG("DrawPicture %ldx%ld\n", CGImageGetWidth(img), CGImageGetHeight(img));
+   CGImageRelease(img);
+   return 0;
+}
+
+/* PicHandle GetPicture(short picID) — load the 'PICT' resource for real via the
+ * Resource Manager (rm_shim.c), which hands back a low-4GB Handle holding a copy
+ * of the picture bytes that DrawPicture can then decode. */
+uint32_t shim_GetPicture(uint32_t *a)
+{
+   uint32_t ra[2] = { kFourCC('P','I','C','T'), a[0] };
+   return shim_GetResource(ra);
+}
+
+/* short GetPictInfo / QDGetPictureBounds etc. are rarely used; a caller that
+ * needs the picture frame reads (**PicHandle).picFrame directly (offset 2). */
+
+/* ---- QDPictToCGContext: the modern PICT-provider -> CGContext API --------
+ * (QDPictCreateWithProvider/WithURL, QDPictDrawToCGContext, QDPictGetBounds,
+ * QDPictRelease) was itself removed from 64-bit macOS. Reimplement on ImageIO:
+ * a QDPictRef is a low-4GB struct holding the decoded CGImage + its bounds. */
+#define QDPICT_MAGIC 0x51504354u   /* 'QPCT' */
+typedef struct { uint32_t magic; CGImageRef img; QDRect frame; } qd_pict;
+
+static qd_pict *qdpict_from_i386(uint32_t h)
+{
+   if (!h) return NULL;
+   qd_pict *q = (qd_pict *)i386_ptr(h);
+   return q->magic == QDPICT_MAGIC ? q : NULL;
+}
+static uint32_t qdpict_wrap_data(CFDataRef data)
+{
+   if (!data) return 0;
+   CGImageRef img = pict_decode(CFDataGetBytePtr(data), (size_t)CFDataGetLength(data));
+   if (!img) return 0;
+   qd_pict *q = (qd_pict *)calloc(1, sizeof(qd_pict));
+   if (!q) { CGImageRelease(img); return 0; }
+   q->magic = QDPICT_MAGIC;
+   q->img = img;
+   q->frame.top = 0; q->frame.left = 0;
+   q->frame.bottom = (int16_t)CGImageGetHeight(img);
+   q->frame.right  = (int16_t)CGImageGetWidth(img);
+   return to_i386(q);
+}
+
+/* QDPictRef QDPictCreateWithProvider(CGDataProviderRef provider) */
+uint32_t shim_QDPictCreateWithProvider(uint32_t *a)
+{
+   CGDataProviderRef prov = (CGDataProviderRef)(uintptr_t)x64_objc_unwrap(a[0]);
+   if (!prov) return 0;
+   CFDataRef data = CGDataProviderCopyData(prov);
+   uint32_t r = qdpict_wrap_data(data);
+   if (data) CFRelease(data);
+   return r;
+}
+/* QDPictRef QDPictCreateWithURL(CFURLRef url) */
+uint32_t shim_QDPictCreateWithURL(uint32_t *a)
+{
+   CFURLRef url = (CFURLRef)(uintptr_t)x64_objc_unwrap(a[0]);
+   if (!url) return 0;
+   CGDataProviderRef prov = CGDataProviderCreateWithURL(url);
+   if (!prov) return 0;
+   CFDataRef data = CGDataProviderCopyData(prov);
+   uint32_t r = qdpict_wrap_data(data);
+   if (data) CFRelease(data);
+   CGDataProviderRelease(prov);
+   return r;
+}
+/* CGRect QDPictGetBounds(QDPictRef) — returns a CGRect (SRET on i386: a[0] is
+ * the hidden return-struct pointer, a[1] is the QDPictRef). Bounds are integer
+ * QD coords widened to CGFloat(float on i386). */
+uint32_t shim_QDPictGetBounds(uint32_t *a)
+{
+   float *out = (float *)i386_ptr(a[0]);       /* CGRect {x,y,w,h} as 4 floats */
+   qd_pict *q = qdpict_from_i386(a[1]);
+   if (out) {
+      out[0] = 0.0f; out[1] = 0.0f;
+      out[2] = q ? (float)(q->frame.right)  : 0.0f;
+      out[3] = q ? (float)(q->frame.bottom) : 0.0f;
+   }
+   return a[0];
+}
+/* OSStatus QDPictDrawToCGContext(CGContextRef ctx, CGRect rect, QDPictRef pict)
+ * i386 frame: a[0]=ctx, a[1..4]=rect (4 floats), a[5]=pict. */
+uint32_t shim_QDPictDrawToCGContext(uint32_t *a)
+{
+   CGContextRef ctx = (CGContextRef)(uintptr_t)x64_objc_unwrap(a[0]);
+   qd_pict *q = qdpict_from_i386(a[5]);
+   if (!ctx || !q || !q->img) return (uint32_t)qdParamErr;
+   union { uint32_t u; float f; } x = { a[1] }, y = { a[2] }, w = { a[3] }, h = { a[4] };
+   CGContextSaveGState(ctx);
+   CGContextDrawImage(ctx, CGRectMake(x.f, y.f, w.f, h.f), q->img);
+   CGContextRestoreGState(ctx);
+   return 0;
+}
+/* void QDPictRelease(QDPictRef) */
+uint32_t shim_QDPictRelease(uint32_t *a)
+{
+   qd_pict *q = qdpict_from_i386(a[0]);
+   if (!q) return 0;
+   if (q->img) CGImageRelease(q->img);
+   q->magic = 0;
+   free(q);
+   return 0;
+}
+
+/* ======================================================================== */
+/* Cursor — GetCursor/SetCursor (the removed classic 16x16 b/w cursor API)  */
+/* ======================================================================== */
+/* These are ABIGEN-faulting (their generated shim calls a REMOVED native and
+ * would crash). Cursor shape is cosmetic on our offscreen substrate: hand back
+ * a VALID (never-NULL) CursHandle so callers that do SetCursor(*GetCursor(id))
+ * don't deref garbage, and make SetCursor a safe no-op (the live system cursor
+ * is unchanged). A full NSCursor bridge is possible later but AppKit-heavy and
+ * purely cosmetic. InitCursor/HideCursor/ShowCursor survive natively (abigen). */
+/* CursHandle GetCursor(short cursorID) — Cursor = {Bits16 data; Bits16 mask;
+ * Point hotSpot} = 16+16+4 = 68 bytes. */
+uint32_t shim_GetCursor(uint32_t *a) { (void)a; return cm_new_handle(68, 1); }
+/* void SetCursor(const Cursor *crsr) */
+uint32_t shim_SetCursor(uint32_t *a) { (void)a; return 0; }
+/* void SetCCursor(CCrsrHandle) / void SetCursorComponent — cosmetic no-ops. */
+uint32_t shim_SetCCursor(uint32_t *a) { (void)a; return 0; }

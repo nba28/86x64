@@ -631,6 +631,24 @@ _x64_exc_longjmp:
 	MTSHIM	___QDEndCGContext,     _shim_QDEndCGContext
 
 ;; ---------------------------------------------------------------------
+;; QuickDraw PICT playback (qd_gworld.c). classic PICT decode via ImageIO's
+;; surviving com.apple.pict reader; DrawPicture renders into the current port,
+;; GetPicture loads the 'PICT' resource through rm_shim, and the modern
+;; QDPictToCGContext provider->CGContext API is reimplemented on ImageIO.
+;; DrawPicture/GetPicture/GetCursor/SetCursor are also abigen-faulting shims
+;; (they call a REMOVED native) -> excluded via custom.syms so these win.
+	MTSHIM	___DrawPicture,             _shim_DrawPicture
+	MTSHIM	___GetPicture,              _shim_GetPicture
+	MTSHIM	___QDPictCreateWithProvider,_shim_QDPictCreateWithProvider
+	MTSHIM	___QDPictCreateWithURL,     _shim_QDPictCreateWithURL
+	MTSHIM	___QDPictGetBounds,         _shim_QDPictGetBounds
+	MTSHIM	___QDPictDrawToCGContext,   _shim_QDPictDrawToCGContext
+	MTSHIM	___QDPictRelease,           _shim_QDPictRelease
+	MTSHIM	___GetCursor,               _shim_GetCursor
+	MTSHIM	___SetCursor,               _shim_SetCursor
+	MTSHIM	___SetCCursor,              _shim_SetCCursor
+
+;; ---------------------------------------------------------------------
 ;; C++ runtime (cxx_shim.c): libstdc++.6 imports of legacy i386 binaries.
 ;; Guards are implemented locally (native libc++abi sizes its lock words
 ;; for x86_64); new/delete use the low-4GB shim heap; _Rb_tree_* are

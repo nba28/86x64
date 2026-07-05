@@ -427,6 +427,15 @@ _UnlockPixels
 _EraseRect
 _QDFlushPortBuffer
 
+# QuickDraw PICT playback + cursor (qd_gworld.c). DrawPicture/GetPicture/
+# GetCursor/SetCursor are abigen-faulting (call a REMOVED native); exclude so
+# the ImageIO-backed PICT decode + cursor-safe shims win.
+_DrawPicture
+_GetPicture
+_GetCursor
+_SetCursor
+_SetCCursor
+
 # QuickTime GraphicsImporter (quicktime_image.c). QuickTime.framework is gone,
 # so abigen never generated these (listed for clarity; harmless to exclude).
 _GraphicsImportSetDataHandle
