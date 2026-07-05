@@ -32,6 +32,7 @@
 // forward-marshalling family, extended by the same iterate loop as s29->s32.
 
 #include <stdint.h>
+#include <string.h>
 #include <dlfcn.h>
 
 // Forward N i386 cdecl arg slots (widened) to native <name>, return eax.
@@ -60,3 +61,18 @@
 // Civ/Halo never need (they don't play movies). Promote to a real FWD4 forward
 // if a target genuinely needs QuickTime component resources.
 uint32_t shim_RMOpenResourceFileRef(uint32_t *a) { (void)a; return (uint32_t)-43; }
+
+// ---- QuickDraw std bottleneck procs (REMOVED) ----
+// void SetStdCProcs(CQDProcs*) — fills a CQDProcs record with the standard
+// QuickDraw bottleneck proc UPPs (StdText/StdLine/StdRect/...). All removed from
+// modern macOS, so this is weak-NULL'd -> QuickTime InitCodecManagerInternal's
+// call jumps to 0. ZERO the caller's record (a[0]) so its ~16 UPP slots read
+// NULL instead of stack garbage (QuickTime stages the record but does not draw
+// through these procs on the codec-init path; a NULL proc is the benign "use
+// default / none"). CQDProcs is ~13-16 UnivProcPtr; zero 0x40 to cover the
+// field QuickTime reads at +0x38.
+uint32_t shim_SetStdCProcs(uint32_t *a) {
+   void *p = (void *)(uintptr_t)a[0];
+   if (p) { memset(p, 0, 0x40); }
+   return 0;
+}

@@ -875,6 +875,7 @@ _x64_exc_longjmp:
 	; --- Present but __LP64__-header-gated Carbon entries translated QuickTime
 	;     calls: FORWARD to native w/ ABI conversion (carbon_fwd_shim.c; s34) ---
 	MTSHIM	___RMOpenResourceFileRef,            _shim_RMOpenResourceFileRef
+	MTSHIM	___SetStdCProcs,                     _shim_SetStdCProcs
 	; --- Resource Manager Handle marshalling (rm_shim.c; s35): wrap the native
 	;     >4GB Handle abigen would truncate into a low-4GB arena Handle ---
 	MTSHIM	___Get1Resource,                     _shim_Get1Resource
