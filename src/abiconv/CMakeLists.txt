@@ -437,6 +437,7 @@ add_library(abiconv SHARED
   qd_shim.c
   carbon_ui_shim.c
   qt_hitoolbox_shim.c
+  carbon_fwd_shim.c
   upp_shim.c
   sndmgr_shim.c
   fontmgr_shim.c

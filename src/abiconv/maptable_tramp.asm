@@ -872,6 +872,9 @@ _x64_exc_longjmp:
 	MTSHIM	___InstallWindowContentPaintProc,    _shim_InstallWindowContentPaintProc
 	MTSHIM	___InvalWindowRgn,                   _shim_InvalWindowRgn
 	MTSHIM	___SetWTitle,                        _shim_SetWTitle
+	; --- Present but __LP64__-header-gated Carbon entries translated QuickTime
+	;     calls: FORWARD to native w/ ABI conversion (carbon_fwd_shim.c; s34) ---
+	MTSHIM	___RMOpenResourceFileRef,            _shim_RMOpenResourceFileRef
 	; --- Universal Procedure Pointers (upp_shim.c) ---
 	MTSHIM	___DisposeControlUserPaneDrawUPP,     _shim_DisposeControlUserPaneDrawUPP
 	MTSHIM	___DisposeControlUserPaneHitTestUPP,  _shim_DisposeControlUserPaneHitTestUPP

@@ -253,7 +253,30 @@ void _86x64_import_repair(const struct mach_header_64 *mh64, intptr_t slide,
                   if (ws != 0) { slots[k] = ws; n_unbound++; n_shim++; }
                   continue;
                } else {
-                  continue;   /* genuinely bound */
+                  /* GENUINELY BOUND — but to WHAT? A translated image's calls
+                   * use the i386 4-byte-return cdecl frame; a slot dyld bound to
+                   * a NATIVE function makes the callee's 8-byte `ret` over-pop
+                   * that frame (the s28 ABI family; QuickTime's header-gated
+                   * QuickDraw/Resource-Mgr/Nav present imports that static-
+                   * interpose could not rewrite because libabiconv had no shim
+                   * for them yet — e.g. _RMOpenResourceFileRef from OpenWarhol-
+                   * ForkMapped). If a libabiconv marshalling shim EXISTS for the
+                   * symbol, redirect the slot to it: the shim enters the i386
+                   * frame correctly and forwards to native with ABI conversion.
+                   * Skip if the slot already points into libabiconv (already
+                   * marshalled by static-interpose) or no shim exists (leave the
+                   * native bind; a genuinely-called one surfaces + gets a shim,
+                   * same iterate loop). This makes import_repair a runtime
+                   * marshalling safety net independent of static-interpose. */
+                  Dl_info cur;
+                  if (dladdr((void *)(uintptr_t)v, &cur) &&
+                      cur.dli_fname != NULL &&
+                      strstr(cur.dli_fname, "libabiconv") != NULL) {
+                     continue;   /* already a libabiconv shim */
+                  }
+                  const uint64_t sh = ir_resolve_shim_only(name);
+                  if (sh != 0 && sh != v) { slots[k] = sh; n_unbound++; n_shim++; }
+                  continue;
                }
             } else {
                if (v != 0) { continue; }                          /* bound */
