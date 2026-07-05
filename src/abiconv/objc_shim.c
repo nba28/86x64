@@ -3671,6 +3671,102 @@ static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
    return 1;
 }
 
+/* -[NSString fileSystemRepresentation] / getFileSystemRepresentation:maxLength:
+ * intermittently (~2-7%, heap/thread-timing dependent) SIGSEGVs at addr=0x8 in
+ * modern Foundation: the fsrep path builds a VM-backed NSData
+ * (initWithBytes:length:copy:freeWhenDone:bytesAreVM:) whose -[NSConcreteData
+ * bytes] pthread_mutex_lock()s a mutex at a NULL base — iPhoto's account-config
+ * background thread (createDir: path cleanup) at boot / opening Preferences.
+ * The redirect of the deprecated removeFileAtPath:handler: (bp_deprecated_
+ * removefile) did NOT cure it: the crashing fileSystemRepresentation is called
+ * DIRECTLY by the app (and removeItemAtPath:error: hits the same path).
+ *
+ * Satisfy fileSystemRepresentation ourselves via getCString:...:NSUTF8String-
+ * Encoding, which never enters the VM-NSData machinery, so the null-lock path is
+ * never reached. For paths this is byte-equivalent to fileSystemRepresentation
+ * (UTF-8; the only difference is HFS NFD decomposition of non-ASCII, immaterial
+ * to the app's path use). Universal: any i386 caller. The returned C string
+ * pointer must be low-4GB (i386-derefs it) and live until the autorelease pool
+ * drains — a per-thread ring of grow-on-demand low-4GB buffers gives exactly
+ * that lifetime (valid for the next FSREP_RING calls on the thread, matching the
+ * "copy it if it must persist past the current pool" contract) with no per-call
+ * leak. getFileSystemRepresentation:maxLength: fills the caller's OWN buffer, so
+ * no ring slot is needed there. */
+#define FSREP_RING 16
+struct fsrep_slot { char *buf; size_t cap; };
+static __thread struct fsrep_slot g_fsrep_ring[FSREP_RING];
+static __thread unsigned g_fsrep_pos;
+static char *fsrep_low_buf(size_t need) {
+   if (need == 0) { need = 1; }
+   struct fsrep_slot *sl = &g_fsrep_ring[g_fsrep_pos];
+   g_fsrep_pos = (g_fsrep_pos + 1u) % FSREP_RING;
+   if (sl->cap < need) {
+      char *nb = (char *)malloc(need);                 /* low-4GB shim heap */
+      if (!nb) { return NULL; }
+      if ((uintptr_t)nb >= 0x100000000ULL) { free(nb); return NULL; }
+      free(sl->buf);
+      sl->buf = nb; sl->cap = need;
+   }
+   return sl->buf;
+}
+static int bp_fsrep(struct objc_call_plan *plan, const uint32_t *args32,
+                    id real_self, SEL sel) {
+   if (!sel || !real_self) { return 0; }
+   const char *s = sel_getName(sel);
+   int is_get = (strcmp(s, "getFileSystemRepresentation:maxLength:") == 0);
+   int is_fsr = !is_get && (strcmp(s, "fileSystemRepresentation") == 0);
+   if (!is_fsr && !is_get) { return 0; }
+   Class nsstr = objc_getClass("NSString");
+   typedef unsigned char (*kind_t)(id, SEL, Class);
+   if (!nsstr || !((kind_t)objc_msgSend)(real_self,
+                     sel_registerName("isKindOfClass:"), nsstr)) {
+      return 0;                                   /* receiver isn't an NSString */
+   }
+   const unsigned long NSUTF8 = 4;                /* NSUTF8StringEncoding */
+   SEL gc = sel_registerName("getCString:maxLength:encoding:");
+   typedef unsigned char (*getc_t)(id, SEL, char *, unsigned long, unsigned long);
+
+   if (is_get) {
+      /* getFileSystemRepresentation:(char *)buffer maxLength:(NSUInteger) -> BOOL,
+       * filling the caller's OWN i386 low-4GB buffer. */
+      char *buf = (char *)(uintptr_t)args32[2];
+      unsigned long maxLen = (unsigned long)args32[3];
+      if (!buf || maxLen == 0) { return 0; }       /* let native handle the edge */
+      unsigned char ok = ((getc_t)objc_msgSend)(real_self, gc, buf, maxLen, NSUTF8);
+      plan->reg[0] = (uint64_t)(unsigned char)ok;
+      plan->reg[1] = plan->reg[2] = plan->reg[3] = plan->reg[4] = plan->reg[5] = 0;
+      plan->nreg = 1;
+      plan->ret_is_obj = 0;
+      plan->target = (uint64_t)(uintptr_t)x64_ret_identity;
+      if (getenv("OBJC_BRIDGE_TRACE")) {
+         fprintf(stderr, "[bp] getFileSystemRepresentation:maxLength: -> getCString ok=%d\n",
+                 (int)ok);
+         fflush(stderr);
+      }
+      return 1;
+   }
+
+   /* fileSystemRepresentation -> const char *. Size to the exact UTF-8 max. */
+   typedef unsigned long (*maxlen_t)(id, SEL, unsigned long);
+   unsigned long cap = ((maxlen_t)objc_msgSend)(real_self,
+                          sel_registerName("maximumLengthOfBytesUsingEncoding:"),
+                          NSUTF8) + 1;               /* +1 for the NUL */
+   char *buf = fsrep_low_buf((size_t)cap);
+   if (!buf) { return 0; }                          /* no low mem: let native try */
+   if (!((getc_t)objc_msgSend)(real_self, gc, buf, cap, NSUTF8)) {
+      buf[0] = '\0';                                /* getCString shouldn't fail at max cap */
+   }
+   plan->reg[0]     = (uint32_t)(uintptr_t)buf;     /* low-4GB C-string ptr in eax */
+   plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
+   plan->ret_is_obj = 0;
+   if (getenv("OBJC_BRIDGE_TRACE")) {
+      fprintf(stderr, "[bp] fileSystemRepresentation -> low 0x%08x \"%.64s\"\n",
+              (uint32_t)(uintptr_t)buf, buf);
+      fflush(stderr);
+   }
+   return 1;
+}
+
 /* -[NSView getRectsBeingDrawn:count:] hands the caller, via two out-parameters,
  * a pointer to an AppKit-owned array of NSRect plus a count (the dirty-rect
  * optimisation an app's drawRect: uses to redraw only invalidated cells). Two
@@ -3945,6 +4041,12 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
     * caller can dereference (raw-C consumers like Quinn's ks_decrypt). Must run
     * before the bare-`^v` return wrap would hand back an unreadable arena handle. */
    if (bp_nsdata_bytes(plan, real_self, sel))
+      return;
+
+   /* -[NSString fileSystemRepresentation]/getFileSystemRepresentation:maxLength:
+    * -> satisfy via getCString into a low-4GB buffer, sidestepping the native
+    * VM-backed-NSData null-lock (iPhoto account-config createDir:; see bp_fsrep). */
+   if (bp_fsrep(plan, args32, real_self, sel))
       return;
 
    /* -[NSView getRectsBeingDrawn:count:]: AppKit writes a >4GB pointer to a
