@@ -483,6 +483,12 @@ add_library(abiconv SHARED
   # libstdc++ i386 COW std::string/std::wstring surface (cow_string_tramp.asm
   # keeps its own MTSHIM + MTSHIM_SRET; wired the same way as the other modules).
   cow_string_shim.c
+  # wchar_shim.c / wchar_tramp.asm: the <wchar.h> wide-string family (wcslen/
+  # wcscpy/wcsto*/... — PRESENT native fns static-interpose renames _wcs* ->
+  # ___wcs* but abigen's modern pass didn't yet shim). Pointer-widening
+  # marshalling; listed in custom.syms so abigen never dup-emits them.
+  wchar_shim.c
+  wchar_tramp.asm
   # (halo_shim.c / halo_tramp.asm RETIRED: mach_timebase_info / mach_absolute_time
   # are now covered by the universal import-driven modern pass — libSystem maps to
   # <mach/mach_time.h> in includes_auto.h, so abigen emits ___mach_timebase_info /

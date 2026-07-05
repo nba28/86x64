@@ -1,3 +1,22 @@
+# wchar.h wide-string family — hand-shimmed in wchar_shim.c / wchar_tramp.asm
+# (PRESENT native fns; static-interpose renames _wcs* -> ___wcs*). Listed here
+# so abigen's modern/legacy passes never dup-emit them.
+_wcslen
+_wcscmp
+_wcsncmp
+_wcscpy
+_wcsncpy
+_wcscat
+_wcschr
+_wcsrchr
+_wcsstr
+_wcstok
+_wcstol
+_wcstoll
+_wcstod
+_wcstof
+_wcsftime
+
 _xmlMemSetup
 _xmlMemGet
 _getopt
