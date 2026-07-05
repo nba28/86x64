@@ -42,3 +42,19 @@ uint32_t shim_NewMovieFromDataRef(uint32_t *args) {
     if (theMovie) *theMovie = 0;
     return (uint32_t)QT_COULD_NOT_RESOLVE_DATAREF;
 }
+
+// OSErr EnterMovies(void) — QuickTime Movie Toolbox initialization. The bundled
+// (translated) QuickTime's real EnterMovies runs InitCodecManagerInternal and a
+// deep tail of removed-QuickDraw / Component-Manager codec-registration calls
+// that fault on modern macOS. Civ IV / Halo only need QuickTime for OPTIONAL
+// frontend movies, which the NewMovieFromDataRef stub above already declines.
+// Report success WITHOUT running the codec init: the caller believes QuickTime
+// is available and proceeds into the game; every movie load then gracefully
+// declines. This short-circuits the entire codec-init subsystem (a program that
+// genuinely needs QuickTime playback would instead route the Movie Toolbox
+// through real marshalling — the larger effort flagged above). Idempotent.
+// EnterMoviesOnThread / ExitMovies mirror it (init/teardown no-ops).
+uint32_t shim_EnterMovies(uint32_t *args)         { (void)args; return 0; }
+uint32_t shim_EnterMoviesOnThread(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_ExitMovies(uint32_t *args)          { (void)args; return 0; }
+uint32_t shim_ExitMoviesOnThread(uint32_t *args)  { (void)args; return 0; }

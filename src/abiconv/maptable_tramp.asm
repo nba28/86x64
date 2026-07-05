@@ -962,6 +962,10 @@ _x64_exc_longjmp:
 	; --- QuickTime Movie Toolbox: trie-missing symbol in the bundled QuickTime
 	;     (symtab-only; dyld two-level binds resolve via the trie) (quicktime_movie_shim.c) ---
 	MTSHIM	___NewMovieFromDataRef,               _shim_NewMovieFromDataRef
+	MTSHIM	___EnterMovies,                      _shim_EnterMovies
+	MTSHIM	___EnterMoviesOnThread,              _shim_EnterMoviesOnThread
+	MTSHIM	___ExitMovies,                       _shim_ExitMovies
+	MTSHIM	___ExitMoviesOnThread,               _shim_ExitMoviesOnThread
 
 	; --- keymgr process-wide pointer store + DWARF2 EH-section registration
 	;     (keymgr_shim.c). NOT removed — present natively but an i386->x86_64 ABI

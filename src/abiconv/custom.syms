@@ -433,3 +433,12 @@ _ICACopyObjectThumbnail
 _ICADownloadFile
 _ICAObjectSendMessage
 _ICARegisterEventNotification
+
+# QuickTime Movie Toolbox init: abigen would forward to the translated
+# QuickTime's EnterMovies -> InitCodecManagerInternal (removed-QuickDraw codec
+# tail that faults). quicktime_movie_shim.c reports success without it so the
+# caller skips into the game; movie loads decline via NewMovieFromDataRef.
+_EnterMovies
+_EnterMoviesOnThread
+_ExitMovies
+_ExitMoviesOnThread

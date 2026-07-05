@@ -77,16 +77,22 @@ static void rm_forget(uint32_t low) {
 
 // Wrap a native Handle into a low-4GB Handle holding a copy of the resource
 // bytes. A NULL native Handle (resource not found) -> 0, as the caller expects.
+// DEFENSIVE: only copy `size` bytes when *nH and size are self-consistent — a
+// bogus/huge GetHandleSize or a NULL master (purged/unloaded resource) must NOT
+// drive a wild memcpy that corrupts the low-4GB heap (which surfaces later as
+// non-deterministic faults in unrelated code — the app's own allocator, a
+// foreign abigen shim). An implausible size yields an empty but valid, recorded
+// low Handle so the caller can still LoadResource / release it.
+#define RM_MAX_RES (64u * 1024u * 1024u)         // 64MB sanity cap on one resource
 static uint32_t rm_wrap(void *nH) {
    if (!nH) return 0;
    RM_N(getsize, rm_size_t, "GetHandleSize");
    long size = getsize ? getsize(nH) : 0;
-   if (size < 0) size = 0;
    void *master = *(void **)nH;                 // *Handle = master ptr = data
-   uint32_t low = cm_new_handle((uint32_t)size, 0);
-   if (low && master && size > 0) {
-      memcpy(cm_handle_block(low), master, (size_t)size);
-   }
+   uint32_t nbytes = (size > 0 && (uint64_t)size <= RM_MAX_RES && master)
+                     ? (uint32_t)size : 0;
+   uint32_t low = cm_new_handle(nbytes, 0);
+   if (low && nbytes) { memcpy(cm_handle_block(low), master, nbytes); }
    rm_record(low, nH);
    return low;
 }
