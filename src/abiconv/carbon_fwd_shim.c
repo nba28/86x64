@@ -52,4 +52,11 @@
 // ---- Resource Manager (CarbonCore; header-gated, present) ----
 // OSErr RMOpenResourceFileRef(const FSRef*, HFSUniStr255*, SInt8 perm,
 //                             FSIORefNum* refNum) — 4 args (caller add $0x10).
-FWD4(RMOpenResourceFileRef)
+// QuickTime's OpenWarholForkMapped/HereIsWarholResFile use it to open QuickTime's
+// own legacy component RESOURCE fork; forwarding to native sends QuickTime down
+// that classic Resource-Manager reader, which faults in the modern environment
+// (no such fork on the translated framework). Return fnfErr(-43) so the caller
+// takes its "no resource file" path and SKIPS legacy resource loading — a path
+// Civ/Halo never need (they don't play movies). Promote to a real FWD4 forward
+// if a target genuinely needs QuickTime component resources.
+uint32_t shim_RMOpenResourceFileRef(uint32_t *a) { (void)a; return (uint32_t)-43; }
