@@ -443,3 +443,36 @@ _EnterMovies
 _EnterMoviesOnThread
 _ExitMovies
 _ExitMoviesOnThread
+
+# Navigation Services (nav_shim.m): the classic Carbon file dialogs are removed
+# in 64-bit macOS, so abigen would (a) find a modern prototype but no symbol and
+# skip, or (b) via the legacy pass forward to a nonexistent/broken entry. We hand
+# them REAL NSOpenPanel/NSSavePanel implementations; listing them here prevents
+# abigen from also emitting a version. Wired ___Nav* -> _shim_Nav* in
+# maptable_tramp.asm (NavServices block).
+_NavCreatePutFileDialog
+_NavCreateGetFileDialog
+_NavCreateChooseFolderDialog
+_NavCreateChooseFileDialog
+_NavCreateChooseObjectDialog
+_NavDialogRun
+_NavDialogGetUserAction
+_NavDialogGetReply
+_NavDialogGetSaveFileName
+_NavDialogSetSaveFileName
+_NavDialogGetWindow
+_NavDialogDispose
+_NavCustomControl
+_NavGetFile
+_NavChooseFile
+_NavChooseFolder
+_NavChooseObject
+_NavPutFile
+_NavDisposeReply
+_NavCompleteSave
+_NavGetDefaultDialogCreationOptions
+_NavGetDefaultDialogOptions
+_NavServicesAvailable
+_NavServicesCanRun
+_NavLoad
+_NavUnload

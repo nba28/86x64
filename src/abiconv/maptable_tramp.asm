@@ -980,6 +980,39 @@ _x64_exc_longjmp:
 	MTSHIM	____keymgr_get_and_lock_processwide_ptr_2, _shim_keymgr_get_and_lock_processwide_ptr_2
 	MTSHIM	____keymgr_set_and_unlock_processwide_ptr, _shim_keymgr_set_and_unlock_processwide_ptr
 
+	; --- Navigation Services -> AppKit NSOpenPanel/NSSavePanel (nav_shim.m) ---
+	; The classic Carbon file dialogs (removed in 64-bit macOS). Reimplemented on
+	; NSOpenPanel/NSSavePanel; the reply.selection AEDescList round-trips through
+	; abigen's AE-desc x64_objc_wrap table. Create/run/reply API + classic blocking
+	; API + defaults/availability. custom.syms lists these so abigen does not also
+	; emit a (broken, forward-to-removed) version.
+	MTSHIM	___NavCreatePutFileDialog,            _shim_NavCreatePutFileDialog
+	MTSHIM	___NavCreateGetFileDialog,            _shim_NavCreateGetFileDialog
+	MTSHIM	___NavCreateChooseFolderDialog,       _shim_NavCreateChooseFolderDialog
+	MTSHIM	___NavCreateChooseFileDialog,         _shim_NavCreateChooseFileDialog
+	MTSHIM	___NavCreateChooseObjectDialog,       _shim_NavCreateChooseObjectDialog
+	MTSHIM	___NavDialogRun,                      _shim_NavDialogRun
+	MTSHIM	___NavDialogGetUserAction,            _shim_NavDialogGetUserAction
+	MTSHIM	___NavDialogGetReply,                 _shim_NavDialogGetReply
+	MTSHIM	___NavDialogGetSaveFileName,          _shim_NavDialogGetSaveFileName
+	MTSHIM	___NavDialogSetSaveFileName,          _shim_NavDialogSetSaveFileName
+	MTSHIM	___NavDialogGetWindow,                _shim_NavDialogGetWindow
+	MTSHIM	___NavDialogDispose,                  _shim_NavDialogDispose
+	MTSHIM	___NavCustomControl,                  _shim_NavCustomControl
+	MTSHIM	___NavGetFile,                        _shim_NavGetFile
+	MTSHIM	___NavChooseFile,                     _shim_NavChooseFile
+	MTSHIM	___NavChooseFolder,                   _shim_NavChooseFolder
+	MTSHIM	___NavChooseObject,                   _shim_NavChooseObject
+	MTSHIM	___NavPutFile,                        _shim_NavPutFile
+	MTSHIM	___NavDisposeReply,                   _shim_NavDisposeReply
+	MTSHIM	___NavCompleteSave,                   _shim_NavCompleteSave
+	MTSHIM	___NavGetDefaultDialogCreationOptions,_shim_NavGetDefaultDialogCreationOptions
+	MTSHIM	___NavGetDefaultDialogOptions,        _shim_NavGetDefaultDialogOptions
+	MTSHIM	___NavServicesAvailable,              _shim_NavServicesAvailable
+	MTSHIM	___NavServicesCanRun,                 _shim_NavServicesCanRun
+	MTSHIM	___NavLoad,                           _shim_NavLoad
+	MTSHIM	___NavUnload,                         _shim_NavUnload
+
 	; --- RTTI type_info vtable sentinels (used by cxx_shim.c's __dynamic_cast) ---
 	; Exported under the exact libstdc++ __cxxabiv1 vtable names so static-interpose
 	; redirects every translated typeinfo's vtable-ptr field (typeinfo+0) to one of

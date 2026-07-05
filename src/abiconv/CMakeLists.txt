@@ -436,6 +436,10 @@ add_library(abiconv SHARED
   qt_hitoolbox_shim.c
   carbon_fwd_shim.c
   upp_shim.c
+  # Navigation Services -> AppKit NSOpenPanel/NSSavePanel (classic Carbon file
+  # dialogs, removed in 64-bit). Real bridge; reply.selection AEDescList round-
+  # trips via the x64_objc_wrap AE-desc table. Needs -framework AppKit.
+  nav_shim.m
   # SoundManager: classic Sound Manager reimplemented on CoreAudio AudioQueue.
   # sndmgr_shim.c = the API + AudioQueue lifecycle + i386 callback bridge;
   # snd_convert.c = the pure (framework-free) SoundHeader/'snd '-resource decoder
@@ -484,6 +488,8 @@ target_link_libraries(abiconv System objc
   "-framework CoreFoundation"
   "-framework CoreServices"
   "-framework ApplicationServices"
+  # nav_shim.m reimplements Navigation Services on NSOpenPanel/NSSavePanel.
+  "-framework AppKit"
   "-framework IOKit"
   "-framework OpenGL"
   # quicktime_image.c reimplements the QuickTime GraphicsImporter on these:
