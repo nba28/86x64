@@ -253,6 +253,22 @@ python3 "$ROOTDIR/remove_dup_lc_id_dylib.py" "$DYLIB64" >/dev/null || error
 # cmd flips; identical behavior for present deps. See _weaken_dangling_deps.py.
 python3 "$ROOTDIR/_weaken_dangling_deps.py" "$DYLIB64" || error
 
+# Weaken individual binds to REMOVED symbols (modern-LC_DYLD_INFO inputs only).
+# A modern i386 framework (QuickTime) keeps its ORIGINAL bind opcodes
+# (synthesize_dyld_info is a no-op when a DyldInfo already exists), so an
+# over-linked symbol since removed from 64-bit macOS (e.g. _CopyDeepMask from
+# ApplicationServices) stays a non-lazy NON-WEAK bind and dyld hard-fails the
+# whole image at load. Flip SET_SYMBOL -> WEAK_IMPORT (in-place |0x01) for every
+# bind whose symbol is genuinely gone (neither a libabiconv export nor present
+# in the native dyld namespace); dyld then NULLs them and the image LOADS,
+# import_repair + the marshalling shims cover any that are CALLED. Runs AFTER
+# static-interpose (covered imports already carry their ___X names). Classic
+# (synthesized) images do not need it — their binds are emitted weak from the
+# start (the N_WEAK_REF jump-table path). See _weaken_removed_binds.py.
+if [ "$HAS_DYLD_INFO" -gt 0 ]; then
+    python3 "$ROOTDIR/_weaken_removed_binds.py" "$DYLIB64" "$LIBABICONV" || error
+fi
+
 # If no wrapper requested (dylib-only mode), we're done.
 if [ ! -f "$WRAPPER_OBJ" ]; then
     [ "$VERBOSE" ] && echo "86x64: dylib-only mode, output at $DYLIB64"
