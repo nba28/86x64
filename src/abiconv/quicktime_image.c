@@ -40,6 +40,11 @@ extern void *malloc(size_t);
 extern void *calloc(size_t, size_t);
 extern void  free(void *);
 
+/* The GWorld/PixMap offscreen substrate lives in qd_gworld.c (CG-backed). The
+ * GraphicsImporter renders into a bound GWorld/port via this shared accessor
+ * (port handle 0 => the current port). */
+extern int qd_port_pixels(uint32_t port_h, void **base, int *rowBytes, int *w, int *h);
+
 static int qt_trace(void)
 {
    static int t = -1;
@@ -77,57 +82,6 @@ typedef struct {
    int16_t  clutID;          /* 84 */
 } ImageDescriptionRec;        /* logical size 86 */
 #define IMAGEDESC_SIZE 86
-
-/* ---- GWorld / PixMap ----------------------------------------------------- */
-
-#define GW_MAGIC 0x47574c44u      /* 'GWLD' */
-typedef struct gw_state {
-   uint32_t magic;
-   void    *base;                 /* low-4GB ARGB pixel buffer */
-   int      rowBytes;
-   int      width, height;
-   int      depth;                /* bits per pixel (always 32 here) */
-   int      owns_base;            /* free base on dispose */
-   uint32_t pixmap_handle;        /* lazily-created PixMapHandle (cm Handle) */
-} gw_state;
-
-/* The block a PixMapHandle points at: just a back-pointer to the GWorld. Only
- * our accessors read it; the i386 caller treats the PixMapHandle opaquely. */
-typedef struct { gw_state *gw; } gw_pixmap;
-
-static gw_state *gw_from_i386(uint32_t h)
-{
-   if (!h) return NULL;
-   gw_state *gw = (gw_state *)i386_ptr(h);
-   return gw->magic == GW_MAGIC ? gw : NULL;   /* low-4GB; safe to peek */
-}
-
-/* Thread-local "current port" for GetGWorld/SetGWorld. */
-static __thread uint32_t tl_cur_port;
-static __thread uint32_t tl_cur_gd;
-
-/* An opaque, never-dereferenced GDHandle token for GetGWorldDevice. */
-#define FAKE_GDEVICE 0xF2000001u
-
-static uint32_t make_pixmap_handle(gw_state *gw)
-{
-   if (gw->pixmap_handle)
-      return gw->pixmap_handle;
-   uint32_t h = cm_new_handle(sizeof(gw_pixmap), 0);
-   if (!h) return 0;
-   gw_pixmap *pm = (gw_pixmap *)cm_handle_block(h);
-   pm->gw = gw;
-   gw->pixmap_handle = h;
-   return h;
-}
-
-static gw_state *gw_from_pixmap(uint32_t pmHandle)
-{
-   void *blk = cm_handle_block(pmHandle);
-   if (!blk) return NULL;
-   gw_state *gw = ((gw_pixmap *)blk)->gw;
-   return (gw && gw->magic == GW_MAGIC) ? gw : NULL;
-}
 
 /* ---- GraphicsImporter instance ------------------------------------------ */
 
@@ -243,8 +197,10 @@ static void gi_set_dataref(gi_state *gi, uint32_t dataRef, uint32_t dataRefType)
 
 static cm_result gi_draw(gi_state *gi)
 {
-   gw_state *gw = gw_from_i386(gi->gw ? gi->gw : tl_cur_port);
-   if (!gw || !gw->base) { QTLOG("draw: no target GWorld\n"); return cmParamErr; }
+   void *base = NULL; int rowBytes = 0, gw_w = 0, gw_h = 0;
+   if (!qd_port_pixels(gi->gw, &base, &rowBytes, &gw_w, &gw_h) || !base) {
+      QTLOG("draw: no target GWorld\n"); return cmParamErr;
+   }
 
    CGImageSourceRef s = gi_source(gi);
    if (!s) { QTLOG("draw: no image source\n"); return cmParamErr; }
@@ -253,30 +209,32 @@ static cm_result gi_draw(gi_state *gi)
 
    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
    /* ARGB, 8bpc, big-endian 32-bit word == classic k32ARGBPixelFormat byte
-    * order (A,R,G,B) that a 32-bit QuickDraw GWorld holds. */
+    * order (A,R,G,B) that a 32-bit QuickDraw GWorld holds. The port's own
+    * CGContext uses AlphaNoneSkipFirst; here we build a decode context over the
+    * SAME low-4GB buffer with premultiplied alpha so PNG/etc. composite. */
    CGContextRef ctx = CGBitmapContextCreate(
-      gw->base, gw->width, gw->height, 8, gw->rowBytes, cs,
+      base, gw_w, gw_h, 8, rowBytes, cs,
       kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Big);
    CGColorSpaceRelease(cs);
    if (!ctx) { CGImageRelease(img); QTLOG("draw: no bitmap ctx\n"); return cmMemFullErr; }
 
    /* Destination rect (default: whole GWorld). QuickDraw is top-left origin,
     * CoreGraphics bottom-left -> flip vertically. */
-   double dx = 0, dy = 0, dw = gw->width, dh = gw->height;
+   double dx = 0, dy = 0, dw = gw_w, dh = gw_h;
    if (gi->have_dest) {
       dx = gi->destRect.left;
       dy = gi->destRect.top;
       dw = gi->destRect.right  - gi->destRect.left;
       dh = gi->destRect.bottom - gi->destRect.top;
    }
-   CGContextTranslateCTM(ctx, 0, gw->height);
+   CGContextTranslateCTM(ctx, 0, gw_h);
    CGContextScaleCTM(ctx, 1, -1);
    CGContextDrawImage(ctx, CGRectMake(dx, dy, dw, dh), img);
    CGContextFlush(ctx);
 
    QTLOG("draw: %ldx%ld -> gworld %dx%d rb=%d at (%g,%g %gx%g)\n",
          CGImageGetWidth(img), CGImageGetHeight(img),
-         gw->width, gw->height, gw->rowBytes, dx, dy, dw, dh);
+         gw_w, gw_h, rowBytes, dx, dy, dw, dh);
 
    CGContextRelease(ctx);
    CGImageRelease(img);
@@ -479,123 +437,10 @@ uint32_t shim_GetGraphicsImporterForFile(uint32_t *a)
    return cmParamErr;
 }
 
-/* ---- QuickDraw GWorld / PixMap ------------------------------------------ */
-
-static uint32_t new_gworld(uint32_t outPtr, int w, int h, int rowBytes,
-                           void *base, int owns)
-{
-   if (w <= 0 || h <= 0) { put_u32(outPtr, 0); return cmParamErr; }
-   if (rowBytes <= 0) rowBytes = (w * 4 + 15) & ~15;
-   gw_state *gw = (gw_state *)calloc(1, sizeof(gw_state));
-   if (!gw) { put_u32(outPtr, 0); return cmMemFullErr; }
-   gw->magic = GW_MAGIC;
-   gw->width = w; gw->height = h; gw->depth = 32; gw->rowBytes = rowBytes;
-   if (base) { gw->base = base; gw->owns_base = 0; }
-   else      { gw->base = calloc(1, (size_t)rowBytes * h); gw->owns_base = 1; }
-   if (!gw->base) { free(gw); put_u32(outPtr, 0); return cmMemFullErr; }
-   (void)owns;
-   put_u32(outPtr, to_i386(gw));
-   QTLOG("NewGWorld %dx%d rb=%d base=%p owns=%d\n", w, h, rowBytes, gw->base, gw->owns_base);
-   return cmNoErr;
-}
-
-/* QDErr NewGWorld(GWorldPtr*, short depth, const Rect*, CTabHandle, GDHandle, GWorldFlags); */
-uint32_t shim_NewGWorld(uint32_t *a)
-{
-   QDRect *b = (QDRect *)i386_ptr(a[2]);
-   int w = b ? b->right - b->left : 0;
-   int h = b ? b->bottom - b->top : 0;
-   return new_gworld(a[0], w, h, 0, NULL, 1);
-}
-
-/* QDErr NewGWorldFromPtr(GWorldPtr*, depth, const Rect*, CTab, GD, flags,
- *                        Ptr base, long rowBytes); */
-uint32_t shim_NewGWorldFromPtr(uint32_t *a)
-{
-   QDRect *b = (QDRect *)i386_ptr(a[2]);
-   int w = b ? b->right - b->left : 0;
-   int h = b ? b->bottom - b->top : 0;
-   return new_gworld(a[0], w, h, (int)a[7], i386_ptr(a[6]), 0);
-}
-
-/* OSErr QTNewGWorldFromPtr(GWorldPtr*, OSType pixFmt, const Rect*, CTab, GD,
- *                          flags, void *base, long rowBytes); */
-uint32_t shim_QTNewGWorldFromPtr(uint32_t *a)
-{
-   QDRect *b = (QDRect *)i386_ptr(a[2]);
-   int w = b ? b->right - b->left : 0;
-   int h = b ? b->bottom - b->top : 0;
-   return new_gworld(a[0], w, h, (int)a[7], i386_ptr(a[6]), 0);
-}
-
-/* void DisposeGWorld(GWorldPtr gw); */
-uint32_t shim_DisposeGWorld(uint32_t *a)
-{
-   gw_state *gw = gw_from_i386(a[0]);
-   if (!gw) return 0;
-   if (gw->pixmap_handle) cm_dispose_handle(gw->pixmap_handle);
-   if (gw->owns_base && gw->base) free(gw->base);
-   gw->magic = 0;
-   free(gw);
-   return 0;
-}
-
-/* PixMapHandle GetGWorldPixMap(GWorldPtr gw); */
-uint32_t shim_GetGWorldPixMap(uint32_t *a)
-{
-   gw_state *gw = gw_from_i386(a[0]);
-   return gw ? make_pixmap_handle(gw) : 0;
-}
-
-/* PixMapHandle GetPortPixMap(CGrafPtr port); — a CGrafPtr is a GWorldPtr here */
-uint32_t shim_GetPortPixMap(uint32_t *a)
-{
-   gw_state *gw = gw_from_i386(a[0]);
-   return gw ? make_pixmap_handle(gw) : 0;
-}
-
-/* GDHandle GetGWorldDevice(GWorldPtr gw); */
-uint32_t shim_GetGWorldDevice(uint32_t *a) { (void)a; return FAKE_GDEVICE; }
-
-/* void GetGWorld(CGrafPtr *port, GDHandle *gd); */
-uint32_t shim_GetGWorld(uint32_t *a)
-{
-   put_u32(a[0], tl_cur_port);
-   put_u32(a[1], tl_cur_gd ? tl_cur_gd : FAKE_GDEVICE);
-   return 0;
-}
-/* void SetGWorld(CGrafPtr port, GDHandle gd); */
-uint32_t shim_SetGWorld(uint32_t *a)
-{
-   tl_cur_port = a[0];
-   tl_cur_gd   = a[1];
-   return 0;
-}
-
-/* Ptr GetPixBaseAddr(PixMapHandle pm); */
-uint32_t shim_GetPixBaseAddr(uint32_t *a)
-{
-   gw_state *gw = gw_from_pixmap(a[0]);
-   return gw ? to_i386(gw->base) : 0;
-}
-/* SInt16 GetPixRowBytes(PixMapHandle pm); (the "long" form returns rowBytes) */
-uint32_t shim_GetPixRowBytes(uint32_t *a)
-{
-   gw_state *gw = gw_from_pixmap(a[0]);
-   return gw ? (uint32_t)gw->rowBytes : 0;
-}
-/* Rect *GetPixBounds(PixMapHandle pm, Rect *bounds); */
-uint32_t shim_GetPixBounds(uint32_t *a)
-{
-   gw_state *gw = gw_from_pixmap(a[0]);
-   QDRect *r = (QDRect *)i386_ptr(a[1]);
-   if (gw && r) { r->top = 0; r->left = 0; r->bottom = gw->height; r->right = gw->width; }
-   return a[1];
-}
-/* Boolean LockPixels(PixMapHandle pm); — our pixels never move */
-uint32_t shim_LockPixels(uint32_t *a) { (void)a; return 1; }
-/* void UnlockPixels(PixMapHandle pm); */
-uint32_t shim_UnlockPixels(uint32_t *a) { (void)a; return 0; }
+/* The QuickDraw GWorld / PixMap entry points (NewGWorld, GetGWorldPixMap,
+ * GetPixBaseAddr, LockPixels, SetGWorld, ...) live in qd_gworld.c, which
+ * implements them as CG-backed offscreen ports. The GraphicsImporter above
+ * renders into those ports via qd_port_pixels(). */
 
 /* ---- register the GraphicsImporter backend at load ---------------------- */
 

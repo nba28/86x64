@@ -431,6 +431,9 @@ add_library(abiconv SHARED
   carbon_fsspec_shim.c
   # Civ IV: removed Carbon/QuickDraw/QuickTime-callback subsystems (single-purpose shims,
   # wired through maptable_tramp.asm MTSHIM -> ___<sym> exports). See each file's header.
+  # qd_gworld.c = the CG-backed classic QuickDraw substrate (GWorlds/PixMaps/CopyBits/
+  # drawing/GDevice); qd_shim.c = the small port-independent slice (patterns/points/cursors).
+  qd_gworld.c
   qd_shim.c
   carbon_ui_shim.c
   # carbon_nib_shim.c: REAL IBCarbon nib window/control materialization (fixes the

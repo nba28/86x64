@@ -578,12 +578,13 @@ _x64_exc_longjmp:
 	MTSHIM	___GetGraphicsImporterForFile,         _shim_GetGraphicsImporterForFile
 
 ;; ---------------------------------------------------------------------
-;; QuickDraw offscreen GWorld + PixMap (quicktime_image.c). Excluded from abigen
-;; (custom.syms): the GWorld/PixMap handles are ours and opaque to the caller.
+;; QuickDraw offscreen GWorld + PixMap (qd_gworld.c — CG-backed ports).
+;; Excluded from abigen (custom.syms): the GWorld/PixMap handles are ours.
 	MTSHIM	___NewGWorld,          _shim_NewGWorld
 	MTSHIM	___NewGWorldFromPtr,   _shim_NewGWorldFromPtr
 	MTSHIM	___QTNewGWorldFromPtr, _shim_QTNewGWorldFromPtr
 	MTSHIM	___DisposeGWorld,      _shim_DisposeGWorld
+	MTSHIM	___UpdateGWorld,       _shim_UpdateGWorld
 	MTSHIM	___GetGWorldPixMap,    _shim_GetGWorldPixMap
 	MTSHIM	___GetPortPixMap,      _shim_GetPortPixMap
 	MTSHIM	___GetGWorldDevice,    _shim_GetGWorldDevice
@@ -594,6 +595,40 @@ _x64_exc_longjmp:
 	MTSHIM	___GetPixBounds,       _shim_GetPixBounds
 	MTSHIM	___LockPixels,         _shim_LockPixels
 	MTSHIM	___UnlockPixels,       _shim_UnlockPixels
+
+;; ---------------------------------------------------------------------
+;; QuickDraw drawing substrate — CG-backed (qd_gworld.c). CopyBits/CopyMask
+;; image blits, rect/rgn fills, pen/line, PICT-less draw, offscreen buffer
+;; flush, GDevice. Region args arrive as objc-arena handles wrapping the
+;; surviving-native RgnHandle (abigen ___NewRgn wrap) and are unwrapped here.
+;; EraseRect + QDFlushPortBuffer are also abigen-generated (they call a GONE
+;; native) -> excluded via custom.syms so these real impls win.
+	MTSHIM	___CopyMask,           _shim_CopyMask
+	MTSHIM	___CopyDeepMask,       _shim_CopyDeepMask
+	MTSHIM	___EraseRect,          _shim_EraseRect
+	MTSHIM	___EraseRgn,           _shim_EraseRgn
+	MTSHIM	___PaintRgn,           _shim_PaintRgn
+	MTSHIM	___FillRgn,            _shim_FillRgn
+	MTSHIM	___FrameRgn,           _shim_FrameRgn
+	MTSHIM	___InvertRect,         _shim_InvertRect
+	MTSHIM	___InvertRgn,          _shim_InvertRgn
+	MTSHIM	___Line,               _shim_Line
+	MTSHIM	___Move,               _shim_Move
+	MTSHIM	___PenMode,            _shim_PenMode
+	MTSHIM	___PenPat,             _shim_PenPat
+	MTSHIM	___BackPat,            _shim_BackPat
+	MTSHIM	___HidePen,            _shim_HidePen
+	MTSHIM	___ShowPen,            _shim_ShowPen
+	MTSHIM	___TextMode,           _shim_TextMode
+	MTSHIM	___GetPortTextSize,    _shim_GetPortTextSize
+	MTSHIM	___GetPortTextMode,    _shim_GetPortTextMode
+	MTSHIM	___GetGDevice,         _shim_GetGDevice
+	MTSHIM	___QDError,            _shim_QDError
+	MTSHIM	___QDFlushPortBuffer,  _shim_QDFlushPortBuffer
+	MTSHIM	___QDIsPortBuffered,   _shim_QDIsPortBuffered
+	MTSHIM	___QDIsPortBufferDirty,_shim_QDIsPortBufferDirty
+	MTSHIM	___QDBeginCGContext,   _shim_QDBeginCGContext
+	MTSHIM	___QDEndCGContext,     _shim_QDEndCGContext
 
 ;; ---------------------------------------------------------------------
 ;; C++ runtime (cxx_shim.c): libstdc++.6 imports of legacy i386 binaries.

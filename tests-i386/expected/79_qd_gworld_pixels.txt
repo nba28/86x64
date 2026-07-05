@@ -1,0 +1,9 @@
+newgworld err=0 nonnull=1
+pixmap nonnull=1
+base nonnull=1 rowbytes_ok=1
+bounds=0,0,8,8
+corner=FFFFFF
+center=0000FF
+edge_out=FFFFFF
+disposed ok
+exit_code: 0

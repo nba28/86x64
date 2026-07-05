@@ -384,10 +384,13 @@ _GetComponentInfo
 _ResolveComponentAlias
 _UnregisterComponent
 
-# QuickDraw offscreen GWorld + PixMap (quicktime_image.c) — handles are ours.
+# QuickDraw offscreen GWorld + PixMap (qd_gworld.c — CG-backed ports) — the
+# GWorld/PixMap handles are ours. NewGWorld & co. are also abigen-legacy targets
+# in some builds; excluded so the real CG-backed impls win.
 _NewGWorld
 _NewGWorldFromPtr
 _DisposeGWorld
+_UpdateGWorld
 _GetGWorldPixMap
 _GetPortPixMap
 _GetGWorldDevice
@@ -398,6 +401,12 @@ _GetPixRowBytes
 _GetPixBounds
 _LockPixels
 _UnlockPixels
+
+# QuickDraw drawing substrate (qd_gworld.c). EraseRect + QDFlushPortBuffer are
+# emitted by the abigen legacy pass but forward to a REMOVED native (they would
+# fault when called); exclude so the CG-backed reimplementations win.
+_EraseRect
+_QDFlushPortBuffer
 
 # QuickTime GraphicsImporter (quicktime_image.c). QuickTime.framework is gone,
 # so abigen never generated these (listed for clarity; harmless to exclude).
