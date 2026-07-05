@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color synth-dyld-info jt-weak-import
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color synth-dyld-info jt-weak-import dyld-multicopy
 all: run-only
 
 list:
@@ -99,6 +99,15 @@ cg-color:
 # (modern ld can't emit classic format); SKIPs if none is present.
 synth-dyld-info: $(MACHO_TOOL)
 	@bash synth_dyld_info_test.sh $(MACHO_TOOL)
+
+# dyld-multicopy: regression test for the multi-libabiconv-copy __dyld+8
+# mod-init artifact fix (wrap_mod_init_funcs skip; Halo CE + bundled translated
+# QuickTime). Builds an i386 fixture that recreates patch_dyld_section's
+# func_lookup artifact in a typed __mod_init_func slot, dlopens a SECOND
+# libabiconv copy, and asserts the re-scan skips (unfixed: SIGSEGV in dlopen).
+# Needs the i386 sysroot + ABICONV_RUN_INITS (set by the script); SKIPs without.
+dyld-multicopy: $(MACHO_TOOL)
+	@bash dyld_multicopy_test.sh $(MACHO_TOOL)
 
 # jt-weak-import: regression test for the WEAK-IMPORT jump-table fix. Exercises
 # the classic i386 __IMPORT,__jump_table self-modifying stub path: undefined
