@@ -293,6 +293,7 @@ static uint64_t read_image_qword(const char *imgname, uint64_t fo) {
 
 static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
                                 intptr_t slide, const char *imgname,
+                                uint64_t text_lo, uint64_t text_hi,
                                 void **collect, size_t *n_collect) {
    if (getenv("ABICONV_NO_INIT_STACKSWITCH")) { return; }
    if (init_stack_setup() != 0) { return; }
@@ -337,6 +338,48 @@ static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
                collect != NULL && getenv("ABICONV_RUN_INITS") != NULL;
             for (size_t j = 0; j < n; j++) {
                if (!slots[j]) { continue; }
+               /* Skip patch_dyld_section's __dyld+8 artifact (multi-copy
+                * re-scan). patch_dyld_section stamps the i386-cdecl
+                * func_lookup shim into the 8-BYTE view of the classic
+                * __DATA,__dyld func_lookup slot (__dyld+8) — which, in the
+                * common Csu layout where the i386-sized 8-byte __dyld section
+                * is immediately followed by __mod_init_func, IS
+                * __mod_init_func[0]. Within one libabiconv copy the order is
+                * safe (this collector runs first, NULLs the slot, then the
+                * patch re-dirties it), but every OTHER loaded libabiconv copy
+                * re-scans the image (the processed-set is per-copy) and finds
+                * the slot non-NULL again, holding the first copy's shim — a
+                * LOW-4GB address the >4GB clobber-recovery below can't flag.
+                * Collected and run as an initializer it writes the noop fn-ptr
+                * through a NULL i386 out-arg (argc=0/argv=NULL frame) -> NULL
+                * write. (Halo CE + its bundled translated QuickTime, whose
+                * embedded libabiconv copy is the second instance; 2026-07-05.)
+                * A REAL translated init always points into its own image's
+                * executable range; a slot holding the exact exported entry of
+                * _86x64_dyld_func_lookup (any libabiconv copy) is that
+                * artifact — the real initializer was already recovered,
+                * collected, and run by the copy that patched. Skip; do NOT
+                * recover from disk (that would run the real init twice). */
+               {
+                  const uintptr_t v = (uintptr_t)slots[j];
+                  if (v < 0x100000000ULL &&
+                      (v - (uintptr_t)slide < (uintptr_t)text_lo ||
+                       v - (uintptr_t)slide >= (uintptr_t)text_hi)) {
+                     Dl_info di;
+                     if (dladdr((void *)v, &di) && di.dli_saddr == (void *)v &&
+                         di.dli_sname != NULL &&
+                         strcmp(di.dli_sname, "_86x64_dyld_func_lookup") == 0) {
+                        if (g_verbose) {
+                           fprintf(stderr, "abiconv init_stack: skipped "
+                                   "__mod_init_func[%zu] in %s: __dyld+8 "
+                                   "func_lookup shim artifact (already "
+                                   "collected by an earlier libabiconv "
+                                   "copy)\n", j, imgname);
+                        }
+                        continue;
+                     }
+                  }
+               }
                /* Recover a __mod_init_func entry clobbered by dyld's classic
                 * __DATA,__dyld overflow. A pre-10.5 i386 binary's __dyld section
                 * is 8 bytes (two 4-byte slots: lazy-binder, func_lookup), but a
@@ -1490,7 +1533,8 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    void *init_targets[INIT_COLLECT_MAX];
    size_t n_init = 0;
    if (image_links_libabiconv(mh64)) {
-      wrap_mod_init_funcs(mh64, slide, imgname, init_targets, &n_init);
+      wrap_mod_init_funcs(mh64, slide, imgname, text_lo, text_hi,
+                          init_targets, &n_init);
       /* Slide 4-byte __DATA intra-image pointer slots (vtables, fn-ptr tables,
        * AND data->data global pointers) by the load slide BEFORE the collected
        * static initializers run (a C++ ctor stores/derefs these). Universal:
