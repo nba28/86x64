@@ -857,13 +857,14 @@ namespace MachO {
                img.template at<uint32_t>(loc.offset + imm_off);
             if (value >= 0x1000 && value < 0x80000000U) {
                bool in_seg = false;
+               Segment<bits> *hit_seg = nullptr;
                for (auto *seg : env.archive.segments()) {
                   std::string name(
                      seg->segment_command.segname,
                      strnlen(seg->segment_command.segname,
                              sizeof(seg->segment_command.segname)));
                   if (name == SEG_PAGEZERO || name == SEG_LINKEDIT) continue;
-                  if (seg->contains_vmaddr(value)) { in_seg = true; break; }
+                  if (seg->contains_vmaddr(value)) { in_seg = true; hit_seg = seg; break; }
                }
                /* CODE-target FUNCTION-ENTRY gate (shared with DataParser, see
                 * ParseEnv::code_alias_is_constant): a stack-arg imm32 that
@@ -875,7 +876,36 @@ namespace MachO {
                if (in_seg && bits == Bits::M32 &&
                    (env.code_alias_is_constant(value) ||
                     env.stackarg_imm_is_code_constant(value))) {
-                  in_seg = false;
+                  /* EXCEPTION for locals-STRIPPED binaries: with no symbol at a
+                   * function entry, stackarg_imm_is_code_constant conservatively
+                   * calls EVERY code-section-aliasing stack-arg imm a constant —
+                   * which drops genuine callback ProcPtrs (Halo CE registers its
+                   * Carbon renderer-check event handlers via
+                   * `movl $handler,(%esp)`; the raw i386 __text address then
+                   * survives translation and, when Carbon later invokes the
+                   * handler, the reverse bridge jmps to the unslid/unmapped
+                   * address -> EXC_BAD_ACCESS). Recover them STRUCTURALLY: a
+                   * genuine ProcPtr targets a FUNCTION ENTRY, recognizable
+                   * without symbols by the standard i386 frame-setup prologue
+                   * `55 89 e5` (push ebp; mov ebp,esp). An integer constant that
+                   * merely aliases a mid-instruction code byte will not match a
+                   * prologue, so this keeps the constant-vs-pointer split precise
+                   * (universal: triggers on the prologue byte pattern, not an app
+                   * or symbol). Only needed on the stripped path; a symboled
+                   * binary's func_syms already discriminates. */
+                  bool is_fn_prologue = false;
+                  if (hit_seg) {
+                     const std::size_t fo =
+                        (std::size_t)value - hit_seg->segment_command.vmaddr
+                        + hit_seg->segment_command.fileoff;
+                     if (fo + 3 <= img.size()) {
+                        is_fn_prologue =
+                           img.template at<uint8_t>(fo)     == 0x55 &&
+                           img.template at<uint8_t>(fo + 1) == 0x89 &&
+                           img.template at<uint8_t>(fo + 2) == 0xe5;
+                     }
+                  }
+                  if (!is_fn_prologue) { in_seg = false; }
                }
                if (in_seg) {
                   imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);

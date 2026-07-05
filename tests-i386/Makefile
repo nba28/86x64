@@ -109,6 +109,14 @@ synth-dyld-info: $(MACHO_TOOL)
 dyld-multicopy: $(MACHO_TOOL)
 	@bash dyld_multicopy_test.sh $(MACHO_TOOL)
 
+# stripped-stackarg-procptr: regression for the stripped-binary stack-arg
+# ProcPtr relocation fix (core instruction.cc; Halo CE renderer-check event
+# handlers registered via `movl $handler,(%esp)` in a symbol-stripped binary).
+# Asserts the raw i386 ProcPtr immediate is relocated (not left as a bare
+# c7 04 24 <i386 addr>). Needs the i386 sysroot; SKIPs without.
+stripped-stackarg-procptr: $(MACHO_TOOL)
+	@bash stripped_stackarg_procptr_test.sh $(MACHO_TOOL)
+
 # jt-weak-import: regression test for the WEAK-IMPORT jump-table fix. Exercises
 # the classic i386 __IMPORT,__jump_table self-modifying stub path: undefined
 # imports are marked N_WEAK_REF (=> WEAK_IMPORT bind, so REMOVED symbols bind
