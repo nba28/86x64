@@ -318,6 +318,21 @@ def translate_bundle(bundle, args):
     skip = set(args.skip or [])
     only = set(args.only or [])
 
+    # Output-dir mode: with `-o/--output <dir>`, translate a faithful COPY of the
+    # source bundle inside <dir> (as <dir>/<bundle>), leaving the source
+    # untouched — e.g. read-only Apps32 originals -> Apps64 translated outputs.
+    outopt = getattr(args, "output", None)
+    if outopt:
+        dest = Path(outopt) / Path(bundle).name
+        if dest.resolve() != Path(bundle).resolve():
+            Path(outopt).mkdir(parents=True, exist_ok=True)
+            if dest.exists():
+                info(f"output bundle exists, replacing: {dest}")
+                shutil.rmtree(dest)
+            info(f"copy {Path(bundle).name} -> {dest}  (source untouched)")
+            run(["ditto", str(bundle), str(dest)], dry=False)
+            bundle = dest
+
     # Pull in any framework dependency that lives OUTSIDE the bundle (e.g. the
     # iWork '09 shared frameworks) so it gets translated alongside everything
     # else. Skippable with --no-vendor; extra source roots via --source.
@@ -888,7 +903,9 @@ def build_parser():
     # translate
     t = sub.add_parser("translate", help="translate a binary or a whole bundle")
     t.add_argument("target", help="an .app/.framework bundle, or a Mach-O file")
-    t.add_argument("-o", "--output", help="output path (standalone-file mode)")
+    t.add_argument("-o", "--output", help="output path: a FILE (standalone-binary mode) "
+                   "or a DIRECTORY (bundle mode — translate a copy in <dir>/<bundle>, "
+                   "leaving the source untouched; e.g. Apps32 -> Apps64)")
     t.add_argument("--only", action="append", metavar="RELPATH",
                    help="bundle mode: only translate these relpaths (repeatable)")
     t.add_argument("--skip", action="append", metavar="RELPATH",
