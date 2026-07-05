@@ -154,14 +154,23 @@ add_custom_target(abiconv_syms
 #
 # Targets contribute their imports; missing targets are skipped (EXISTS guard),
 # so this is portable. Extend the list when a new i386 target needs coverage.
+# ★2026-07-05: seed from the Apps32 i386 ORIGINALS, NOT translated dylibs — a
+# translated dylib's nlists are RENAMED by static-interpose to _____X and vanish
+# from the abigen consider-set (silently emptying the shim surface). Originals
+# carry the true import names. (Old ~/Downloads/iLife11 paths were deleted in the
+# 2026-07-05 reorg → the whole legacy Carbon/QT surface silently dropped to 0.)
 set(ABICONV_MODERN_TARGETS
-    "$ENV{HOME}/Downloads/iLife11/Quinn.app/Contents/MacOS/Quinn.dylib"
-    "$ENV{HOME}/Downloads/iLife11/civ4/Civilization IV.app/Contents/MacOS/civ4.out.dylib"
-    "$ENV{HOME}/Downloads/iLife11/Halo.app/Contents/MacOS/Halo.dylib"
-    "$ENV{HOME}/Downloads/iLife11/Applications/iPhoto.app/Contents/MacOS/iPhoto.dylib"
-    "$ENV{HOME}/Downloads/iLife11/Applications/iWeb.app/Contents/MacOS/iWeb.dylib"
+    "$ENV{HOME}/projects/translations/Apps32/Civilization IV.app/Contents/MacOS/Civilization IV"
+    "$ENV{HOME}/projects/translations/Apps32/Halo.app/Contents/MacOS/Halo"
+    "$ENV{HOME}/projects/translations/Apps32/iMovie.app/Contents/MacOS/iMovie"
+    "$ENV{HOME}/projects/translations/Apps32/iPhoto.app/Contents/MacOS/iPhoto"
+    "$ENV{HOME}/projects/translations/Apps32/iWeb.app/Contents/MacOS/iWeb"
+    "$ENV{HOME}/projects/translations/Apps32/Keynote.app/Contents/MacOS/Keynote"
+    "$ENV{HOME}/projects/translations/Apps32/Numbers.app/Contents/MacOS/Numbers"
+    "$ENV{HOME}/projects/translations/Apps32/Pages.app/Contents/MacOS/Pages"
+    "$ENV{HOME}/projects/translations/Apps32/Quinn.app/Contents/MacOS/Quinn"
     "$ENV{HOME}/Library/Application Support/Steam/steamapps/common/Portal 2/bin/osx32/engine.dylib"
-    CACHE STRING "translated app-code dylibs whose imports drive the universal modern shim set")
+    CACHE STRING "i386 ORIGINAL app executables (Apps32) whose imports drive the universal modern shim set")
 set(ABICONV_MODERN_TARGET_ARGS "")
 set(ABICONV_MODERN_TARGET_DEPS "")
 foreach(t IN LISTS ABICONV_MODERN_TARGETS)
@@ -287,9 +296,16 @@ set(ABICONV_LEGACY_SDK "$ENV{HOME}/projects/Library/SDKs/MacOSX10.6.sdk"
 # Carbon-nib UI load — plus the QuickDraw/Window/Menu Mgr surface). Same stable
 # input + naming convention as ABICONV_MODERN_TARGETS above.
 set(ABICONV_LEGACY_TARGETS
-    "$ENV{HOME}/Downloads/iLife11/civ4/Civilization IV.app/Contents/MacOS/civ4.out.dylib"
-    "$ENV{HOME}/Downloads/iLife11/Halo.app/Contents/MacOS/Halo.dylib"
-    CACHE STRING "translated app-code dylibs whose imports define the legacy shim set")
+    "$ENV{HOME}/projects/translations/Apps32/Civilization IV.app/Contents/MacOS/Civilization IV"
+    "$ENV{HOME}/projects/translations/Apps32/Halo.app/Contents/MacOS/Halo"
+    "$ENV{HOME}/projects/translations/Apps32/iMovie.app/Contents/MacOS/iMovie"
+    "$ENV{HOME}/projects/translations/Apps32/iPhoto.app/Contents/MacOS/iPhoto"
+    "$ENV{HOME}/projects/translations/Apps32/iWeb.app/Contents/MacOS/iWeb"
+    "$ENV{HOME}/projects/translations/Apps32/Keynote.app/Contents/MacOS/Keynote"
+    "$ENV{HOME}/projects/translations/Apps32/Numbers.app/Contents/MacOS/Numbers"
+    "$ENV{HOME}/projects/translations/Apps32/Pages.app/Contents/MacOS/Pages"
+    "$ENV{HOME}/projects/translations/Apps32/Quinn.app/Contents/MacOS/Quinn"
+    CACHE STRING "i386 ORIGINAL app executables (Apps32) whose imports define the legacy Carbon/QT shim set")
 set(ABICONV_LEGACY_TARGET_ARGS "")
 set(ABICONV_LEGACY_TARGET_DEPS "")
 foreach(t IN LISTS ABICONV_LEGACY_TARGETS)
