@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color synth-dyld-info jt-weak-import dyld-multicopy
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color synth-dyld-info jt-weak-import dyld-multicopy carbon-nib
 all: run-only
 
 list:
@@ -125,6 +125,14 @@ stripped-stackarg-procptr: $(MACHO_TOOL)
 # binary (modern ld rewrites the stubs); SKIPs if none is present.
 jt-weak-import: $(MACHO_TOOL)
 	@bash jt_weak_import_test.sh $(MACHO_TOOL)
+
+# carbon-nib: regression guard for the IBCarbon nib reader (carbon_nib_parse.h)
+# that drives carbon_nib_shim.c's real window/control materialization. Pure
+# native x86_64 (no i386 sysroot, no HIToolbox, no window server): parses a
+# synthetic objects.xib + Halo's real Halo.nib and asserts nameTable lookup,
+# window/rect, nested control classes, controlID/command/bounds, XML unescape.
+carbon-nib:
+	@bash carbon_nib_parse_test.sh
 
 # ObjC test group. Kept separate from the default `all` so the core
 # (asm/C) suite stays green while ObjC support is still landing. Builds each

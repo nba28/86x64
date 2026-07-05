@@ -755,6 +755,17 @@ _x64_exc_longjmp:
 	MTSHIM	___SetWindowContentColor,             _shim_SetWindowContentColor
 	MTSHIM	___SetWindowProxyCreatorAndType,      _shim_SetWindowProxyCreatorAndType
 	MTSHIM	___ValidWindowRect,                   _shim_ValidWindowRect
+	; --- Carbon IBCarbon NIB window/control materialization (carbon_nib_shim.c) ---
+	;     Real functionality: intercept the nib loader, forward to native first, and
+	;     custom-build (compositing window + modern controls) when native's gutted
+	;     IBCarbonRuntime fails (-5601 non-compositing windows / dropped IBCarbonEditText).
+	;     These 5 nib symbols are removed from the abigen legacy pass by their MTSHIM
+	;     presence (legacy consider-set scans this file), so no duplicate-symbol clash.
+	MTSHIM	___CreateNibReference,                _shim_CreateNibReference
+	MTSHIM	___CreateNibReferenceWithCFBundle,    _shim_CreateNibReferenceWithCFBundle
+	MTSHIM	___CreateWindowFromNib,               _shim_CreateWindowFromNib
+	MTSHIM	___DisposeNibReference,               _shim_DisposeNibReference
+	MTSHIM	___SetMenuBarFromNib,                 _shim_SetMenuBarFromNib
 	; --- Removed HIToolbox UI surface linked by translated QuickTime.framework
 	;     (qt_hitoolbox_shim.c; Civ IV / Halo s32; 115 no-op ___X shims) ---
 	MTSHIM	____InitHLTB,                        _shim_InitHLTB

@@ -433,6 +433,9 @@ add_library(abiconv SHARED
   # wired through maptable_tramp.asm MTSHIM -> ___<sym> exports). See each file's header.
   qd_shim.c
   carbon_ui_shim.c
+  # carbon_nib_shim.c: REAL IBCarbon nib window/control materialization (fixes the
+  # -5601 non-compositing window failure + dropped IBCarbonEditText UserPane gap).
+  carbon_nib_shim.c
   qt_hitoolbox_shim.c
   carbon_fwd_shim.c
   upp_shim.c
