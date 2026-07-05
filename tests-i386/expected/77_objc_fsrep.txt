@@ -1,0 +1,4 @@
+ok fsr
+ok getfsr
+ok lifetime
+exit_code: 0
