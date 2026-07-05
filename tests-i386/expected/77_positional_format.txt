@@ -1,0 +1,3 @@
+hello
+X|7
+exit_code: 0

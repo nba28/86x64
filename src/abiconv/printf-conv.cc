@@ -5,6 +5,8 @@
 #include <list>
 #include <string>
 #include <optional>
+#include <vector>
+#include <map>
 #include <unordered_map>
 
 typedef uint32_t ptr32_t;
@@ -136,8 +138,34 @@ namespace {
       return std::nullopt;
    }
 
-   void printf_parse_directive(const void *& args32, void *& args64, reg_width_t *& argtypes,
-                               const char *& format, unsigned& arg_count) {
+   /* One parsed conversion directive. `pos` is the 1-based positional argument
+    * index from a `%N$...` specifier (0 = non-positional). `consumes` is false
+    * for `%%`. */
+   struct printf_directive {
+      unsigned pos;
+      printf_type type;
+      std::optional<printf_modifier> mod;
+      bool consumes;
+   };
+
+   /* Parse ONE directive (the char after '%'), advancing `format` past it.
+    * Does NOT consume an argument — the driver decides ordering (sequential vs
+    * positional). Handles the C / CFString positional prefix `%N$` (which MUST
+    * precede flags/width; without this the leading digit was mis-read as a field
+    * width and the trailing '$' threw "invalid conversion specifier", so a
+    * `%1$.2g` double arg was never converted -> native read garbage, e.g. Civ
+    * IV's "requires at least 1.2e-265 MB" disk-space alert). */
+   printf_directive printf_parse_directive(const char *& format) {
+      printf_directive d{0, printf_type::ESCAPE, std::nullopt, false};
+
+      /* positional argument prefix: <digits>'$' */
+      if (isdigit((unsigned char)*format)) {
+         const char *q = format;
+         unsigned n = 0;
+         while (isdigit((unsigned char)*q)) { n = n * 10 + (unsigned)(*q - '0'); ++q; }
+         if (*q == '$') { d.pos = n; format = q + 1; }
+      }
+
       /* parse flags */
       switch (*format) {
       case '#':
@@ -151,7 +179,7 @@ namespace {
       }
 
       /* parse minimum field width */
-      while (isdigit(*format)) {
+      while (isdigit((unsigned char)*format)) {
          ++format;
       }
 
@@ -161,12 +189,19 @@ namespace {
       }
 
       /* parse length modifier */
-      std::optional<printf_modifier> modifier = printf_parse_modifier(format);
-      
-      /* parse format specifier */
-      const printf_type type = printf_parse_type(format);
+      d.mod = printf_parse_modifier(format);
 
-      /* do conversion */
+      /* parse format specifier */
+      d.type = printf_parse_type(format);
+      d.consumes = (d.type != printf_type::ESCAPE);
+      return d;
+   }
+
+   /* Convert one i386 argument of `type`/`modifier` into the x86_64 arg stream
+    * (advances args32/args64). */
+   void printf_do_convert(printf_type type, std::optional<printf_modifier> modifier,
+                          const void *& args32, void *& args64,
+                          reg_width_t *& argtypes, unsigned& arg_count) {
       const std::unordered_map<printf_type,
                                std::unordered_map<std::optional<printf_modifier>,
                                                   void (*)(const void*&, void*&, reg_width_t*&,
@@ -203,8 +238,8 @@ namespace {
           {printf_type::ESCAPE, {{std::nullopt, nullptr}}}
          };
 
-      converter.at(type).at(modifier)(args32, args64, argtypes, arg_count);
-
+      auto fn = converter.at(type).at(modifier);
+      if (fn) { fn(args32, args64, argtypes, arg_count); }
    }
 
    /* scanf-family directive. Unlike printf, EVERY consumed scanf argument is a
@@ -278,18 +313,52 @@ extern "C" unsigned printf_conversion_f(const void *args32, void *args64, reg_wi
 
    const char *format = (const char *) convert_arg<ptr32_t, ptr64_t>(args32, args64, argtypes,
                                                                      arg_count);
-   char c;
-   while ((c = *format++)) {
-      switch (c) {
-      case '%':
-         printf_parse_directive(args32, args64, argtypes, format, arg_count);
-         break;
-         
-      default:
-         break;
+   /* Scan every directive first (arguments are NOT consumed during the scan) so
+    * we can honor POSITIONAL args: a `%N$` format references arguments by index,
+    * and (per C/CFString) if ANY specifier is positional they all are. The i386
+    * argument stream is laid out in slot order (arg1, arg2, ...) regardless of
+    * the order the format mentions them, so we must convert slots 1..max in
+    * INDEX order with each slot's declared type. Non-positional formats keep the
+    * original scan-order (== argument-order) sequential conversion. */
+   std::vector<printf_directive> specs;
+   bool positional = false;
+   {
+      const char *scan = format;
+      char c;
+      while ((c = *scan++)) {
+         if (c != '%') { continue; }
+         printf_directive d = printf_parse_directive(scan);
+         if (d.consumes) {
+            if (d.pos) { positional = true; }
+            specs.push_back(d);
+         }
       }
    }
-   
+
+   if (!positional) {
+      for (const printf_directive &d : specs) {
+         printf_do_convert(d.type, d.mod, args32, args64, argtypes, arg_count);
+      }
+   } else {
+      std::map<unsigned, printf_directive> slot;   /* 1-based index -> spec */
+      unsigned maxp = 0;
+      for (const printf_directive &d : specs) {
+         if (d.pos) { slot[d.pos] = d; if (d.pos > maxp) { maxp = d.pos; } }
+      }
+      for (unsigned i = 1; i <= maxp; ++i) {
+         auto it = slot.find(i);
+         if (it != slot.end()) {
+            printf_do_convert(it->second.type, it->second.mod,
+                              args32, args64, argtypes, arg_count);
+         } else {
+            /* gap (undefined per C): consume a pointer-width slot to keep the
+             * remaining i386 stream aligned rather than desync. */
+            convert_arg<ptr32_t, ptr64_t>(args32, args64, argtypes, arg_count);
+         }
+      }
+   }
+
+   (void)idx_64; (void)idx_32;
    return arg_count;
 }
 
@@ -411,10 +480,41 @@ namespace {
       const void *a32 = (const void *) ap;
       void *a64 = (void *) args64;
       reg_width_t *at = argtypes;
-      char c;
-      while ((c = *format++)) {
-         if (c == '%') {
-            printf_parse_directive(a32, a64, at, format, arg_count);
+      /* Same positional-aware conversion as printf_conversion_f: scan first, then
+       * convert either in argument order (non-positional) or slot-index order
+       * (%N$ positional). THIS is the CFStringCreateWithFormat path — Civ IV's
+       * disk-space alert uses `%1$.2g`, whose double was previously misparsed. */
+      std::vector<printf_directive> specs;
+      bool positional = false;
+      {
+         const char *scan = format;
+         char c;
+         while ((c = *scan++)) {
+            if (c != '%') { continue; }
+            printf_directive d = printf_parse_directive(scan);
+            if (d.consumes) {
+               if (d.pos) { positional = true; }
+               specs.push_back(d);
+            }
+         }
+      }
+      if (!positional) {
+         for (const printf_directive &d : specs) {
+            printf_do_convert(d.type, d.mod, a32, a64, at, arg_count);
+         }
+      } else {
+         std::map<unsigned, printf_directive> slot;
+         unsigned maxp = 0;
+         for (const printf_directive &d : specs) {
+            if (d.pos) { slot[d.pos] = d; if (d.pos > maxp) { maxp = d.pos; } }
+         }
+         for (unsigned i = 1; i <= maxp; ++i) {
+            auto it = slot.find(i);
+            if (it != slot.end()) {
+               printf_do_convert(it->second.type, it->second.mod, a32, a64, at, arg_count);
+            } else {
+               convert_arg<ptr32_t, ptr64_t>(a32, a64, at, arg_count);
+            }
          }
       }
       /* GP regs (6*8=48 bytes) and XMM regs (8*16, fp window ends at 176) are
