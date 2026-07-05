@@ -436,7 +436,12 @@ add_library(abiconv SHARED
   qt_hitoolbox_shim.c
   carbon_fwd_shim.c
   upp_shim.c
+  # SoundManager: classic Sound Manager reimplemented on CoreAudio AudioQueue.
+  # sndmgr_shim.c = the API + AudioQueue lifecycle + i386 callback bridge;
+  # snd_convert.c = the pure (framework-free) SoundHeader/'snd '-resource decoder
+  # (unit-tested headless by snd_convert_test.c). Needs -framework AudioToolbox.
   sndmgr_shim.c
+  snd_convert.c
   fontmgr_shim.c
   mlte_shim.c
   fmgr_shim.c
@@ -485,6 +490,9 @@ target_link_libraries(abiconv System objc
   # CGImageSource (decode) + CGBitmapContext/CGImage (render into the GWorld).
   "-framework ImageIO"
   "-framework CoreGraphics"
+  # SoundManager: sndmgr_shim.c reimplements the classic Sound Manager on the
+  # AudioQueue (playback) + AudioServices (SysBeep alert sound) APIs.
+  "-framework AudioToolbox"
   # Legacy shim pass (abiconv_legacy.asm): the SURVIVED (header-deleted but still
   # present) framework functions it marshals resolve their `call _sym` here.
   # Linked so the frameworks are loaded in-process and the flat dynamic_lookup
@@ -519,4 +527,12 @@ add_definitions(${LLVM_DEFINITIONS})
 add_executable(syscall_tabgen
   syscall_tabgen.cc
   )
+
+# SoundManager: headless unit test for the pure classic Sound Manager decoder
+# (snd_convert.c). Framework-free — validates SoundHeader / ExtSoundHeader /
+# 'snd ' resource -> PCM description (rate/channels/bits/sample location/bytes),
+# the marshalling that feeds AudioQueueEnqueueBuffer in sndmgr_shim.c. No speaker
+# needed. Run: `cmake --build build --target snd_convert_test && build/src/abiconv/snd_convert_test`
+add_executable(snd_convert_test snd_convert_test.c snd_convert.c)
+add_test(NAME snd_convert_test COMMAND snd_convert_test)
 
