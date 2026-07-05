@@ -426,6 +426,7 @@ add_library(abiconv SHARED
   cb_bridge.c
   iokit_shim.c
   carbon_memory.c
+  rm_shim.c
   carbon_component.c
   cg_function_shim.c
   cg_color_shim.c

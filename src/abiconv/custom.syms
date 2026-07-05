@@ -70,6 +70,22 @@ _pthread_rwlock_destroy
 # (pthread_sync_shim.c runs the once itself, calls the init via _86x64_call_i386).
 _pthread_once
 
+# Resource Manager Handle-boundary entries (rm_shim.c, s35): abigen would forward
+# to native but TRUNCATE the returned >4GB Handle (or pass our low Handle raw to
+# a native Handle-taking call). Hand-shim wraps/unwraps through a low-4GB arena
+# Handle; list here so abigen does not also emit the truncating version.
+_Get1Resource
+_GetResource
+_Get1IndResource
+_GetIndResource
+_LoadResource
+_SizeResource
+_GetResAttrs
+_HomeResFile
+_GetResInfo
+_DetachResource
+_ReleaseResource
+
 __sprintf_chk
 
 _NSNextMapEnumeratorPair

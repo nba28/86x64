@@ -875,6 +875,19 @@ _x64_exc_longjmp:
 	; --- Present but __LP64__-header-gated Carbon entries translated QuickTime
 	;     calls: FORWARD to native w/ ABI conversion (carbon_fwd_shim.c; s34) ---
 	MTSHIM	___RMOpenResourceFileRef,            _shim_RMOpenResourceFileRef
+	; --- Resource Manager Handle marshalling (rm_shim.c; s35): wrap the native
+	;     >4GB Handle abigen would truncate into a low-4GB arena Handle ---
+	MTSHIM	___Get1Resource,                     _shim_Get1Resource
+	MTSHIM	___GetResource,                      _shim_GetResource
+	MTSHIM	___Get1IndResource,                  _shim_Get1IndResource
+	MTSHIM	___GetIndResource,                   _shim_GetIndResource
+	MTSHIM	___LoadResource,                     _shim_LoadResource
+	MTSHIM	___SizeResource,                     _shim_SizeResource
+	MTSHIM	___GetResAttrs,                      _shim_GetResAttrs
+	MTSHIM	___HomeResFile,                      _shim_HomeResFile
+	MTSHIM	___GetResInfo,                       _shim_GetResInfo
+	MTSHIM	___DetachResource,                   _shim_DetachResource
+	MTSHIM	___ReleaseResource,                  _shim_ReleaseResource
 	; --- Universal Procedure Pointers (upp_shim.c) ---
 	MTSHIM	___DisposeControlUserPaneDrawUPP,     _shim_DisposeControlUserPaneDrawUPP
 	MTSHIM	___DisposeControlUserPaneHitTestUPP,  _shim_DisposeControlUserPaneHitTestUPP
