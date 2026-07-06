@@ -73,8 +73,25 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return
 all: run-only
+
+# byval-marshal: regression for the GENERALIZED SysV struct-by-value ARG
+# marshalling (abigen.cc byval_classify / byval_flat_convert). abigen used to
+# skip every by-value struct outside {1-2 long} and homogeneous-FP; the skipped
+# set bound NATIVE and crashed (classic Carbon Point-by-value family, in_addr,
+# CFUUIDBytes, CFGregorianDate, NSCreateMapTableWithZone). Self-contained (abigen
+# parses a synthetic header + nasm assembles the output; no i386 sysroot).
+byval-marshal:
+	@bash byval_marshal_test.sh
+
+# fpreg-return: regression for the SSE-register FP-pair struct RETURN fix
+# (abigen.cc fp_reg_return). CGPoint/CGSize/NSPoint/NSSize are returned by x86_64
+# in xmm0:xmm1 but by i386 Darwin in the integer pair eax:edx; abigen emitted no
+# return conversion, so the i386 caller read garbage. Self-contained (abigen +
+# nasm; no i386 sysroot). i386 conventions verified via clang -arch i386 disasm.
+fpreg-return:
+	@bash fpreg_return_test.sh
 
 list:
 	@echo "Tests: $(TESTS)"
