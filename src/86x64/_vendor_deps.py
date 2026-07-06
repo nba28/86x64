@@ -40,8 +40,12 @@ from pathlib import Path
 # Default places to look for the original i386 frameworks, most-specific first.
 # Repeatable --source args are searched ahead of these.
 DEFAULT_SOURCES = [
-    Path.home() / "Downloads/iLife11/Library/Frameworks",
-    Path.home() / "Downloads/iLife11/Library/Application Support",
+    # Curated i386 originals after the 2026-07-05 reorg (~/Downloads/iLife11 is
+    # GONE). ~/projects/Library/Frameworks holds the reusable framework library
+    # (incl. the iLife11/ subdir with iLifeFaceRecognition/Helium/…); each root is
+    # rglob-walked, so the iLife11/ nesting resolves automatically.
+    Path.home() / "projects/Library/Frameworks",
+    Path.home() / "projects/Library/Application Support",
     Path("/Library/Application Support"),
     Path("/Library/Frameworks"),
 ]
