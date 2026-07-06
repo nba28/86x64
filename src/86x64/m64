@@ -788,6 +788,26 @@ def _discover_shim_targets(app, translated_only=False):
     return sorted(out)
 
 
+def _strip_native_execution(app):
+    """Remove LSRequiresNativeExecution from a translated app's Info.plist.
+    Intel-era apps (iMovie '11, …) set it to force x86_64-native and avoid
+    PPC-via-Rosetta. On Apple Silicon "native" means arm64, so LaunchServices
+    refuses to launch our x86_64 (Rosetta) executable and Finder/`open` fails
+    with "The application cannot be opened because it has an incorrect executable
+    format." A translated bundle always runs x86_64 under Rosetta, so the key is
+    never appropriate — strip it so the app is Finder-launchable. Idempotent."""
+    ip = Path(app) / "Contents" / "Info.plist"
+    try:
+        with open(ip, "rb") as f:
+            d = plistlib.load(f)
+    except Exception:
+        return
+    if d.pop("LSRequiresNativeExecution", None) is not None:
+        with open(ip, "wb") as f:
+            plistlib.dump(d, f)
+        info("  stripped LSRequiresNativeExecution (Finder-launchable under Rosetta)")
+
+
 def cmd_sign(args):
     require(FIX_SIGNING)
     app = Path(args.app)
@@ -795,6 +815,7 @@ def cmd_sign(args):
     info(f"sign {app.name}  (identifier {ident})")
     # flat-sign loose dylibs, fix nested signing, then the outer bundle.
     if not args.dry_run:
+        _strip_native_execution(app)
         for d in (app / "Contents" / "Frameworks").glob("*.dylib"):
             subprocess.run(["codesign", "-f", "-s", "-", str(d)],
                            capture_output=True)
