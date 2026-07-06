@@ -73,8 +73,18 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended
 all: run-only
+
+# cb-extended: guard for the extended callback-bridge marshalling (C4): a
+# long-long callback RETURN (CBR_I64; _86x64_call_i386 folds i386 edx:eax -> rax:
+# funopen fpos_t seekfn, CGDataProvider off_t skipForward) and a small by-VALUE
+# struct callback ARG (an all-int <=8B aggregate rides one GP reg == a 32/64-bit
+# int -> CBA_I32/CBA_I64: CGScreenUpdateMoveDelta, classic Carbon Point). Asserts
+# the emitted cb-signature descriptors + that FP-bearing structs stay unsupported.
+# Self-contained (abigen + nasm; no i386 sysroot).
+cb-extended:
+	@bash cb_extended_test.sh
 
 # pack-record: guard for the #pragma pack record-LAYOUT fix (abigen convert_record
 # + align_field pack_cap; Civ 'oapp' AEGetParamDesc EXC_BAD_ACCESS). Classic Carbon

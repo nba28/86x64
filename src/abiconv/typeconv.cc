@@ -463,6 +463,8 @@ namespace {
       CBR_PTR   = 2, /* eax, zero-extended                                 */
       CBR_OBJ   = 3, /* eax; arena handle -> unwrap to the real object     */
       CBR_I32SX = 4, /* eax sign-extended (i386 long -> native 64-bit long)*/
+      CBR_I64   = 5, /* i386 edx:eax -> native rax (long long: funopen     */
+                     /* seekfn/fpos_t, CGDataProvider skipForward/off_t)   */
    };
    constexpr unsigned CB_MAX_ARGS = 16; /* x64_cb_sig.arg_kinds[] capacity */
 
@@ -491,6 +493,37 @@ namespace {
       const bool cf = std::string(clang_getCString(s)).find("__CF") != std::string::npos;
       clang_disposeString(s);
       return cf;
+   }
+
+   /* True if the record (recursively) contains NO floating-point field, so every
+    * SysV eightbyte is INTEGER-class and the whole aggregate travels in GP
+    * register(s)/stack — never xmm. A small (<=8B) such struct is thus passed by
+    * x86_64 in a SINGLE GP register, byte-identical to a 32/64-bit integer, which
+    * is exactly how the callback dispatcher already marshals CBA_I32/CBA_I64.
+    * An FP-bearing (possibly SSE) struct would arrive in xmm and is left
+    * unsupported (skips to the raw-pointer fallback). */
+   bool cb_record_all_int(CXType record_canon) {
+      record_decl decl(record_canon);
+      for (CXType f : decl.field_types) {
+         const CXType c = clang_getCanonicalType(f);
+         switch (c.kind) {
+         case CXType_Float: case CXType_Double: case CXType_LongDouble:
+            return false;
+         case CXType_Record:
+            if (!cb_record_all_int(c)) { return false; }
+            break;
+         case CXType_ConstantArray: {
+            const CXType el = clang_getCanonicalType(clang_getArrayElementType(c));
+            if (el.kind == CXType_Float || el.kind == CXType_Double ||
+                el.kind == CXType_LongDouble) { return false; }
+            if (el.kind == CXType_Record && !cb_record_all_int(el)) { return false; }
+            break;
+         }
+         default:
+            break;
+         }
+      }
+      return true;
    }
 
    uint8_t cb_arg_code_for(CXType t) {
@@ -528,6 +561,23 @@ namespace {
       case CXType_ConstantArray:
       case CXType_IncompleteArray:
          return CBA_PTR;
+      case CXType_Record: {
+         /* small by-VALUE struct callback arg (CGScreenUpdateMoveDelta
+          * {int32,int32}, classic Carbon Point {short,short}, ...). An
+          * all-integer aggregate <=8 bytes is ONE SysV eightbyte, so x86_64
+          * passes it in a single GP register byte-identical to a 32/64-bit int,
+          * and the i386 callback receives its 1 or 2 by-value words on the stack
+          * — exactly the CBA_I32 / CBA_I64 marshalling the dispatcher already
+          * performs (read one GP reg, emit 1 word if <=4 bytes else 2). No new
+          * descriptor code / dispatcher change. A >8B or FP-bearing (SSE) struct
+          * would span multiple regs / arrive in xmm; leave those unsupported. */
+         const long long sz = clang_Type_getSizeOf(t);
+         if (sz >= 1 && sz <= 8 && cb_record_all_int(t)) {
+            return sz <= 4 ? CBA_I32 : CBA_I64;
+         }
+         throw std::invalid_argument(
+            "callback arg type unsupported: " + to_string(t));
+      }
       default:
          throw std::invalid_argument("callback arg type unsupported: " + to_string(t));
       }
@@ -552,6 +602,10 @@ namespace {
          return CBR_I32;
       case CXType_Long: /* CFIndex comparators: native caller reads all of rax */
          return CBR_I32SX;
+      case CXType_ULongLong:
+      case CXType_LongLong: /* i386 edx:eax -> native rax (funopen fpos_t seekfn,
+                             * CGDataProvider off_t skipForward) */
+         return CBR_I64;
       case CXType_ObjCObjectPointer:
       case CXType_ObjCId:
       case CXType_ObjCClass:

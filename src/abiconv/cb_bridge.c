@@ -37,9 +37,12 @@ typedef struct {
 
 enum { CBA_I32 = 0, CBA_I64 = 1, CBA_PTR = 2, CBA_OBJ = 3,
        CBA_F32 = 4, CBA_F64 = 5 };
-enum { CBR_VOID = 0, CBR_I32 = 1, CBR_PTR = 2, CBR_OBJ = 3, CBR_I32SX = 4 };
+enum { CBR_VOID = 0, CBR_I32 = 1, CBR_PTR = 2, CBR_OBJ = 3, CBR_I32SX = 4,
+       CBR_I64 = 5 };
 
-uint32_t _86x64_call_i386(uint64_t fn, uint64_t nwords,
+/* returns the i386 result as edx:eax combined in rax: the low 32 bits are the
+ * usual eax result, the high 32 the edx half of a 64-bit (long long) return. */
+uint64_t _86x64_call_i386(uint64_t fn, uint64_t nwords,
                           const uint32_t *words, uint64_t lowstack_top);
 uint32_t x64_objc_wrap(uint64_t real);     /* objc_shim.c */
 uint64_t x64_objc_unwrap(uint32_t h);      /* objc_shim.c */
@@ -252,8 +255,9 @@ uint64_t x64_cb_dispatch(uint64_t slot, const uint64_t *gp, const uint64_t *fp,
    cr->depth = depth; cr->done = 0;
 
    x64_cb_enter();
-   const uint32_t eax = _86x64_call_i386(b.fn32, w, words, top);
+   const uint64_t r64 = _86x64_call_i386(b.fn32, w, words, top);
    x64_cb_leave();
+   const uint32_t eax = (uint32_t)r64;   /* low 32 = the i386 eax result */
 
    cr->done = 1;
    __atomic_sub_fetch(&g_cb_depth, 1, __ATOMIC_SEQ_CST);
@@ -270,6 +274,7 @@ uint64_t x64_cb_dispatch(uint64_t slot, const uint64_t *gp, const uint64_t *fp,
    case CBR_I32:
    case CBR_PTR:   return eax;
    case CBR_I32SX: return (uint64_t)(int64_t)(int32_t)eax;
+   case CBR_I64:   return r64;                  /* full i386 edx:eax -> rax */
    case CBR_OBJ:   return x64_objc_unwrap(eax); /* handle -> real; raw passes */
    default:        return eax;
    }

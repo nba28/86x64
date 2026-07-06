@@ -183,14 +183,18 @@ __86x64_reverse_imp_stret:
    REVERSE_IMP 1
 
 ;; ---------------------------------------------------------------------------
-;; uint32_t _86x64_call_i386(uint64_t fn, uint64_t nwords,
+;; uint64_t _86x64_call_i386(uint64_t fn, uint64_t nwords,
 ;;                           const uint32_t *words, uint64_t lowstack_top);
 ;;
 ;; Generic native→i386 C-function call: the primitive for bridging C
 ;; CALLBACKS registered by translated code with native APIs (CFRunLoop
 ;; observers, etc.). Lays `nwords` 4-byte cdecl args + a 4-byte return
 ;; address on the caller-provided low-4GB stack, runs the translated
-;; function, and returns its eax. Same frame/return dance as
+;; function, and returns its i386 result as edx:eax combined in rax — the
+;; low 32 bits (eax) are the usual scalar/pointer return (callers that keep
+;; the historical uint32_t prototype read exactly this), and the high 32
+;; bits (edx) carry a 64-bit `long long` callback return (CBR_I64), which
+;; cb_bridge reads via a uint64_t prototype. Same frame/return dance as
 ;; __86x64_reverse_imp above, without the ObjC plan/prep.
 ;;   rdi = fn (translated entry, <4GB)
 ;;   rsi = nwords
@@ -240,13 +244,20 @@ __86x64_call_i386:
    xor ebx, ebx
    jmp r12
 .cback:
-   ;; rsp = i386 frame + 4; eax = result. Recover rsp/rbp from the stash.
-   mov ebx, eax
+   ;; rsp = i386 frame + 4; edx:eax = i386 result. Recover rsp/rbp from the
+   ;; stash. Fold edx:eax into rbx (callee-saved, survives the unstash call)
+   ;; NOW, before rdx is reused: `mov ebx,eax` zero-extends eax into rbx, then
+   ;; the high 32 (edx) is shifted in. A scalar/pointer return leaves garbage in
+   ;; edx, but uint32_t-prototyped callers read only eax; the CBR_I64 path reads
+   ;; the full rax.
+   mov ebx, eax                    ; rbx[31:0] = eax, rbx high zeroed
+   shl rdx, 32                     ; edx -> bits 63:32
+   or rbx, rdx                     ; rbx = i386 edx:eax
    and rsp, ~0xf
    call __86x64_rsp_unstash        ; rax = high rsp, rdx = rbp
    mov rsp, rax
    mov rbp, rdx
-   mov eax, ebx                    ; i386 result
+   mov rax, rbx                    ; i386 result (edx:eax) -> rax
 
    lea rsp, [rbp - 40]
    pop r15
