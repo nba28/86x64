@@ -1122,3 +1122,44 @@ uint32_t shim_GetCursor(uint32_t *a) { (void)a; return cm_new_handle(68, 1); }
 uint32_t shim_SetCursor(uint32_t *a) { (void)a; return 0; }
 /* void SetCCursor(CCrsrHandle) / void SetCursorComponent — cosmetic no-ops. */
 uint32_t shim_SetCCursor(uint32_t *a) { (void)a; return 0; }
+
+/* ======================================================================== */
+/* Display Manager (DM*) — screen-device + display-mode enumeration         */
+/* ======================================================================== */
+/* The classic Display Manager was removed from 64-bit macOS; the abigen shims
+ * for these forward to a REMOVED native and would fault. Screen-device
+ * enumeration is REAL (our main-screen GDevice); display-MODE enumeration is a
+ * callback+nested-VD-struct subsystem (DMGetIndexedDisplayModeFromList invokes
+ * a DMDisplayModeListIteratorUPP with a DMDisplayModeListEntryRec of
+ * VDResolutionInfo/VDTimingInfo/... records), so for now we return an EMPTY
+ * mode list (count=0) — the safe, non-faulting answer a well-behaved caller
+ * handles by using the current mode; full per-mode enumeration is tracked as
+ * follow-up. DMGetDisplayIDByGDevice/DMGetGDeviceByDisplayID/DMGetDeskRegion
+ * live in carbon_ui_shim.c. */
+
+/* GDHandle DMGetFirstScreenDevice(Boolean activeOnly) — the main screen. */
+uint32_t shim_DMGetFirstScreenDevice(uint32_t *a) { (void)a; return make_main_gdevice(); }
+/* GDHandle DMGetNextScreenDevice(GDHandle theDevice, Boolean activeOnly) — one device. */
+uint32_t shim_DMGetNextScreenDevice(uint32_t *a) { (void)a; return 0; }
+
+/* DMDisplayModeListIteratorUPP: a UPP is the proc pointer itself on Carbon-X. */
+uint32_t shim_NewDMDisplayModeListIteratorUPP(uint32_t *a) { return a[0]; }
+uint32_t shim_DisposeDMDisplayModeListIteratorUPP(uint32_t *a) { (void)a; return 0; }
+
+/* OSErr DMNewDisplayModeList(DisplayIDType, UInt32 flags, UInt32 reserved,
+ *                            DMListIndexType *count, DMListType *list) */
+#define DM_LIST_MAGIC 0x444d4c53u   /* 'DMLS' */
+uint32_t shim_DMNewDisplayModeList(uint32_t *a)
+{
+   put_u32(a[3], 0);                                   /* count = 0 (empty) */
+   uint32_t h = cm_new_handle(4, 1);
+   if (h) { uint32_t *b = (uint32_t *)cm_handle_block(h); if (b) *b = DM_LIST_MAGIC; }
+   put_u32(a[4], h);
+   return 0;                                            /* noErr */
+}
+/* OSErr DMGetIndexedDisplayModeFromList(DMListType, DMListIndexType index,
+ *   UInt32 reserved, DMDisplayModeListIteratorUPP, void *userData) — empty
+ * list => not reached in normal use; return paramErr WITHOUT calling back. */
+uint32_t shim_DMGetIndexedDisplayModeFromList(uint32_t *a) { (void)a; return (uint32_t)qdParamErr; }
+/* OSErr DMDisposeList(DMListType list) */
+uint32_t shim_DMDisposeList(uint32_t *a) { if (a[0]) cm_dispose_handle(a[0]); return 0; }

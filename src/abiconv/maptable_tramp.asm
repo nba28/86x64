@@ -649,6 +649,18 @@ _x64_exc_longjmp:
 	MTSHIM	___SetCCursor,              _shim_SetCCursor
 
 ;; ---------------------------------------------------------------------
+;; Display Manager (DM*) screen-device + mode enumeration (qd_gworld.c).
+;; Real main-screen GDevice; empty (safe) display-mode list. abigen-faulting
+;; -> excluded via custom.syms. (DMGetDisplayIDByGDevice etc. in carbon_ui_shim.)
+	MTSHIM	___DMGetFirstScreenDevice,             _shim_DMGetFirstScreenDevice
+	MTSHIM	___DMGetNextScreenDevice,              _shim_DMGetNextScreenDevice
+	MTSHIM	___DMNewDisplayModeList,               _shim_DMNewDisplayModeList
+	MTSHIM	___DMGetIndexedDisplayModeFromList,    _shim_DMGetIndexedDisplayModeFromList
+	MTSHIM	___DMDisposeList,                      _shim_DMDisposeList
+	MTSHIM	___NewDMDisplayModeListIteratorUPP,    _shim_NewDMDisplayModeListIteratorUPP
+	MTSHIM	___DisposeDMDisplayModeListIteratorUPP,_shim_DisposeDMDisplayModeListIteratorUPP
+
+;; ---------------------------------------------------------------------
 ;; C++ runtime (cxx_shim.c): libstdc++.6 imports of legacy i386 binaries.
 ;; Guards are implemented locally (native libc++abi sizes its lock words
 ;; for x86_64); new/delete use the low-4GB shim heap; _Rb_tree_* are

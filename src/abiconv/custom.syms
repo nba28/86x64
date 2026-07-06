@@ -436,6 +436,16 @@ _GetCursor
 _SetCursor
 _SetCCursor
 
+# Display Manager (qd_gworld.c) — abigen-faulting; real device enum + safe
+# empty mode-list win over the removed-native forwarders.
+_DMGetFirstScreenDevice
+_DMGetNextScreenDevice
+_DMNewDisplayModeList
+_DMGetIndexedDisplayModeFromList
+_DMDisposeList
+_NewDMDisplayModeListIteratorUPP
+_DisposeDMDisplayModeListIteratorUPP
+
 # QuickTime GraphicsImporter (quicktime_image.c). QuickTime.framework is gone,
 # so abigen never generated these (listed for clarity; harmless to exclude).
 _GraphicsImportSetDataHandle
