@@ -484,12 +484,38 @@ _ICARegisterEventNotification
 
 # QuickTime Movie Toolbox init: abigen would forward to the translated
 # QuickTime's EnterMovies -> InitCodecManagerInternal (removed-QuickDraw codec
-# tail that faults). quicktime_movie_shim.c reports success without it so the
-# caller skips into the game; movie loads decline via NewMovieFromDataRef.
+# tail that faults). quicktime_movie_shim.c reports success without it (AVFoundation
+# owns decode) so the app proceeds to open + play movies via the bridge.
 _EnterMovies
 _EnterMoviesOnThread
 _ExitMovies
 _ExitMoviesOnThread
+# QuickTime Movie Toolbox REAL playback -> AVFoundation (quicktime_movie_bridge.m).
+# The classic Movie Toolbox lives in the 10.6 SDK QuickTime headers, so abigen's
+# LEGACY pass would emit ___<name> forwarding to the removed native QuickTime;
+# listing them here hands the family to the AVFoundation bridge instead (no dup).
+_NewMovieFromDataRef
+_DisposeMovie
+_SetMovieGWorld
+_GetMovieGWorld
+_GetMovieBox
+_GetMovieNaturalBoundsRect
+_SetMovieBox
+_StartMovie
+_StopMovie
+_GoToBeginningOfMovie
+_SetMovieRate
+_GetMovieRate
+_GetMovieTimeScale
+_GetMovieDuration
+_GetMovieTime
+_SetMovieTimeValue
+_IsMovieDone
+_MoviesTask
+_UpdateMovie
+_PrerollMovie
+_SetMovieActive
+_SetMovieVolume
 
 # Navigation Services (nav_shim.m): the classic Carbon file dialogs are removed
 # in 64-bit macOS, so abigen would (a) find a modern prototype but no symbol and

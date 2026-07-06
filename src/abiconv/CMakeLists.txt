@@ -486,6 +486,11 @@ add_library(abiconv SHARED
   tec_shim.c
   py_shim.c
   quicktime_movie_shim.c
+  # quicktime_movie_bridge.m: GOLDEN functional QuickTime Movie Toolbox -> AVFoundation
+  # video-playback bridge (open/transport/timing + frame pull into the QuickDraw GWorld
+  # ARGB buffer). Needs -framework AVFoundation/CoreMedia/CoreVideo. Symbols listed in
+  # custom.syms so abigen's legacy pass hands the family to this bridge (no dup).
+  quicktime_movie_bridge.m
   keymgr_shim.c
   # libstdc++ i386 COW std::string/std::wstring surface (cow_string_tramp.asm
   # keeps its own MTSHIM + MTSHIM_SRET; wired the same way as the other modules).
@@ -535,6 +540,12 @@ target_link_libraries(abiconv System objc
   # CGImageSource (decode) + CGBitmapContext/CGImage (render into the GWorld).
   "-framework ImageIO"
   "-framework CoreGraphics"
+  # quicktime_movie_bridge.m maps the classic Movie Toolbox onto AVFoundation
+  # (AVURLAsset/AVPlayer decode) + CoreMedia (CMTime) + CoreVideo (CVPixelBuffer
+  # frame pull into the GWorld ARGB buffer).
+  "-framework AVFoundation"
+  "-framework CoreMedia"
+  "-framework CoreVideo"
   # SoundManager: sndmgr_shim.c reimplements the classic Sound Manager on the
   # AudioQueue (playback) + AudioServices (SysBeep alert sound) APIs.
   "-framework AudioToolbox"

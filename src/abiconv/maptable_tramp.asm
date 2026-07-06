@@ -1136,13 +1136,37 @@ _x64_exc_longjmp:
 	MTSHIM	___p2cstrcpy,                         _shim_p2cstrcpy
 	; --- Python C-API name shim (py_shim.c) ---
 	MTSHIM	___Py_InitModule4,                    _shim_Py_InitModule4
-	; --- QuickTime Movie Toolbox: trie-missing symbol in the bundled QuickTime
-	;     (symtab-only; dyld two-level binds resolve via the trie) (quicktime_movie_shim.c) ---
-	MTSHIM	___NewMovieFromDataRef,               _shim_NewMovieFromDataRef
+	; --- QuickTime Movie Toolbox init/teardown no-ops (quicktime_movie_shim.c) ---
 	MTSHIM	___EnterMovies,                      _shim_EnterMovies
 	MTSHIM	___EnterMoviesOnThread,              _shim_EnterMoviesOnThread
 	MTSHIM	___ExitMovies,                       _shim_ExitMovies
 	MTSHIM	___ExitMoviesOnThread,               _shim_ExitMoviesOnThread
+	; --- QuickTime Movie Toolbox REAL playback -> AVFoundation (quicktime_movie_bridge.m):
+	;     open (NewMovieFromDataRef), bind GWorld, transport (Start/Stop/rate/seek),
+	;     frame pull (MoviesTask/UpdateMovie -> AVPlayerItemVideoOutput -> GWorld ARGB),
+	;     timing (Box/Duration/TimeScale/Time/IsMovieDone), teardown (DisposeMovie). ---
+	MTSHIM	___NewMovieFromDataRef,               _shim_NewMovieFromDataRef
+	MTSHIM	___DisposeMovie,                      _shim_DisposeMovie
+	MTSHIM	___SetMovieGWorld,                    _shim_SetMovieGWorld
+	MTSHIM	___GetMovieGWorld,                    _shim_GetMovieGWorld
+	MTSHIM	___GetMovieBox,                       _shim_GetMovieBox
+	MTSHIM	___GetMovieNaturalBoundsRect,         _shim_GetMovieNaturalBoundsRect
+	MTSHIM	___SetMovieBox,                       _shim_SetMovieBox
+	MTSHIM	___StartMovie,                        _shim_StartMovie
+	MTSHIM	___StopMovie,                         _shim_StopMovie
+	MTSHIM	___GoToBeginningOfMovie,              _shim_GoToBeginningOfMovie
+	MTSHIM	___SetMovieRate,                      _shim_SetMovieRate
+	MTSHIM	___GetMovieRate,                      _shim_GetMovieRate
+	MTSHIM	___GetMovieTimeScale,                 _shim_GetMovieTimeScale
+	MTSHIM	___GetMovieDuration,                  _shim_GetMovieDuration
+	MTSHIM	___GetMovieTime,                      _shim_GetMovieTime
+	MTSHIM	___SetMovieTimeValue,                 _shim_SetMovieTimeValue
+	MTSHIM	___IsMovieDone,                       _shim_IsMovieDone
+	MTSHIM	___MoviesTask,                        _shim_MoviesTask
+	MTSHIM	___UpdateMovie,                       _shim_UpdateMovie
+	MTSHIM	___PrerollMovie,                      _shim_PrerollMovie
+	MTSHIM	___SetMovieActive,                    _shim_SetMovieActive
+	MTSHIM	___SetMovieVolume,                    _shim_SetMovieVolume
 
 	; --- keymgr process-wide pointer store + DWARF2 EH-section registration
 	;     (keymgr_shim.c). NOT removed — present natively but an i386->x86_64 ABI
