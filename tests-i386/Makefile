@@ -73,8 +73,18 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg
 all: run-only
+
+# handle-arg: regression for the bare opaque-Handle ARGUMENT marshalling fix
+# (abigen is_opaque_handle_type at the top-level arg dispatch; companion to
+# handle-marshal's struct-FIELD case). A Handle (char**, spelled Handle/*Handle)
+# passed directly as an arg is an opaque token; abigen's generic Pointer path
+# would dereference it (deep-copy) -> EXC_BAD_ACCESS. The fix marshals the pointer
+# VALUE. Serves GetDialogItemText/SetDialogItemText (Halo), HLock/DisposeHandle,
+# AppleEvent AEDesc handles. Self-contained (abigen + nasm; no i386 sysroot).
+handle-arg:
+	@bash handle_arg_test.sh
 
 # byval-marshal: regression for the GENERALIZED SysV struct-by-value ARG
 # marshalling (abigen.cc byval_classify / byval_flat_convert). abigen used to

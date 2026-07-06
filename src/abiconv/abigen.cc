@@ -944,6 +944,26 @@ struct ABIConversion {
             type_kind = CXType_Pointer;
             to_conv.convert_cf_ptr(to_ss, load_loc, *dst);
          } else
+         if (is_opaque_handle_type(orig_type)) {
+            /* Bare opaque Memory Manager Handle ARG (Handle / AEDataStorage /
+             * *Handle: a T** whose typedef spelling names it a Handle). The app
+             * treats it as an OPAQUE token — a pointer to a relocatable master
+             * pointer — so marshal the pointer VALUE (i386 4-byte low-4GB handle
+             * -> zero-extended to 8 bytes), NEVER dereference/deep-copy it. The
+             * generic Pointer path below would convert_pointer(T**) = read the
+             * master pointer through the handle (movl (%rN),... on an opaque
+             * token) -> EXC_BAD_ACCESS. This is the top-level-ARG twin of the
+             * convert_record opaque-Handle FIELD case (is_opaque_handle_type):
+             * GetDialogItemText/SetDialogItemText/HLock/HUnlock/DisposeHandle,
+             * the Resource Manager, AppleEvent AEDesc handles, ... No copy-back
+             * (the handle value is unchanged; re-writing it would clobber the
+             * i386 caller's slot). Detected on orig_type because canonicalization
+             * to `char **` loses the *Handle typedef spelling. */
+            type_kind = CXType_Pointer;
+            to_ss << "\t; opaque Handle arg '" << to_string(orig_type)
+                  << "' -> pointer value (no deep-copy)" << std::endl;
+            to_conv.convert_int(to_ss, CXType_Pointer, load_loc, *dst);
+         } else
          switch (type.kind) {
          case CXType_ConstantArray:
             type_kind = CXType_Pointer;

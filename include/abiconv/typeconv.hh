@@ -34,6 +34,15 @@ bool cf_opaque_ptr_type(CXType canonical);
  * handles that need the same unwrap as the opaque `*Ref` records. */
 bool cf_void_ref_type(CXType orig);
 
+/* true iff `written` (the AS-WRITTEN arg/field type) is a classic Mac OS Memory
+ * Manager Handle (or the AEDataStorage / opaque-Ptr* family): a typedef whose
+ * canonical type is a pointer-to-pointer (T**) AND whose typedef spelling names
+ * it a *Handle. Such a value is an OPAQUE token (a pointer to a relocatable
+ * master pointer): a marshalling shim must pass the pointer VALUE, NEVER
+ * dereference/deep-copy it. Name+structure gated so a genuine `T** out` param
+ * (never spelled *Handle) is still deep-copied as a real out-pointer. */
+bool is_opaque_handle_type(CXType written);
+
 size_t sizeof_type(CXType type, arch a);
 size_t sizeof_type(CXTypeKind type_kind, arch a);
 

@@ -364,7 +364,7 @@ void conversion::convert_constant_array(std::ostream& os, CXType array, MemoryLo
  * *Handle) is still deep-copied as a real out-pointer. Universal: any i386 app
  * passing a Handle-bearing struct to a native-marshalled Toolbox function
  * (AppleEvent 'oapp'/'odoc', Resource Manager, ...) is served. */
-static bool is_opaque_handle_type(CXType written) {
+bool is_opaque_handle_type(CXType written) {
    CXType canon = clang_getCanonicalType(written);
    if (canon.kind != CXType_Pointer) { return false; }
    CXType pointee = clang_getCanonicalType(clang_getPointeeType(canon));
