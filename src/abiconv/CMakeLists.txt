@@ -136,9 +136,13 @@ add_custom_target(abiconv_syms
 #
 # ADDITIVE, low blast radius: the import-driven consider set is UNIONED with the
 # curated abiconv.syms (below), so every existing curated shim is preserved; this
-# only widens coverage. The translated app-code dylib (NOT the wrapper exec) is
-# the discovery input — it preserves the original import names (binds are
-# redirected at the opcode level, not in the nlist), so nm -arch x86_64 shows them.
+# only widens coverage. The discovery input is the Apps32 i386 ORIGINAL executable
+# (--arch i386, matching ABICONV_MODERN_TARGETS below): it carries the true, un-
+# renamed import names. (A DEPLOYED/translated dylib's nlists are rewritten to
+# _____X by static-interpose and vanish from `nm`, silently emptying the set — and
+# an x86_64 nm of these i386/ppc originals returns 0 undefineds, which is exactly
+# the bug the pre-reorg `--arch x86_64` caused: the whole modern surface incl. the
+# wchar family dropped to 0, leaving Civ's ___wcslen slot NULL -> ud2.)
 #
 # Why --exclude-asm maptable_tramp.asm (and NOT abiconv.asm): maptable_tramp.asm
 # hand-defines ~364 `MTSHIM ___sym` shims, 74 of which are NOT also in custom.syms
@@ -183,7 +187,7 @@ endforeach()
 add_custom_command(OUTPUT abiconv_import.syms includes_auto.h abiconv_handshim.syms
   COMMAND python3 ${CMAKE_SOURCE_DIR}/src/86x64/abigen_modern_manifest.py
           ${ABICONV_MODERN_TARGET_ARGS}
-          --arch x86_64
+          --arch i386
           --exclude-asm ${CMAKE_CURRENT_SOURCE_DIR}/maptable_tramp.asm
           --out-syms abiconv_import.syms
           --out-includes includes_auto.h
