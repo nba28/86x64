@@ -184,6 +184,15 @@
 	MTSHIM	___IOServiceClose,                   _shim_IOServiceClose
 	MTSHIM	___IOAllowPowerChange,               _shim_IOAllowPowerChange
 	MTSHIM	___IOCancelPowerChange,              _shim_IOCancelPowerChange
+	;; IOKit device-notification (hot-plug) registration: consumes the port
+	;; TOKEN from IONotificationPortCreate (abigen zero-extended it into a
+	;; native IONotificationPortRef -> deref fault at 0xF1A00000, Halo), plus
+	;; the CF-ref return/out-param and callback fn-ptr cases abigen can't
+	;; marshal for IOKit. See iokit_shim.c device-notification section.
+	MTSHIM	___IOServiceMatching,                 _shim_IOServiceMatching
+	MTSHIM	___IOServiceAddMatchingNotification,  _shim_IOServiceAddMatchingNotification
+	MTSHIM	___IOServiceAddInterestNotification,  _shim_IOServiceAddInterestNotification
+	MTSHIM	___IORegistryEntryCreateCFProperties, _shim_IORegistryEntryCreateCFProperties
 	MTSHIM	___CFRunLoopAddSource,               _shim_CFRunLoopAddSource
 	MTSHIM	___CFRunLoopRemoveSource,            _shim_CFRunLoopRemoveSource
 

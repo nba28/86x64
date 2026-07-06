@@ -49,8 +49,14 @@
 #include <string.h>
 
 /* objc_shim.c: 32-bit proxy-arena handle -> real 64-bit ref (non-handles pass
- * through zero-extended). */
+ * through zero-extended), and the reverse (64-bit ref -> low-4GB handle). */
 extern uint64_t x64_objc_unwrap(uint32_t h);
+extern uint32_t x64_objc_wrap(uint64_t real);
+
+/* cb_bridge.c: bind an i386 callback fn-ptr to a native trampoline. The sig
+ * layout + codes MUST match cb_bridge.c (x64_cb_sig / CBA_* / CBR_*). */
+struct iok_cb_sig { uint32_t nargs; uint32_t ret_kind; uint8_t arg_kinds[16]; };
+extern uint64_t x64_cb_wrap(uint32_t fn32, const struct iok_cb_sig *sig);
 
 /* Tokens live in the i386 kernel-reserved top (> LOW_REGION_END 0xF0000000,
  * < 0xFFFFFFFF) so they can never collide with a real low-4GB pointer from
@@ -233,6 +239,159 @@ int shim_IOAllowPowerChange(uint32_t *a)
 int shim_IOCancelPowerChange(uint32_t *a)
 {
    return IOCancelPowerChange((io_connect_t)a[0], (long)(uintptr_t)a[1]);
+}
+
+/* ---- IOKit device-notification path (matching/interest registration) ----
+ *
+ * The general hot-plug registration family that consumes the port TOKEN from
+ * shim_IONotificationPortCreate. abigen's auto shims zero-extend every arg, so
+ * the token (0xF1Axxxxx) reached native IOServiceAddMatchingNotification as
+ * the IONotificationPortRef and was DEREFERENCED -> EXC_BAD_ACCESS at
+ * 0xf1a00000 (Halo device-notification setup, right after its run-loop source
+ * was added). Everything io_object_t/io_service_t/io_iterator_t is a 32-bit
+ * mach port on both archs and needs no help; only the port token, the CF refs
+ * and the callback fn-ptrs do. */
+
+/* CFMutableDictionaryRef IOServiceMatching(const char *name);
+ * Returns a NEW 64-bit CF dict (allocated high) -> abigen's zero-extended
+ * forward TRUNCATES it in eax. Wrap it into a proxy-arena handle; the
+ * consumers (CFDictionary* abigen shims, our AddMatchingNotification below)
+ * unwrap per the arena convention. a[0] = i386 char* (low-4GB, valid natively). */
+uint32_t shim_IOServiceMatching(uint32_t *a)
+{
+   CFMutableDictionaryRef d = IOServiceMatching((const char *)(uintptr_t)a[0]);
+   return d ? x64_objc_wrap((uint64_t)(uintptr_t)d) : 0;
+}
+
+/* A real, EMPTY io_iterator_t: a valid iterator over a matching set that
+ * matches nothing, so IOIteratorNext returns 0 immediately and
+ * IOObjectRelease disposes it — the caller walks a genuine (just empty)
+ * device list. MACH_PORT_NULL mainPort = default; the matching dict is
+ * consumed by IOServiceGetMatchingServices. */
+static io_iterator_t iok_empty_iterator(void)
+{
+   io_iterator_t it = MACH_PORT_NULL;
+   CFMutableDictionaryRef m = IOServiceNameMatching("86x64-match-nothing");
+   if (m)
+      IOServiceGetMatchingServices(MACH_PORT_NULL, m, &it);
+   return it;
+}
+
+/* kern_return_t IOServiceAddMatchingNotification(
+ *    IONotificationPortRef notifyPort, const io_name_t notificationType,
+ *    CFDictionaryRef matching CF_RELEASES_ARGUMENT,
+ *    IOServiceMatchingCallback callback, void *refCon,
+ *    io_iterator_t *notification);
+ * i386 frame: notifyPort[0] type[1] matching[2] callback[3] refCon[4] out[5].
+ *
+ * DELIBERATE graceful-degrade (structural, not app-specific): a matching
+ * notification's whole point is to hand the app io_service_t devices, and the
+ * canonical consumer pattern (Apple HID Utilities and kin) immediately opens
+ * each device via IOCreatePlugInInterfaceForService — a COM-style plug-in API
+ * that is NOT bridged (raw native bind in translated binaries; bridging it
+ * means a CFPlugIn vtable bridge + retranslate). Forwarding for real would
+ * enumerate this machine's REAL HID devices and walk the app straight into
+ * that un-bridged call with an i386 frame -> undefined native behavior. Until
+ * the plug-in surface is bridged, register NOTHING natively and hand back
+ * kIOReturnSuccess + a real EMPTY iterator: the app arms its handler, walks
+ * "no devices yet", and proceeds — the classic no-gamepad/no-camera case
+ * every hot-plug consumer already handles. (No hot-plug events are lost that
+ * the app could have survived processing.) We honor the API's refcount
+ * contract: one reference of `matching` is consumed. */
+uint32_t shim_IOServiceAddMatchingNotification(uint32_t *a)
+{
+   uint32_t port_tok = a[0];
+   uint32_t matching = a[2];
+   uint32_t iter_out = a[5];
+
+   if ((port_tok & TOK_MASK) != TOK_PORT_BASE)
+      return kIOReturnBadArgument;
+   int i = TOK_IDX(port_tok);
+   if (i >= IOK_MAX_SLOTS || !g_slots[i].in_use || !g_slots[i].port)
+      return kIOReturnBadArgument;
+
+   /* Callee consumes one ref of the matching dict (CF_RELEASES_ARGUMENT). */
+   CFDictionaryRef md = (CFDictionaryRef)(uintptr_t)x64_objc_unwrap(matching);
+   if (md)
+      CFRelease(md);
+
+   if (iter_out)
+      *(uint32_t *)(uintptr_t)iter_out = (uint32_t)iok_empty_iterator();
+   return kIOReturnSuccess;
+}
+
+/* kern_return_t IOServiceAddInterestNotification(
+ *    IONotificationPortRef notifyPort, io_service_t service,
+ *    const io_name_t interestType, IOServiceInterestCallback callback,
+ *    void *refCon, io_object_t *notification);
+ * i386 frame: notifyPort[0] service[1] type[2] callback[3] refCon[4] out[5].
+ *
+ * REAL forward: service is a 32-bit mach port the app already holds, the
+ * interestType string is a low-4GB i386 pointer, and the callback
+ * void (*)(void *refcon, io_service_t, natural_t, void *arg) bridges through
+ * x64_cb_wrap ({PTR,I32,I32,PTR} -> void). The native refcon is the
+ * zero-extended i386 refcon, which the trampoline's PTR marshalling hands
+ * back to the i386 frame unchanged. Out-param is a 32-bit io_object_t. */
+uint32_t shim_IOServiceAddInterestNotification(uint32_t *a)
+{
+   uint32_t port_tok = a[0];
+   uint32_t service  = a[1];
+   uint32_t type     = a[2];
+   uint32_t cb32     = a[3];
+   uint32_t refcon   = a[4];
+   uint32_t note_out = a[5];
+
+   if ((port_tok & TOK_MASK) != TOK_PORT_BASE)
+      return kIOReturnBadArgument;
+   int i = TOK_IDX(port_tok);
+   if (i >= IOK_MAX_SLOTS || !g_slots[i].in_use || !g_slots[i].port)
+      return kIOReturnBadArgument;
+
+   /* CBA_PTR=2, CBA_I32=0, CBR_VOID=0 (cb_bridge.c). Static: x64_cb_wrap
+    * keeps the sig POINTER in its binding. */
+   static const struct iok_cb_sig interest_sig = { 4, 0, { 2, 0, 0, 2 } };
+   IOServiceInterestCallback cb = NULL;
+   if (cb32) {
+      uint64_t tramp = x64_cb_wrap(cb32, &interest_sig);
+      if (!tramp)
+         return kIOReturnNoResources;   /* trampoline slots exhausted */
+      cb = (IOServiceInterestCallback)(uintptr_t)tramp;
+   }
+
+   io_object_t note = MACH_PORT_NULL;
+   kern_return_t kr = IOServiceAddInterestNotification(
+       g_slots[i].port, (io_service_t)service,
+       (const char *)(uintptr_t)type, cb,
+       (void *)(uintptr_t)refcon, &note);
+   if (note_out)
+      *(uint32_t *)(uintptr_t)note_out = (uint32_t)note;
+   return (uint32_t)kr;
+}
+
+/* kern_return_t IORegistryEntryCreateCFProperties(io_registry_entry_t entry,
+ *    CFMutableDictionaryRef *properties, CFAllocatorRef allocator,
+ *    IOOptionBits options);
+ * i386 frame: entry[0] properties[1] allocator[2] options[3].
+ * The OUT dict is a fresh 64-bit CF ref -> abigen's forward would write a
+ * native 8-byte store through the i386 4-byte slot pointer (or truncate).
+ * Receive it natively, wrap to an arena handle, store 4 bytes. The allocator
+ * may be NULL (kCFAllocatorDefault) or a shadowed-constant handle -> unwrap. */
+uint32_t shim_IORegistryEntryCreateCFProperties(uint32_t *a)
+{
+   uint32_t entry     = a[0];
+   uint32_t props_out = a[1];
+   uint32_t allocator = a[2];
+   uint32_t options   = a[3];
+
+   CFMutableDictionaryRef d = NULL;
+   kern_return_t kr = IORegistryEntryCreateCFProperties(
+       (io_registry_entry_t)entry, &d,
+       (CFAllocatorRef)(uintptr_t)x64_objc_unwrap(allocator),
+       (IOOptionBits)options);
+   if (props_out)
+      *(uint32_t *)(uintptr_t)props_out =
+          d ? x64_objc_wrap((uint64_t)(uintptr_t)d) : 0;
+   return (uint32_t)kr;
 }
 
 /* ---- CFRunLoop overrides (token-aware; abigen excludes these via custom.syms) ----
