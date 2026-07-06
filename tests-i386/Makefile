@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow
 all: run-only
 
 # va-list-skip: guard for the abigen va_list-arg SKIP (C6). abigen can't marshal a
@@ -155,6 +155,15 @@ change-deps: $(MACHO_TOOL)
 # i386 sysroot): converted double[] renders white, raw i386 float[] does not.
 cg-color:
 	@bash cg_color_test.sh
+
+# ae-shadow: regression guard for the Apple Event Manager native-shadow bridge
+# (ae_shim.c). Self-contained (native x86_64 cc + CoreServices, no i386 sysroot):
+# links the real ae_shim.c and proves (A) the shadow registry preserves a FULL
+# >4GB native AEDesc pointer across the 32-bit i386 shadow key (the old path
+# truncated it -> Civ 'oapp' AEGetParamDesc crash) and (B) shim_AEGetParamPtr
+# resolves a registered shadow to the ORIGINAL native descriptor.
+ae-shadow:
+	@bash ae_shadow_test.sh
 
 # qd-pict: regression guard for the classic-PICT decode path (qd_gworld.c
 # shim_DrawPicture/QDPict*). Self-contained native x86_64 (no i386 sysroot):

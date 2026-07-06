@@ -59,6 +59,17 @@ _dlerror
 # colliding ___CFBundleGetFunctionPointerForName global.
 _CFBundleGetFunctionPointerForName
 
+# Apple Event Manager native-shadow bridge (ae_shim.c / ae_tramp.asm). Hand-
+# written so the AE handler dispatch hands i386 a low-4GB shadow AEDesc and
+# ___AEGetParamPtr resolves it to the ORIGINAL native descriptor (full 64-bit
+# Handle) — the abigen bridge rebuilt a native AEDesc from the truncated i386
+# fields and native AE dereferenced the chopped Handle (Civ 'oapp' crash inside
+# AEGetParamDesc; the callback/down mirror of the a4ca917 pack fix). Excluded
+# here so abigen does not also emit colliding ___AEGetParamPtr /
+# ___AEInstallEventHandler globals.
+_AEGetParamPtr
+_AEInstallEventHandler
+
 _pthread_getspecific
 _pthread_setspecific
 

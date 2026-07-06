@@ -501,6 +501,15 @@ add_library(abiconv SHARED
   # marshalling; listed in custom.syms so abigen never dup-emits them.
   wchar_shim.c
   wchar_tramp.asm
+  # ae_shim.c / ae_tramp.asm: Apple Event Manager native-shadow bridge. The AE
+  # handler dispatch hands i386 a low-4GB SHADOW AEDesc keyed to the native
+  # AEDesc; ___AEGetParamPtr resolves the shadow and forwards the ORIGINAL native
+  # descriptor (full 64-bit Handle) instead of a 32-bit-truncated rebuild (Civ
+  # 'oapp' AEGetParamDesc crash — the callback/down mirror of a4ca917). Exports
+  # ___AEGetParamPtr / ___AEInstallEventHandler listed in custom.syms so abigen
+  # never dup-emits them.
+  ae_shim.c
+  ae_tramp.asm
   # (halo_shim.c / halo_tramp.asm RETIRED: mach_timebase_info / mach_absolute_time
   # are now covered by the universal import-driven modern pass — libSystem maps to
   # <mach/mach_time.h> in includes_auto.h, so abigen emits ___mach_timebase_info /
