@@ -92,8 +92,8 @@
  * already transitively includes the CG headers, but list it explicitly so the
  * VarDecls (kCGColorSpaceGenericRGB, ...) are unambiguously parsed. */
 #include <CoreGraphics/CoreGraphics.h>
-/* ImageIO is now in ABICONV_SYM_SOURCES (its CGImageSource*/CGImageDestination*
- * functions + kCGImageSource*/kCGImageProperty* data constants are otherwise
+/* ImageIO is now in ABICONV_SYM_SOURCES (its CGImageSource* / CGImageDestination*
+ * functions + kCGImageSource* / kCGImageProperty* data constants are otherwise
  * invisible re-exports of ApplicationServices). List the umbrella explicitly so
  * the CGImageSourceCreateWithURL(CFURLRef,CFDictionaryRef) prototype is
  * unambiguously parsed and abigen unwraps its CF-object args (the iPhoto
