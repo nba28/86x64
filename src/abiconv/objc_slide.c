@@ -85,7 +85,7 @@ uint64_t g_init_shadow_sp     = 0;   /* grows down; 64 bytes per nesting level *
 uint64_t g_init_low_stack_top = 0;   /* 16-aligned top of the low-4GB init stack */
 extern void abiconv_init_trampoline(void);
 /* Run one translated __mod_init_func on the low-4GB init stack and return (see
- * init_trampoline.asm). Used by the ABICONV_RUN_INITS path below. */
+ * init_trampoline.asm). Used by the run-now init path below (default; ABICONV_NO_RUN_INITS opts out). */
 extern void abiconv_call_init(void *target, long argc, char **argv,
                               char **envp, char **apple);
 
@@ -222,7 +222,7 @@ static int image_links_libabiconv(const struct mach_header_64 *mh64) {
 
 /* Per-process set of mach_headers we have already fully processed in slide_objc
  * (slid + initialized). dyld invokes our add-image callback once per image, but
- * in ABICONV_RUN_INITS mode we ALSO process an image's dependencies proactively
+ * in run-now mode (default) we ALSO process an image's dependencies proactively
  * (bottom-up) before running its own initializers — see process_deps below — so
  * an image can be reached before dyld delivers its own callback. This set makes
  * the later real callback a no-op and prevents double-init / double-register.
@@ -256,12 +256,12 @@ static const struct mach_header *find_loaded_image(const char *leaf,
    return NULL;
 }
 
-/* Max translated __mod_init_func pointers we collect per image in RUN_INITS
- * mode before running them at the end of slide_objc. Overflow falls back to the
- * make_init_stub wrapping path — but on dyld4 those out-of-image stubs are
- * SILENTLY SKIPPED (the same in-image validation that motivates RUN_INITS, see
- * the wrap_mod_init_funcs comment), so any init beyond the cap simply never
- * runs. The cap must therefore comfortably exceed any real image's init count:
+/* Max translated __mod_init_func pointers we collect per image in run-now
+ * mode (the default) before running them at the end of slide_objc. Overflow
+ * falls back to the make_init_stub wrapping path — but on dyld4 those
+ * out-of-image stubs are SILENTLY SKIPPED (the same in-image validation that
+ * motivates run-now, see the wrap_mod_init_funcs comment), so any init beyond
+ * the cap simply never runs. The cap must therefore comfortably exceed any real image's init count:
  * Civ IV's main dylib has 1063 __mod_init_func entries (libtier0 has 11), so the
  * former 1024 cap dropped ~39 of Civ IV's initializers. 4096 (a 32 KiB on-stack
  * pointer array in slide_objc) covers it with wide margin. */
@@ -271,13 +271,14 @@ static const struct mach_header *find_loaded_image(const char *leaf,
  * a stack-switching stub. Runs from the add-image callback, BEFORE dyld reads
  * __mod_init_func to run the initializers.
  *
- * In ABICONV_RUN_INITS mode we do NOT run the initializers here — running them
- * mid-walk is too early (the image's other per-image fixups, esp. the 4-byte
- * __DATA pointer relocation and __OBJC slide, haven't happened yet, so a C++
- * static ctor would dereference an unslid pointer — see the Portal 2 translation notes
- * s3b/s4). Instead we COLLECT the target addresses into `collect[]` and NULL
- * the slots (so neither dyld nor a nested re-entry runs them); slide_objc runs
- * the collected targets at its very END, after all fixups. */
+ * In run-now mode (the default) we do NOT run the initializers here — running
+ * them mid-walk is too early (the image's other per-image fixups, esp. the
+ * 4-byte __DATA pointer relocation and __OBJC slide, haven't happened yet, so a
+ * C++ static ctor would dereference an unslid pointer — see
+ * the Portal 2 translation notes s3b/s4). Instead we COLLECT the target addresses into
+ * `collect[]` and NULL the slots (so neither dyld nor a nested re-entry runs
+ * them); slide_objc runs the collected targets at its very END, after all
+ * fixups. */
 /* Read the 8-byte on-disk value at file offset `fo` of `imgname` (a thin
  * translated dylib, mach_header at offset 0). Returns 0 on any error. Used to
  * recover __mod_init_func entries clobbered by dyld's classic-__dyld overflow. */
@@ -322,20 +323,31 @@ static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
             void **slots = (void **)base;
             size_t wrapped = 0;
             /* Two strategies (see the Portal 2 translation notes s3b):
-             *  - DEFAULT: rewrite each slot to a low-stack JIT stub and let dyld
-             *    call it. Works on the dyld that shipped with the iPhoto-era
-             *    macOS, but dyld4 VALIDATES __mod_init_func entries are in-image
-             *    and SILENTLY SKIPS our out-of-image stubs → the initializers
-             *    never run.
-             *  - ABICONV_RUN_INITS: run each init OURSELVES right here (the
-             *    add-image callback fires before dyld's init pass), on the
-             *    low-4GB init stack, then NULL the slot so dyld skips it. This
-             *    sidesteps dyld4's in-image validation entirely. Per-image, in
+             *  - DEFAULT (run-now; was opt-in as ABICONV_RUN_INITS): COLLECT
+             *    each init target, NULL the slot so dyld skips it, and let
+             *    slide_objc run the collected list at its very END (after all
+             *    per-image fixups), on the low-4GB init stack. This sidesteps
+             *    dyld4's in-image validation entirely. Per-image, in
              *    image-load (≈bottom-up dependency) order; nested dlopen during
              *    an init re-enters here and the trampoline's shadow stack keeps
-             *    nesting LIFO-correct. */
+             *    nesting LIFO-correct. NULLed slots also make multi-copy
+             *    deploys idempotent: a later libabiconv copy's re-scan finds
+             *    nothing left to collect (vs. the stub path's stub-of-stub
+             *    re-wrapping).
+             *  - ABICONV_NO_RUN_INITS (legacy stub path, opt-out): rewrite each
+             *    slot to a low-stack JIT stub and let dyld call it. Works on
+             *    the dyld that shipped with the iPhoto-era macOS, but dyld4
+             *    VALIDATES __mod_init_func entries are in-image and SILENTLY
+             *    SKIPS our out-of-image stubs → the initializers never run.
+             *    Civ IV s26 (2026-07-06): with run-now still opt-in, any launch
+             *    that forgot ABICONV_RUN_INITS=1 (m64 run, Finder) silently
+             *    lost ALL 1063 static ctors on this path; the zeroed static
+             *    std::set header (GameRanger MSG_Mac sCallbackList) then
+             *    crashed _Rb_tree_decrement at NULL+4 in main→CheckPreferences
+             *    →InitGameRanger. Run-now is therefore the DEFAULT — the env
+             *    var must not be a correctness switch. */
             const int run_now =
-               collect != NULL && getenv("ABICONV_RUN_INITS") != NULL;
+               collect != NULL && getenv("ABICONV_NO_RUN_INITS") == NULL;
             for (size_t j = 0; j < n; j++) {
                if (!slots[j]) { continue; }
                /* Skip patch_dyld_section's __dyld+8 artifact (multi-copy
@@ -407,6 +419,36 @@ static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
                   }
                   slots[j] = fixed;
                   if (!slots[j]) { continue; }
+               }
+               /* Recover an UNREBASED __mod_init_func entry. Not every
+                * translated image's dyld info carries rebase entries for the
+                * widened 8-byte init slots (a classic-origin route-C dylib
+                * does — Civ IV covers all 1063 — but a modern-i386-origin
+                * dylib can come out with an EMPTY rebase table), so the slot
+                * still holds the on-disk PREFERRED address after dyld slides
+                * the image; calling it faults on unmapped memory
+                * (81_static_init_default). Structural check, image-agnostic:
+                * a correct target lies in the LOADED text range
+                * [text_lo+slide, text_hi+slide); a value inside the PREFERRED
+                * range [text_lo, text_hi) but NOT the loaded range is the
+                * unrebased on-disk value -> add the slide. No-op for
+                * correctly rebased images and for slide==0, and leaves
+                * anything else (already-slid targets) untouched. */
+               if (slide != 0) {
+                  const uint64_t t = (uint64_t)(uintptr_t)slots[j];
+                  const uint64_t lo_l = text_lo + (uint64_t)(int64_t)slide;
+                  const uint64_t hi_l = text_hi + (uint64_t)(int64_t)slide;
+                  if (!(t >= lo_l && t < hi_l) &&
+                      t >= text_lo && t < text_hi) {
+                     void *fixed =
+                        (void *)(uintptr_t)(t + (uint64_t)(int64_t)slide);
+                     if (g_verbose) {
+                        fprintf(stderr, "abiconv init_stack: slid unrebased "
+                                "__mod_init_func[%zu] in %s: %p -> %p\n",
+                                j, imgname, slots[j], fixed);
+                     }
+                     slots[j] = fixed;
+                  }
                }
                if (run_now && *n_collect < INIT_COLLECT_MAX) {
                   /* Collect the target + NULL the slot FIRST so dyld (and a
@@ -725,7 +767,7 @@ static int repair_method_lists_from_file(const char *imgname,
  *   - the 4-byte pointer slots of __TEXT,__const (switch jump tables).
  * wrapper_setup.c's fixup_translated_dylib_slots does the same scan, but it
  * only runs at WRAPPER ENTRY (build_i386_main_frame) — AFTER dyld inits, and
- * in ABICONV_RUN_INITS mode the collected static ctors run at ADD-IMAGE time
+ * in run-now mode (default) the collected static ctors run at ADD-IMAGE time
  * (end of slide_objc), i.e. BEFORE the wrapper's pass. Civ IV s21:
  * NiAnimationSDM's ctor -> NiStaticDataManager::AddLibrary stores through
  * `67 89 14 85 <disp32>` (mov [disp32+eax*4], edx; ms_apfnInitFunctions in
@@ -1139,7 +1181,7 @@ static void bind_external_relocs(const struct mach_header_64 *mh64, intptr_t sli
  * legacy, points the func_lookup slot at native legacyDyldLookup4OldBinaries,
  * which reads its args from registers (x86_64 ABI) — garbage — and writes the
  * looked-up fp through the garbage out-pointer -> SIGSEGV writing 0x0 (Halo CE,
- * Civ IV). Our own runtime (wrapper + slide_objc + ABICONV_RUN_INITS) already
+ * Civ IV). Our own runtime (wrapper + slide_objc + run-now inits) already
  * performs that legacy bootstrap, so we overwrite the slots to route the crt's
  * func_lookup into our i386-cdecl-honoring shim (dyld_func_lookup.asm), which
  * satisfies the lookup harmlessly. Defensive: the lazy-binder slot is pointed at
@@ -1149,7 +1191,7 @@ static void bind_external_relocs(const struct mach_header_64 *mh64, intptr_t sli
  * Universal: triggers on the structural presence of __DATA,__dyld, not an app
  * name. Runs from the add-image callback (before dyld's findAndRunAllInitializers
  * reaches the crt, and before slide_objc runs the collected init funcs in
- * RUN_INITS mode), so the slot is patched before the crt ever reads it.
+ * run-now init mode), so the slot is patched before the crt ever reads it.
  * Idempotent: re-running writes the same shim addresses. */
 static void patch_dyld_section(const struct mach_header_64 *mh64, intptr_t slide,
                                const char *imgname) {
@@ -1559,7 +1601,7 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
       /* Neutralize the classic __DATA,__dyld crt bootstrap (pre-10.5 i386
        * binaries) before the crt's func_lookup is reached — by dyld's init pass
        * (default mode) or by the collected init funcs run at the end of this
-       * function (ABICONV_RUN_INITS). Universal: triggers only on the structural
+       * function (run-now init mode). Universal: triggers only on the structural
        * presence of __DATA,__dyld. */
       patch_dyld_section(mh64, slide, imgname);
       /* Redirect the classic libc/crt-internal __IMPORT,__pointers slots
@@ -1572,7 +1614,7 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    }
 
    /* the legacy-ObjC1 fixups below are __OBJC-only, but the collected
-    * static initializers (n_init>0, ABICONV_RUN_INITS mode) must still run at
+    * static initializers (n_init>0, run-now mode) must still run at
     * the END for a pure-C++ no-__OBJC image (e.g. Portal 2's libtier0), so we
     * branch around the __OBJC work instead of returning early. */
    /* Slide __DATA,__cfstring str pointers (the x86_64 32-byte records
@@ -1658,7 +1700,7 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
 
    /* Before running THIS image's collected initializers, make sure every
     * translated dependency has been slid + initialized (bottom-up order). Only
-    * relevant in RUN_INITS mode (n_init>0); the default path lets dyld order the
+    * relevant in run-now mode (n_init>0, default); the legacy stub path lets dyld order the
     * wrapped-stub initializers and never populates init_targets. */
    if (n_init > 0) {
       process_deps(mh64);
@@ -1676,7 +1718,7 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
     * stack, in collection (≈section, bottom-up dependency) order; a nested
     * dlopen during one of these re-enters slide_objc and runs its own inits
     * first (the trampoline's shadow stack keeps nesting LIFO-correct).
-    * n_init>0 only in ABICONV_RUN_INITS mode; the default path wrapped the
+    * n_init>0 in run-now mode (default); the legacy ABICONV_NO_RUN_INITS path wrapped the
     * slots into dyld-called stubs instead and leaves n_init==0. */
    for (size_t i = 0; i < n_init; i++) {
       abiconv_call_init(init_targets[i], 0, NULL, NULL, NULL);
