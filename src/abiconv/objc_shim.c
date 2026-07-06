@@ -1923,11 +1923,31 @@ static int is_format_sel(const char *s) {
                 || sel_has_suffix(s, "appendFormat:") || sel_has_suffix(s, ":format:"));
 }
 
+/* ObjC TAGGED-POINTER object: a VALUE, not an address (bit 0 on x86_64, bit
+ * 63 on arm64 — this runtime is x86_64-under-Rosetta but check both). Short
+ * (<=7 ASCII char) NSString/CFString contents are realized as tagged pointers
+ * by Foundation — including the real CFStrings i386_cfstr_to_real mints for
+ * short i386 @"..." constants. mem_readable() (a genuine address probe)
+ * always REJECTS them, so any readability gate must exempt them; CF/objc
+ * themselves handle tagged pointers natively (CFGetTypeID /
+ * CFStringGetCString are tagged-safe). */
+static int objc_tagged_ptr(uint64_t obj) {
+   return (obj & 1ULL) != 0 || (obj >> 63) != 0;
+}
+
 /* Extract the C-string of a real Foundation format object (an NSString, which
- * may be a translated low-address constant @"..." or a real 64-bit NSString).
- * Returns 1 and fills buf on success; 0 if obj is not a usable CFString. */
+ * may be a translated low-address constant @"...", a real 64-bit NSString, or
+ * a TAGGED-POINTER short string). Returns 1 and fills buf on success; 0 if
+ * obj is not a usable CFString.
+ * ★The tagged exemption is load-bearing: a short format like @"Msg%s" (Halo's
+ * alert-title key, <=7 chars) unwraps to a tagged pointer; gating it through
+ * mem_readable called it "unreadable", so shim_CFStringCreateWithFormat took
+ * the no-directive fast path and returned the format LITERALLY — the visible
+ * unsubstituted "Msg%s" alert title. */
 static int format_cstr(uint64_t obj, char *buf, size_t buflen) {
-   if (obj == 0 || !mem_readable((uintptr_t)obj, sizeof(void *))) { return 0; }
+   if (obj == 0) { return 0; }
+   if (!objc_tagged_ptr(obj)
+       && !mem_readable((uintptr_t)obj, sizeof(void *))) { return 0; }
    CFTypeRef cf = (CFTypeRef)(uintptr_t)obj;
    if (CFGetTypeID(cf) != CFStringGetTypeID()) { return 0; }
    return CFStringGetCString((CFStringRef)cf, buf, (CFIndex)buflen,

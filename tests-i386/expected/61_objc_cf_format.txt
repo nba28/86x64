@@ -1,3 +1,4 @@
 hello there 42 world!
 plain
+MsgInsufficientHDSpace
 exit_code: 0
