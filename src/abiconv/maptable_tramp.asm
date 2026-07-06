@@ -196,6 +196,11 @@
 	;; Variadic CF formatting (same class as the panels: abigen skips
 	;; variadics, so the raw native bind read registers for i386 stack varargs).
 	MTSHIM	___CFStringCreateWithFormat,     _shim_CFStringCreateWithFormat
+	;; va_list CF formatting (the AndArguments siblings): abigen CAN'T marshal a
+	;; va_list arg (i386 char* vs x86_64 __va_list_tag), so its auto-shim
+	;; deep-copied garbage. Same cure, reading varargs through the va_list pointer.
+	MTSHIM	___CFStringCreateWithFormatAndArguments, _shim_CFStringCreateWithFormatAndArguments
+	MTSHIM	___CFStringAppendFormatAndArguments,     _shim_CFStringAppendFormatAndArguments
 	;; CFRetain/CFRelease must no-op on our IOKit tokens (else the token
 	;; leaks into real CF and faults). Token-aware override; passthrough else.
 	MTSHIM	___CFRetain,                         _shim_CFRetain

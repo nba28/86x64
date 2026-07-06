@@ -2158,10 +2158,19 @@ uint32_t shim_NSGetAlertPanel(const uint32_t *a) {
  * through fill_format_varargs (positional %N$ + %@ handle resolution), and
  * make the native variadic call from the converted plan slots.
  * i386 arg block: a[0]=alloc a[1]=formatOptions a[2]=format a[3...]=varargs */
-uint32_t shim_CFStringCreateWithFormat(const uint32_t *a) {
-   CFAllocatorRef  alloc = (CFAllocatorRef)(uintptr_t)unwrap_obj_arg(a[0]);
-   CFDictionaryRef opts  = (CFDictionaryRef)(uintptr_t)unwrap_obj_arg(a[1]);
-   uint64_t fmt = unwrap_obj_arg(a[2]);
+/* Common CF-format core. `va32` is a flat array of 4-byte i386 vararg slots —
+ * either the inline stack varargs (CFStringCreateWithFormat) OR the pointee of an
+ * i386 va_list (CFStringCreateWithFormatAndArguments): an i386 va_list is a plain
+ * char* pointing straight at the first vararg, so both cases hand
+ * fill_format_varargs the same flat slot array. Reusing the VARIADIC
+ * CFStringCreateWithFormat with the expanded plan is equivalent to the
+ * AndArguments form (the variadic one calls it internally) and needs no x86_64
+ * va_list synthesized. Returns a wrapped CFStringRef handle (0 on failure). */
+static uint32_t cfstring_with_format_core(uint32_t alloc32, uint32_t opts32,
+                                          uint32_t fmt32, const uint32_t *va32) {
+   CFAllocatorRef  alloc = (CFAllocatorRef)(uintptr_t)unwrap_obj_arg(alloc32);
+   CFDictionaryRef opts  = (CFDictionaryRef)(uintptr_t)unwrap_obj_arg(opts32);
+   uint64_t fmt = unwrap_obj_arg(fmt32);
    if (!fmt) { return 0; }
    char fmtbuf[2048];
    if (!format_cstr(fmt, fmtbuf, sizeof fmtbuf) || !strchr(fmtbuf, '%')) {
@@ -2172,7 +2181,7 @@ uint32_t shim_CFStringCreateWithFormat(const uint32_t *a) {
    struct objc_call_plan plan;
    memset(&plan, 0, sizeof plan);
    /* GP slots 0..2 = alloc/options/format of the native call below */
-   fill_format_varargs(&plan, a + 3, /*ai=*/0, /*gp=*/3,
+   fill_format_varargs(&plan, va32, /*ai=*/0, /*gp=*/3,
                        /*gp_cap=*/6 + PLAN_STACK_MAX, fmtbuf, /*cur=*/NULL);
    /* a true variadic prototype so the compiler zeroes al (no XMM varargs —
     * fill_format_varargs drops float conversions, the known alert-panel gap) */
@@ -2188,6 +2197,50 @@ uint32_t shim_CFStringCreateWithFormat(const uint32_t *a) {
       fflush(stderr);
    }
    return s ? x64_objc_wrap((uint64_t)(uintptr_t)s) : 0;
+}
+
+uint32_t shim_CFStringCreateWithFormat(const uint32_t *a) {
+   /* i386 arg block: a[0]=alloc a[1]=formatOptions a[2]=format a[3...]=varargs */
+   return cfstring_with_format_core(a[0], a[1], a[2], a + 3);
+}
+
+/* CFStringCreateWithFormatAndArguments(alloc, options, format, va_list) — the
+ * va_list sibling of CFStringCreateWithFormat (the Msg%s / Halo wall family).
+ * abigen can't marshal a va_list arg (the i386 va_list is a char* to the stack
+ * varargs, NOTHING like the x86_64 __va_list_tag register-save struct), so its
+ * auto-shim deep-copied garbage. i386 arg block: a[0]=alloc a[1]=options
+ * a[2]=format a[3]=va_list (a pointer to the first 4-byte vararg slot). */
+uint32_t shim_CFStringCreateWithFormatAndArguments(const uint32_t *a) {
+   return cfstring_with_format_core(a[0], a[1], a[2],
+                                    (const uint32_t *)(uintptr_t)a[3]);
+}
+
+/* CFStringAppendFormatAndArguments(theString, options, format, va_list): appends
+ * the formatted result to a mutable string (void). Same va_list translation, but
+ * the native call is the variadic CFStringAppendFormat and there is no return.
+ * i386 arg block: a[0]=theString a[1]=options a[2]=format a[3]=va_list. */
+uint32_t shim_CFStringAppendFormatAndArguments(const uint32_t *a) {
+   CFMutableStringRef str = (CFMutableStringRef)(uintptr_t)unwrap_obj_arg(a[0]);
+   CFDictionaryRef    opts = (CFDictionaryRef)(uintptr_t)unwrap_obj_arg(a[1]);
+   uint64_t fmt = unwrap_obj_arg(a[2]);
+   const uint32_t *va32 = (const uint32_t *)(uintptr_t)a[3];
+   if (!str || !fmt) { return 0; }
+   char fmtbuf[2048];
+   if (!format_cstr(fmt, fmtbuf, sizeof fmtbuf) || !strchr(fmtbuf, '%')) {
+      CFStringAppend(str, (CFStringRef)(uintptr_t)fmt);
+      return 0;
+   }
+   struct objc_call_plan plan;
+   memset(&plan, 0, sizeof plan);
+   fill_format_varargs(&plan, va32, /*ai=*/0, /*gp=*/3,
+                       /*gp_cap=*/6 + PLAN_STACK_MAX, fmtbuf, /*cur=*/NULL);
+   ((void (*)(CFMutableStringRef, CFDictionaryRef, CFStringRef, ...))
+    CFStringAppendFormat)(
+      str, opts, (CFStringRef)(uintptr_t)fmt,
+      plan.reg[3], plan.reg[4], plan.reg[5],
+      plan.stack[0], plan.stack[1], plan.stack[2], plan.stack[3],
+      plan.stack[4], plan.stack[5], plan.stack[6], plan.stack[7]);
+   return 0;
 }
 
 /*

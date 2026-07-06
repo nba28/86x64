@@ -157,6 +157,8 @@ _NSRunInformationalAlertPanel
 _NSGetAlertPanel
 
 _CFStringCreateWithFormat
+_CFStringCreateWithFormatAndArguments
+_CFStringAppendFormatAndArguments
 
 _NSUnionRect
 _NSIntersectionRect

@@ -677,6 +677,28 @@ struct ABIConversion {
    }
 #endif
 
+   /* True if `type` (a canonical arg type) is a `va_list`. A va_list is
+    * `__builtin_va_list` = `struct __va_list_tag[1]` on x86_64, so as a parameter
+    * it appears as a ConstantArray of (or a decayed Pointer to) a Record whose
+    * spelling names it __va_list_tag. Detected structurally, never by function
+    * name; used to skip functions abigen cannot marshal (see the arg loop). */
+   static bool is_va_list_arg(CXType type) {
+      CXType inner;
+      if (type.kind == CXType_ConstantArray) {
+         inner = clang_getCanonicalType(clang_getArrayElementType(type));
+      } else if (type.kind == CXType_Pointer) {
+         inner = clang_getCanonicalType(clang_getPointeeType(type));
+      } else {
+         return false;
+      }
+      if (inner.kind != CXType_Record) { return false; }
+      CXString s = clang_getTypeSpelling(inner);
+      const bool va =
+         std::string(clang_getCString(s)).find("__va_list_tag") != std::string::npos;
+      clang_disposeString(s);
+      return va;
+   }
+
    void emit(std::ostream& final_os, Symbols& symbols, const Symbols& ignore_structs,
              const Symbols& reserved_names) {
       const bool variadic = clang_isFunctionTypeVariadic(function_type);
@@ -868,6 +890,23 @@ struct ABIConversion {
 
          CXType orig_type = clang_getArgType(function_type, param_it);
          CXType type = handle_type(orig_type);
+
+         if (is_va_list_arg(type)) {
+            /* A va_list arg is fundamentally un-marshallable by abigen: the i386
+             * va_list is a plain char* pointing straight at the stack varargs,
+             * whereas x86_64's is a __va_list_tag register-save-area struct — and
+             * translating it needs the arg TYPES, which only the callee's format
+             * string yields at runtime. The generic Pointer/ConstantArray path
+             * would deep-copy the i386 char* AS a __va_list_tag (16 garbage bytes)
+             * -> native va_arg derefs a fused overflow_arg_area -> SIGSEGV. Skip
+             * the function so no actively-broken shim is emitted; a correct v*
+             * function needs a per-function hand-shim that walks the i386 va_list
+             * from its format (printf-conv.cc, CFStringCreateWithFormatAndArguments
+             * in objc_shim.c). Universal: triggers on the __va_list_tag structure. */
+            throw std::invalid_argument(
+               "va_list arg not marshallable (i386 char* vs x86_64 __va_list_tag);"
+               " needs a hand-shim");
+         }
 
          if (type.kind == CXType_Record) {
             /* by-value struct: general SysV eightbyte classification (see the

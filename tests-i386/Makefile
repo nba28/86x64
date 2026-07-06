@@ -73,8 +73,17 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip
 all: run-only
+
+# va-list-skip: guard for the abigen va_list-arg SKIP (C6). abigen can't marshal a
+# va_list (i386 char* vs x86_64 __va_list_tag) and used to emit a broken
+# __va_list_tag deep-copy (native va_arg -> SIGSEGV); it now detects the va_list
+# structurally and skips the function (correct v* fns get a hand-shim). Asserts
+# the va_list fn is skipped/not-emitted while an ordinary fn still is. Self-
+# contained (abigen + nasm). The CF va_list hand-shim runs in 53_cf_format_valist.
+va-list-skip:
+	@bash va_list_skip_test.sh
 
 # cb-extended: guard for the extended callback-bridge marshalling (C4): a
 # long-long callback RETURN (CBR_I64; _86x64_call_i386 folds i386 edx:eax -> rax:
@@ -486,6 +495,14 @@ $(BUILD_DIR)/50_cgaffine_sret.i386: $(BUILD_DIR)/50_cgaffine_sret.o
 # libabiconv's ___CF* shims (the abigen RETURN-side const-void* CF wrap).
 # Overrides %.i386.
 $(BUILD_DIR)/56_cf_collection_value_ret.i386: $(BUILD_DIR)/56_cf_collection_value_ret.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 53_cf_format_valist: CoreFoundation isn't in the i386 sysroot, so
+# CFStringCreateWithCString / CFStringCreateWithFormatAndArguments (the va_list CF
+# formatting shim) / CFStringGetCString are undefined dynamic_lookup imports
+# resolved at translate time by static-interpose -> libabiconv's ___CF* shims.
+# Overrides %.i386.
+$(BUILD_DIR)/53_cf_format_valist.i386: $(BUILD_DIR)/53_cf_format_valist.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +
