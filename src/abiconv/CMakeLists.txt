@@ -459,6 +459,13 @@ add_library(abiconv SHARED
   # carbon_nib_shim.c: REAL IBCarbon nib window/control materialization (fixes the
   # -5601 non-compositing window failure + dropped IBCarbonEditText UserPane gap).
   carbon_nib_shim.c
+  # Reclassified abigen-DANGLING classic Carbon (removed on 64-bit macOS): abigen
+  # forwarded these to now-removed natives (dangling `call _X` -> abort if reached).
+  # Real HIView bridges where a modern equivalent survives, else signature-correct
+  # graceful. MTSHIM presence removes them from the abigen legacy pass.
+  carbon_control_shim.c    # Control/Window/Menu Manager (real bridges + graceful)
+  carbon_dialog_shim.c     # classic Dialog Manager (graceful "no classic dialog")
+  carbon_classic_ui_shim.c # classic TextEdit/List/Drag/Theme (graceful dead surface)
   qt_hitoolbox_shim.c
   carbon_fwd_shim.c
   upp_shim.c

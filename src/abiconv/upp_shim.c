@@ -18,9 +18,12 @@ uint32_t shim_NewControlUserPaneTrackingUPP(uint32_t *args) { return args[0]; }
 uint32_t shim_NewEventHandlerUPP(uint32_t *args)            { return args[0]; }
 uint32_t shim_NewEventLoopTimerUPP(uint32_t *args)          { return args[0]; }
 uint32_t shim_NewSndCallBackUPP(uint32_t *args)             { return args[0]; }
+uint32_t shim_NewControlActionUPP(uint32_t *args)          { return args[0]; }
 
 // Dispose<Kind>UPP(upp) -> nothing to free
 void shim_DisposeControlUserPaneDrawUPP(uint32_t *args)     { (void)args; }
+void shim_DisposeControlActionUPP(uint32_t *args)          { (void)args; }
+void shim_DisposeEventLoopTimerUPP(uint32_t *args)         { (void)args; }
 void shim_DisposeControlUserPaneHitTestUPP(uint32_t *args)  { (void)args; }
 void shim_DisposeControlUserPaneTrackingUPP(uint32_t *args) { (void)args; }
 void shim_DisposeEventHandlerUPP(uint32_t *args)            { (void)args; }

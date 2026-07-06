@@ -801,6 +801,107 @@ _x64_exc_longjmp:
 	MTSHIM	___CreateWindowFromNib,               _shim_CreateWindowFromNib
 	MTSHIM	___DisposeNibReference,               _shim_DisposeNibReference
 	MTSHIM	___SetMenuBarFromNib,                 _shim_SetMenuBarFromNib
+	; ==== Reclassified abigen-DANGLING classic Carbon (removed on 64-bit) ====
+	; abigen forwarded these to now-removed natives (call _X -> dangling abort). Real
+	; bridges where a modern equivalent survives, else signature-correct graceful.
+	; MTSHIM presence removes each from the abigen legacy pass (no dup-symbol clash).
+	; --- Reclassified dangling Control/Window/Menu Mgr -> REAL bridges (carbon_control_shim.c) ---
+	MTSHIM	___AdvanceKeyboardFocus,                    _shim_AdvanceKeyboardFocus
+	MTSHIM	___AppendResMenu,                           _shim_AppendResMenu
+	MTSHIM	___CreatePopupButtonControl,                _shim_CreatePopupButtonControl
+	MTSHIM	___CreateScrollBarControl,                  _shim_CreateScrollBarControl
+	MTSHIM	___CreateScrollingTextBoxControl,           _shim_CreateScrollingTextBoxControl
+	MTSHIM	___DisposeControl,                          _shim_DisposeControl
+	MTSHIM	___DisposeMenu,                             _shim_DisposeMenu
+	MTSHIM	___DrawGrowIcon,                            _shim_DrawGrowIcon
+	MTSHIM	___DumpControlHierarchy,                    _shim_DumpControlHierarchy
+	MTSHIM	___EmbedControl,                            _shim_EmbedControl
+	MTSHIM	___EnableMenuCommand,                       _shim_EnableMenuCommand
+	MTSHIM	___GetControlCommandID,                     _shim_GetControlCommandID
+	MTSHIM	___GetControlID,                            _shim_GetControlID
+	MTSHIM	___GetControlMaximum,                       _shim_GetControlMaximum
+	MTSHIM	___GetControlMinimum,                       _shim_GetControlMinimum
+	MTSHIM	___GetControlRegion,                        _shim_GetControlRegion
+	MTSHIM	___GetControlVariant,                       _shim_GetControlVariant
+	MTSHIM	___GetMenuItemKeyGlyph,                     _shim_GetMenuItemKeyGlyph
+	MTSHIM	___HIComboBoxCreate,                        _shim_HIComboBoxCreate
+	MTSHIM	___HIImageViewSetOpaque,                    _shim_HIImageViewSetOpaque
+	MTSHIM	___HIImageViewSetScaleToFit,                _shim_HIImageViewSetScaleToFit
+	MTSHIM	___IsWindowContainedInGroup,                _shim_IsWindowContainedInGroup
+	MTSHIM	___IsWindowUpdatePending,                   _shim_IsWindowUpdatePending
+	MTSHIM	___NewCWindow,                              _shim_NewCWindow
+	MTSHIM	___ReleaseWindowGroup,                      _shim_ReleaseWindowGroup
+	MTSHIM	___ReverseKeyboardFocus,                    _shim_ReverseKeyboardFocus
+	MTSHIM	___SetControl32BitMinimum,                  _shim_SetControl32BitMinimum
+	MTSHIM	___SetControlColorProc,                     _shim_SetControlColorProc
+	MTSHIM	___SetControlMinimum,                       _shim_SetControlMinimum
+	MTSHIM	___SetControlViewSize,                      _shim_SetControlViewSize
+	MTSHIM	___SetItemCmd,                              _shim_SetItemCmd
+	MTSHIM	___SetMenuFont,                             _shim_SetMenuFont
+	MTSHIM	___SetMenuItemData,                         _shim_SetMenuItemData
+	MTSHIM	___SetWindowKind,                           _shim_SetWindowKind
+	MTSHIM	___ValidWindowRgn,                          _shim_ValidWindowRgn
+	; --- Classic Dialog Manager: graceful no-classic-dialog (carbon_dialog_shim.c) ---
+	MTSHIM	___AppendDialogItemList,                    _shim_AppendDialogItemList
+	MTSHIM	___AutoSizeDialog,                          _shim_AutoSizeDialog
+	MTSHIM	___DisposeDialog,                           _shim_DisposeDialog
+	MTSHIM	___GetDialogCancelItem,                     _shim_GetDialogCancelItem
+	MTSHIM	___GetDialogDefaultItem,                    _shim_GetDialogDefaultItem
+	MTSHIM	___GetDialogItemText,                       _shim_GetDialogItemText
+	MTSHIM	___GetDialogTextEditHandle,                 _shim_GetDialogTextEditHandle
+	MTSHIM	___GetModalDialogEventMask,                 _shim_GetModalDialogEventMask
+	MTSHIM	___GetNewDialog,                            _shim_GetNewDialog
+	MTSHIM	___ModalDialog,                             _shim_ModalDialog
+	MTSHIM	___MoveDialogItem,                          _shim_MoveDialogItem
+	MTSHIM	___SetDialogDefaultItem,                    _shim_SetDialogDefaultItem
+	MTSHIM	___SetDialogItemText,                       _shim_SetDialogItemText
+	MTSHIM	___SetPortDialogPort,                       _shim_SetPortDialogPort
+	MTSHIM	___SizeDialogItem,                          _shim_SizeDialogItem
+	MTSHIM	___StopAlert,                               _shim_StopAlert
+	; --- Classic TextEdit/List/Drag/Theme: graceful dead-surface (carbon_classic_ui_shim.c) ---
+	MTSHIM	___AddDragItemFlavor,                       _shim_AddDragItemFlavor
+	MTSHIM	___CountDragItemFlavors,                    _shim_CountDragItemFlavors
+	MTSHIM	___CountDragItems,                          _shim_CountDragItems
+	MTSHIM	___DisposeThemeDrawingState,                _shim_DisposeThemeDrawingState
+	MTSHIM	___GetDragAttributes,                       _shim_GetDragAttributes
+	MTSHIM	___GetDragHiliteColor,                      _shim_GetDragHiliteColor
+	MTSHIM	___GetDragItemReferenceNumber,              _shim_GetDragItemReferenceNumber
+	MTSHIM	___GetDragModifiers,                        _shim_GetDragModifiers
+	MTSHIM	___GetDragMouse,                            _shim_GetDragMouse
+	MTSHIM	___GetDropLocation,                         _shim_GetDropLocation
+	MTSHIM	___GetFlavorData,                           _shim_GetFlavorData
+	MTSHIM	___GetFlavorDataSize,                       _shim_GetFlavorDataSize
+	MTSHIM	___GetFlavorFlags,                          _shim_GetFlavorFlags
+	MTSHIM	___GetFlavorType,                           _shim_GetFlavorType
+	MTSHIM	___GetListActive,                           _shim_GetListActive
+	MTSHIM	___GetScrapFlavorFlags,                     _shim_GetScrapFlavorFlags
+	MTSHIM	___GetThemeScrollBarArrowStyle,             _shim_GetThemeScrollBarArrowStyle
+	MTSHIM	___LActivate,                               _shim_LActivate
+	MTSHIM	___LNextCell,                               _shim_LNextCell
+	MTSHIM	___LScroll,                                 _shim_LScroll
+	MTSHIM	___SetDragItemFlavorData,                   _shim_SetDragItemFlavorData
+	MTSHIM	___SetDropLocation,                         _shim_SetDropLocation
+	MTSHIM	___SetListSelectionFlags,                   _shim_SetListSelectionFlags
+	MTSHIM	___SetThemePen,                             _shim_SetThemePen
+	MTSHIM	___TEActivate,                              _shim_TEActivate
+	MTSHIM	___TEAutoView,                              _shim_TEAutoView
+	MTSHIM	___TECopy,                                  _shim_TECopy
+	MTSHIM	___TECut,                                   _shim_TECut
+	MTSHIM	___TEDeactivate,                            _shim_TEDeactivate
+	MTSHIM	___TEDelete,                                _shim_TEDelete
+	MTSHIM	___TEGetText,                               _shim_TEGetText
+	MTSHIM	___TEIdle,                                  _shim_TEIdle
+	MTSHIM	___TEInsert,                                _shim_TEInsert
+	MTSHIM	___TEKey,                                   _shim_TEKey
+	MTSHIM	___TEPaste,                                 _shim_TEPaste
+	MTSHIM	___TESetSelect,                             _shim_TESetSelect
+	MTSHIM	___TEStyleNew,                              _shim_TEStyleNew
+	MTSHIM	___TrackMouseLocation,                      _shim_TrackMouseLocation
+	MTSHIM	___TrackMouseLocationWithOptions,           _shim_TrackMouseLocationWithOptions
+	; --- Control/EventLoopTimer UPP New/Dispose identity (upp_shim.c) ---
+	MTSHIM	___NewControlActionUPP,               _shim_NewControlActionUPP
+	MTSHIM	___DisposeControlActionUPP,           _shim_DisposeControlActionUPP
+	MTSHIM	___DisposeEventLoopTimerUPP,          _shim_DisposeEventLoopTimerUPP
 	; --- Removed HIToolbox UI surface linked by translated QuickTime.framework
 	;     (qt_hitoolbox_shim.c; Civ IV / Halo s32; 115 no-op ___X shims) ---
 	MTSHIM	____InitHLTB,                        _shim_InitHLTB

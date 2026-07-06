@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color synth-dyld-info jt-weak-import dyld-multicopy carbon-nib stripped-stackarg-procptr handle-marshal
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal
 all: run-only
 
 list:
@@ -142,6 +142,13 @@ jt-weak-import: $(MACHO_TOOL)
 # window/rect, nested control classes, controlID/command/bounds, XML unescape.
 carbon-nib:
 	@bash carbon_nib_parse_test.sh
+
+# carbon-dangling: regression guard that the reclassified "dangling abigen" classic
+# Carbon symbols (carbon_control_shim/carbon_dialog_shim/carbon_classic_ui_shim/
+# upp_shim) are DEFINED hand shims in libabiconv, carry no undefined-native dangle,
+# and are excluded from the abigen legacy pass. Inspects the built libabiconv.
+carbon-dangling:
+	@bash carbon_dangling_shims_test.sh
 
 # ObjC test group. Kept separate from the default `all` so the core
 # (asm/C) suite stays green while ObjC support is still landing. Builds each
