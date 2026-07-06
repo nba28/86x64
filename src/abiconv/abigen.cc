@@ -522,6 +522,38 @@ struct ABIConversion {
       return true;
    }
 
+   /* Detect a by-value struct RETURN that BOTH ABIs return in INTEGER registers:
+    * i386 in eax:edx (any struct <= 8 bytes, no hidden sret pointer, no arg
+    * shift), x86_64 in rax(:rdx) (an all-INTEGER-eightbyte aggregate <= 16 bytes).
+    * These need at most a trivial fix-up and NO sret buffer — the AbsoluteTime /
+    * Duration / Nanoseconds timing family (UnsignedWide {UInt32,UInt32}), and the
+    * NSRange / CFRange {long,long} family. *hi_split is set when the x86_64 value
+    * is a SINGLE eightbyte (in rax) but the i386 struct spans > 4 bytes, so the
+    * high dword must be copied rax[63:32] -> edx (i386 returns bytes[4:8] in edx);
+    * a 2-eightbyte return already lands in rax:rdx = i386 eax:edx with no fix-up,
+    * and a <=4-byte return is just eax. Mutually exclusive with fp_sret/fp_reg
+    * (those carry an SSE eightbyte or an i386 hidden pointer). Structural, never a
+    * name. Returns false (skip) for unions/packed and any SSE-bearing return. */
+   bool int_reg_struct_return(bool *hi_split = nullptr) const {
+      const CXType ret = clang_getCanonicalType(clang_getResultType(function_type));
+      if (ret.kind != CXType_Record) { return false; }
+      byval_plan plan;
+      try {
+         plan = byval_classify(ret);          /* throws on union/packed -> skip */
+      } catch (const std::invalid_argument&) {
+         return false;
+      }
+      if (plan.sz64 > 16) { return false; }    /* x86_64 MEMORY -> real sret path */
+      if (sizeof_type(ret, arch::i386) > 8) { return false; } /* i386 hidden ptr   */
+      for (unsigned k = 0; k < plan.ebs(); ++k) {
+         if (plan.eb_sse(k)) { return false; } /* any SSE eightbyte -> not int-reg */
+      }
+      if (hi_split) {
+         *hi_split = (plan.ebs() == 1) && (sizeof_type(ret, arch::i386) > 4);
+      }
+      return true;
+   }
+
    /* Marshal one i386 FP field (a 4-byte CGFloat or an 8-byte double) at `src` to
     * an x86_64 double at `dst` (an xmm register or an 8-byte stack slot), widening
     * float->double when `widen`. A MEMORY (stack) destination bounces through
@@ -783,6 +815,12 @@ struct ABIConversion {
        * with fp_sret (that is the >16B MEMORY family). */
       std::vector<bool> ret_reg_widen;
       const bool fp_reg = !fp_sret && fp_reg_return(&ret_reg_widen);
+      /* All-INTEGER register-class struct return (AbsoluteTime/UnsignedWide,
+       * NSRange/CFRange): i386 eax:edx, x86_64 rax(:rdx). No sret buffer, no arg
+       * shift; at most a rax[63:32]->edx high-dword split (int_ret_hi_split). */
+      bool int_ret_hi_split = false;
+      const bool int_reg_ret =
+         !fp_sret && !fp_reg && int_reg_struct_return(&int_ret_hi_split);
       const CXType ret_canon =
          clang_getCanonicalType(clang_getResultType(function_type));
       const size_t sret_size =
@@ -841,11 +879,18 @@ struct ABIConversion {
              * (exactly the old failure mode for still-unsupported shapes:
              * unions, packed, bitfields, CGFloat-under-i386-parse). */
             const byval_plan plan = byval_classify(type);
-            if (ret_is_record && !fp_sret) {
-               /* an unrecognized record RETURN leaves the i386 hidden sret
-                * pointer / arg offsets unmodelled -> pairing it with a byval
-                * arg would marshal every arg from the wrong slot; keep the
-                * conservative skip until record returns are generalized */
+            if (ret_is_record && !fp_sret && !fp_reg && !int_reg_ret) {
+               /* An UNRECOGNIZED record return leaves the i386 hidden sret pointer
+                * / arg offsets unmodelled -> pairing it with a byval arg would
+                * marshal every arg from the wrong slot. But a REGISTER-class
+                * return (fp_reg = CGPoint/CGSize in xmm0:xmm1; int_reg_ret =
+                * AbsoluteTime/NSRange/CFRange in eax:edx) has NO i386 hidden
+                * pointer and NO arg shift, so the default modelling is already
+                * correct and the return fix-up is emitted after the call. Those
+                * combos (CGPointApplyAffineTransform, CGContextConvertPointTo*,
+                * NSIntersectionRange, CFDataFind, AddDurationToAbsolute, ...) are
+                * now marshalled; only a genuine sret-shaped return we didn't
+                * detect (fp_sret) stays conservatively skipped. */
                throw std::invalid_argument(
                   "byval struct arg with unhandled struct return not supported");
             }
@@ -1193,6 +1238,20 @@ struct ABIConversion {
          emit_inst(os, "movd", "eax", "xmm0");
          emit_inst(os, "cvtsd2ss", "xmm1", "xmm1");
          emit_inst(os, "movd", "edx", "xmm1");
+      }
+
+      /* All-INTEGER register-class struct return (UnsignedWide/AbsoluteTime): the
+       * native callee packed the <=8-byte aggregate into a SINGLE eightbyte in
+       * rax, but the i386 caller reads an 8-byte struct as eax:edx — so the high
+       * dword must be copied rax[63:32] -> edx (i386 returns bytes[4:8] there).
+       * eax already holds bytes[0:4]. A 2-eightbyte return (NSRange/CFRange) is
+       * already in rax:rdx = i386 eax:edx and needs no fix-up (hi_split false);
+       * a <=4-byte return is just eax. rdx is caller-saved and dead here. */
+      if (int_reg_ret && int_ret_hi_split) {
+         os << "\t; split x86_64 single-eightbyte int struct return rax -> i386 eax:edx"
+            << std::endl;
+         emit_inst(os, "mov", "rdx", "rax");
+         emit_inst(os, "shr", "rdx", "32");
       }
 
       // emit_inst(os, "add", "rsp", stack_data_size() + stack_args_size());

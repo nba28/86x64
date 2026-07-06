@@ -429,6 +429,14 @@ $(BUILD_DIR)/39_xml_memget_alloc.i386: $(BUILD_DIR)/39_xml_memget_alloc.o
 $(BUILD_DIR)/49_cgrect_byval.i386: $(BUILD_DIR)/49_cgrect_byval.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 51_structret_regclass: CoreGraphics isn't in the i386 sysroot, so
+# CGPointApplyAffineTransform / CGSizeApplyAffineTransform (register-class struct
+# RETURN + byval struct args) are undefined dynamic_lookup imports resolved at
+# translate time by static-interpose -> libabiconv's ___CG* shims (the abigen
+# byval-arg + fp_reg/int_reg struct-return completion). Overrides %.i386.
+$(BUILD_DIR)/51_structret_regclass.i386: $(BUILD_DIR)/51_structret_regclass.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # 79_qd_gworld_pixels: classic QuickDraw isn't in the i386 sysroot, so every QD
 # entry (NewGWorld/EraseRect/PaintRect/GetPixBaseAddr/...) is an undefined
 # dynamic_lookup import resolved at translate time by static-interpose ->
