@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo
 all: run-only
 
 # handle-arg: regression for the bare opaque-Handle ARGUMENT marshalling fix
@@ -160,6 +160,16 @@ stripped-stackarg-procptr: $(MACHO_TOOL)
 # int** field is still deep-copied (fix is name+structure scoped).
 handle-marshal:
 	@bash handle_marshal_test.sh
+
+# fmgr-vinfo: regression for the REAL PBHGetVInfoSync free-space report
+# (fmgr_shim.c; Halo CE false "Free up some space on your local disk" abort —
+# the old no-op returned nsvErr so every classic disk-space check failed).
+# Self-contained native cc of fmgr_shim.c with a shrunken __PAGEZERO (the shim
+# reads its param block through 32-bit i386 slots): asserts noErr + real
+# statfs-backed free space with the classic 2GB pinning (15-bit counts, no
+# 32-bit product overflow) + single-volume index-enumeration termination.
+fmgr-vinfo:
+	@bash fmgr_vinfo_test.sh
 
 # jt-weak-import: regression test for the WEAK-IMPORT jump-table fix. Exercises
 # the classic i386 __IMPORT,__jump_table self-modifying stub path: undefined

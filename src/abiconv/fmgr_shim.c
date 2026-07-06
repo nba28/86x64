@@ -20,6 +20,11 @@
 // MTSHIM convention: rdi -> &i386 args[0]; OSErr result in eax.
 
 #include <stdint.h>
+#include <string.h>
+#include <sys/attr.h>
+#include <sys/mount.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #define PTR(n) ((void *)(uintptr_t)args[(n)])
 
@@ -30,6 +35,13 @@
 #define FM_EOF_ERR   (-39)   // eofErr
 #define FM_FNF_ERR   (-43)   // fnfErr   — file not found
 #define FM_RFNUM_ERR (-51)   // rfNumErr — bad file reference number
+#define FM_PARAM_ERR (-50)   // paramErr — "call not supported by this volume"
+
+// Every classic PB variant (HVolumeParam/HIOParam/HFileInfo/DirInfo/...)
+// shares the pack(2) header through ioVRefNum, so ioResult is ALWAYS at +16 —
+// set it as well as returning the OSErr in eax (classic callers poll
+// pb.ioResult after sync calls).
+#define PB_IORESULT(pb)  (*(int16_t *)((uint8_t *)(pb) + 16))
 
 // ---- open / delete / lock / info (FSSpec-addressed): no such file/volume ----
 uint32_t shim_FSpOpenDF(uint32_t *args) {
@@ -58,8 +70,134 @@ uint32_t shim_GetEOF(uint32_t *args) {
 uint32_t shim_SetEOF(uint32_t *args)  { (void)args; return (uint32_t)FM_RFNUM_ERR; }
 uint32_t shim_SetFPos(uint32_t *args) { (void)args; return (uint32_t)FM_RFNUM_ERR; }
 
-// ---- parameter-block calls: report no volume / no file ----
-uint32_t shim_PBHGetVInfoSync(uint32_t *args) { (void)args; return (uint32_t)FM_NSV_ERR; }
+// ---- parameter-block calls ----
+
+// PBHGetVInfoSync — REAL free/total-space report for the boot volume (the
+// single-volume model this runtime maintains everywhere: HGetVol reports
+// vRefNum -1 / root, PBHGetVolParmsSync reports a plain local volume).
+// The old nsvErr no-op made every classic startup disk-space check FAIL —
+// Halo computes free = ioVFrBlk(u16@+62) * ioVAlBlkSiz(u32@+48), needs
+// > 0xF9FFFFF (250MB), and aborts with its "Free up some space on your local
+// disk" alert when the call errors.
+//
+// HVolumeParam layout (classic pack(2); field offsets GROUND-TRUTHED against
+// Halo's own compiled accesses — memset(pb,0,0x7A)=122-byte struct, writes
+// ioVRefNum@+22 / ioVolIndex@+28, reads ioVAlBlkSiz@+48 / ioVFrBlk@+62 —
+// which uniquely pin the Inside-Macintosh layout; the shared 22-byte header
+// through ioVRefNum is documented at the HIOParam comment below):
+//   +16 ioResult(2)   +18 ioNamePtr(4)   +22 ioVRefNum(2) +24 filler2(4)
+//   +28 ioVolIndex(2) +30 ioVCrDate(4)   +34 ioVLsMod(4)  +38 ioVAtrb(2)
+//   +40 ioVNmFls(2)   +42 ioVBitMap(2)   +44 ioAllocPtr(2)
+//   +46 ioVNmAlBlks(2)+48 ioVAlBlkSiz(4) +52 ioVClpSiz(4) +56 ioAlBlSt(2)
+//   +58 ioVNxtCNID(4) +62 ioVFrBlk(2)    +64 ioVSigWord(2)+66 ioVDrvInfo(2)
+//   +68 ioVDRefNum(2) +70 ioVFSID(2)     +72 ioVBkUp(4)   +76 ioVSeqNum(2)
+//   +78 ioVWrCnt(4)   +82 ioVFilCnt(4)   +86 ioVDirCnt(4) +90 ioVFndrInfo(32)
+//
+// The 16-bit block counts cannot represent a modern disk, so apply the
+// DOCUMENTED classic pinning (real Mac OS did exactly this on >2GB volumes):
+// pin the byte figures at 0x7FFFFFFF, then scale ioVAlBlkSiz up (power of
+// two) until the total-block count fits in 15 bits — the reported
+// count*blocksize products stay = min(real, ~2GB), honest and overflow-free
+// even through a caller's 32-bit multiply.
+#define MAC_EPOCH_DELTA 2082844800u   /* 1904-01-01 -> 1970-01-01 seconds */
+
+static void pstr27(uint8_t *dst, const char *src) {
+    uint32_t n = (uint32_t)strlen(src);
+    if (n > 27) { n = 27; }                      /* classic Str27 volume name */
+    dst[0] = (uint8_t)n;
+    memcpy(dst + 1, src, n);
+}
+
+/* Boot-volume name via getattrlist(ATTR_VOL_NAME); fall back to the mount
+ * point spelling if unavailable. */
+static void boot_volume_name(char *out, size_t cap) {
+    struct attrlist al;
+    /* u_int32_t length + attrreference_t + the name bytes it points at */
+    char abuf[sizeof(uint32_t) + sizeof(attrreference_t) + 256];
+    memset(&al, 0, sizeof al);
+    al.bitmapcount = ATTR_BIT_MAP_COUNT;
+    al.volattr = ATTR_VOL_INFO | ATTR_VOL_NAME;
+    out[0] = '\0';
+    if (getattrlist("/", &al, abuf, sizeof abuf, 0) == 0) {
+        attrreference_t *ref = (attrreference_t *)(abuf + sizeof(uint32_t));
+        const char *nm = (const char *)ref + ref->attr_dataoffset;
+        size_t n = ref->attr_length;             /* includes the NUL */
+        if (n > 0 && n <= cap) {
+            memcpy(out, nm, n);
+            out[cap - 1] = '\0';
+        }
+    }
+    if (!out[0]) { strlcpy(out, "Macintosh HD", cap); }
+}
+
+uint32_t shim_PBHGetVInfoSync(uint32_t *args) {
+    uint8_t *pb = (uint8_t *)PTR(0);
+    if (!pb) { return (uint32_t)FM_PARAM_ERR; }
+    int16_t volIndex = *(int16_t *)(pb + 28);
+    if (volIndex > 1) {                     /* single-volume model: indexed */
+        PB_IORESULT(pb) = (int16_t)FM_NSV_ERR;   /* enumeration ends after 1 */
+        return (uint32_t)FM_NSV_ERR;
+    }
+    /* volIndex==1, ==0 (use ioVRefNum: 0=default, -1=our boot vol, anything
+     * maps there) and <0 (use ioNamePtr) all resolve to the boot volume. */
+    struct statfs sf;
+    struct stat st;
+    if (statfs("/", &sf) != 0) {
+        PB_IORESULT(pb) = (int16_t)FM_NSV_ERR;
+        return (uint32_t)FM_NSV_ERR;
+    }
+    uint64_t blksz  = sf.f_bsize ? (uint64_t)sf.f_bsize : 512u;
+    uint64_t total  = (uint64_t)sf.f_blocks * blksz;
+    uint64_t freeb  = (uint64_t)sf.f_bavail * blksz;
+    if (total > 0x7FFFFFFFu) { total = 0x7FFFFFFFu; }     /* classic 2GB pin */
+    if (freeb > 0x7FFFFFFFu) { freeb = 0x7FFFFFFFu; }
+    while (total / blksz > 0x7FFFu) { blksz <<= 1; }      /* 15-bit counts */
+    uint16_t nmblks = (uint16_t)(total / blksz);
+    uint16_t frblks = (uint16_t)(freeb / blksz);
+
+    uint32_t namep = *(uint32_t *)(pb + 18);   /* ioNamePtr: Pascal vol name */
+    if (namep) {
+        char vname[128];
+        boot_volume_name(vname, sizeof vname);
+        pstr27((uint8_t *)(uintptr_t)namep, vname);
+    }
+    if (volIndex > 0) {                      /* indexed: return the vRefNum */
+        *(int16_t *)(pb + 22) = -1;          /* boot volume == HGetVol's -1 */
+    }
+    uint32_t crdate = 0, moddate = 0;
+    if (stat("/", &st) == 0) {
+        crdate  = (uint32_t)((uint64_t)st.st_birthtime + MAC_EPOCH_DELTA);
+        moddate = (uint32_t)((uint64_t)st.st_mtime + MAC_EPOCH_DELTA);
+    }
+    uint64_t filcnt = (uint64_t)sf.f_files - (uint64_t)sf.f_ffree;
+    if (filcnt > 0xFFFFFFFFu) { filcnt = 0xFFFFFFFFu; }
+
+    *(uint32_t *)(pb + 30) = crdate;                  /* ioVCrDate  */
+    *(uint32_t *)(pb + 34) = moddate;                 /* ioVLsMod   */
+    *(int16_t  *)(pb + 38) = 0;                       /* ioVAtrb: unlocked */
+    *(uint16_t *)(pb + 40) = 0;                       /* ioVNmFls   */
+    *(uint16_t *)(pb + 42) = 0;                       /* ioVBitMap  */
+    *(uint16_t *)(pb + 44) = 0;                       /* ioAllocPtr */
+    *(uint16_t *)(pb + 46) = nmblks;                  /* ioVNmAlBlks */
+    *(uint32_t *)(pb + 48) = (uint32_t)blksz;         /* ioVAlBlkSiz */
+    *(uint32_t *)(pb + 52) = (uint32_t)blksz;         /* ioVClpSiz  */
+    *(uint16_t *)(pb + 56) = 0;                       /* ioAlBlSt   */
+    *(uint32_t *)(pb + 58) = 16;                      /* ioVNxtCNID */
+    *(uint16_t *)(pb + 62) = frblks;                  /* ioVFrBlk   */
+    *(int16_t  *)(pb + 64) = 0x4244;                  /* ioVSigWord: HFS 'BD' */
+    *(int16_t  *)(pb + 66) = 1;                       /* ioVDrvInfo: drive 1 */
+    *(int16_t  *)(pb + 68) = -1;                      /* ioVDRefNum */
+    *(int16_t  *)(pb + 70) = 0;                       /* ioVFSID: local FM */
+    *(uint32_t *)(pb + 72) = 0;                       /* ioVBkUp: never */
+    *(int16_t  *)(pb + 76) = 0;                       /* ioVSeqNum  */
+    *(uint32_t *)(pb + 78) = 0;                       /* ioVWrCnt   */
+    *(uint32_t *)(pb + 82) = (uint32_t)filcnt;        /* ioVFilCnt  */
+    *(uint32_t *)(pb + 86) = 0;                       /* ioVDirCnt  */
+    memset(pb + 90, 0, 32);                           /* ioVFndrInfo */
+    PB_IORESULT(pb) = 0;
+    return FM_NO_ERR;
+}
+
 uint32_t shim_PBMakeFSRefSync(uint32_t *args) { (void)args; return (uint32_t)FM_FNF_ERR; }
 
 // ---- classic HParamBlockRec / CInfoPBRec parameter-block calls (Halo NULL-bind set) ----
@@ -71,11 +209,7 @@ uint32_t shim_PBMakeFSRefSync(uint32_t *args) { (void)args; return (uint32_t)FM_
 //   +16 ioResult(OSErr,2) +18 ioNamePtr(4) +22 ioVRefNum(2) +24 ioRefNum(2)
 //   +26 ioVersNum(1) +27 ioPermssn(1) +28 ioMisc(4)
 //   +32 ioBuffer(4) +36 ioReqCount(4) +40 ioActCount(4)
-// Every PB variant (HFileInfo/DirInfo/copy/access) shares the header through
-// ioVRefNum, so ioResult is ALWAYS at +16 — set it as well as returning the
-// OSErr in eax (classic callers poll pb.ioResult after sync calls).
-#define FM_PARAM_ERR (-50)   // paramErr — "call not supported by this volume"
-#define PB_IORESULT(pb)  (*(int16_t *)((uint8_t *)(pb) + 16))
+// (FM_PARAM_ERR / PB_IORESULT defined with the error codes at the top.)
 
 // PBHGetVolParmsSync — the LIVE Halo blocker (audio/volume startup probes the
 // boot volume). Smart fill, not a stub: a modern APFS/HFS+ boot volume IS a
