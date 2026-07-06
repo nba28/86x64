@@ -39,11 +39,16 @@
 #include <dlfcn.h>
 
 /* gestaltQuickTimeVersion. NumVersion-style: 0xVV RR SS BB (major/minor.bugfix/
- * stage/nonRelRev). 0x07638000 = QuickTime 7.6.3 final — the last-shipped 7.x
- * line, comfortably above any real minimum a legacy title checks (6.0 = 0x06..,
- * 7.0 = 0x07..) and positive as a signed 32-bit compare. */
+ * stage/nonRelRev). 0x07668000 = QuickTime 7.6.6 final — the ACTUAL last-shipped
+ * Mac QuickTime 7 (Snow Leopard); comfortably above any real minimum a legacy
+ * title checks (6.0 = 0x06.., 7.0 = 0x07..) and positive as a signed 32-bit
+ * compare. Reporting the true final 7.x matters: iMovie '11 gates launch on
+ * `Gestalt('qtim') >= 7.6.6` and puts up a modal "QuickTime update required"
+ * critical alert (blocking its main window) for anything lower — 7.6.3 failed it.
+ * Higher is strictly safer for the universal `>=` version gate (Civ IV also does
+ * a 'qtim' check); no legacy title checks for an exact/upper-bound version. */
 #define GESTALT_QUICKTIME_VERSION 'qtim'
-#define QUICKTIME_VERSION_REPORT  0x07638000
+#define QUICKTIME_VERSION_REPORT  0x07668000
 
 /* Resolve the real system Gestalt once, load-order-independently: RTLD_NEXT can
  * miss CoreServices if it was mapped before libabiconv, so open the framework by
