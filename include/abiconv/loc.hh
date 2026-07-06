@@ -56,7 +56,10 @@ struct MemoryLocation: Location {
 
    // void align(int align);
    void align(CXType type, arch a);
-   void align_field(CXType type, arch a);
+   /* Align the cursor to `type`'s field alignment for arch `a`. `pack_cap`
+    * (bytes) caps the alignment to honor a struct's #pragma pack / packed
+    * attribute (0 = no cap = natural alignment). */
+   void align_field(CXType type, arch a, size_t pack_cap = 0);
 
    virtual MemoryLocation *copy() const override { return new MemoryLocation(base, index); }
    

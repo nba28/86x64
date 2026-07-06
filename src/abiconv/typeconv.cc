@@ -393,13 +393,27 @@ void conversion::convert_record(std::ostream& os, CXType record, MemoryLocation 
    if (decl.cursor.kind != CXCursor_StructDecl) {
       throw std::invalid_argument("convert_record: union by value not supported");
    }
+   /* #pragma pack / __attribute__((packed)) cap: a packed struct's fields sit at
+    * TIGHTER offsets than natural alignment (classic Carbon AppleEvent structs are
+    * pack(2): AEDesc is {DescType@0; AEDataStorage dataHandle@+4}, sizeof 12 — the
+    * Handle at +4, NOT the natural +8). clang folds the pragma into the record's
+    * alignment, so clang_Type_getAlignOf gives the effective pack cap (2 for
+    * AEDesc; the natural max-field-align for an unpacked struct, which caps
+    * NOTHING since every field's align is already <= it). Building the native
+    * x86_64 record with natural alignment writes dataHandle at +8 -> the native
+    * AE callee reads it at +4, straddling two fields = a garbage handle pointer
+    * (Civ 'oapp' AEGetParamDesc EXC_BAD_ACCESS at addr 0x..._00000008). The SAME
+    * cap governs the i386 side (pack is arch-independent), applied after
+    * align_field's Darwin-i386 8->4 clamp. */
+   const long long rec_align = clang_Type_getAlignOf(record);
+   const size_t pack_cap = (rec_align > 0) ? static_cast<size_t>(rec_align) : 0;
    /* field_types (canonical) and field_types_written are populated in lockstep. */
    auto wi = decl.field_types_written.begin();
    for (CXType field_type : decl.field_types) {
       const CXType written =
          (wi != decl.field_types_written.end()) ? *wi : field_type;
-      src.align_field(field_type, from_arch);
-      dst.align_field(field_type, to_arch);
+      src.align_field(field_type, from_arch, pack_cap);
+      dst.align_field(field_type, to_arch, pack_cap);
 
       if (is_opaque_handle_type(written)) {
          /* Opaque Memory Manager Handle field: marshal the pointer VALUE, do

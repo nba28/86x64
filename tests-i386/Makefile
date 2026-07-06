@@ -73,8 +73,25 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record
 all: run-only
+
+# pack-record: guard for the #pragma pack record-LAYOUT fix (abigen convert_record
+# + align_field pack_cap; Civ 'oapp' AEGetParamDesc EXC_BAD_ACCESS). Classic Carbon
+# AppleEvent structs are pack(2) (AEDesc: Handle @+4, not the natural +8); abigen
+# built the native record with natural alignment so the native AE callee's +4 read
+# straddled -> garbage handle. The fix caps field alignment at clang_Type_getAlignOf
+# (the effective pack). Self-contained (abigen + nasm; no i386 sysroot).
+pack-record:
+	@bash pack_record_test.sh
+
+# structret-regclass: guard for the register-class struct RETURN + byval struct
+# ARG completion (abigen relaxed the "byval arg + unhandled struct return" skip to
+# admit fp_reg [CGPoint/CGSize -> eax:edx] and int_reg [NSRange/CFRange rax:rdx,
+# UnsignedWide/AbsoluteTime rax hi-split] returns). Self-contained (abigen + nasm).
+# The fp_reg runtime path is value-checked by test 51_structret_regclass.
+structret-regclass:
+	@bash structret_regclass_test.sh
 
 # handle-arg: regression for the bare opaque-Handle ARGUMENT marshalling fix
 # (abigen is_opaque_handle_type at the top-level arg dispatch; companion to

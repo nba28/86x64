@@ -63,10 +63,17 @@ const std::string& reg_group::reg(reg_width width) const {
    }
 }
 
-void MemoryLocation::align_field(CXType type, arch a) {
+void MemoryLocation::align_field(CXType type, arch a, size_t pack_cap) {
    size_t align = alignof_type(type, a);
    if (align == 8 && a == arch::i386) {
       align = 4;
+   }
+   /* honor a struct's #pragma pack(N) / __attribute__((packed)): a field's
+    * alignment is capped at the struct's effective packing (e.g. AEDesc is
+    * pack(2), so its Handle field sits at +4, not the natural +8). Applied after
+    * the Darwin-i386 8->4 clamp; 0 means "no cap". */
+   if (pack_cap && align > pack_cap) {
+      align = pack_cap;
    }
    index = align_up<int>(index, align);
 }
