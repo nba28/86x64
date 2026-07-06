@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record
 all: run-only
 
 # pack-record: guard for the #pragma pack record-LAYOUT fix (abigen convert_record
@@ -144,6 +144,14 @@ cg-color:
 # reader — exactly what the shims do. SKIPs if no .pict is present.
 qd-pict:
 	@bash qd_pict_test.sh
+
+# qt-movie: regression guard for the QuickTime Movie Toolbox -> AVFoundation bridge
+# (quicktime_movie_bridge.m) + the GetMoviePict wrapped-picture decode (qd_gworld.c
+# pict_decode 'MVPX'). Self-contained native x86_64 (no i386 sysroot, no display):
+# synthesizes an H.264 movie, pulls a decoded ARGB frame via AVPlayerItemVideoOutput
+# and validates the pixels, then round-trips a GetMoviePict wrapped PicHandle body.
+qt-movie:
+	@bash qt_movie_test.sh
 
 # synth-dyld-info: regression test for `convert --synthesize-dyld-info` (route C:
 # classic LC_DYSYMTAB image -> canonical modern LC_DYLD_INFO_ONLY dylib that

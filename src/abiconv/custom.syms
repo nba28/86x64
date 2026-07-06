@@ -513,6 +513,7 @@ _SetMovieTimeValue
 _IsMovieDone
 _MoviesTask
 _UpdateMovie
+_GetMoviePict
 _PrerollMovie
 _SetMovieActive
 _SetMovieVolume

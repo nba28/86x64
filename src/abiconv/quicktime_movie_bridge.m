@@ -39,6 +39,7 @@
 #import <AVFoundation/AVFoundation.h>
 #import <CoreMedia/CoreMedia.h>
 #import <CoreVideo/CoreVideo.h>
+#import <ImageIO/ImageIO.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -370,4 +371,70 @@ uint32_t shim_SetMovieVolume(uint32_t *a) {
    qt_movie *m = qt_from_i386(a[0]);
    if (m) { int16_t v = (int16_t)a[1]; m->player.volume = (v <= 0) ? 0.f : (float)v / 256.f; }
    return cmNoErr;
+}
+
+/* ---- GetMoviePict: single-frame snapshot -> classic PicHandle ----------- *
+ * PicHandle GetMoviePict(Movie, TimeValue) returns a QuickDraw picture of the
+ * frame at `time`, which the app then hands to DrawPicture. Modern macOS has no
+ * PICT *encoder* (ImageIO's com.apple.pict is read-only), so instead of forging a
+ * fragile PICT opcode stream we hand back a "wrapped-image PicHandle": a valid
+ * classic 10-byte header ([picSize:2][picFrame Rect:8], NATIVE i386 byte order so
+ * the app reads correct bounds) followed by the 4-byte tag 'MVPX' and a PNG of the
+ * frame. The substrate's decode (qd_gworld.c pict_decode) recognizes the tag and
+ * decodes the PNG; DrawPicture then blits it exactly like a real picture. */
+#define QT_WRAPPIC_TAG "MVPX"
+
+/* Decode the frame at `sec` to a +1 CGImage (image generator — no playback). */
+static CGImageRef qt_frame_cgimage(qt_movie *m, double sec) {
+   if (!m->asset) return NULL;
+   AVAssetImageGenerator *g = [AVAssetImageGenerator assetImageGeneratorWithAsset:m->asset];
+   g.appliesPreferredTrackTransform = YES;
+   g.requestedTimeToleranceBefore = kCMTimeZero;
+   g.requestedTimeToleranceAfter  = kCMTimePositiveInfinity;   /* nearest at/after */
+   CMTime t = CMTimeMakeWithSeconds(sec < 0 ? 0 : sec, m->timeScale);
+   NSError *err = nil;
+   CGImageRef img = [g copyCGImageAtTime:t actualTime:NULL error:&err];
+   if (!img) MVLOG("frame decode failed @%.2fs: %s\n", sec,
+                   err.localizedDescription.UTF8String ?: "?");
+   return img;   /* caller releases */
+}
+
+/* Encode a CGImage to PNG bytes (retained CFData), or NULL. */
+static CFDataRef qt_cgimage_png(CGImageRef img) {
+   CFMutableDataRef d = CFDataCreateMutable(NULL, 0);
+   if (!d) return NULL;
+   CGImageDestinationRef dst = CGImageDestinationCreateWithData(d, CFSTR("public.png"), 1, NULL);
+   if (!dst) { CFRelease(d); return NULL; }
+   CGImageDestinationAddImage(dst, img, NULL);
+   BOOL ok = CGImageDestinationFinalize(dst);
+   CFRelease(dst);
+   if (!ok) { CFRelease(d); return NULL; }
+   return d;
+}
+
+/* PicHandle GetMoviePict(Movie theMovie, TimeValue time); */
+uint32_t shim_GetMoviePict(uint32_t *a) {
+   qt_movie *m = qt_from_i386(a[0]);
+   if (!m) return 0;
+   double sec = (double)(int32_t)a[1] / (double)m->timeScale;
+   CGImageRef img = qt_frame_cgimage(m, sec);
+   if (!img) return 0;
+   int w = (int)CGImageGetWidth(img), h = (int)CGImageGetHeight(img);
+   CFDataRef png = qt_cgimage_png(img);
+   CGImageRelease(img);
+   if (!png) return 0;
+
+   uint32_t pnglen = (uint32_t)CFDataGetLength(png);
+   uint32_t handle = cm_new_handle(10 + 4 + pnglen, 0);
+   if (!handle) { CFRelease(png); return 0; }
+   uint8_t *blk = (uint8_t *)cm_handle_block(handle);
+   int16_t *hdr = (int16_t *)blk;               /* NATIVE i386 (LE) so the app reads it */
+   hdr[0] = 0;                                  /* picSize (low word; modern-ignored) */
+   hdr[1] = 0; hdr[2] = 0;                      /* picFrame.top, .left */
+   hdr[3] = (int16_t)h; hdr[4] = (int16_t)w;    /* picFrame.bottom, .right */
+   memcpy(blk + 10, QT_WRAPPIC_TAG, 4);
+   memcpy(blk + 14, CFDataGetBytePtr(png), pnglen);
+   CFRelease(png);
+   MVLOG("GetMoviePict @%.2fs -> %dx%d PicHandle=%08x (%u png bytes)\n", sec, w, h, handle, pnglen);
+   return handle;
 }

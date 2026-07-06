@@ -1164,6 +1164,7 @@ _x64_exc_longjmp:
 	MTSHIM	___IsMovieDone,                       _shim_IsMovieDone
 	MTSHIM	___MoviesTask,                        _shim_MoviesTask
 	MTSHIM	___UpdateMovie,                       _shim_UpdateMovie
+	MTSHIM	___GetMoviePict,                      _shim_GetMoviePict
 	MTSHIM	___PrerollMovie,                      _shim_PrerollMovie
 	MTSHIM	___SetMovieActive,                    _shim_SetMovieActive
 	MTSHIM	___SetMovieVolume,                    _shim_SetMovieVolume

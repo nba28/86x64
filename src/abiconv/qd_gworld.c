@@ -956,6 +956,23 @@ uint32_t shim_TestDeviceAttribute(uint32_t *a)
 static CGImageRef pict_decode(const void *body, size_t len)
 {
    if (!body || !len) return NULL;
+   /* "wrapped-image PicHandle" (quicktime_movie_bridge.m GetMoviePict, and any
+    * shim that snapshots a frame): a classic 10-byte header ([picSize][picFrame])
+    * then the tag 'MVPX' and a self-describing image (PNG/etc.). Decode the image
+    * directly — ImageIO can't ENCODE PICT, so this is how a live frame becomes a
+    * drawable PicHandle. Detected by the tag at offset 10; falls through to the
+    * real com.apple.pict path for genuine pictures. */
+   if (len > 14) {
+      const uint8_t *b = (const uint8_t *)body;
+      if (b[10]=='M' && b[11]=='V' && b[12]=='P' && b[13]=='X') {
+         CFDataRef id_ = CFDataCreate(NULL, b + 14, (CFIndex)(len - 14));
+         CGImageSourceRef is = id_ ? CGImageSourceCreateWithData(id_, NULL) : NULL;
+         CGImageRef im = is ? CGImageSourceCreateImageAtIndex(is, 0, NULL) : NULL;
+         if (is) CFRelease(is);
+         if (id_) CFRelease(id_);
+         return im;
+      }
+   }
    CFMutableDataRef d = CFDataCreateMutable(NULL, 0);
    if (!d) return NULL;
    static const UInt8 hdr512[512] = { 0 };
