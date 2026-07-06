@@ -682,6 +682,14 @@ _x64_exc_longjmp:
 	MTSHIM	____ZdlPv,              _shim_ZdlPv
 	MTSHIM	____ZdaPv,              _shim_ZdaPv
 	MTSHIM	____ZdlPvRKSt9nothrow_t, _shim_ZdlPv_nothrow
+	; std::ios_base::Init::Init / ~Init — <iostream> per-TU static ctor. Binds to
+	; NATIVE libstdc++ whose 8-byte ret OVER-POPS the i386 4-byte frame (universal
+	; C++ ctors-ON crash). Route through the i386 4-byte-ret discipline; the shim
+	; still calls the real native ctor/dtor. C1/C2 + D1/D2 funnel to one impl.
+	MTSHIM	____ZNSt8ios_base4InitC1Ev, _shim_ios_base_Init_ctor
+	MTSHIM	____ZNSt8ios_base4InitC2Ev, _shim_ios_base_Init_ctor
+	MTSHIM	____ZNSt8ios_base4InitD1Ev, _shim_ios_base_Init_dtor
+	MTSHIM	____ZNSt8ios_base4InitD2Ev, _shim_ios_base_Init_dtor
 	MTSHIM	____ZSt17__throw_bad_allocv,        _shim_throw_bad_alloc
 	MTSHIM	____ZSt20__throw_length_errorPKc,   _shim_throw_length_error
 	MTSHIM	____ZSt20__throw_out_of_rangePKc,   _shim_throw_out_of_range

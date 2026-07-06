@@ -54,6 +54,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <pthread.h>
+#include <dlfcn.h>
 
 /* ---------------- __cxa_guard_* ---------------- */
 
@@ -161,6 +162,44 @@ uint32_t shim_Znam_nothrow(uint32_t *a) { return cxx_alloc(a[0], 0, "new[](nothr
 uint32_t shim_ZdlPv(uint32_t *a) { free((void *)(uintptr_t)a[0]); return 0; }
 uint32_t shim_ZdaPv(uint32_t *a) { free((void *)(uintptr_t)a[0]); return 0; }
 uint32_t shim_ZdlPv_nothrow(uint32_t *a) { free((void *)(uintptr_t)a[0]); return 0; }
+
+/* ---------------- std::ios_base::Init::Init / ~Init ----------------
+ * The per-translation-unit `static std::ios_base::Init __ioinit;` that <iostream>
+ * emits calls these to refcount-guard std::cout/cin/cerr setup. In a translated
+ * i386 image the call reaches a __symbol_stub that binds to NATIVE libstdc++
+ * (x86_64); the native `ret` pops 8 bytes and OVER-POPS the translated i386
+ * 4-byte return frame — fusing two adjacent i386 stack slots into a garbage rip
+ * (the iPhoto ctors-ON crash: EXC_BAD_ACCESS rip=<slotB>:<slotA> in the FIRST
+ * static ctor). This is UNIVERSAL: every C++ <iostream> program emits this ctor,
+ * and once the translated __mod_init_func static ctors run (default since the
+ * run-now init change) it fires for every such target.
+ *
+ * Routing these through libabiconv makes the MTSHIM trampoline run the i386
+ * 4-byte-ret discipline (no over-pop). We still invoke the REAL native ctor/dtor
+ * so the refcount-guarded stream init/teardown happens for real and stays
+ * balanced; `this` is an empty refcount-guard object (not dereferenced by the
+ * native impl, which uses a libstdc++-internal static _S_refcount), so the i386
+ * 4-byte `this` widens harmlessly to rdi. If native libstdc++ isn't resolvable
+ * the shim no-ops — still correct, since libstdc++'s OWN load-time __ioinit
+ * already created the streams; the point is only to STOP over-popping. C1/C2
+ * (complete/base ctor) and D1/D2 both funnel here (Init is an empty class). */
+static void *ios_native(const char *sym) {
+   static void *ctor = (void *)-1, *dtor = (void *)-1;
+   int want_ctor = sym[strlen(sym) - 3] == 'C';   /* ...C1Ev vs ...D1Ev */
+   void **slot = want_ctor ? &ctor : &dtor;
+   if (*slot == (void *)-1) { *slot = dlsym(RTLD_DEFAULT, sym); }
+   return *slot;
+}
+uint32_t shim_ios_base_Init_ctor(uint32_t *a) {
+   void (*f)(void *) = (void (*)(void *))ios_native("_ZNSt8ios_base4InitC1Ev");
+   if (f) { f((void *)(uintptr_t)a[0]); }   /* a[0] = this (empty guard object) */
+   return 0;                                /* ctor returns void (Itanium x86 ABI) */
+}
+uint32_t shim_ios_base_Init_dtor(uint32_t *a) {
+   void (*f)(void *) = (void (*)(void *))ios_native("_ZNSt8ios_base4InitD1Ev");
+   if (f) { f((void *)(uintptr_t)a[0]); }
+   return 0;
+}
 
 /* ---------------- std:: __throw_* helpers ---------------- */
 
