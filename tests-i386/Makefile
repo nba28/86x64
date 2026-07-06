@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow
 all: run-only
 
 # va-list-skip: guard for the abigen va_list-arg SKIP (C6). abigen can't marshal a
@@ -164,6 +164,15 @@ cg-color:
 # resolves a registered shadow to the ORIGINAL native descriptor.
 ae-shadow:
 	@bash ae_shadow_test.sh
+
+# record-shadow: regression guard for the record-VALUE data-shadow fix
+# (abigen.cc handle_var_decl CXType_Record case + objc_slide.c load-time
+# redirect). Self-contained (abigen parses a synthetic header, no i386 sysroot):
+# an 8-byte record VALUE data constant (HIViewID-shaped) is shadowed with a
+# low-4GB copy (info=8); a >8-byte record is not (8-byte slot cap). Fixes Civ
+# EULADialog+356 -> kHIViewWindowContentID truncation.
+record-shadow:
+	@bash record_shadow_test.sh
 
 # qd-pict: regression guard for the classic-PICT decode path (qd_gworld.c
 # shim_DrawPicture/QDPict*). Self-contained native x86_64 (no i386 sysroot):

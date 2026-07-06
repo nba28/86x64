@@ -5177,6 +5177,35 @@ static void x64_init_data_shadows(void) {
    }
 }
 
+/* Look up a VALUE-copy data-shadow (scalar/small-record, info != 0) by symbol
+ * name WITHOUT the leading underscore. Returns &shadow (a low-4GB slot) and its
+ * byte width, and (re)fills it from the live native symbol via dlsym — so the
+ * value is correct even if the constructor above ran before the owning
+ * framework was loaded (e.g. HIToolbox's kHIViewWindowContentID, resolved only
+ * when Civ's Carbon dependency is in). Object/CF shadows (info==0, handle-wrap)
+ * are NOT served here — they need the objc arena + double-deref semantics that
+ * the translate-time static-interpose path already provides. Used by
+ * patch_import_pointers (objc_slide.c) to redirect a classic __IMPORT,__pointers
+ * slot to the shadow at load time (the RESYNC-class application of the
+ * translate-time data-shadow table for a value-typed data constant that a
+ * 32-bit load would otherwise truncate). NULL if not a value-shadow. */
+uint64_t *x64_value_data_shadow(const char *name_no_underscore) {
+   const uint64_t n = x64_data_shadows_count;
+   for (uint64_t i = 0; i < n; ++i) {
+      const char *nm = (const char *)x64_data_shadows[3 * i + 1];
+      const uint64_t info = (uint64_t)x64_data_shadows[3 * i + 2];
+      if (info == 0 || !nm || strcmp(nm, name_no_underscore) != 0) { continue; }
+      uint64_t *shadow = (uint64_t *)x64_data_shadows[3 * i];
+      if (!shadow) { return NULL; }
+      void *addr = dlsym(RTLD_DEFAULT, name_no_underscore);
+      if (!addr) { return NULL; }       /* owning framework not loaded yet */
+      *shadow = 0;
+      memcpy(shadow, addr, info > 8 ? 8 : (size_t)info);
+      return shadow;
+   }
+   return NULL;
+}
+
 /* Lazily resolve object data-shadows that were nil at constructor time (mutable
  * object globals like NSApp, which AppKit sets only once the app's
  * NSApplication exists). Called from the forward bridge on each translated

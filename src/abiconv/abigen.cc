@@ -1581,8 +1581,27 @@ struct ABIGenerator {
          if (!is_cf) { return; }
          break;
       }
+      case CXType_Record: {
+         /* Small struct-VALUE data constants (e.g. `const HIViewID
+          * kHIViewWindowContentID` = {OSType signature; SInt32 id}, 8B). The
+          * i386 code loads &var via the non-lazy ptr then reads its fields
+          * (`movl slot,%reg; movl (%reg),%f0; movl 0x4(%reg),%f1`); the real
+          * 64-bit &var truncates on the 4-byte load and the field read faults
+          * (Civ EULADialog: kHIViewWindowContentID -> HIViewFindByID). The bits
+          * ARE the value, so shadow a low-4GB COPY (x64_init_data_shadows
+          * memcpy's `info` bytes, exactly like the scalar case). Only records
+          * that fit the 8-byte shadow slot — larger toolbox structs would need
+          * a wider shadow (none seen yet). REGRESSION-SAFE: such a global is
+          * already broken-on-read (its high &var truncates), so no working path
+          * is lost. Universal: triggers on "small record-value data constant",
+          * not an app name. */
+         const long long sz = clang_Type_getSizeOf(canon);
+         if (sz < 1 || sz > 8) { return; }
+         info = (unsigned)sz;
+         break;
+      }
       default:
-         return; /* only objc-object + opaque-CF data constants */
+         return; /* only objc-object + opaque-CF + small-record data constants */
       }
       CXString cxsym = clang_getCursorSpelling(c);
       const std::string sym = std::string("_") + clang_getCString(cxsym);

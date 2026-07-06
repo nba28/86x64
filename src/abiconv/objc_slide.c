@@ -1495,6 +1495,10 @@ static void i386_rune_build(void) {
  * data-shadow table carries; extending that is the complete cure (see
  * the known-gaps list). This runtime pass unblocks the crt bootstrap, which is the
  * gate for all four targets. */
+/* objc_shim.c: (re)fill + return a low-4GB value-copy data-shadow by name (no
+ * leading underscore), or NULL if the symbol is not a value-typed data shadow. */
+extern uint64_t *x64_value_data_shadow(const char *name_no_underscore);
+
 static void patch_import_pointers(const struct mach_header_64 *mh64,
                                   intptr_t slide, const char *imgname) {
    if (((uintptr_t)&g_import_zero_word >> 32) ||
@@ -1577,6 +1581,23 @@ static void patch_import_pointers(const struct mach_header_64 *mh64,
                    * table base instead of the truncated 64-bit libSystem addr. */
                   i386_rune_build();
                   target = (uint64_t *)(void *)g_i386_rune;
+               } else if (name[0] == '_') {
+                  /* General value-typed data constant (scalar / small record,
+                   * e.g. HIToolbox's `const HIViewID kHIViewWindowContentID`):
+                   * the i386 code reads &var via this slot then derefs the
+                   * value bytes; the real 64-bit &var truncates on the 4-byte
+                   * load -> fault (Civ EULADialog+356: kHIViewWindowContentID ->
+                   * HIViewFindByID). abigen emits a low-4GB shadow COPY for such
+                   * constants (data-shadow table); apply it HERE at load time —
+                   * the RESYNC-class equivalent of the translate-time static-
+                   * interpose redirect, so a non-retranslated classic binary is
+                   * cured on a plain libabiconv resync. x64_value_data_shadow
+                   * (re)fills from the live symbol via dlsym (this pass runs at
+                   * the image's add-image, after its framework deps are in).
+                   * Object/CF (handle-wrap) shadows are left to translate time.
+                   * Regression-safe: only fires for a data constant already
+                   * broken-on-read (its high &var truncates). */
+                  target = x64_value_data_shadow(name + 1);
                }
                if (!target) { continue; }
 
