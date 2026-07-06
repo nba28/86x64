@@ -150,6 +150,42 @@ int shim_IODeregisterForSystemPower(uint32_t *a)
    return r;
 }
 
+/* IONotificationPortRef IONotificationPortCreate(mach_port_t mainPort);
+ *
+ * The GENERAL device-notification port creator (device/HID hot-plug, IOKit
+ * matching notifications) — the sibling of IORegisterForSystemPower's power
+ * port. Without this hand shim, abigen auto-forwards to the native creator and
+ * TRUNCATES the returned 64-bit IONotificationPortRef into i386's 4-byte eax;
+ * the caller then hands that truncated pointer to
+ * IONotificationPortGetRunLoopSource, whose token check fails -> it returns a
+ * NULL CFRunLoopSourceRef -> the app's CFRunLoopAddSource(rl, NULL, ...) faults
+ * (Halo: EXC_BAD_ACCESS in CFRunLoopAddSource+114 after
+ * IONotificationPortCreate at i386 site 0x2f0109). Fix: create the REAL native
+ * port and tokenize it into the SAME slot table the power path uses, so
+ * IONotificationPortGetRunLoopSource / IONotificationPortDestroy resolve it.
+ * mainPort (mach_port_t) is 32-bit on both archs (typically kIOMainPortDefault
+ * == 0), so a[0] passes through un-truncated. Universal: any i386 app wiring
+ * IOKit device notifications into its run loop. */
+uint32_t shim_IONotificationPortCreate(uint32_t *a)
+{
+   os_unfair_lock_lock(&g_lock);
+   int i = -1;
+   for (int k = 0; k < IOK_MAX_SLOTS; k++)
+      if (!g_slots[k].in_use) { i = k; break; }
+   if (i >= 0) { memset(&g_slots[i], 0, sizeof(g_slots[i])); g_slots[i].in_use = 1; }
+   os_unfair_lock_unlock(&g_lock);
+   if (i < 0)
+      return 0;   /* slot table full -> NULL port (caller null-checks or we've capped) */
+
+   IONotificationPortRef port = IONotificationPortCreate((mach_port_t)a[0]);
+   if (!port) {
+      g_slots[i].in_use = 0;
+      return 0;
+   }
+   g_slots[i].port = port;   /* connect/notifier/source stay 0/NULL (no power path) */
+   return TOK_PORT_BASE | (uint32_t)i;
+}
+
 /* CFRunLoopSourceRef IONotificationPortGetRunLoopSource(IONotificationPortRef port);
  * port arg is our port token -> return a source token. */
 uint32_t shim_IONotificationPortGetRunLoopSource(uint32_t *a)

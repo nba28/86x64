@@ -178,6 +178,7 @@
 	;; Current stays abigen-generated). See iokit_shim.c.
 	MTSHIM	___IORegisterForSystemPower,         _shim_IORegisterForSystemPower
 	MTSHIM	___IODeregisterForSystemPower,       _shim_IODeregisterForSystemPower
+	MTSHIM	___IONotificationPortCreate,         _shim_IONotificationPortCreate
 	MTSHIM	___IONotificationPortGetRunLoopSource, _shim_IONotificationPortGetRunLoopSource
 	MTSHIM	___IONotificationPortDestroy,        _shim_IONotificationPortDestroy
 	MTSHIM	___IOServiceClose,                   _shim_IOServiceClose
