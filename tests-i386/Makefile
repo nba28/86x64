@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework
 all: run-only
 
 # cb-extended: guard for the extended callback-bridge marshalling (C4): a
@@ -186,6 +186,14 @@ dyld-multicopy: $(MACHO_TOOL)
 # c7 04 24 <i386 addr>). Needs the i386 sysroot; SKIPs without.
 stripped-stackarg-procptr: $(MACHO_TOOL)
 	@bash stripped_stackarg_procptr_test.sh $(MACHO_TOOL)
+
+# sub-framework: guard for LC_SUB_FRAMEWORK (0x12) support in the core load-command
+# parser (lc.cc). Umbrella sub-frameworks (iMovie's Helium/HeliumRender) carry it;
+# the parser's default case used to throw "load command 0x12 not supported" and
+# abort the translate. Builds an i386 dylib with -umbrella, runs rebasify+transform,
+# asserts no throw + LC_SUB_FRAMEWORK preserved. Needs the i386 sysroot; SKIPs without.
+sub-framework: $(MACHO_TOOL)
+	@bash sub_framework_test.sh $(MACHO_TOOL)
 
 # handle-marshal: regression for the opaque-Handle-in-struct marshalling fix
 # (abigen typeconv.cc; Civ IV 'oapp' AppleEvent crash — AEDesc::dataHandle is a

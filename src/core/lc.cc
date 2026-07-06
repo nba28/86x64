@@ -48,9 +48,20 @@ namespace MachO {
 
       case LC_LOAD_DYLINKER:
       case LC_RPATH:
-         /* dylinker_command and rpath_command share layout (cmd/cmdsize/lc_str),
-          * so DylinkerCommand parses/builds/emits both correctly; the stored
-          * cmd field carries LC_RPATH through to emission. */
+      case LC_SUB_FRAMEWORK:
+      case LC_SUB_UMBRELLA:
+      case LC_SUB_CLIENT:
+      case LC_SUB_LIBRARY:
+         /* dylinker_command, rpath_command, and the four sub_*_command variants
+          * (sub_framework/sub_umbrella/sub_client/sub_library) all share the
+          * {cmd, cmdsize, lc_str} layout, so DylinkerCommand parses/builds/emits
+          * all of them correctly; the stored cmd field carries the original
+          * command (LC_RPATH, LC_SUB_FRAMEWORK, ...) through to emission. The
+          * lc_str is a plain name (rpath / umbrella / sub-library) with no
+          * vmaddr or __LINKEDIT offset, so it relays through the M32->M64
+          * transform verbatim. LC_SUB_FRAMEWORK appears on umbrella SUB-frameworks
+          * — e.g. iMovie's Helium.framework/.../HeliumRender.framework names its
+          * "Helium" umbrella — which previously hit the default throw. */
          return DylinkerCommand<bits>::Parse(img, offset, env);
 
       case LC_UUID:
