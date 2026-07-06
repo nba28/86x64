@@ -269,6 +269,83 @@ struct ABIConversion {
              (f.canon.kind == CXType_Double || f.canon.kind == CXType_Float);
    }
 
+   /* Detect a fixed-width 32-bit Mac typedef (SInt32/UInt32/OSType/FourCharCode/
+    * OSStatus/DescType/...) that the LEGACY -arch i386 header parse canonicalizes
+    * to `long`/`unsigned long`. On i386 that `long` is 4 bytes (correct), but the
+    * NATIVE x86_64 framework was built from the MODERN headers where the SAME
+    * typedef is `int` = 4 bytes — NOT the 8-byte `long` the canonical implies. So a
+    * by-value struct carrying such a field (HIViewID/ControlID {OSType;SInt32},
+    * EventTypeSpec {OSType;UInt32}, ...) is over-sized to 16 bytes and rides TWO GP
+    * regs instead of ONE, shifting the following arg (Civ's HIViewFindByID wall:
+    * inID's second half landed in rdx, displacing outView). Detected by walking the
+    * AS-WRITTEN typedef chain for a name ending in "32" (every one is built on
+    * SInt32/UInt32) with a `long`/`unsigned long` canonical. INERT in the modern
+    * pass (there the canonical is Int/UInt, already the correct 4 bytes); a
+    * pointer-width `long` typedef (CFIndex/NSInteger) never ends in "32", so
+    * CFRange/NSRange keep 8 bytes per field. Structural + name gated, never a name. */
+   static bool byval_field_is_int32(const byval_field& f) {
+      if (f.canon.kind != CXType_Long && f.canon.kind != CXType_ULong) {
+         return false;
+      }
+      CXType t = f.written;
+      for (int depth = 0; depth < 8 && t.kind == CXType_Typedef; ++depth) {
+         CXCursor d = clang_getTypeDeclaration(t);
+         CXString ns = clang_getCursorSpelling(d);
+         const char* cs = clang_getCString(ns);
+         const std::string name(cs ? cs : "");
+         clang_disposeString(ns);
+         if (name.size() >= 2 && name.compare(name.size() - 2, 2, "32") == 0) {
+            return true;
+         }
+         t = clang_getTypedefDeclUnderlyingType(d);
+      }
+      return false;
+   }
+
+   /* x86_64 SIZE / ALIGN of a by-value field, correcting a legacy fixed-32 typedef
+    * (byval_field_is_int32) back to its true native 4-byte width; recurses for
+    * nested records / arrays. Used everywhere the byval machinery computes the
+    * x86_64 layout, so a fixed-32 field consumes 4 bytes, not the canonical 8. */
+   static size_t byval_field_x64_size(const byval_field& f) {
+      if (byval_field_is_int32(f)) { return 4; }
+      const CXType c = f.canon;
+      if (c.kind == CXType_Record) { return byval_x64_sizeof(c); }
+      if (c.kind == CXType_ConstantArray) {
+         const CXType el = clang_getCanonicalType(clang_getArrayElementType(c));
+         return static_cast<size_t>(clang_getArraySize(c)) *
+                byval_field_x64_size({el, el});
+      }
+      return sizeof_type(c, arch::x86_64);
+   }
+   static size_t byval_field_x64_align(const byval_field& f) {
+      if (byval_field_is_int32(f)) { return 4; }
+      const CXType c = f.canon;
+      if (c.kind == CXType_Record) {
+         std::vector<byval_field> fs;
+         byval_collect_fields(c, fs);
+         size_t a = 1;
+         for (const byval_field& g : fs) { a = std::max(a, byval_field_x64_align(g)); }
+         return a;
+      }
+      if (c.kind == CXType_ConstantArray) {
+         const CXType el = clang_getCanonicalType(clang_getArrayElementType(c));
+         return byval_field_x64_align({el, el});
+      }
+      return alignof_type(c, arch::x86_64);
+   }
+   static size_t byval_x64_sizeof(CXType record_canon) {
+      std::vector<byval_field> fs;
+      byval_collect_fields(record_canon, fs);
+      size_t off = 0, salign = 1;
+      for (const byval_field& f : fs) {
+         const size_t a = byval_field_x64_align(f);
+         off = align_up(off, a);
+         salign = std::max(salign, a);
+         off += byval_field_x64_size(f);
+      }
+      return align_up(off, salign);
+   }
+
    static void byval_mark(byval_plan& plan, size_t off, size_t size, bool fp) {
       for (size_t k = off / 8; k <= (off + size - 1) / 8; ++k) {
          if (k >= plan.eb_int.size()) { plan.eb_int.resize(k + 1); plan.eb_fp.resize(k + 1); }
@@ -291,9 +368,9 @@ struct ABIConversion {
       byval_collect_fields(record_canon, fields);
       size_t off = 0;
       for (const byval_field& f : fields) {
-         off = align_up(off, alignof_type(f.canon, arch::x86_64));
+         off = align_up(off, byval_field_x64_align(f));
          byval_classify_leaf(f, base64 + off, plan);
-         off += sizeof_type(f.canon, arch::x86_64);
+         off += byval_field_x64_size(f);
       }
    }
 
@@ -324,7 +401,10 @@ struct ABIConversion {
       case CXType_Pointer: case CXType_BlockPointer:
       case CXType_ObjCObjectPointer: case CXType_ObjCId:
       case CXType_ObjCClass: case CXType_ObjCSel:
-         byval_mark(plan, off64, sizeof_type(c, arch::x86_64), false);
+         /* byval_field_x64_size corrects a legacy fixed-32 typedef (SInt32/OSType
+          * => canonical `long`) to its true 4-byte native width, so it occupies
+          * one eightbyte slot, not the two an 8-byte `long` would span. */
+         byval_mark(plan, off64, byval_field_x64_size(f), false);
          return;
       case CXType_Record:
          byval_classify_walk(c, off64, plan);
@@ -346,7 +426,11 @@ struct ABIConversion {
    static byval_plan byval_classify(CXType record_canon) {
       byval_plan plan;
       plan.sz32 = sizeof_type(record_canon, arch::i386);
-      plan.sz64 = sizeof_type(record_canon, arch::x86_64);
+      /* corrected x86_64 size: a legacy fixed-32 field is 4 bytes, not 8 (see
+       * byval_field_is_int32), so a {OSType;SInt32} record is 8 bytes / ONE
+       * eightbyte, not 16 / two — the in-regs vs MEMORY decision below depends
+       * on this, as does the outgoing register count. */
+      plan.sz64 = byval_x64_sizeof(record_canon);
       if (plan.sz32 == 0 || plan.sz64 == 0) {
          throw std::invalid_argument("byval struct: empty/incomplete");
       }
@@ -385,6 +469,20 @@ struct ABIConversion {
          emit_fp_widen(os, true, src, dst);
          src += 4;
          dst += 8;
+         return;
+      }
+      /* legacy fixed-32 typedef (SInt32/OSType => canonical `long`): 4 bytes on
+       * BOTH the i386 source and the native x86_64 image (the modern SDK types it
+       * `int`), NOT the 8-byte `long` the canonical implies. Copy the 4 bytes and
+       * advance both cursors by 4 so the eightbyte layout matches native. */
+      if (byval_field_is_int32(f)) {
+         CXType i32 = c; i32.kind = CXType_Int;   /* force 4-byte align on both */
+         src.align_field(i32, arch::i386);
+         dst.align_field(i32, arch::x86_64);
+         conv.convert_int(os, c.kind == CXType_ULong ? CXType_UInt : CXType_Int,
+                          src, dst);
+         src += 4;
+         dst += 4;
          return;
       }
       src.align_field(c, arch::i386);

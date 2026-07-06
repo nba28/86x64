@@ -73,8 +73,19 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32
 all: run-only
+
+# byval-int32: guard for the legacy fixed-32 by-value-struct SIZING fix (abigen
+# byval_field_is_int32; Civ HIViewFindByID wall). The 10.6 parse canonicalizes
+# SInt32/UInt32/OSType to `long`, so abigen sized an all-int 8B record (HIViewID/
+# ControlID {OSType;SInt32}) as 16B -> two eightbytes -> two GP regs, shifting the
+# next arg. Fix: a `long`-canonical field whose typedef chain ends in "32" is a
+# fixed-32 type = 4 bytes on x86_64. Asserts the record rides ONE GP reg + the
+# following pointer isn't shifted, and a genuine {long,long} still spans two.
+# Self-contained (abigen + nasm; no i386 sysroot).
+byval-int32:
+	@bash byval_int32_test.sh
 
 # va-list-skip: guard for the abigen va_list-arg SKIP (C6). abigen can't marshal a
 # va_list (i386 char* vs x86_64 __va_list_tag) and used to emit a broken
