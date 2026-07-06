@@ -108,11 +108,28 @@ def fw_name(path):
     return None
 
 
+# System frameworks whose on-disk .framework is a HOLLOW SHELL on modern macOS:
+# the directory + Info.plist still exist under /System/Library/Frameworks, but the
+# x86_64 binary was REMOVED from the dyld shared cache, so dlopen fails ("Library
+# not loaded: .../QuickTime … not in dyld cache"). A bare directory-exists check
+# wrongly treats these as host-resolvable and skips them → the translated app then
+# hard-fails at LOAD. These must be VENDORED (from a curated x86_64 copy in
+# ~/projects/Library/Frameworks, e.g. QuickTime.framework/{86x64,iLife11,legacy}).
+# QuickTime is the documented one for our i386 targets (Halo/iMovie/iLife); extend
+# as other removed frameworks surface. (General follow-up: replace this curated set
+# with a live `arch -x86_64` dlopen loadability probe — see todo_gaps.)
+HOLLOW_SHELL_SYSTEM_FRAMEWORKS = {"QuickTime"}
+
+
 def system_fw_exists(kind, name):
     """A modern-macOS native home for this dependency? If so we must NOT vendor
     and translate the i386 original — it has to run native so it can keep
-    exporting its ObjC classes to the rest of the system."""
+    exporting its ObjC classes to the rest of the system. A hollow-shell framework
+    (dir present but x86_64 binary stripped from the dyld cache) is NOT a real
+    native home → return False so it gets vendored."""
     if kind == "framework":
+        if name in HOLLOW_SHELL_SYSTEM_FRAMEWORKS:
+            return False
         return any(Path(p, f"{name}.framework").is_dir() for p in (
             "/System/Library/Frameworks", "/System/Library/PrivateFrameworks"))
     return any(Path(p, name).exists() for p in (
@@ -202,8 +219,15 @@ def vendor(app, sources, dry, native=DEFAULT_NATIVE):
                     dangling.setdefault((kind, name), set()).add(b.name)
                 continue
             if dep.startswith('/System/') or dep.startswith('/usr/'):
-                continue          # OS-owned location → always native
-            if os.path.exists(dep):
+                # OS-owned location → normally native and left alone. EXCEPTION:
+                # a hollow-shell framework (dir present but x86_64 binary stripped
+                # from the dyld cache, e.g. QuickTime) is NOT loadable, so fall
+                # through to vendoring instead of skipping — otherwise the app
+                # dyld-fails at load ("Library not loaded: .../QuickTime").
+                if not (kind == "framework"
+                        and name in HOLLOW_SHELL_SYSTEM_FRAMEWORKS):
+                    continue
+            elif os.path.exists(dep):
                 continue          # resolves at its absolute path → host-native
             if system_fw_exists(kind, name):
                 continue          # has a modern native home → leave native
