@@ -473,6 +473,149 @@ static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
    }
 }
 
+/* ---------------------------------------------------------------------------
+ * __DATA,__mod_term_func: static TERMINATORS (the classic-GCC C++ static-dtor
+ * runners; Darwin GCC put them here, not through __cxa_atexit).
+ *
+ * dyld4's Loader::findAndRunAllInitializers -> forEachTerminator registers
+ * every entry RAW with native __cxa_atexit(func, NULL, mh) — an in-image
+ * translated address passes its validation (unlike our old out-of-image init
+ * stubs, which is what c2eb10a's run-now sidesteps for INITS). At exit(),
+ * native __cxa_finalize_ranges CALLS the translated i386-ABI terminator
+ * directly: the 64-bit call pushes an 8-byte return address, the terminator
+ * body runs fine (the main stack is already low-4GB), but the translated i386
+ * epilogue (movl (%rsp),%r11d; lea 4(%rsp),%rsp; jmp *%r11) pops only the LOW
+ * 4 BYTES -> jumps to the truncated low half of the libsystem_c return
+ * address -> EXC_BAD_ACCESS (Halo: 0x1c08aeb3 = low32 of
+ * __cxa_finalize_ranges+319; lldb-confirmed registration by
+ * dyld`forEachTerminator with rdi = __mod_term_func[0]+slide). Surfaced when
+ * c2eb10a made ctors live and the disk-space fix let Halo reach its voluntary
+ * exit(0); universal for EVERY translated image with a non-empty
+ * __mod_term_func in any process that calls exit().
+ *
+ * Fix (the mod_TERM twin of the run-now init path, functionality-first):
+ * from the add-image callback — which runs during libabiconv's initializer,
+ * i.e. BEFORE dyld4 initializes the translated image and reads this section —
+ * NULL each slot so dyld4 skips it (NULL entries are silently skipped exactly
+ * like NULLed __mod_init_func slots; lldb-verified on Halo: zeroed slot ->
+ * clean exit 0, no dyld diagnostics), and re-register the real terminator
+ * through the reverse callback bridge: x64_cb_wrap(fn32, {0 args, void})
+ * hands native __cxa_atexit a NATIVE trampoline that re-enters the translated
+ * terminator on a low-4GB stack with a proper i386 4-byte return frame (the
+ * same mechanism shim_cxa_atexit uses for dlsym'd dtors). Static dtors
+ * therefore still RUN at exit, and in the classic dyld2 LIFO position
+ * (registered before any app atexit -> run last). NULLed slots keep
+ * multi-copy deploys idempotent: a later libabiconv copy's re-scan finds
+ * nothing left to register. Slot-value recovery (>4GB dyld __dyld-overflow
+ * clobber, unrebased widened 8-byte slots) mirrors wrap_mod_init_funcs.
+ */
+struct term_cb_sig { uint32_t nargs; uint32_t ret_kind; uint8_t arg_kinds[16]; };
+extern uint64_t x64_cb_wrap(uint32_t fn32, const struct term_cb_sig *sig);
+extern int __cxa_atexit(void (*func)(void *), void *arg, void *dso);
+
+static void wrap_mod_term_funcs(const struct mach_header_64 *mh64,
+                                intptr_t slide, const char *imgname,
+                                uint64_t text_lo, uint64_t text_hi) {
+   /* nargs=0, ret=CBR_VOID: the SysV shape of `void terminator(void)`.
+    * Static storage: x64_cb_wrap keeps the sig POINTER in its binding. */
+   static const struct term_cb_sig term_sig = { 0, 0, { 0 } };
+
+   const uint8_t *p = (const uint8_t *)(mh64 + 1);
+   for (uint32_t i = 0; i < mh64->ncmds; i++) {
+      const struct load_command *lc = (const struct load_command *)p;
+      if (lc->cmd == LC_SEGMENT_64) {
+         const struct segment_command_64 *seg = (const struct segment_command_64 *)p;
+         const struct section_64 *sect = (const struct section_64 *)(seg + 1);
+         for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
+            const uint32_t type = sect->flags & SECTION_TYPE;
+            if (type != S_MOD_TERM_FUNC_POINTERS) { continue; }
+            uintptr_t base = (uintptr_t)sect->addr + (uintptr_t)slide;
+            size_t n = (size_t)sect->size / sizeof(void *);
+            const size_t page = 4096;
+            uintptr_t a0 = base & ~(uintptr_t)(page - 1);
+            uintptr_t a1 = (base + sect->size + page - 1) & ~(uintptr_t)(page - 1);
+            if (mprotect((void *)a0, a1 - a0, PROT_READ | PROT_WRITE) != 0) {
+               if (g_verbose) {
+                  fprintf(stderr, "abiconv mod_term: mprotect RW failed for "
+                          "%s __mod_term_func: %s\n", imgname, strerror(errno));
+               }
+               continue;
+            }
+            void **slots = (void **)base;
+            size_t wrapped = 0;
+            for (size_t j = 0; j < n; j++) {
+               if (!slots[j]) { continue; }
+               /* Recover a slot clobbered by dyld's classic-__dyld 8-byte
+                * overflow (structurally possible whenever __mod_term_func
+                * directly follows the i386-sized __dyld section; same cure as
+                * the __mod_init_func case). */
+               if ((uintptr_t)slots[j] >= 0x100000000ULL) {
+                  uint64_t orig =
+                     read_image_qword(imgname, (uint64_t)sect->offset + j * 8);
+                  void *fixed = orig
+                     ? (void *)(uintptr_t)(orig + (uint64_t)slide) : NULL;
+                  if (g_verbose) {
+                     fprintf(stderr, "abiconv mod_term: recovered clobbered "
+                             "__mod_term_func[%zu] in %s: %p -> %p\n",
+                             j, imgname, slots[j], fixed);
+                  }
+                  slots[j] = fixed;
+                  if (!slots[j]) { continue; }
+               }
+               /* Recover an UNREBASED widened 8-byte slot (empty-rebase-table
+                * modern-i386-origin dylibs; same structural check as the init
+                * path: preferred-range-but-outside-loaded -> add the slide). */
+               if (slide != 0) {
+                  const uint64_t t = (uint64_t)(uintptr_t)slots[j];
+                  const uint64_t lo_l = text_lo + (uint64_t)(int64_t)slide;
+                  const uint64_t hi_l = text_hi + (uint64_t)(int64_t)slide;
+                  if (!(t >= lo_l && t < hi_l) &&
+                      t >= text_lo && t < text_hi) {
+                     void *fixed =
+                        (void *)(uintptr_t)(t + (uint64_t)(int64_t)slide);
+                     if (g_verbose) {
+                        fprintf(stderr, "abiconv mod_term: slid unrebased "
+                                "__mod_term_func[%zu] in %s: %p -> %p\n",
+                                j, imgname, slots[j], fixed);
+                     }
+                     slots[j] = fixed;
+                  }
+               }
+               const uintptr_t fn = (uintptr_t)slots[j];
+               /* NULL the slot FIRST: whatever happens below, dyld4 must
+                * never register the raw i386-ABI address. */
+               slots[j] = NULL;
+               if (fn >> 32) {
+                  if (g_verbose) {
+                     fprintf(stderr, "abiconv mod_term: dropped >4GB "
+                             "__mod_term_func[%zu] in %s (0x%lx)\n",
+                             j, imgname, (unsigned long)fn);
+                  }
+                  continue;
+               }
+               uint64_t tramp = x64_cb_wrap((uint32_t)fn, &term_sig);
+               if (!tramp) {          /* slots exhausted: drop, don't crash */
+                  if (g_verbose) {
+                     fprintf(stderr, "abiconv mod_term: cb slots exhausted; "
+                             "dropped __mod_term_func[%zu] in %s\n",
+                             j, imgname);
+                  }
+                  continue;
+               }
+               __cxa_atexit((void (*)(void *))(uintptr_t)tramp, NULL,
+                            (void *)mh64);
+               ++wrapped;
+            }
+            if (g_verbose) {
+               fprintf(stderr, "abiconv mod_term: registered %zu/%zu term "
+                       "funcs in %s via cb bridge\n", wrapped, n, imgname);
+            }
+         }
+      }
+      p += lc->cmdsize;
+   }
+}
+
 static void slide_section_4byte(const char *imgname,
                                  const char *segname, const char *sectname,
                                  uint64_t vmaddr, uint64_t size,
@@ -1577,6 +1720,14 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    if (image_links_libabiconv(mh64)) {
       wrap_mod_init_funcs(mh64, slide, imgname, text_lo, text_hi,
                           init_targets, &n_init);
+      /* Re-register static TERMINATORS (__DATA,__mod_term_func) through the
+       * reverse callback bridge so dyld4 never calls the raw i386-ABI address
+       * at exit(): the translated epilogue's 4-byte return-pop would truncate
+       * libsystem_c's 8-byte return address (Halo exit crash 0x1c08aeb3 =
+       * low32 of __cxa_finalize_ranges+319). Same add-image timing as the init
+       * path — runs during libabiconv's ctor, before dyld4 initializes this
+       * image and reads the section. */
+      wrap_mod_term_funcs(mh64, slide, imgname, text_lo, text_hi);
       /* Slide 4-byte __DATA intra-image pointer slots (vtables, fn-ptr tables,
        * AND data->data global pointers) by the load slide BEFORE the collected
        * static initializers run (a C++ ctor stores/derefs these). Universal:

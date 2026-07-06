@@ -1,0 +1,3 @@
+main
+term marker=42
+exit_code: 0
