@@ -48,7 +48,7 @@ uint32_t shim_DrawThemeFocusRect(uint32_t *args) { (void)args; return 0; }
 uint32_t shim_DrawThemeListBoxFrame(uint32_t *args) { (void)args; return 0; }
 uint32_t shim_DrawThemePrimaryGroup(uint32_t *args) { (void)args; return 0; }
 uint32_t shim_DrawThemeSeparator(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_DrawThemeText(uint32_t *args) { (void)args; return 0; }
+// shim_DrawThemeText: REAL CoreText implementation in carbon_themetext_shim.c.
 uint32_t shim_DrawThemeTickMark(uint32_t *args) { (void)args; return 0; }
 uint32_t shim_DrawThemeTrack(uint32_t *args) { (void)args; return 0; }
 uint32_t shim_GetThemeDrawingState(uint32_t *args) { (void)args; return 0; }

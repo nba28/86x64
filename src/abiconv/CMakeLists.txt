@@ -464,6 +464,17 @@ add_library(abiconv SHARED
   # Real HIView bridges where a modern equivalent survives, else signature-correct
   # graceful. MTSHIM presence removes them from the abigen legacy pass.
   carbon_control_shim.c    # Control/Window/Menu Manager (real bridges + graceful)
+  # REAL CreateScrollingTextBoxControl: classic 'TEXT'/'styl' resources drawn
+  # by a self-drawing compositing HIView via CoreText (Halo EULA license text).
+  carbon_scrolltext_shim.c
+  # One-shot AppKit window-host bootstrap (NSApplicationLoad) for pure-Carbon
+  # translated apps: cures the "Unable to bridge WindowManagement interface -
+  # no delegate has been set" -> NSCGSPanic _createContext death, letting
+  # Carbon windows actually materialize on screen.
+  carbon_appkit_host.c
+  # REAL Appearance Manager theme text (DrawThemeTextBox/DrawThemeText/
+  # GetThemeTextDimensions) via CoreText — replaces silent no-draw no-ops.
+  carbon_themetext_shim.c
   carbon_dialog_shim.c     # classic Dialog Manager (graceful "no classic dialog")
   carbon_classic_ui_shim.c # classic TextEdit/List/Drag/Theme (graceful dead surface)
   qt_hitoolbox_shim.c
@@ -549,6 +560,9 @@ target_link_libraries(abiconv System objc
   # CGImageSource (decode) + CGBitmapContext/CGImage (render into the GWorld).
   "-framework ImageIO"
   "-framework CoreGraphics"
+  # carbon_scrolltext_shim.c + carbon_themetext_shim.c render classic text
+  # (scrolling 'TEXT'/'styl' boxes, Appearance theme text) with CoreText.
+  "-framework CoreText"
   # quicktime_movie_bridge.m maps the classic Movie Toolbox onto AVFoundation
   # (AVURLAsset/AVPlayer decode) + CoreMedia (CMTime) + CoreVideo (CVPixelBuffer
   # frame pull into the GWorld ARGB buffer).

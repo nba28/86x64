@@ -55,6 +55,13 @@ static inline int nibx_int(const char *x, long lo, long hi, const char *k, int *
     p += strlen(pat); *v = atoi(p); return 1;
 }
 
+// <boolean name="KEY">TRUE|FALSE</boolean> within [lo,hi).
+static inline int nibx_bool(const char *x, long lo, long hi, const char *k, int *v) {
+    char pat[128]; snprintf(pat, sizeof pat, "<boolean name=\"%s\">", k);
+    const char *p = strstr(x + lo, pat); if (!p || p - x >= hi) return 0;
+    p += strlen(pat); *v = (p[0] == 'T' || p[0] == 't' || p[0] == 'Y' || p[0] == '1'); return 1;
+}
+
 // <ostype name="KEY">ABCD</ostype> within [lo,hi) -> FourCharCode.
 static inline int nibx_ostype(const char *x, long lo, long hi, const char *k, uint32_t *v) {
     char pat[128]; snprintf(pat, sizeof pat, "<ostype name=\"%s\">", k);

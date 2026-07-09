@@ -40,17 +40,9 @@ void     shim_SetControlMaximum(uint32_t *args)      { (void)args; }
 uint32_t shim_GetControl32BitValue(uint32_t *args)   { (void)args; return 0; }
 uint32_t shim_GetControlPopupMenuHandle(uint32_t *a) { (void)a; return 0; }  // MenuRef NULL
 
-// ---- Appearance / Theme text: we don't draw; report success and sane measurements ----
-uint32_t shim_DrawThemeTextBox(uint32_t *args) { (void)args; return UI_NO_ERR; }
-// GetThemeTextDimensions(str, fontID, state, wrap, Point* ioBounds, SInt16* outBaseline):
-// fill a non-degenerate metric so layout math (line height, baseline) stays well-defined.
-uint32_t shim_GetThemeTextDimensions(uint32_t *args) {
-    QDPoint *io = (QDPoint *)PTR(4);
-    int16_t *baseline = (int16_t *)PTR(5);
-    if (io) { if (io->h <= 0) io->h = 8; io->v = 16; }
-    if (baseline) *baseline = 12;
-    return UI_NO_ERR;
-}
+// ---- Appearance / Theme text: REAL CoreText implementations moved to
+// carbon_themetext_shim.c (DrawThemeTextBox / DrawThemeText /
+// GetThemeTextDimensions) — the old no-ops here left text-shaped holes. ----
 
 // ---- Display Manager: removed; report unavailable so callers fall back to CGDirectDisplay
 // (Civ IV also links CGGetDisplaysWithPoint / CGDisplay*, which resolve natively). ----

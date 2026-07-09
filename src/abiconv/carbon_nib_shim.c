@@ -55,6 +55,11 @@
 extern uint64_t x64_objc_unwrap(uint32_t h);
 extern uint32_t x64_objc_wrap(uint64_t real);
 
+// AppKit window-host bootstrap (carbon_appkit_host.c): without it a pure-Carbon
+// translated app has no WindowManagement delegate — windows half-bridge, then
+// AppKit panics in NSCGSWindow _createContext inside the app's own event loop.
+void carbon_ensure_window_host(void);
+
 typedef void *WindowRef, *ControlRef, *HIViewRef, *HIObjectRef, *IBNibRef;
 typedef int32_t OSStatus;
 typedef struct { int16_t top, left, bottom, right; } CRect;
@@ -66,7 +71,10 @@ typedef struct { double x, y, w, h; } HIRectD;
 #define kWinCompositing   (1u << 19)
 #define kWinStdHandler    (1u << 25)
 #define kWinCloseBox      (1u << 0)
+#define kWinHZoom         (1u << 1)
+#define kWinVZoom         (1u << 2)
 #define kWinCollapseBox   (1u << 3)
+#define kWinResizable     (1u << 4)
 
 // ---- lazily-resolved native entry points (all via dlsym: header-gated / removed
 //      C wrappers are still live symbols in the shared HIToolbox) ----
@@ -89,6 +97,7 @@ static OSStatus (*n_HIViewSetFrame)(HIViewRef, const HIRectD *);
 static OSStatus (*n_SetControlID)(ControlRef, const CtrlID *);
 static OSStatus (*n_SetControlCommandID)(ControlRef, uint32_t);
 static CFBundleRef (*n_CFBundleGetMainBundle)(void);
+static uint32_t (*n_GetAvailableWindowAttributes)(uint32_t);
 
 static int g_resolved;
 static void resolve_once(void) {
@@ -101,6 +110,7 @@ static void resolve_once(void) {
     R(CreateStaticTextControl); R(CreatePushButtonControl); R(CreateCheckBoxControl);
     R(CreateIconControl); R(HIObjectCreate); R(HIViewAddSubview); R(HIViewSetFrame);
     R(SetControlID); R(SetControlCommandID); R(CFBundleGetMainBundle);
+    R(GetAvailableWindowAttributes);
 #undef R
 }
 
@@ -233,9 +243,34 @@ static WindowRef build_window(const char *xibpath, CFStringRef wname) {
     char title[256] = ""; if (nibx_str(x, ws, we, "title", title, sizeof title)) nibx_unescape(title);
     int wclass = 6 /*kDocumentWindowClass*/; nibx_int(x, ws, we, "carbonWindowClass", &wclass);
 
-    uint32_t attrs = kWinCompositing | kWinStdHandler | kWinCloseBox | kWinCollapseBox;
-    if (!n_CreateNewWindow || n_CreateNewWindow((uint32_t)wclass, attrs, &R, &win) != 0 || !win) {
-        free(x); return NULL;
+    // Decoration attributes come from the nib's window booleans (IB writes the
+    // non-default FALSE values out explicitly; absent = classic default ON for
+    // close/collapse). CRUCIALLY, they must then be masked to what the window
+    // CLASS supports: kMovableModalWindowClass(4) — Halo's EULA / Graphics /
+    // Calibration windows — rejects every decoration bit, and CreateNewWindow
+    // fails the whole window with -5601 errUnsupportedWindowAttributesForClass
+    // (the old unconditional closeBox|collapseBox meant those windows NEVER
+    // materialized). GetAvailableWindowAttributes(class) is the exact native
+    // mask; the bare retry below covers its absence.
+    uint32_t attrs = kWinCompositing | kWinStdHandler;
+    int b;
+    if (!nibx_bool(x, ws, we, "hasCloseBox", &b) || b)        attrs |= kWinCloseBox;
+    if (!nibx_bool(x, ws, we, "hasCollapseBox", &b) || b)     attrs |= kWinCollapseBox;
+    if (nibx_bool(x, ws, we, "isResizable", &b) && b)         attrs |= kWinResizable;
+    if (nibx_bool(x, ws, we, "hasHorizontalZoom", &b) && b)   attrs |= kWinHZoom;
+    if (nibx_bool(x, ws, we, "hasVerticalZoom", &b) && b)     attrs |= kWinVZoom;
+    if (n_GetAvailableWindowAttributes)
+        attrs &= n_GetAvailableWindowAttributes((uint32_t)wclass)
+                 | kWinCompositing | kWinStdHandler;
+    if (!n_CreateNewWindow) { free(x); return NULL; }
+    if (n_CreateNewWindow((uint32_t)wclass, attrs, &R, &win) != 0 || !win) {
+        // last-resort: a bare compositing window of that class (still -5601?
+        // then the class itself is gone; give up)
+        win = NULL;
+        if (n_CreateNewWindow((uint32_t)wclass, kWinCompositing | kWinStdHandler,
+                              &R, &win) != 0 || !win) {
+            free(x); return NULL;
+        }
     }
     if (n_SetWindowTitleWithCFString) n_SetWindowTitleWithCFString(win, cfs(title));
 
@@ -259,6 +294,7 @@ static WindowRef build_window(const char *xibpath, CFStringRef wname) {
 // OSStatus CreateNibReference(CFStringRef inNibName, IBNibRef *outNibRef)
 uint32_t shim_CreateNibReference(uint32_t *a) {
     resolve_once();
+    carbon_ensure_window_host();
     if (!n_CreateNibReference) return (uint32_t)-108;
     CFStringRef name = (CFStringRef)(uintptr_t)x64_objc_unwrap(a[0]);
     IBNibRef ref = NULL;
@@ -276,6 +312,7 @@ uint32_t shim_CreateNibReference(uint32_t *a) {
 // OSStatus CreateNibReferenceWithCFBundle(CFBundleRef, CFStringRef, IBNibRef*)
 uint32_t shim_CreateNibReferenceWithCFBundle(uint32_t *a) {
     resolve_once();
+    carbon_ensure_window_host();
     if (!n_CreateNibReferenceWithCFBundle) return (uint32_t)-108;
     CFBundleRef bundle = (CFBundleRef)(uintptr_t)x64_objc_unwrap(a[0]);
     CFStringRef name   = (CFStringRef)(uintptr_t)x64_objc_unwrap(a[1]);
@@ -293,6 +330,7 @@ uint32_t shim_CreateNibReferenceWithCFBundle(uint32_t *a) {
 // OSStatus CreateWindowFromNib(IBNibRef, CFStringRef inName, WindowRef *outWindow)
 uint32_t shim_CreateWindowFromNib(uint32_t *a) {
     resolve_once();
+    carbon_ensure_window_host();
     IBNibRef ref  = (IBNibRef)(uintptr_t)x64_objc_unwrap(a[0]);
     CFStringRef wn = (CFStringRef)(uintptr_t)x64_objc_unwrap(a[1]);
     uint32_t *out = (uint32_t *)(uintptr_t)a[2];

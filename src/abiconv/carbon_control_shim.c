@@ -49,11 +49,16 @@ typedef struct { int16_t top, left, bottom, right; } CRect;
 // ---------------- Control Manager (real HIView bridges) ----------------
 
 // OSStatus DisposeControl(ControlRef) — remove from its window, then release.
+// carbon_scrolltext_shim.m keeps an AppKit overlay behind some controls (the
+// real CreateScrollingTextBoxControl); give it the chance to sever its overlay
+// for THIS control before the HIView goes away.
+extern void carbon_scrolltext_control_disposed(void *ctrl);
 uint32_t shim_DisposeControl(uint32_t *a) {
     DL(HIViewRemoveFromSuperview, OSStatus, (void *));
     DL(CFRelease, void, (const void *));
     void *c = UNWRAP(0);
-    if (c) { if (HIViewRemoveFromSuperview) HIViewRemoveFromSuperview(c);
+    if (c) { carbon_scrolltext_control_disposed(c);
+             if (HIViewRemoveFromSuperview) HIViewRemoveFromSuperview(c);
              if (CFRelease) CFRelease(c); }
     return 0;
 }
@@ -98,9 +103,9 @@ uint32_t shim_GetControlRegion(uint32_t *a) { (void)a; return 0; }
 // SInt16 GetControlVariant(ControlRef) -> 0 (kControlNoVariant)
 uint32_t shim_GetControlVariant(uint32_t *a) { (void)a; return 0; }
 void     shim_DumpControlHierarchy(uint32_t *a) { (void)a; }
-// Removed control creators (edit-scroll/scrollbar/popup): the nib loader
-// materializes these via HIObject; a direct classic creator call is dead surface.
-uint32_t shim_CreateScrollingTextBoxControl(uint32_t *a) { (void)a; return (uint32_t)-9999; }
+// Removed control creators (scrollbar/popup): the nib loader materializes
+// these via HIObject; a direct classic creator call is dead surface.
+// (CreateScrollingTextBoxControl is REAL now — carbon_scrolltext_shim.m.)
 uint32_t shim_CreateScrollBarControl(uint32_t *a)        { (void)a; return (uint32_t)-9999; }
 uint32_t shim_CreatePopupButtonControl(uint32_t *a)      { (void)a; return (uint32_t)-9999; }
 uint32_t shim_HIComboBoxCreate(uint32_t *a)              { (void)a; return (uint32_t)-9999; }
@@ -119,6 +124,8 @@ void     shim_DrawGrowIcon(uint32_t *a)         { (void)a; }
 //   Boolean visible, SInt16 procID, WindowRef behind, Boolean goAwayFlag,
 //   SInt32 refCon) — bridge to modern CreateNewWindow (compositing document class).
 uint32_t shim_NewCWindow(uint32_t *a) {
+    void carbon_ensure_window_host(void);   /* carbon_appkit_host.c */
+    carbon_ensure_window_host();
     DL(CreateNewWindow, OSStatus, (uint32_t, uint32_t, const CRect *, void **));
     DL(SetWRefCon, void, (void *, int32_t));
     DL(ShowWindow, void, (void *));

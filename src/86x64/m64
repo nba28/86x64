@@ -599,6 +599,78 @@ def _find_libinterpose():
     return None
 
 
+def _rsrc_fork_size(path):
+    """Size of a file's classic Mac resource fork (0 = none). APFS/HFS+ expose
+    the fork as the virtual child path <file>/..namedfork/rsrc."""
+    try:
+        return os.stat(str(path) + "/..namedfork/rsrc").st_size
+    except OSError:
+        return 0
+
+
+def cmd_forks(args):
+    """List / restore classic Mac RESOURCE FORKS in a bundle.
+
+    Old bundles store real data in the resource fork (classic Resource Manager
+    files like *.rsrc DLOG/DITL/TEXT dialogs, QuickTime ref movies, ...). The
+    fork travels as the com.apple.ResourceFork xattr; plain `cp`/`shutil` copies
+    DROP it, leaving a 0-byte data-fork husk the app silently fails to load.
+    (`ditto` — used by `m64 translate -o` since d5da653 — preserves forks, so
+    this repairs bundles deployed before that, or copied by other tools.)
+
+    m64 forks App.app                 -> list fork-carrying files
+    m64 forks App.app --from Orig.app -> restore missing/short forks (+ the
+                                         com.apple.FinderInfo type/creator
+                                         xattr) from the original bundle
+    """
+    app = Path(args.app)
+    if not app.exists():
+        raise Die(f"no such bundle: {app}")
+
+    if not args.source:                                   # list mode
+        n = 0
+        for f in sorted(p for p in app.rglob("*") if p.is_file()):
+            sz = _rsrc_fork_size(f)
+            if sz:
+                print(f"  {sz:>10}  {f.relative_to(app)}")
+                n += 1
+        good(f"{n} file(s) carry a resource fork")
+        return
+
+    src_app = Path(args.source)
+    require(src_app)
+    fixed = skipped = missing = 0
+    for src in sorted(p for p in src_app.rglob("*") if p.is_file()):
+        want = _rsrc_fork_size(src)
+        if not want:
+            continue
+        dst = app / src.relative_to(src_app)
+        if not dst.is_file():
+            warn(f"not in target bundle, skipping: {dst.relative_to(app)}")
+            missing += 1
+            continue
+        have = _rsrc_fork_size(dst)
+        if have == want:
+            skipped += 1
+            continue
+        info(f"restore fork {src.relative_to(src_app)}  ({have} -> {want} bytes)")
+        if args.dry_run:
+            continue
+        with open(str(src) + "/..namedfork/rsrc", "rb") as i, \
+             open(str(dst) + "/..namedfork/rsrc", "wb") as o:
+            shutil.copyfileobj(i, o)
+        # FinderInfo (classic type/creator codes) rides along for fidelity.
+        p = subprocess.run(["xattr", "-px", "com.apple.FinderInfo", str(src)],
+                           capture_output=True, text=True)
+        if p.returncode == 0 and p.stdout.strip():
+            subprocess.run(["xattr", "-wx", "com.apple.FinderInfo",
+                            p.stdout.strip(), str(dst)], capture_output=True)
+        if _rsrc_fork_size(dst) != want:
+            raise Die(f"fork restore failed for {dst}")
+        fixed += 1
+    good(f"forks: {fixed} restored, {skipped} already ok, {missing} absent from target")
+
+
 def cmd_tree(args):
     """Translate a NON-bundle directory tree of i386 binaries (e.g. a Source-
     engine game like Portal 2) into x86_64.
@@ -975,6 +1047,16 @@ def build_parser():
                             "copy inside a bundle (+ ad-hoc sign)")
     s.add_argument("app")
     common(s); s.set_defaults(func=cmd_resync)
+
+    # forks
+    fk = sub.add_parser("forks",
+                        help="list / restore classic Mac resource forks in a "
+                             "bundle (old copy steps dropped them; data like "
+                             "*.rsrc dialogs lives ONLY in the fork)")
+    fk.add_argument("app", help="the (deployed) bundle to inspect/repair")
+    fk.add_argument("--from", dest="source", metavar="ORIG",
+                    help="original bundle to restore missing forks from")
+    common(fk); fk.set_defaults(func=cmd_forks)
 
     # reinterpose
     ri = sub.add_parser("reinterpose",

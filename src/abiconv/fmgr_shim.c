@@ -19,6 +19,7 @@
 //
 // MTSHIM convention: rdi -> &i386 args[0]; OSErr result in eax.
 
+#include <dlfcn.h>
 #include <stdint.h>
 #include <string.h>
 #include <sys/attr.h>
@@ -54,7 +55,23 @@ uint32_t shim_FSpRstFLock(uint32_t *args) { (void)args; return (uint32_t)FM_FNF_
 uint32_t shim_FSpSetFLock(uint32_t *args) { (void)args; return (uint32_t)FM_FNF_ERR; }
 
 // ---- read / write / position (refNum-addressed): there is no valid open refNum ----
-uint32_t shim_FSClose(uint32_t *args) { (void)args; return FM_NO_ERR; }   // close: nothing to do
+
+// FSClose — REAL bridge, not a no-op. In this runtime the ONLY producer of
+// classic file refNums is the still-native FSOpenResFile (the FSSpec openers
+// above never hand one out), so an incoming refNum is a resource-file refNum
+// and the faithful modern close is CloseResFile (classic FSClose on a resource
+// refNum closed the resource file — same file-refnum space). Halo: EULA.rsrc
+// is FSOpenResFile'd for the license window and FSClose'd on dismissal; the
+// old no-op stacked the file on the resource chain forever, where it kept
+// SHADOWING later Get1Resource lookups. CloseResFile on an unknown refNum just
+// sets ResError (-193) and is harmless.
+uint32_t shim_FSClose(uint32_t *args) {
+    static void (*CloseResFile)(int16_t);
+    if (!CloseResFile)
+        CloseResFile = (void (*)(int16_t))dlsym(RTLD_DEFAULT, "CloseResFile");
+    if (CloseResFile) CloseResFile((int16_t)args[0]);
+    return FM_NO_ERR;
+}
 uint32_t shim_FSRead(uint32_t *args) {
     int32_t *count = (int32_t *)PTR(1); if (count) *count = 0;   // 0 bytes transferred
     return (uint32_t)FM_EOF_ERR;
