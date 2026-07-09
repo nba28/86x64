@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32
 all: run-only
 
 # byval-int32: guard for the legacy fixed-32 by-value-struct SIZING fix (abigen
@@ -275,6 +275,15 @@ carbon-nib:
 # and are excluded from the abigen legacy pass. Inspects the built libabiconv.
 carbon-dangling:
 	@bash carbon_dangling_shims_test.sh
+
+# stale-check: regression guard for `m64 stale-check`, the retranslate-staleness
+# detector (src/86x64/m64). Asserts the _shim_for matcher mirrors static-interpose
+# (true positive for a shimmed symbol, no false positive for an unshimmed native
+# one, `$`-variant folding) and that the retranslated HeliumRender reports CLEAN
+# end-to-end (ios_base fix guarded). Inspects the built libabiconv + m64 module;
+# the end-to-end leg skips if iMovie isn't deployed. No i386 sysroot needed.
+stale-check: $(MACHO_TOOL)
+	@bash stale_check_test.sh $(MACHO_TOOL)
 
 # ObjC test group. Kept separate from the default `all` so the core
 # (asm/C) suite stays green while ObjC support is still landing. Builds each
