@@ -1234,6 +1234,14 @@ namespace MachO {
           *       are pending. Otherwise this is a mid-function RET (the
           *       slow path follows, reached via the pending branch).
           *     - INTERRUPT / SYSCALL / SYSRET: system transition; clear.
+          *       EXCEPT int3 (0xCC): an abort/breakpoint trap whose fall-through
+          *       is dead code — live successors reach any shared target via a
+          *       branch that BYPASSES the int3. Clearing at int3 poisons the
+          *       branch_anchor_snap intersection at that target (pattern
+          *       `je L; int3; jmp L` — the dead jmp records an empty snapshot
+          *       which intersects the live path's anchors to {}), losing the
+          *       PIC anchor. So int3 is transparent to anchor tracking.
+          *       (Root cause: Portal 2 engine.dylib CVoxelTree::CVoxelTree.)
           *     - CALL (not `call $+0`): the callee may clobber caller-
           *       saved regs (EAX/ECX/EDX in i386 sysv). Clear those;
           *       keep EBX/ESI/EDI/EBP (callee preserves them).
@@ -1246,7 +1254,8 @@ namespace MachO {
                anchors.clear();
                anchor_slots.clear();
             }
-         } else if (cat == XED_CATEGORY_INTERRUPT ||
+         } else if ((cat == XED_CATEGORY_INTERRUPT &&
+                     xed_decoded_inst_get_iclass(&xedd) != XED_ICLASS_INT3) ||
                     cat == XED_CATEGORY_SYSCALL ||
                     cat == XED_CATEGORY_SYSRET) {
             anchors.clear();
