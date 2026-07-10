@@ -62,9 +62,10 @@ enum {
    CB_NONE = 0,
    /* map keys */
    CB_MAP_KEY_INTEGER, CB_MAP_KEY_OBJECT, CB_MAP_KEY_NONOWNED, CB_MAP_KEY_INT,
+   CB_MAP_KEY_NONRETAINED, CB_MAP_KEY_OWNEDPTR,
    /* map values */
    CB_MAP_VAL_INTEGER, CB_MAP_VAL_OBJECT, CB_MAP_VAL_NONOWNED,
-   CB_MAP_VAL_NONRETAINED, CB_MAP_VAL_INT,
+   CB_MAP_VAL_NONRETAINED, CB_MAP_VAL_INT, CB_MAP_VAL_OWNEDPTR,
    /* hash */
    CB_HASH_NONOWNED, CB_HASH_OBJECT,
 };
@@ -103,11 +104,13 @@ static const void *real_cb(const char *name) {
 static const NSMapTableKeyCallBacks *real_map_key_cb(int kind) {
    const char *n;
    switch (kind) {
-   case CB_MAP_KEY_OBJECT:   n = "NSObjectMapKeyCallBacks"; break;
-   case CB_MAP_KEY_NONOWNED: n = "NSNonOwnedPointerMapKeyCallBacks"; break;
-   case CB_MAP_KEY_INT:      n = "NSIntMapKeyCallBacks"; break;
+   case CB_MAP_KEY_OBJECT:      n = "NSObjectMapKeyCallBacks"; break;
+   case CB_MAP_KEY_NONOWNED:    n = "NSNonOwnedPointerMapKeyCallBacks"; break;
+   case CB_MAP_KEY_INT:         n = "NSIntMapKeyCallBacks"; break;
+   case CB_MAP_KEY_NONRETAINED: n = "NSNonRetainedObjectMapKeyCallBacks"; break;
+   case CB_MAP_KEY_OWNEDPTR:    n = "NSOwnedPointerMapKeyCallBacks"; break;
    case CB_MAP_KEY_INTEGER:
-   default:                  n = "NSIntegerMapKeyCallBacks"; break;
+   default:                     n = "NSIntegerMapKeyCallBacks"; break;
    }
    const void *p = real_cb(n);
    if (!p) { p = real_cb("NSIntegerMapKeyCallBacks"); }
@@ -120,6 +123,7 @@ static const NSMapTableValueCallBacks *real_map_value_cb(int kind) {
    case CB_MAP_VAL_NONRETAINED:  n = "NSNonRetainedObjectMapValueCallBacks"; break;
    case CB_MAP_VAL_INTEGER:      n = "NSIntegerMapValueCallBacks"; break;
    case CB_MAP_VAL_INT:          n = "NSIntMapValueCallBacks"; break;
+   case CB_MAP_VAL_OWNEDPTR:     n = "NSOwnedPointerMapValueCallBacks"; break;
    case CB_MAP_VAL_NONOWNED:
    default:                      n = "NSNonOwnedPointerMapValueCallBacks"; break;
    }
@@ -324,10 +328,14 @@ VAL_SHADOW(NSNonOwnedPointerMapValueCallBacks, CB_MAP_VAL_NONOWNED);
 VAL_SHADOW(NSNonRetainedObjectMapValueCallBacks, CB_MAP_VAL_NONRETAINED);
 VAL_SHADOW(NSIntegerMapValueCallBacks,       CB_MAP_VAL_INTEGER);
 VAL_SHADOW(NSIntMapValueCallBacks,           CB_MAP_VAL_INT);
+VAL_SHADOW(NSOwnedPointerMapValueCallBacks,  CB_MAP_VAL_OWNEDPTR);
 
 KEY_SHADOW(NSObjectMapKeyCallBacks,          CB_MAP_KEY_OBJECT);
 KEY_SHADOW(NSIntegerMapKeyCallBacks,         CB_MAP_KEY_INTEGER);
 KEY_SHADOW(NSNonOwnedPointerMapKeyCallBacks, CB_MAP_KEY_NONOWNED);
+KEY_SHADOW(NSIntMapKeyCallBacks,             CB_MAP_KEY_INT);
+KEY_SHADOW(NSNonRetainedObjectMapKeyCallBacks, CB_MAP_KEY_NONRETAINED);
+KEY_SHADOW(NSOwnedPointerMapKeyCallBacks,    CB_MAP_KEY_OWNEDPTR);
 
 HASH_SHADOW(NSNonOwnedPointerHashCallBacks,  CB_HASH_NONOWNED);
 
