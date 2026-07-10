@@ -299,6 +299,44 @@ static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
    if (getenv("ABICONV_NO_INIT_STACKSWITCH")) { return; }
    if (init_stack_setup() != 0) { return; }
 
+   /* Structural precondition for the classic __DATA,__dyld 8-byte overflow: an
+    * 8-byte __dyld section whose END vmaddr equals a __mod_init_func's START
+    * vmaddr means dyld's 8-byte func_lookup write at __dyld+8 lands on
+    * __mod_init_func[0]. Precompute the set of clobbered init-section vmaddrs so
+    * the per-slot recovery below can fire even when the clobbered value is a
+    * LOW-4GB address (dyld may write a shared-cache pointer whose HIGH half —
+    * e.g. 0x00007ff8 — ends up as init[0]'s value, below the >4GB threshold the
+    * original recovery keyed on). Universal: triggers on the section adjacency,
+    * not an app name. */
+   /* dyld's func_lookup write is an 8-byte store at __dyld+8, i.e. the vmaddr
+    * range [dyld.addr+8, dyld.addr+16). Any __mod_init_func[0] slot (8 bytes at
+    * its section start) that INTERSECTS this range has its low bytes clobbered
+    * — this is true even when 8-byte alignment leaves a 4-byte gap between the
+    * i386-sized 8-byte __dyld and __mod_init_func (SFWordProcessing: __dyld ends
+    * at +0x944, __mod_init_func starts at +0x948; the write at +0x944..+0x94c
+    * still overwrites init[0]'s low 4 bytes at +0x948). */
+   uint64_t dyld_wr_lo = 0, dyld_wr_hi = 0;  /* [lo,hi) of the __dyld+8 store (0 = none) */
+   {
+      const uint8_t *pp = (const uint8_t *)(mh64 + 1);
+      for (uint32_t ci = 0; ci < mh64->ncmds; ci++) {
+         const struct load_command *clc = (const struct load_command *)pp;
+         if (clc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *cseg =
+               (const struct segment_command_64 *)pp;
+            const struct section_64 *csect =
+               (const struct section_64 *)(cseg + 1);
+            for (uint32_t cs = 0; cs < cseg->nsects; cs++, csect++) {
+               if (strncmp(csect->sectname, "__dyld", 16) == 0 &&
+                   csect->size == 8) {
+                  dyld_wr_lo = csect->addr + 8;
+                  dyld_wr_hi = csect->addr + 16;
+               }
+            }
+         }
+         pp += clc->cmdsize;
+      }
+   }
+
    const uint8_t *p = (const uint8_t *)(mh64 + 1);
    for (uint32_t i = 0; i < mh64->ncmds; i++) {
       const struct load_command *lc = (const struct load_command *)p;
@@ -308,6 +346,12 @@ static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
          for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
             const uint32_t type = sect->flags & SECTION_TYPE;
             if (type != S_MOD_INIT_FUNC_POINTERS) { continue; }
+            /* Is THIS the init section dyld's __dyld+8 write clobbers slot[0] of?
+             * The 8-byte store [dyld_wr_lo,dyld_wr_hi) overlaps slot[0]'s 8-byte
+             * range [sect->addr, sect->addr+8). */
+            const int dyld_clobbers_slot0 =
+               (dyld_wr_lo != 0 &&
+                dyld_wr_lo < sect->addr + 8 && sect->addr < dyld_wr_hi);
             uintptr_t base = (uintptr_t)sect->addr + (uintptr_t)slide;
             size_t n = (size_t)sect->size / sizeof(void *);
             const size_t page = 4096;
@@ -407,18 +451,39 @@ static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
                 * static value + slide. Universal (triggers on the structural
                 * ">4GB __mod_init_func entry", not an app name); the crt's own
                 * func_lookup read is handled separately by patch_dyld_section. */
-               if ((uintptr_t)slots[j] >= 0x100000000ULL) {
-                  uint64_t orig =
-                     read_image_qword(imgname, (uint64_t)sect->offset + j * 8);
-                  void *fixed = orig
-                     ? (void *)(uintptr_t)(orig + (uint64_t)slide) : NULL;
-                  if (g_verbose) {
-                     fprintf(stderr, "abiconv init_stack: recovered clobbered "
-                             "__mod_init_func[%zu] in %s: %p -> %p (dyld __dyld "
-                             "8-byte overflow)\n", j, imgname, slots[j], fixed);
+               /* Recovery trigger. The clobber shows up two ways:
+                *  - >4GB value: dyld wrote a shared-cache 8-byte pointer whose
+                *    LOW half survived into the slot (original threshold).
+                *  - LOW-4GB but bogus value at slot[0] of the init section that
+                *    directly follows an 8-byte __dyld: the same 8-byte __dyld+8
+                *    write, but the surviving bytes form a small value (e.g. the
+                *    0x00007ff8 HIGH half of a native selector/dyld pointer) that
+                *    is below 4GB yet still NOT a valid intra-image init target.
+                *    (SFWordProcessing init[0] = 0x7ff8; SIGSEGV at 0x7ff8.)
+                * The disk value + slide is the real ctor in both cases. */
+               {
+                  const uintptr_t v = (uintptr_t)slots[j];
+                  const uint64_t vl = (uint64_t)v;
+                  const uint64_t lo_l = text_lo + (uint64_t)(int64_t)slide;
+                  const uint64_t hi_l = text_hi + (uint64_t)(int64_t)slide;
+                  const int in_loaded_text = (vl >= lo_l && vl < hi_l);
+                  const int in_pref_text   = (vl >= text_lo && vl < text_hi);
+                  const int slot0_clobbered =
+                     (j == 0 && dyld_clobbers_slot0 &&
+                      !in_loaded_text && !in_pref_text);
+                  if (v >= 0x100000000ULL || slot0_clobbered) {
+                     uint64_t orig =
+                        read_image_qword(imgname, (uint64_t)sect->offset + j * 8);
+                     void *fixed = orig
+                        ? (void *)(uintptr_t)(orig + (uint64_t)slide) : NULL;
+                     if (g_verbose) {
+                        fprintf(stderr, "abiconv init_stack: recovered clobbered "
+                                "__mod_init_func[%zu] in %s: %p -> %p (dyld __dyld "
+                                "8-byte overflow)\n", j, imgname, slots[j], fixed);
+                     }
+                     slots[j] = fixed;
+                     if (!slots[j]) { continue; }
                   }
-                  slots[j] = fixed;
-                  if (!slots[j]) { continue; }
                }
                /* Recover an UNREBASED __mod_init_func entry. Not every
                 * translated image's dyld info carries rebase entries for the
@@ -1893,6 +1958,11 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
     * n_init>0 in run-now mode (default); the legacy ABICONV_NO_RUN_INITS path wrapped the
     * slots into dyld-called stubs instead and leaves n_init==0. */
    for (size_t i = 0; i < n_init; i++) {
+      if (getenv("ABICONV_INIT_TRACE")) {
+         fprintf(stderr, "[abiconv] call_init[%zu/%zu] in %s fn=%p\n",
+                 i, n_init, imgname ? imgname : "?", init_targets[i]);
+         fflush(stderr);
+      }
       abiconv_call_init(init_targets[i], 0, NULL, NULL, NULL);
    }
 }
