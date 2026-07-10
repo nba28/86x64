@@ -217,6 +217,78 @@ uint32_t shim_PBHGetVInfoSync(uint32_t *args) {
 
 uint32_t shim_PBMakeFSRefSync(uint32_t *args) { (void)args; return (uint32_t)FM_FNF_ERR; }
 
+// PBXGetVolInfoSync / PBXGetVolInfoAsync — private Apple extension to the HFS
+// File Manager that returns 64-bit total/free byte counts plus the standard
+// HVolumeParam fields in an XVolumeParam "union" variant.  Both symbols were
+// REMOVED from modern macOS (dlsym returns NULL — verified), yet the abigen
+// legacy pass-through shims still reference the dead native symbols via a
+// flat-namespace lazy bind: the first call would trip a dyld missing-symbol
+// failure or read garbage.
+//
+// Classic i386 apps (iPhoto's PhotoCDManager, Civ-era Carbon startup) call
+// PBXGetVolInfoSync to learn a volume's free/total bytes.  This shim restores
+// real functionality: it fills the shared HVolumeParam body via the existing
+// shim_PBHGetVInfoSync and appends the real 64-bit statfs("/") byte counts, so
+// any classic caller gets a truthful answer for the boot volume instead of a
+// dead-stub failure.  UNIVERSAL (keyed on the API, not any app).
+//
+// XVolumeParam layout (pack 2, i386 — from the 10.6 SDK Files.h; it extends
+// HVolumeParam through +90, the sole structural difference being that the old
+// HVolumeParam filler2 (4B) at +24 is now the named ioXVersion, version = 0):
+//     +16 ioResult(2)  +18 ioNamePtr(4)  +22 ioVRefNum(2)
+//     +24 ioXVersion(4)  +28 ioVolIndex(2)
+//     +30 ioVCrDate(4)   +34 ioVLsMod(4)   +38 ioVAtrb(2)
+//     +40 ioVNmFls(2)    +46 ioVNmAlBlks(2) +48 ioVAlBlkSiz(4)
+//     +56 ioAlBlSt(2)    +58 ioVNxtCNID(4)  +62 ioVFrBlk(2)
+//     +64 ioVSigWord(2)  +66 ioVDrvInfo(2)  +68 ioVDRefNum(2) +70 ioVFSID(2)
+//     +72 ioVBkUp(4)     +76 ioVSeqNum(2)   +78 ioVWrCnt(4)
+//     +82 ioVFilCnt(4)   +86 ioVDirCnt(4)   +90 ioVFndrInfo[8] (32B)
+//   XVolumeParam-specific additions:
+//     +122 ioVTotalBytes (UInt64, 8B) — total bytes on volume
+//     +130 ioVFreeBytes  (UInt64, 8B) — free bytes on volume
+//
+// IMPLEMENTATION: delegate to shim_PBHGetVInfoSync for the shared HVolumeParam
+// body (+16..+90, identical layout), stamp ioXVersion = 0, then write the
+// 64-bit real total/free byte counts from statfs("/").  Classic 68k PB "async"
+// is completed inline on modern macOS (no async I/O manager); iPhoto only calls
+// the sync variant in practice, but the async shim is wired for completeness.
+uint32_t shim_PBXGetVolInfoSync(uint32_t *args) {
+    uint8_t *pb = (uint8_t *)PTR(0);
+    if (!pb) return (uint32_t)FM_PARAM_ERR;
+
+    /* Fill the HVolumeParam portion (+16..+90) via the shared helper.
+     * shim_PBHGetVInfoSync reads ioVolIndex@+28 and handles naming/error
+     * paths identically — XVolumeParam is layout-compatible there. */
+    uint32_t err = shim_PBHGetVInfoSync(args);
+
+    /* ioXVersion at +24 (old HVolumeParam filler2): version tag 0. */
+    *(uint32_t *)(pb + 24) = 0;
+
+    if (err == (uint32_t)FM_NO_ERR) {
+        struct statfs sf;
+        if (statfs("/", &sf) == 0) {
+            uint64_t blksz = sf.f_bsize ? (uint64_t)sf.f_bsize : 512u;
+            uint64_t total = (uint64_t)sf.f_blocks * blksz;
+            uint64_t freeb = (uint64_t)sf.f_bavail * blksz;
+            memcpy(pb + 122, &total, 8);   /* ioVTotalBytes */
+            memcpy(pb + 130, &freeb, 8);   /* ioVFreeBytes  */
+        } else {
+            memset(pb + 122, 0, 16);       /* statfs failed: zero both fields */
+        }
+    }
+    return err;
+}
+
+uint32_t shim_PBXGetVolInfoAsync(uint32_t *args) {
+    /* Execute synchronously (classic PB async is always synchronous on modern
+     * macOS — no async I/O manager exists).  We do NOT fire the ioCompletion
+     * callback at +12: that's an i386 cdecl function pointer inside the
+     * translated binary that would require the full reverse-bridge to invoke.
+     * iPhoto only calls the sync variant; the async entry exists to satisfy
+     * the import so the lazy stub doesn't reference the dead native symbol. */
+    return shim_PBXGetVolInfoSync(args);
+}
+
 // ---- classic HParamBlockRec / CInfoPBRec parameter-block calls (Halo NULL-bind set) ----
 //
 // All PB structs in the 10.6 SDK Files.h sit under `#pragma pack(push, 2)` (68k

@@ -1143,6 +1143,8 @@ _x64_exc_longjmp:
 	MTSHIM	___HGetVol,                           _shim_HGetVol
 	MTSHIM	___HSetVol,                           _shim_HSetVol
 	MTSHIM	___PBHGetVInfoSync,                   _shim_PBHGetVInfoSync
+	MTSHIM	___PBXGetVolInfoSync,                 _shim_PBXGetVolInfoSync
+	MTSHIM	___PBXGetVolInfoAsync,                _shim_PBXGetVolInfoAsync
 	MTSHIM	___PBMakeFSRefSync,                   _shim_PBMakeFSRefSync
 	MTSHIM	___PBHGetVolParmsSync,                _shim_PBHGetVolParmsSync
 	MTSHIM	___PBGetCatInfoSync,                  _shim_PBGetCatInfoSync
