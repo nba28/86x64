@@ -93,6 +93,37 @@ static inline void nibx_unescape(char *s) {
     *o = 0;
 }
 
+// A container object's OWN <string name="title"> — the one at the object's top
+// level, not a nested child's. IB writes a group/pane's children inside an
+// <array name="subviews"> (or "items"), then the container's own <title> AFTER
+// that array closes. So scan for the container-level title starting past the end
+// of the first "subviews"/"items" array; the first <string name="title"> we hit
+// after the array is the container's own (e.g. an IBCarbonGroupBox frame label
+// "Rendering Pipeline", not its first child's "Lens Flare:"). Falls back to the
+// plain first title if there is no subviews array. Returns 1 + copies VALUE.
+static inline int nibx_own_title(const char *x, long lo, long hi, char *o, int os) {
+    // find the end of this object's subviews/items array (word "subviews" or
+    // "items" inside an <array ...>), then the title after it.
+    long scan = lo;
+    const char *arr = strstr(x + lo, "name=\"subviews\"");
+    if (!arr || arr - x >= hi) arr = strstr(x + lo, "name=\"items\"");
+    if (arr && arr - x < hi) {
+        // walk to the matching </array> at the same nesting depth
+        const char *ao = strchr(arr, '>');
+        long ap = ao ? (ao - x + 1) : (arr - x);
+        int d = 1;
+        while (ap < hi && d > 0) {
+            const char *no = strstr(x + ap, "<array");
+            const char *nc = strstr(x + ap, "</array>");
+            if (!nc) break;
+            if (no && no < nc) { d++; ap = (no - x) + 6; }
+            else { d--; ap = (nc - x) + 8; }
+        }
+        scan = ap;
+    }
+    return nibx_str(x, scan, hi, "title", o, os);
+}
+
 // Object id bound to `name` in <dictionary name="nameTable">, or -1.
 static inline int nibx_nametable_id(const char *x, const char *name) {
     const char *nt = strstr(x, "name=\"nameTable\""); if (!nt) return -1;

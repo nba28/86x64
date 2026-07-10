@@ -210,27 +210,90 @@ static void set_frame(ControlRef c, const CRect *r) {
 // The title text is copied into the handler's user-data (freed with the view is
 // impractical here; the frame lives for the window's life, a small leak that a
 // modal settings window incurs once — acceptable and bounded).
-struct gbox { char title[128]; };
+struct gbox { char title[128]; void *view; CRect r; };
+
+// Pull the CGContext + drawing bounds out of a kEventControlDraw event.  On a base
+// com.apple.hiview the draw event carries kEventParamCGContextRef ('cntx') but does
+// NOT populate kEventParamDirectObject ('ctrl'), so we can't get the view from the
+// event — the caller passes the view it stored at creation.  Bounds come from
+// HIViewGetBounds(view); if that yields an empty rect we fall back to the nib frame
+// size the caller also stored.  Returns 1 on success (cg + w/h valid).
+static int draw_ctx(void *ev, void *view, const CRect *nibr,
+                    CGContextRef *out_cg, double *out_w, double *out_h) {
+    static OSStatus (*gep)(void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *);
+    if (!gep) gep = (void *)dlsym(RTLD_DEFAULT, "GetEventParameter");
+    CGContextRef cg = NULL;
+    if (gep) gep(ev, 'cntx' /*kEventParamCGContextRef*/, 'cntx', NULL, sizeof(CGContextRef), NULL, &cg);
+    if (!cg) return 0;
+    double w = 0, h = 0;
+    HIRectD b = { 0, 0, 0, 0 };
+    if (view && n_HIViewGetBounds && n_HIViewGetBounds(view, &b) == 0) { w = b.w; h = b.h; }
+    if ((w <= 0 || h <= 0) && nibr) { w = nibr->right - nibr->left; h = nibr->bottom - nibr->top; }
+    if (w <= 0 || h <= 0) return 0;
+    *out_cg = cg; *out_w = w; *out_h = h; return 1;
+}
+
+// Typographic width of a line at a given font size (no drawing).
+static double measure_text(const char *utf8, double fontsz) {
+    if (!utf8 || !utf8[0]) return 0;
+    CFStringRef s = CFStringCreateWithCString(NULL, utf8, kCFStringEncodingUTF8);
+    if (!s) return 0;
+    CTFontRef font = CTFontCreateWithName(CFSTR("Helvetica"), fontsz, NULL);
+    CFStringRef k[] = { kCTFontAttributeName };
+    CFTypeRef v[] = { font };
+    CFDictionaryRef attr = CFDictionaryCreate(NULL, (const void **)k, (const void **)v, 1,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFAttributedStringRef as = CFAttributedStringCreate(NULL, s, attr);
+    CTLineRef line = CTLineCreateWithAttributedString(as);
+    double tw = CTLineGetTypographicBounds(line, NULL, NULL, NULL);
+    CFRelease(line); CFRelease(as); CFRelease(attr); CFRelease(font); CFRelease(s);
+    return tw;
+}
+
+// Draw one line of upright text into a HIView draw context.  The HIToolbox draw
+// context is FLIPPED (top-left origin, y increasing downward — the same convention
+// as the control frame we stroke), but CoreText renders glyphs y-up, so a bare
+// CTLineDraw comes out upside-down.  Flip a saved copy of the CTM vertically around
+// the view height H, and place the baseline at (H - baseline_from_top) so the text
+// reads upright at the requested top-relative position.  `align`: 0 = x is the left
+// edge; 1 = x is the RIGHT edge (right-align the text ending at x); returns the
+// text width.  Color is RGB in 0..1.
+static double draw_text(CGContextRef cg, const char *utf8, double x,
+                        double baseline_from_top, double H, double fontsz,
+                        double rr, double gg, double bb, int align) {
+    if (!utf8 || !utf8[0]) return 0;
+    CFStringRef s = CFStringCreateWithCString(NULL, utf8, kCFStringEncodingUTF8);
+    if (!s) return 0;
+    CTFontRef font = CTFontCreateWithName(CFSTR("Helvetica"), fontsz, NULL);
+    CGColorRef col = CGColorCreateGenericRGB(rr, gg, bb, 1);
+    CFStringRef k[] = { kCTFontAttributeName, kCTForegroundColorAttributeName };
+    CFTypeRef v[] = { font, col };
+    CFDictionaryRef attr = CFDictionaryCreate(NULL, (const void **)k, (const void **)v, 2,
+        &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+    CFAttributedStringRef as = CFAttributedStringCreate(NULL, s, attr);
+    CTLineRef line = CTLineCreateWithAttributedString(as);
+    double tw = CTLineGetTypographicBounds(line, NULL, NULL, NULL);
+    double tx = align == 1 ? x - tw : x;
+    CGContextSaveGState(cg);
+    CGContextTranslateCTM(cg, 0, H);
+    CGContextScaleCTM(cg, 1, -1);
+    CGContextSetTextMatrix(cg, CGAffineTransformIdentity);
+    CGContextSetTextPosition(cg, tx, H - baseline_from_top);
+    CTLineDraw(line, cg);
+    CGContextRestoreGState(cg);
+    CFRelease(line); CFRelease(as); CFRelease(attr); CFRelease(col); CFRelease(font); CFRelease(s);
+    return tw;
+}
 
 // (call, ev) are EventHandlerCallRef / EventRef — opaque here to avoid pulling in
 // Carbon.h (this TU only has CoreFoundation). eventNotHandledErr == -9874.
 static OSStatus gbox_draw(void *call, void *ev, void *ud) {
     (void)call;
     struct gbox *g = (struct gbox *)ud;
-    static OSStatus (*gep)(void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *);
-    static void *(*hvgb)(void *, void *);   /* HIViewGetBounds */
-    static void *(*gcev)(void *);            /* GetControlEventTarget (unused here) */
-    if (!gep) gep = (void *)dlsym(RTLD_DEFAULT, "GetEventParameter");
-    if (!hvgb) hvgb = (void *)dlsym(RTLD_DEFAULT, "HIViewGetBounds");
-    (void)gcev;
-    CGContextRef cg = NULL;
-    if (gep) gep(ev, 'cntx' /*kEventParamCGContextRef*/, 'cntx', NULL, sizeof cg, NULL, &cg);
-    // the control ref (view) to query its own bounds
-    void *view = NULL;
-    if (gep) gep(ev, 'ctrl' /*kEventParamDirectObject*/, 'ctrl', NULL, sizeof view, NULL, &view);
-    if (!cg || !view || !hvgb) return (OSStatus)-9874;  /* eventNotHandledErr */
+    CGContextRef cg = NULL; double W = 0, H = 0;
+    if (!g || !draw_ctx(ev, g->view, &g->r, &cg, &W, &H)) return (OSStatus)-9874;
     typedef struct { double x, y, w, h; } HR;
-    HR b; ((OSStatus(*)(void *, HR *))hvgb)(view, &b);
+    HR b = { 0, 0, W, H };
     // frame inset a little; leave room at top for the title
     CGFloat top = 8;
     CGRect fr = CGRectMake(1, top, b.w - 2, b.h - top - 1);
@@ -239,25 +302,13 @@ static OSStatus gbox_draw(void *call, void *ev, void *ud) {
     CGContextSetLineWidth(cg, 1.0);
     CGPathRef p = CGPathCreateWithRoundedRect(fr, 5, 5, NULL);
     CGContextAddPath(cg, p); CGContextStrokePath(cg); CGPathRelease(p);
-    // title: punch a gap + draw label at top-left
+    // title: punch a gap in the top border, then draw the label upright over it.
     if (g && g->title[0]) {
-        CFStringRef s = CFStringCreateWithCString(NULL, g->title, kCFStringEncodingUTF8);
-        CFStringRef keys[] = { kCTFontAttributeName, kCTForegroundColorAttributeName };
-        CTFontRef font = CTFontCreateWithName(CFSTR("Helvetica"), 11, NULL);
-        CGColorRef col = CGColorCreateGenericRGB(0.15, 0.15, 0.18, 1);
-        CFTypeRef vals[] = { font, col };
-        CFDictionaryRef attr = CFDictionaryCreate(NULL, (const void **)keys, (const void **)vals, 2,
-            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFAttributedStringRef as = CFAttributedStringCreate(NULL, s, attr);
-        CTLineRef line = CTLineCreateWithAttributedString(as);
-        double tw = CTLineGetTypographicBounds(line, NULL, NULL, NULL);
-        // clear a gap in the frame stroke behind the title
+        double tw = measure_text(g->title, 11);
+        // clear a gap in the frame stroke behind the title (cover ~[top-1, top+1])
         CGContextSetRGBFillColor(cg, 0.93, 0.93, 0.93, 1.0);
         CGContextFillRect(cg, CGRectMake(10, top - 6, tw + 8, 13));
-        CGContextSetTextPosition(cg, 14, top - 4);
-        CTLineDraw(line, cg);
-        CFRelease(line); CFRelease(as); CFRelease(attr); CFRelease(col);
-        CFRelease(font); CFRelease(s);
+        draw_text(cg, g->title, 14, top + 3, H, 11, 0.15, 0.15, 0.18, 0);
     }
     CGContextRestoreGState(cg);
     return noErr;
@@ -277,10 +328,13 @@ static ControlRef make_group_frame(WindowRef win, const CRect *r, const char *ti
     set_frame(c, r);
     if (inst && getT) {
         struct gbox *g = (struct gbox *)calloc(1, sizeof *g);
-        if (g && title) { strncpy(g->title, title, sizeof g->title - 1); }
+        if (g) { g->view = c; if (r) g->r = *r; if (title) strncpy(g->title, title, sizeof g->title - 1); }
         struct { uint32_t cls, kind; } dr = { 'cntl', 4 /*kEventControlDraw*/ };
         inst(getT(c), (void *)gbox_draw, 1, &dr, g, NULL);
     }
+    // a base com.apple.hiview is created HIDDEN; make it visible so its
+    // kEventControlDraw handler is actually invoked by the compositing hierarchy.
+    if (n_HIViewSetVisible) n_HIViewSetVisible(c, 1);
     if (parent) n_HIViewAddSubview(parent, c);
     return c;
 }
@@ -301,53 +355,49 @@ struct popup {
     int     nitems;
     int     selected;              /* 1-based; 0 = none */
     char    items[POPUP_MAX_ITEMS][64];
+    char    label[64];             /* the popup's own title, drawn to the left */
     void   *view;                  /* the hiview */
+    CRect   r;                     /* nib frame (bounds fallback) */
 };
 static int16_t g_popup_menu_id = 5000;
 
 static OSStatus popup_draw(void *call, void *ev, void *ud) {
     (void)call;
     struct popup *pu = (struct popup *)ud;
-    CGContextRef cg = NULL;
-    if (n_HIViewGetBounds == NULL) return (OSStatus)-9874;
-    static OSStatus (*gep)(void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *);
-    if (!gep) gep = (void *)dlsym(RTLD_DEFAULT, "GetEventParameter");
-    if (gep) gep(ev, 'cntx', 'cntx', NULL, sizeof cg, NULL, &cg);
-    void *view = NULL;
-    if (gep) gep(ev, 'ctrl', 'ctrl', NULL, sizeof view, NULL, &view);
-    if (!cg || !view) return (OSStatus)-9874;
-    HIRectD b; n_HIViewGetBounds(view, &b);
-    // bezel: rounded light-gray box
+    CGContextRef cg = NULL; double W = 0, H = 0;
+    if (!pu || !draw_ctx(ev, pu->view, &pu->r, &cg, &W, &H)) return (OSStatus)-9874;
+    HIRectD b = { 0, 0, W, H };
     CGContextSaveGState(cg);
-    CGRect box = CGRectMake(0.5, 0.5, b.w - 1, b.h - 1);
+    double baseline = b.h / 2 + 4;   // vertically centred 11pt baseline, from top
+    // The control bounds span the LABEL (e.g. "Lens Flare:") on the left plus the
+    // popup box on the right (nib titleJustification -2 = right-aligned label).
+    // Reserve the rightmost portion for the box; draw the label right-aligned just
+    // to its left so the classic colon-aligned column look is preserved.
+    CGFloat box_w = b.w * 0.52; if (box_w > 150) box_w = 150; if (box_w < 60 && b.w > 70) box_w = b.w - 8;
+    CGFloat box_x = b.w - box_w;
+    if (pu->label[0])
+        draw_text(cg, pu->label, box_x - 6, baseline, H, 11, 0.1, 0.1, 0.12, 1 /*right-align*/);
+    // bezel: rounded light-gray box (right portion)
+    CGRect box = CGRectMake(box_x + 0.5, 0.5, box_w - 1, b.h - 1);
     CGPathRef path = CGPathCreateWithRoundedRect(box, 4, 4, NULL);
     CGContextSetRGBFillColor(cg, 0.96, 0.96, 0.97, 1.0);
     CGContextAddPath(cg, path); CGContextFillPath(cg);
     CGContextSetRGBStrokeColor(cg, 0.5, 0.5, 0.53, 1.0); CGContextSetLineWidth(cg, 1);
     CGContextAddPath(cg, path); CGContextStrokePath(cg); CGPathRelease(path);
-    // current selection text
+    // current selection text (inside the box)
     const char *sel = (pu->selected >= 1 && pu->selected <= pu->nitems)
                       ? pu->items[pu->selected - 1] : (pu->nitems ? pu->items[0] : "");
-    CFStringRef s = CFStringCreateWithCString(NULL, sel, kCFStringEncodingUTF8);
-    if (s) {
-        CTFontRef font = CTFontCreateWithName(CFSTR("Helvetica"), 11, NULL);
-        CGColorRef col = CGColorCreateGenericRGB(0.1, 0.1, 0.12, 1);
-        CFStringRef k[] = { kCTFontAttributeName, kCTForegroundColorAttributeName };
-        CFTypeRef v[] = { font, col };
-        CFDictionaryRef attr = CFDictionaryCreate(NULL, (const void **)k, (const void **)v, 2,
-            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
-        CFAttributedStringRef as = CFAttributedStringCreate(NULL, s, attr);
-        CTLineRef line = CTLineCreateWithAttributedString(as);
-        CGContextSetTextPosition(cg, 8, (b.h - 11) / 2 + 1);
-        CTLineDraw(line, cg);
-        CFRelease(line); CFRelease(as); CFRelease(attr); CFRelease(col); CFRelease(font); CFRelease(s);
-    }
-    // disclosure triangle at the right
-    CGFloat tx = b.w - 16, ty = b.h / 2;
+    draw_text(cg, sel, box_x + 8, baseline, H, 11, 0.1, 0.1, 0.12, 0);
+    // disclosure double-triangle at the right of the box
+    CGFloat tx = b.w - 14, ty = b.h / 2;
     CGContextSetRGBFillColor(cg, 0.25, 0.25, 0.3, 1);
-    CGContextMoveToPoint(cg, tx, ty + 3);
-    CGContextAddLineToPoint(cg, tx + 8, ty + 3);
-    CGContextAddLineToPoint(cg, tx + 4, ty - 3);
+    CGContextMoveToPoint(cg, tx, ty + 1);
+    CGContextAddLineToPoint(cg, tx + 8, ty + 1);
+    CGContextAddLineToPoint(cg, tx + 4, ty + 5);
+    CGContextClosePath(cg); CGContextFillPath(cg);
+    CGContextMoveToPoint(cg, tx, ty - 1);
+    CGContextAddLineToPoint(cg, tx + 8, ty - 1);
+    CGContextAddLineToPoint(cg, tx + 4, ty - 5);
     CGContextClosePath(cg); CGContextFillPath(cg);
     CGContextRestoreGState(cg);
     return noErr;
@@ -390,10 +440,20 @@ static ControlRef make_popup(const char *x, long lo, long hi, const CRect *r,
     struct popup *pu = (struct popup *)calloc(1, sizeof *pu);
     if (!pu) { if (parent) n_HIViewAddSubview(parent, c); return c; }
     pu->view = c;
+    if (r) pu->r = *r;
     pu->menuID = g_popup_menu_id++;
     if (n_CreateNewMenu) n_CreateNewMenu(pu->menuID, 0, &pu->menu);
     if (pu->menu && n_SetMenuID) n_SetMenuID(pu->menu, pu->menuID);
-    // parse nested IBCarbonMenuItem titles in order
+    // the popup's own title (e.g. "Lens Flare:") — drawn as a left label. It sits
+    // at the popup object's top level; the nested IBCarbonMenu's own title is the
+    // "Popup:" placeholder, which nibx_own_title skips over (past the items array).
+    char lbl[64] = "";
+    if (nibx_str(x, lo, hi, "title", lbl, sizeof lbl)) {
+        nibx_unescape(lbl);
+        if (strcmp(lbl, "Popup:") != 0) strncpy(pu->label, lbl, sizeof pu->label - 1);
+    }
+    // parse nested IBCarbonMenuItem titles in order; a menu item flagged
+    // checked=TRUE is the nib's default selection (Halo may override at runtime).
     long p = lo;
     while (p < hi && pu->nitems < POPUP_MAX_ITEMS) {
         const char *o = strstr(x + p, "class=\"IBCarbonMenuItem\"");
@@ -412,12 +472,16 @@ static ControlRef make_popup(const char *x, long lo, long hi, const CRect *r,
                     n_AppendMenuItemTextWithCFString(pu->menu, cs, 0, 0, &idx);
                     if (cs) CFRelease(cs);
                 }
+                int chk = 0;
+                if (nibx_bool(x, os, obje, "checked", &chk) && chk)
+                    pu->selected = pu->nitems + 1;      /* 1-based */
                 pu->nitems++;
             }
         }
         p = obje;
     }
-    pu->selected = pu->nitems ? 1 : 0;                   /* default to first */
+    if (pu->selected < 1 || pu->selected > pu->nitems)
+        pu->selected = pu->nitems ? 1 : 0;              /* default to first */
     if (n_InstallEventHandler2 && n_GetControlEventTarget2) {
         void *tgt = (void *)n_GetControlEventTarget2(c);
         struct { uint32_t cls, kind; } dr = { 'cntl', 4  /*kEventControlDraw*/ };
@@ -427,6 +491,101 @@ static ControlRef make_popup(const char *x, long lo, long hi, const CRect *r,
         n_InstallEventHandler2(tgt, (void *)popup_track, 1, &hk, pu, NULL);
         n_InstallEventHandler2(tgt, (void *)popup_track, 1, &tk, pu, NULL);
     }
+    if (n_HIViewSetVisible) n_HIViewSetVisible(c, 1);   // base hiview starts hidden
+    if (parent) n_HIViewAddSubview(parent, c);
+    return c;
+}
+
+// ---- self-drawn edit-text field ----------------------------------------
+// IBCarbonEditText -> the classic MLTE/edit-text control was removed from 64-bit
+// HIToolbox, so materialize it as a self-drawn com.apple.hiview that (a) draws a
+// classic sunken white field with its current text, and (b) captures the value the
+// app pushes at runtime.  Halo sets the port/IP text with
+// SetControlData(ctl, part, kControlEditTextCFStringTag|kControlEditTextTextTag,
+// size, &value) after resolving the field by its ControlID (signature 'Sprt' etc.).
+// On a compositing HIView SetControlData is delivered as a kEventControlSetData
+// carbon event to the view's own handler, so we intercept it there, store the
+// string, and redraw — no SetControlData interposition (which would need a
+// retranslate) required.  Universal for any IBCarbonEditText.
+struct edit { char text[128]; void *view; CRect r; };
+
+static OSStatus edit_draw(void *call, void *ev, void *ud) {
+    (void)call;
+    struct edit *e = (struct edit *)ud;
+    CGContextRef cg = NULL; double W = 0, H = 0;
+    if (!e || !draw_ctx(ev, e->view, &e->r, &cg, &W, &H)) return (OSStatus)-9874;
+    HIRectD b = { 0, 0, W, H };
+    CGContextSaveGState(cg);
+    // sunken white field with a 1px gray inset border
+    CGRect box = CGRectMake(0.5, 0.5, b.w - 1, b.h - 1);
+    CGContextSetRGBFillColor(cg, 1.0, 1.0, 1.0, 1.0);
+    CGContextFillRect(cg, box);
+    CGContextSetRGBStrokeColor(cg, 0.55, 0.55, 0.58, 1.0);
+    CGContextSetLineWidth(cg, 1.0);
+    CGContextStrokeRect(cg, box);
+    // top inner shadow line for the recessed look
+    CGContextSetRGBStrokeColor(cg, 0.78, 0.78, 0.80, 1.0);
+    CGContextBeginPath(cg);
+    CGContextMoveToPoint(cg, 1.5, b.h - 1.5);
+    CGContextAddLineToPoint(cg, b.w - 1.5, b.h - 1.5);
+    CGContextStrokePath(cg);
+    if (e && e->text[0])
+        draw_text(cg, e->text, 5, b.h / 2 + 4, H, 11, 0.05, 0.05, 0.08, 0);
+    CGContextRestoreGState(cg);
+    return noErr;
+}
+
+// kEventControlSetData: capture the CFString/text the app pushes into the field.
+static OSStatus edit_setdata(void *call, void *ev, void *ud) {
+    (void)call;
+    struct edit *e = (struct edit *)ud;
+    if (!e) return (OSStatus)-9874;
+    static OSStatus (*gep)(void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *);
+    if (!gep) gep = (void *)dlsym(RTLD_DEFAULT, "GetEventParameter");
+    if (!gep) return (OSStatus)-9874;
+    uint32_t tag = 0;
+    void *buf = NULL; unsigned long bufsz = 0;
+    gep(ev, 'cdtg' /*kEventParamControlDataTag*/,        'enum', NULL, sizeof tag,   NULL, &tag);
+    gep(ev, 'cdbf' /*kEventParamControlDataBuffer*/,     'ptr ', NULL, sizeof buf,   NULL, &buf);
+    gep(ev, 'cdbs' /*kEventParamControlDataBufferSize*/, 'lcnt', NULL, sizeof bufsz, NULL, &bufsz);
+    int handled = 0;
+    if (tag == 'cfst' /*kControlEditTextCFStringTag*/ && buf) {
+        // buffer holds a CFStringRef*
+        CFStringRef cf = *(CFStringRef *)buf;
+        if (cf && CFGetTypeID(cf) == CFStringGetTypeID()) {
+            e->text[0] = 0;
+            CFStringGetCString(cf, e->text, sizeof e->text, kCFStringEncodingUTF8);
+            handled = 1;
+        }
+    } else if (tag == 'text' /*kControlEditTextTextTag*/ && buf) {
+        unsigned long n = bufsz < sizeof e->text - 1 ? bufsz : sizeof e->text - 1;
+        memcpy(e->text, buf, n); e->text[n] = 0; handled = 1;
+    }
+    if (handled) {
+        if (n_HIViewSetNeedsDisplay && e->view) n_HIViewSetNeedsDisplay(e->view, 1);
+        return noErr;
+    }
+    return (OSStatus)-9874;  /* eventNotHandledErr: let HIToolbox handle other tags */
+}
+
+static ControlRef make_edit_field(const char *x, long lo, long hi, const CRect *r,
+                                  ControlRef parent) {
+    (void)x; (void)lo; (void)hi;
+    ControlRef c = NULL;
+    if (!n_HIObjectCreate) return NULL;
+    n_HIObjectCreate(CFSTR("com.apple.hiview"), NULL, (HIObjectRef *)&c);
+    if (!c) return NULL;
+    set_frame(c, r);
+    struct edit *e = (struct edit *)calloc(1, sizeof *e);
+    if (e) { e->view = c; if (r) e->r = *r; }
+    if (e && n_InstallEventHandler2 && n_GetControlEventTarget2) {
+        void *tgt = n_GetControlEventTarget2(c);
+        struct { uint32_t cls, kind; } dr = { 'cntl', 4  /*kEventControlDraw*/    };
+        struct { uint32_t cls, kind; } sd = { 'cntl', 20 /*kEventControlSetData*/ };
+        n_InstallEventHandler2(tgt, (void *)edit_draw,    1, &dr, e, NULL);
+        n_InstallEventHandler2(tgt, (void *)edit_setdata, 1, &sd, e, NULL);
+    }
+    if (n_HIViewSetVisible) n_HIViewSetVisible(c, 1);   // base hiview starts hidden
     if (parent) n_HIViewAddSubview(parent, c);
     return c;
 }
@@ -464,7 +623,10 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
             // self-drawn popup (bare HIPopupButton HIObject can't take a menu on
             // modern macOS) with the dropdown built from the nib's menu items;
             // clicking opens it via PopUpMenuSelect. make_popup embeds it itself.
-            make_popup(x, il, ih, &r, parent);
+            // Wire its ControlID so Halo's GetControlByID({'Lens',0})/
+            // SetControl32BitValue resolves the popup at runtime.
+            ControlRef pc = make_popup(x, il, ih, &r, parent);
+            if (pc) wire_ids(x, il, ih, pc);
             p = oe; continue;
         } else if (!strcmp(cls, "IBCarbonGroupBox")) {
             // No CreateGroupBoxControl on modern macOS -> self-drawn titled frame.
@@ -476,7 +638,12 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
             // Shader/FSAA/Port controls off-view). So the group is a VISUAL frame
             // only; its children stay siblings on `parent` (root) with their
             // window-relative coords. Draw the frame FIRST so children sit on top.
-            make_group_frame(win, &r, title, parent);
+            // Use the group's OWN title (after its subviews array) — nibx_str would
+            // return the first *child's* title ("Lens Flare:") instead of the frame
+            // label ("Rendering Pipeline").
+            char gt[512] = "";
+            if (nibx_own_title(x, il, ih, gt, sizeof gt)) nibx_unescape(gt);
+            make_group_frame(win, &r, gt[0] ? gt : NULL, parent);
             build_children(x, il, ih, parent, win);   // children flat on root
             p = oe; continue;
         } else if (!strcmp(cls, "IBCarbonUserPane")) {
@@ -484,7 +651,15 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
             // a base hiview here would double-offset its kids; keep them on root.
             build_children(x, il, ih, parent, win);
             p = oe; continue;
-        } else if (!strcmp(cls, "IBCarbonEditText") || !strcmp(cls, "IBCarbonSeparator") ||
+        } else if (!strcmp(cls, "IBCarbonEditText")) {
+            // self-drawn edit field (MLTE/edit-text removed on modern macOS): draws a
+            // classic sunken box and captures the text the app pushes via
+            // SetControlData. Wire its ControlID so GetControlByID({'Sprt',0}) etc.
+            // resolves the field for the app's runtime value set.
+            ControlRef ec = make_edit_field(x, il, ih, &r, parent);
+            if (ec) wire_ids(x, il, ih, ec);
+            p = oe; continue;
+        } else if (!strcmp(cls, "IBCarbonSeparator") ||
                    !strcmp(cls, "IBCarbonRelevanceBar") || !strcmp(cls, "IBCarbonLittleArrows")) {
             // genuinely-removed surface -> base hiview placeholder (visible, inert)
             if (n_HIObjectCreate) n_HIObjectCreate(CFSTR("com.apple.hiview"), NULL, (HIObjectRef *)&c);
@@ -608,12 +783,18 @@ uint32_t shim_CreateWindowFromNib(uint32_t *a) {
 
     WindowRef w = NULL;
     OSStatus st = n_CreateWindowFromNib ? n_CreateWindowFromNib(ref, wn, &w) : (OSStatus)-108;
+    int trace = getenv("ABICONV_NIB_TRACE") != NULL;
+    char wname[128] = "?";
+    if (trace && wn) CFStringGetCString(wn, wname, sizeof wname, kCFStringEncodingUTF8);
+    if (trace) fprintf(stderr, "[nib] CreateWindowFromNib('%s') native st=%d w=%p\n", wname, (int)st, w);
 
     if ((st != 0 || !w)) {                       // native gutted path failed (e.g. -5601)
         const char *xib = nib_lookup(ref);
+        if (trace) fprintf(stderr, "[nib]   -> falling back to build_window (xib=%s)\n", xib ? xib : "(none)");
         if (xib && wn) {
             WindowRef bw = build_window(xib, wn);
             if (bw) { w = bw; st = 0; }
+            if (trace) fprintf(stderr, "[nib]   -> build_window returned %p\n", (void *)bw);
         }
     }
     if (out) *out = w ? x64_objc_wrap((uint64_t)(uintptr_t)w) : 0;
