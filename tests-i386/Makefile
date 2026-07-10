@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info jt-weak-import dyld-multicopy carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32
 all: run-only
 
 # byval-int32: guard for the legacy fixed-32 by-value-struct SIZING fix (abigen
@@ -207,6 +207,17 @@ qt-movie:
 # (modern ld can't emit classic format); SKIPs if none is present.
 synth-dyld-info: $(MACHO_TOOL)
 	@bash synth_dyld_info_test.sh $(MACHO_TOOL)
+
+# nopie-exec-dylib-rebase: regression for the NON-PIE-executable -> dylib REBASE
+# synthesis fix (core archive.cc synthesize_dyld_info rebase_only path). A non-PIE
+# i386 executable (Civ IV Steam) carries an LC_DYLD_INFO with an EMPTY rebase
+# table (fixed base => absolute internal pointers, zero rebases). Converting it to
+# an always-slid dylib left those pointers stale -> EXC_BAD_ACCESS. The fix merges
+# synthesized REBASE opcodes into the existing empty-rebase stream. Builds a
+# non-PIE i386 exec with an internal __data func-ptr array, converts to a dylib,
+# asserts input rebase_size==0 and output rebase_size>0. Needs i386 sysroot+nasm.
+nopie-exec-dylib-rebase: $(MACHO_TOOL)
+	@bash nopie_exec_dylib_rebase_test.sh $(MACHO_TOOL)
 
 # dyld-multicopy: regression test for the multi-libabiconv-copy __dyld+8
 # mod-init artifact fix (wrap_mod_init_funcs skip; Halo CE + bundled translated

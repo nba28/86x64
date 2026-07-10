@@ -784,9 +784,27 @@ namespace MachO {
       } else {
          if (!synthesize_dyld_info_enabled) { return; }
 
-         /* Already modern (binds live in a real LC_DYLD_INFO stream): nothing to
-          * do. This is exactly the inverse of the classic-image set. */
-         if (this->template subcommand<DyldInfo>() != nullptr) { return; }
+         /* A modern image already carries a real LC_DYLD_INFO stream. Normally
+          * there is nothing to do. But a NON-PIE i386 EXECUTABLE (MH_PIE clear,
+          * e.g. Civ IV Steam) links with an EMPTY rebase table: as a fixed-base
+          * executable its internal __nl_symbol_ptr / __mod_init_func pointers are
+          * baked absolute and never slide, so the linker emits zero rebases. When
+          * we convert that executable into a DYLIB, dyld ALWAYS applies a slide,
+          * and every un-rebased absolute internal pointer is left pointing at the
+          * original (pre-slide) vmaddr -> EXC_BAD_ACCESS on first deref (observed:
+          * a CFBundleGetFunctionPointerForName plugin-loader path reading a stale
+          * __nl_symbol_ptr -> movl (%rdi),%eax with rdi = original vmaddr).
+          *
+          * So: if a DyldInfo exists but its rebase table is EMPTY, run ONLY the
+          * rebase-synthesis pass and merge the synthesized REBASE opcodes into the
+          * existing stream (its binds/exports are already correct). A modern PIE
+          * input has a populated rebase table and is left untouched. This is the
+          * modern-path analogue of the classic (LC_DYSYMTAB-only) synthesis below;
+          * both derive the internal sliding-pointer set from the indirect symbol
+          * table's INDIRECT_SYMBOL_LOCAL markers (nlocrel/nextrel are 0 here). */
+         DyldInfo<b> *existing_dyld = this->template subcommand<DyldInfo>();
+         const bool rebase_only = (existing_dyld != nullptr);
+         if (rebase_only && !existing_dyld->rebase->rebasees.empty()) { return; }
 
          auto *symtab   = this->template subcommand<Symtab>();
          auto *dysymtab = this->template subcommand<Dysymtab>();
@@ -816,7 +834,13 @@ namespace MachO {
          std::vector<const Nlist<b> *> syms_by_index(symtab->syms.begin(),
                                                      symtab->syms.end());
 
-         auto *rebase    = RebaseInfo<b>::Create();
+         /* In rebase_only mode we append to the EXISTING DyldInfo's rebase stream
+          * and leave its binds/weak/lazy/export untouched (they are already the
+          * image's correct modern streams). The scratch bind/weak/lazy/export
+          * objects below are then only populated by the classic path and never
+          * installed. */
+         auto *rebase    = rebase_only ? existing_dyld->rebase
+                                       : RebaseInfo<b>::Create();
          auto *bind      = BindInfo<b, false>::Create();
          auto *weak_bind = BindInfo<b, false>::Create(/*weak=*/true);
          auto *lazy_bind = BindInfo<b, true>::Create();
@@ -881,6 +905,12 @@ namespace MachO {
                   if (isym >= syms_by_index.size()) { continue; }
                   const Nlist<b> *nl = syms_by_index[isym];
                   if (nl->string == nullptr) { continue; }
+
+                  /* rebase_only: the image's imports already live in the existing
+                   * bind stream; only the internal sliding pointers (defined-symbol
+                   * slots -> the `else` below) need a synthesized rebase. Skip the
+                   * UNDEF-bind emission entirely. */
+                  if (rebase_only && nl->kind() == Nlist<b>::Kind::UNDEF) { continue; }
 
                   if (nl->kind() == Nlist<b>::Kind::UNDEF) {
                      const uint8_t ord = GET_LIBRARY_ORDINAL(nl->nlist.n_desc);
@@ -984,7 +1014,21 @@ namespace MachO {
           * externals have no `value` placeholder (Nlist parse only placeholders
           * N_SECT symbols) and are skipped — which also avoids re-exporting GCC
           * C++ `.eh` FDE markers (N_ABS, value 0) that dyld can't satisfy. Weak
-          * definitions carry EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION. */
+          * definitions carry EXPORT_SYMBOL_FLAGS_WEAK_DEFINITION.
+          *
+          * rebase_only: the existing DyldInfo already carries the image's real
+          * export trie; skip export synthesis (and the DyldInfo::Create/insert
+          * below — the synthesized rebase nodes were appended in-place to the
+          * existing stream via the `rebase` alias). */
+         if (rebase_only) {
+            if (dbg) {
+               fprintf(stderr,
+                       "synthesize_dyld_info: rebase_only merged %zu rebase into "
+                       "existing LC_DYLD_INFO\n", n_rebase);
+            }
+            return;
+         }
+
          for (const Nlist<b> *nl : symtab->syms) {
             if (nl->kind() != Nlist<b>::Kind::EXT) { continue; }
             if (nl->string == nullptr || nl->string->str.empty()) { continue; }

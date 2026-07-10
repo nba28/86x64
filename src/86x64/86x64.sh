@@ -231,16 +231,22 @@ else
     DYLD64="$INTERPOSE64"
 fi
 
-# convert result to dylib (final output). For CLASSIC images (no LC_DYLD_INFO)
-# synthesize a canonical modern LC_DYLD_INFO_ONLY (rebase/bind/export opcode
-# streams derived from the indirect symtab + relocs), so the output is a normal
-# modern x86_64 dylib: install_name_tool (cctools + llvm), codesign and dyld all
-# accept it, and the synthesized binds resolve through the SAME static-interpose
-# -> libabiconv shim path as modern targets (curing the classic-import truncation
-# family). Modern inputs already carry LC_DYLD_INFO and are untouched.
-SYNTH_DYLD_INFO=""
-[ "$HAS_DYLD_INFO" -gt 0 ] || SYNTH_DYLD_INFO="--synthesize-dyld-info"
-v "$MACHO_TOOL" convert --archive DYLIB $SYNTH_DYLD_INFO "$DYLD64" "$DYLIB64" || error
+# convert result to dylib (final output). Always request --synthesize-dyld-info:
+#   * CLASSIC images (no LC_DYLD_INFO): synthesize a canonical modern
+#     LC_DYLD_INFO_ONLY (rebase/bind/export opcode streams derived from the
+#     indirect symtab + relocs), so the output is a normal modern x86_64 dylib
+#     (install_name_tool/codesign/dyld all accept it) and the synthesized binds
+#     resolve through the SAME static-interpose -> libabiconv shim path (curing
+#     the classic-import truncation family).
+#   * MODERN images WITH a populated rebase table (PIE): the synthesis pass is a
+#     no-op (returns early — the image is already a correct modern dylib).
+#   * MODERN images with an EMPTY rebase table (a NON-PIE i386 EXECUTABLE, e.g.
+#     Civ IV Steam): the pass synthesizes ONLY the missing REBASE opcodes for the
+#     image's absolute internal pointers and merges them into the existing stream.
+#     Without this, converting a fixed-base executable to an always-slid dylib
+#     leaves every un-rebased internal pointer stale -> EXC_BAD_ACCESS on deref.
+#     (See Archive::synthesize_dyld_info rebase_only path.)
+v "$MACHO_TOOL" convert --archive DYLIB --synthesize-dyld-info "$DYLD64" "$DYLIB64" || error
 
 # Post-process the dylib so install_name_tool can edit it later:
 #   1) strip LC_CODE_SIGNATURE (otherwise install_name_tool refuses with
