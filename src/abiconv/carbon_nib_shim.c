@@ -49,6 +49,8 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include <CoreGraphics/CoreGraphics.h>   // self-drawn group-box frame
+#include <CoreText/CoreText.h>           // group-box title
 #include "carbon_nib_parse.h"   // pure, headless-testable nib XML reader
 
 // arena bridge (objc_shim.c): i386 handle / i386 CFSTR constant <-> real 64-bit ptr.
@@ -98,6 +100,27 @@ static OSStatus (*n_SetControlID)(ControlRef, const CtrlID *);
 static OSStatus (*n_SetControlCommandID)(ControlRef, uint32_t);
 static CFBundleRef (*n_CFBundleGetMainBundle)(void);
 static uint32_t (*n_GetAvailableWindowAttributes)(uint32_t);
+// self-drawn popup: menu build + PopUpMenuSelect
+typedef void *MenuRef;
+static OSStatus (*n_CreateNewMenu)(uint16_t, uint32_t, MenuRef *);
+static OSStatus (*n_AppendMenuItemTextWithCFString)(MenuRef, CFStringRef, uint32_t, uint32_t, uint16_t *);
+static void     (*n_SetMenuID)(MenuRef, int16_t);
+static void     (*n_InsertMenu)(MenuRef, int16_t);
+static void     (*n_DeleteMenu)(int16_t);
+static uint32_t (*n_PopUpMenuSelect)(MenuRef, int16_t, int16_t, int16_t);
+/* GetControlEventTarget returns an EventTargetRef, which is a 64-bit POINTER,
+ * not an OSStatus.  Declaring it as OSStatus (int32_t) made the compiler read
+ * only %eax and truncate the real 64-bit target pointer to 32 bits; the garbage
+ * low pointer was then handed to InstallEventHandler and HIToolbox's
+ * PushEventHandler faulted walking the handler chain at [target+0x68]
+ * (EXC_BAD_ACCESS at Halo startup when materializing settings-window popups).
+ * Keep the return type a pointer so all 64 bits survive. */
+static void *   (*n_GetControlEventTarget2)(ControlRef);
+static OSStatus (*n_InstallEventHandler2)(void *, void *, uint32_t, const void *, void *, void *);
+static OSStatus (*n_HIViewSetNeedsDisplay)(HIViewRef, uint8_t);
+static OSStatus (*n_HIViewGetBounds)(HIViewRef, HIRectD *);
+static OSStatus (*n_HIViewConvertPoint)(void *, HIViewRef, HIViewRef);  /* pt,from,to */
+static OSStatus (*n_HIViewSetVisible)(HIViewRef, uint8_t);
 
 static int g_resolved;
 static void resolve_once(void) {
@@ -111,7 +134,12 @@ static void resolve_once(void) {
     R(CreateIconControl); R(HIObjectCreate); R(HIViewAddSubview); R(HIViewSetFrame);
     R(SetControlID); R(SetControlCommandID); R(CFBundleGetMainBundle);
     R(GetAvailableWindowAttributes);
+    R(CreateNewMenu); R(AppendMenuItemTextWithCFString); R(SetMenuID);
+    R(InsertMenu); R(DeleteMenu); R(PopUpMenuSelect);
+    R(HIViewSetNeedsDisplay); R(HIViewGetBounds); R(HIViewConvertPoint); R(HIViewSetVisible);
 #undef R
+    n_GetControlEventTarget2 = (void *)dlsym(RTLD_DEFAULT, "GetControlEventTarget");
+    n_InstallEventHandler2   = (void *)dlsym(RTLD_DEFAULT, "InstallEventHandler");
 }
 
 // ---- nibref -> objects.xib absolute path table (small, single-threaded UI) ----
@@ -173,6 +201,236 @@ static void set_frame(ControlRef c, const CRect *r) {
     }
 }
 
+// ---- self-drawn group-box frame ----------------------------------------
+// CreateGroupBoxControl and every group-box HIObject class were removed from
+// 64-bit HIToolbox (probed: absent), so an IBCarbonGroupBox has no real control
+// to draw its titled border. Materialize it as a base com.apple.hiview with a
+// kEventControlDraw handler that strokes a rounded-rect frame and draws the
+// title — so the settings window's sections are visible instead of a blank gap.
+// The title text is copied into the handler's user-data (freed with the view is
+// impractical here; the frame lives for the window's life, a small leak that a
+// modal settings window incurs once — acceptable and bounded).
+struct gbox { char title[128]; };
+
+// (call, ev) are EventHandlerCallRef / EventRef — opaque here to avoid pulling in
+// Carbon.h (this TU only has CoreFoundation). eventNotHandledErr == -9874.
+static OSStatus gbox_draw(void *call, void *ev, void *ud) {
+    (void)call;
+    struct gbox *g = (struct gbox *)ud;
+    static OSStatus (*gep)(void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *);
+    static void *(*hvgb)(void *, void *);   /* HIViewGetBounds */
+    static void *(*gcev)(void *);            /* GetControlEventTarget (unused here) */
+    if (!gep) gep = (void *)dlsym(RTLD_DEFAULT, "GetEventParameter");
+    if (!hvgb) hvgb = (void *)dlsym(RTLD_DEFAULT, "HIViewGetBounds");
+    (void)gcev;
+    CGContextRef cg = NULL;
+    if (gep) gep(ev, 'cntx' /*kEventParamCGContextRef*/, 'cntx', NULL, sizeof cg, NULL, &cg);
+    // the control ref (view) to query its own bounds
+    void *view = NULL;
+    if (gep) gep(ev, 'ctrl' /*kEventParamDirectObject*/, 'ctrl', NULL, sizeof view, NULL, &view);
+    if (!cg || !view || !hvgb) return (OSStatus)-9874;  /* eventNotHandledErr */
+    typedef struct { double x, y, w, h; } HR;
+    HR b; ((OSStatus(*)(void *, HR *))hvgb)(view, &b);
+    // frame inset a little; leave room at top for the title
+    CGFloat top = 8;
+    CGRect fr = CGRectMake(1, top, b.w - 2, b.h - top - 1);
+    CGContextSaveGState(cg);
+    CGContextSetRGBStrokeColor(cg, 0.55, 0.55, 0.58, 1.0);
+    CGContextSetLineWidth(cg, 1.0);
+    CGPathRef p = CGPathCreateWithRoundedRect(fr, 5, 5, NULL);
+    CGContextAddPath(cg, p); CGContextStrokePath(cg); CGPathRelease(p);
+    // title: punch a gap + draw label at top-left
+    if (g && g->title[0]) {
+        CFStringRef s = CFStringCreateWithCString(NULL, g->title, kCFStringEncodingUTF8);
+        CFStringRef keys[] = { kCTFontAttributeName, kCTForegroundColorAttributeName };
+        CTFontRef font = CTFontCreateWithName(CFSTR("Helvetica"), 11, NULL);
+        CGColorRef col = CGColorCreateGenericRGB(0.15, 0.15, 0.18, 1);
+        CFTypeRef vals[] = { font, col };
+        CFDictionaryRef attr = CFDictionaryCreate(NULL, (const void **)keys, (const void **)vals, 2,
+            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFAttributedStringRef as = CFAttributedStringCreate(NULL, s, attr);
+        CTLineRef line = CTLineCreateWithAttributedString(as);
+        double tw = CTLineGetTypographicBounds(line, NULL, NULL, NULL);
+        // clear a gap in the frame stroke behind the title
+        CGContextSetRGBFillColor(cg, 0.93, 0.93, 0.93, 1.0);
+        CGContextFillRect(cg, CGRectMake(10, top - 6, tw + 8, 13));
+        CGContextSetTextPosition(cg, 14, top - 4);
+        CTLineDraw(line, cg);
+        CFRelease(line); CFRelease(as); CFRelease(attr); CFRelease(col);
+        CFRelease(font); CFRelease(s);
+    }
+    CGContextRestoreGState(cg);
+    return noErr;
+}
+
+// Create a self-drawing titled group-box frame hiview at r, embedded in parent.
+static ControlRef make_group_frame(WindowRef win, const CRect *r, const char *title,
+                                   ControlRef parent) {
+    (void)win;
+    static OSStatus (*inst)(void *, void *, unsigned long, const void *, void *, void *);
+    static void *(*getT)(void *);   /* GetControlEventTarget */
+    if (!inst) inst = (void *)dlsym(RTLD_DEFAULT, "InstallEventHandler");
+    if (!getT) getT = (void *)dlsym(RTLD_DEFAULT, "GetControlEventTarget");
+    ControlRef c = NULL;
+    if (n_HIObjectCreate) n_HIObjectCreate(CFSTR("com.apple.hiview"), NULL, (HIObjectRef *)&c);
+    if (!c) return NULL;
+    set_frame(c, r);
+    if (inst && getT) {
+        struct gbox *g = (struct gbox *)calloc(1, sizeof *g);
+        if (g && title) { strncpy(g->title, title, sizeof g->title - 1); }
+        struct { uint32_t cls, kind; } dr = { 'cntl', 4 /*kEventControlDraw*/ };
+        inst(getT(c), (void *)gbox_draw, 1, &dr, g, NULL);
+    }
+    if (parent) n_HIViewAddSubview(parent, c);
+    return c;
+}
+
+// ---- self-drawn popup button -------------------------------------------
+// The nib's IBCarbonPopupButton is a com.apple.HIPopupButton HIObject, but that
+// bare object rejects a menu (SetControlData -30581, init-event -50) and
+// CreatePopupButtonControl is gone. So materialize the popup as a self-drawn
+// com.apple.hiview: kEventControlDraw paints the current selection + a disclosure
+// triangle + bezel; a mouse click (kEventControlHit/Track) opens the menu via
+// PopUpMenuSelect (surviving) and updates the selection. The menu is built from
+// the nib's nested IBCarbonMenuItem titles. This is universal (any IBCarbon popup)
+// and shares the self-draw pattern with the group frame.
+#define POPUP_MAX_ITEMS 32
+struct popup {
+    MenuRef menu;
+    int16_t menuID;
+    int     nitems;
+    int     selected;              /* 1-based; 0 = none */
+    char    items[POPUP_MAX_ITEMS][64];
+    void   *view;                  /* the hiview */
+};
+static int16_t g_popup_menu_id = 5000;
+
+static OSStatus popup_draw(void *call, void *ev, void *ud) {
+    (void)call;
+    struct popup *pu = (struct popup *)ud;
+    CGContextRef cg = NULL;
+    if (n_HIViewGetBounds == NULL) return (OSStatus)-9874;
+    static OSStatus (*gep)(void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *);
+    if (!gep) gep = (void *)dlsym(RTLD_DEFAULT, "GetEventParameter");
+    if (gep) gep(ev, 'cntx', 'cntx', NULL, sizeof cg, NULL, &cg);
+    void *view = NULL;
+    if (gep) gep(ev, 'ctrl', 'ctrl', NULL, sizeof view, NULL, &view);
+    if (!cg || !view) return (OSStatus)-9874;
+    HIRectD b; n_HIViewGetBounds(view, &b);
+    // bezel: rounded light-gray box
+    CGContextSaveGState(cg);
+    CGRect box = CGRectMake(0.5, 0.5, b.w - 1, b.h - 1);
+    CGPathRef path = CGPathCreateWithRoundedRect(box, 4, 4, NULL);
+    CGContextSetRGBFillColor(cg, 0.96, 0.96, 0.97, 1.0);
+    CGContextAddPath(cg, path); CGContextFillPath(cg);
+    CGContextSetRGBStrokeColor(cg, 0.5, 0.5, 0.53, 1.0); CGContextSetLineWidth(cg, 1);
+    CGContextAddPath(cg, path); CGContextStrokePath(cg); CGPathRelease(path);
+    // current selection text
+    const char *sel = (pu->selected >= 1 && pu->selected <= pu->nitems)
+                      ? pu->items[pu->selected - 1] : (pu->nitems ? pu->items[0] : "");
+    CFStringRef s = CFStringCreateWithCString(NULL, sel, kCFStringEncodingUTF8);
+    if (s) {
+        CTFontRef font = CTFontCreateWithName(CFSTR("Helvetica"), 11, NULL);
+        CGColorRef col = CGColorCreateGenericRGB(0.1, 0.1, 0.12, 1);
+        CFStringRef k[] = { kCTFontAttributeName, kCTForegroundColorAttributeName };
+        CFTypeRef v[] = { font, col };
+        CFDictionaryRef attr = CFDictionaryCreate(NULL, (const void **)k, (const void **)v, 2,
+            &kCFTypeDictionaryKeyCallBacks, &kCFTypeDictionaryValueCallBacks);
+        CFAttributedStringRef as = CFAttributedStringCreate(NULL, s, attr);
+        CTLineRef line = CTLineCreateWithAttributedString(as);
+        CGContextSetTextPosition(cg, 8, (b.h - 11) / 2 + 1);
+        CTLineDraw(line, cg);
+        CFRelease(line); CFRelease(as); CFRelease(attr); CFRelease(col); CFRelease(font); CFRelease(s);
+    }
+    // disclosure triangle at the right
+    CGFloat tx = b.w - 16, ty = b.h / 2;
+    CGContextSetRGBFillColor(cg, 0.25, 0.25, 0.3, 1);
+    CGContextMoveToPoint(cg, tx, ty + 3);
+    CGContextAddLineToPoint(cg, tx + 8, ty + 3);
+    CGContextAddLineToPoint(cg, tx + 4, ty - 3);
+    CGContextClosePath(cg); CGContextFillPath(cg);
+    CGContextRestoreGState(cg);
+    return noErr;
+}
+
+// Mouse click on the popup -> show the menu via PopUpMenuSelect, update selection.
+static OSStatus popup_track(void *call, void *ev, void *ud) {
+    (void)call; (void)ev;
+    struct popup *pu = (struct popup *)ud;
+    if (!pu || !pu->menu || !n_PopUpMenuSelect) return (OSStatus)-9874;
+    // global position of the popup: use the current mouse location from the event.
+    struct { double x, y; } gpt = { 0, 0 };
+    static OSStatus (*gep)(void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *);
+    if (!gep) gep = (void *)dlsym(RTLD_DEFAULT, "GetEventParameter");
+    // kEventParamMouseLocation 'mloc' typeHIPoint 'hipt' (global)
+    int have = 0;
+    if (gep && gep(ev, 'mloc', 'hipt', NULL, sizeof gpt, NULL, &gpt) == 0) have = 1;
+    if (n_InsertMenu) n_InsertMenu(pu->menu, -1 /*hierarchical (not in the bar)*/);
+    int16_t top = have ? (int16_t)gpt.y : 200;
+    int16_t left = have ? (int16_t)gpt.x : 200;
+    uint32_t res = n_PopUpMenuSelect(pu->menu, top, left,
+                                     (int16_t)(pu->selected > 0 ? pu->selected : 1));
+    if (n_DeleteMenu) n_DeleteMenu(pu->menuID);
+    int16_t item = (int16_t)(res & 0xffff);
+    if (item >= 1 && item <= pu->nitems) {
+        pu->selected = item;
+        if (n_HIViewSetNeedsDisplay && pu->view) n_HIViewSetNeedsDisplay(pu->view, 1);
+    }
+    return noErr;
+}
+
+// Build a self-drawn popup at r with the menu items nested in [lo,hi) of the nib.
+static ControlRef make_popup(const char *x, long lo, long hi, const CRect *r,
+                             ControlRef parent) {
+    ControlRef c = NULL;
+    if (!n_HIObjectCreate) return NULL;
+    n_HIObjectCreate(CFSTR("com.apple.hiview"), NULL, (HIObjectRef *)&c);
+    if (!c) return NULL;
+    set_frame(c, r);
+    struct popup *pu = (struct popup *)calloc(1, sizeof *pu);
+    if (!pu) { if (parent) n_HIViewAddSubview(parent, c); return c; }
+    pu->view = c;
+    pu->menuID = g_popup_menu_id++;
+    if (n_CreateNewMenu) n_CreateNewMenu(pu->menuID, 0, &pu->menu);
+    if (pu->menu && n_SetMenuID) n_SetMenuID(pu->menu, pu->menuID);
+    // parse nested IBCarbonMenuItem titles in order
+    long p = lo;
+    while (p < hi && pu->nitems < POPUP_MAX_ITEMS) {
+        const char *o = strstr(x + p, "class=\"IBCarbonMenuItem\"");
+        if (!o || (o - x) >= hi) break;
+        long os = o - x, objs = os;
+        while (objs > lo && strncmp(x + objs, "<object ", 8)) objs--;
+        long obje = nibx_match_end(x, objs); if (obje < 0 || obje > hi) obje = hi;
+        char t[64] = "";
+        if (nibx_str(x, os, obje, "title", t, sizeof t)) {
+            nibx_unescape(t);
+            if (strcmp(t, "-") != 0) {                  /* skip separators */
+                strncpy(pu->items[pu->nitems], t, sizeof pu->items[0] - 1);
+                if (pu->menu && n_AppendMenuItemTextWithCFString) {
+                    uint16_t idx = 0;
+                    CFStringRef cs = CFStringCreateWithCString(NULL, t, kCFStringEncodingUTF8);
+                    n_AppendMenuItemTextWithCFString(pu->menu, cs, 0, 0, &idx);
+                    if (cs) CFRelease(cs);
+                }
+                pu->nitems++;
+            }
+        }
+        p = obje;
+    }
+    pu->selected = pu->nitems ? 1 : 0;                   /* default to first */
+    if (n_InstallEventHandler2 && n_GetControlEventTarget2) {
+        void *tgt = (void *)n_GetControlEventTarget2(c);
+        struct { uint32_t cls, kind; } dr = { 'cntl', 4  /*kEventControlDraw*/ };
+        struct { uint32_t cls, kind; } hk = { 'cntl', 1  /*kEventControlHit*/  };
+        struct { uint32_t cls, kind; } tk = { 'cntl', 51 /*kEventControlTrack*/};
+        n_InstallEventHandler2(tgt, (void *)popup_draw, 1, &dr, pu, NULL);
+        n_InstallEventHandler2(tgt, (void *)popup_track, 1, &hk, pu, NULL);
+        n_InstallEventHandler2(tgt, (void *)popup_track, 1, &tk, pu, NULL);
+    }
+    if (parent) n_HIViewAddSubview(parent, c);
+    return c;
+}
+
 // Build every control directly under [lo,hi) and embed into `parent`.
 static void build_children(const char *x, long lo, long hi, ControlRef parent, WindowRef win) {
     long p = lo;
@@ -203,15 +461,28 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
         } else if (!strcmp(cls, "IBCarbonIcon")) {
             n_CreateIconControl(win, &r, NULL, 0, &c);
         } else if (!strcmp(cls, "IBCarbonPopupButton")) {
-            if (n_HIObjectCreate) n_HIObjectCreate(CFSTR("com.apple.HIPopupButton"), NULL, (HIObjectRef *)&c);
-            set_frame(c, &r);
-        } else if (!strcmp(cls, "IBCarbonGroupBox") || !strcmp(cls, "IBCarbonUserPane")) {
-            // removed control class -> base hiview container (holds children, draws nothing)
-            if (n_HIObjectCreate) n_HIObjectCreate(CFSTR("com.apple.hiview"), NULL, (HIObjectRef *)&c);
-            set_frame(c, &r);
-            wire_ids(x, il, ih, c);
-            if (c && parent) n_HIViewAddSubview(parent, c);
-            build_children(x, il, ih, c ? c : parent, win);   // its kids embed in it
+            // self-drawn popup (bare HIPopupButton HIObject can't take a menu on
+            // modern macOS) with the dropdown built from the nib's menu items;
+            // clicking opens it via PopUpMenuSelect. make_popup embeds it itself.
+            make_popup(x, il, ih, &r, parent);
+            p = oe; continue;
+        } else if (!strcmp(cls, "IBCarbonGroupBox")) {
+            // No CreateGroupBoxControl on modern macOS -> self-drawn titled frame.
+            // CRUCIAL: the nib stores EVERY control's bounds WINDOW-RELATIVE, even
+            // for a group's children. If we re-parented the children INTO the
+            // group hiview, HIView would re-interpret their window-relative frame
+            // as group-relative and shift them by the group's origin (the "double
+            // offset" that scattered Halo's settings controls and pushed the
+            // Shader/FSAA/Port controls off-view). So the group is a VISUAL frame
+            // only; its children stay siblings on `parent` (root) with their
+            // window-relative coords. Draw the frame FIRST so children sit on top.
+            make_group_frame(win, &r, title, parent);
+            build_children(x, il, ih, parent, win);   // children flat on root
+            p = oe; continue;
+        } else if (!strcmp(cls, "IBCarbonUserPane")) {
+            // user pane: transparent container. Same flat-coord rule as groups —
+            // a base hiview here would double-offset its kids; keep them on root.
+            build_children(x, il, ih, parent, win);
             p = oe; continue;
         } else if (!strcmp(cls, "IBCarbonEditText") || !strcmp(cls, "IBCarbonSeparator") ||
                    !strcmp(cls, "IBCarbonRelevanceBar") || !strcmp(cls, "IBCarbonLittleArrows")) {
