@@ -1,5 +1,10 @@
 add_library(wrapper STATIC wrapper.asm wrapper_setup.c)
 add_library(interpose SHARED interpose.c)
+# The CFPreferences NULL-appID guard references CoreFoundation symbols only to
+# carry the __interpose replacee reference + dlsym the real impls; resolve them
+# at load (dynamic_lookup) so libinterpose keeps its no-CoreFoundation link and
+# early load order.
+target_link_options(interpose PRIVATE "-Wl,-undefined,dynamic_lookup")
 
 # libobjc_compat: a single-purpose drop-in dylib that re-supplies the ObjC1
 # runtime symbols CLASSIC (pre-ObjC2, zero-LC_DYLD_INFO) translated binaries

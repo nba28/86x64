@@ -2,6 +2,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <dlfcn.h>
 #include <sys/mman.h>
 #include <os/lock.h>
 #include <pthread.h>
@@ -289,6 +290,81 @@ __pthread_get_stacksize_np(pthread_t t)
 	return pthread_get_stacksize_np(t);
 }
 
+/*
+ * CFPreferences NULL-applicationID guard.
+ *
+ * A legacy (pre-10.7) app could call CFPreferencesGetAppBooleanValue / the
+ * *WithContainer* family with a NULL applicationID (10.6 CFPreferences treated
+ * it as "current application"). Modern CoreFoundation declares applicationID
+ * _Nonnull and unconditionally dereferences it inside
+ * -[_CFXPreferences withSearchListForIdentifier:...] (CFStringGetCharacterAtIndex
+ * -> __CF_IS_OBJC), so a NULL appID SIGSEGVs at address 0.
+ *
+ * libabiconv's prefs_shim.c ALSO interposes these, but a dylib's own
+ * __DATA,__interpose entries do NOT rebind that same dylib's imports (dyld
+ * skips self-interposition). The crashing call originates INSIDE libabiconv —
+ * its abigen-generated marshalling shim (___CFPreferencesGetAppBooleanValue.l1)
+ * forwards the translated i386 call to the real CF symbol via libabiconv's own
+ * lazy stub — so prefs_shim's interpose never fires for it. libinterpose is a
+ * SEPARATE image, so ITS interposers DO rebind libabiconv's stub. We substitute
+ * kCFPreferencesCurrentApplication for a NULL appID and forward to the real CF
+ * (never returning a bogus "absent" — the pref genuinely resolves against the
+ * current app), restoring the lenient 10.6 contract at the ABI boundary.
+ * GENERIC: helps every revived legacy app that passed NULL/current-app appID.
+ *
+ * libinterpose does NOT link CoreFoundation (it loads very early, before CF's
+ * initializers, and must not force CF up out of order). So the real CF symbols
+ * are resolved lazily via dlsym(RTLD_DEFAULT, ...) on first use — by which time
+ * any caller reaching these functions has CF loaded. The kCFPreferencesCurrent
+ * Application constant is likewise read through its dlsym'd address.
+ */
+typedef const void *CFStringRef_ip;
+typedef unsigned char Boolean_ip;
+typedef long CFIndex_ip;
+
+typedef Boolean_ip (*cf_get_bool_fn)(CFStringRef_ip, CFStringRef_ip, Boolean_ip *);
+typedef CFIndex_ip (*cf_get_int_fn)(CFStringRef_ip, CFStringRef_ip, Boolean_ip *);
+
+/* Weak-import declarations so the __interpose `replacee` slots carry a dyld
+ * symbol reference WITHOUT forcing CoreFoundation to link. dyld matches the
+ * interpose against the CF definitions at load; the addresses below are never
+ * called directly (the wrappers dlsym the real impls). */
+extern Boolean_ip CFPreferencesGetAppBooleanValue(CFStringRef_ip, CFStringRef_ip, Boolean_ip *)
+	__attribute__((weak_import));
+extern CFIndex_ip CFPreferencesGetAppIntegerValue(CFStringRef_ip, CFStringRef_ip, Boolean_ip *)
+	__attribute__((weak_import));
+
+static CFStringRef_ip
+cf_current_application(void)
+{
+	static CFStringRef_ip cached;
+	if (!cached) {
+		void *p = dlsym(RTLD_DEFAULT, "kCFPreferencesCurrentApplication");
+		if (p) { cached = *(CFStringRef_ip *)p; }
+	}
+	return cached;
+}
+
+static Boolean_ip
+__CFPreferencesGetAppBooleanValue(CFStringRef_ip key, CFStringRef_ip appID, Boolean_ip *valid)
+{
+	static cf_get_bool_fn real;
+	if (!real) { real = (cf_get_bool_fn)dlsym(RTLD_DEFAULT, "CFPreferencesGetAppBooleanValue"); }
+	if (!appID) { appID = cf_current_application(); }
+	if (!real || !appID) { if (valid) { *valid = 0; } return 0; }
+	return real(key, appID, valid);
+}
+
+static CFIndex_ip
+__CFPreferencesGetAppIntegerValue(CFStringRef_ip key, CFStringRef_ip appID, Boolean_ip *valid)
+{
+	static cf_get_int_fn real;
+	if (!real) { real = (cf_get_int_fn)dlsym(RTLD_DEFAULT, "CFPreferencesGetAppIntegerValue"); }
+	if (!appID) { appID = cf_current_application(); }
+	if (!real || !appID) { if (valid) { *valid = 0; } return 0; }
+	return real(key, appID, valid);
+}
+
 typedef struct { const void* replacement; const void* replacee; } interpose_t;
 
 __attribute__((used)) static const interpose_t __interposers[]
@@ -300,4 +376,6 @@ __attribute__ ((section("__DATA, __interpose"))) = {
 	{ (void *)__mach_vm_map,      (void *)mach_vm_map },
 	{ (void *)__pthread_get_stackaddr_np, (void *)pthread_get_stackaddr_np },
 	{ (void *)__pthread_get_stacksize_np, (void *)pthread_get_stacksize_np },
+	{ (void *)__CFPreferencesGetAppBooleanValue, (void *)CFPreferencesGetAppBooleanValue },
+	{ (void *)__CFPreferencesGetAppIntegerValue, (void *)CFPreferencesGetAppIntegerValue },
 };

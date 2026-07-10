@@ -45,6 +45,24 @@ _CFPreferencesCopyAppValueWithContainer(CFStringRef key, CFStringRef appID, CFUR
 extern CFPropertyListRef
 _CFPreferencesCopyValueWithContainer(CFStringRef key, CFStringRef appID, CFStringRef user,
                                      CFStringRef host, CFURLRef container);
+/* The Get{Boolean,Integer}Value public API funnels through these PRIVATE
+ * *WithContainer* variants. The public entry points below are interposed, but a
+ * caller that reaches the private variant directly (e.g. our abigen marshalling
+ * shim ___CFPreferencesGetAppBooleanValue.l1 forwards to the real public symbol,
+ * whose body tail-calls the WithContainer variant BELOW the interposed frame)
+ * still hits the real implementation. On modern macOS that implementation
+ * dereferences appID as _Nonnull inside -[_CFXPreferences withSearchListFor
+ * Identifier:...] (CFStringGetCharacterAtIndex -> __CF_IS_OBJC), so a legacy
+ * app that passed a NULL / current-application appID (tolerated on 10.6) now
+ * SIGSEGVs. Interpose the private variants too so the whole family reports
+ * "absent" without ever dereferencing appID. (Root cause: Civ IV Steam
+ * ASLShowFPS -> CFPreferencesGetAppBooleanValue with a NULL appID.) */
+extern Boolean
+_CFPreferencesGetAppBooleanValueWithContainer(CFStringRef key, CFStringRef appID,
+                                              CFURLRef container, Boolean *valid);
+extern CFIndex
+_CFPreferencesGetAppIntegerValueWithContainer(CFStringRef key, CFStringRef appID,
+                                              CFURLRef container, Boolean *valid);
 
 /* ---- replacements: report "absent" / succeed without the daemon ---- */
 
@@ -100,6 +118,24 @@ x64_CFPreferencesGetAppIntegerValue(CFStringRef key, CFStringRef applicationID,
 {
 	(void) key; (void) applicationID;
 	if (keyExistsAndHasValidFormat) { *keyExistsAndHasValidFormat = false; }
+	return 0;
+}
+
+/* Private *WithContainer* variants the Get{Boolean,Integer}Value family funnels
+ * through — same "absent, no daemon, never deref appID" contract. */
+static Boolean
+x64_pref_get_bool_c(CFStringRef key, CFStringRef appID, CFURLRef container, Boolean *valid)
+{
+	(void) key; (void) appID; (void) container;
+	if (valid) { *valid = false; }
+	return false;
+}
+
+static CFIndex
+x64_pref_get_int_c(CFStringRef key, CFStringRef appID, CFURLRef container, Boolean *valid)
+{
+	(void) key; (void) appID; (void) container;
+	if (valid) { *valid = false; }
 	return 0;
 }
 
@@ -162,6 +198,10 @@ __attribute__((section("__DATA,__interpose"))) = {
 	  (const void *) CFPreferencesGetAppBooleanValue },
 	{ (const void *) x64_CFPreferencesGetAppIntegerValue,
 	  (const void *) CFPreferencesGetAppIntegerValue },
+	{ (const void *) x64_pref_get_bool_c,
+	  (const void *) _CFPreferencesGetAppBooleanValueWithContainer },
+	{ (const void *) x64_pref_get_int_c,
+	  (const void *) _CFPreferencesGetAppIntegerValueWithContainer },
 	{ (const void *) x64_CFPreferencesCopyKeyList,
 	  (const void *) CFPreferencesCopyKeyList },
 	{ (const void *) x64_CFPreferencesCopyMultiple,
