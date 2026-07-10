@@ -211,12 +211,17 @@ else
 fi
 
 # statically interpose imported symbols to libabiconv (both binding flavors).
-# stdin MUST be /dev/null: with an EMPTY $SYMS (nm -u found no undefineds,
-# e.g. an already-fully-redirected framework re-translate) static-interpose
-# falls back to reading symbols from stdin — inheriting a never-closing pipe
-# (background runs) hangs its `cat` forever (observed twice on Sparkle.i386,
-# 30–60min wedges).
-v "$ROOTDIR"/static-interpose.sh -l "$LIBABICONV" -n "$LIBABICONV_NAME" -p "__" -o "$INTERPOSE64" "$DOLLAR64" $SYMS < /dev/null || error
+# Symbols are fed via a temp file through stdin to avoid exec ARG_MAX overflows:
+# a binary with a large C++ weak_bind table (e.g. Civ IV Steam: 2.5 MB = ~20K
+# C++ template symbols) would exceed the 1 MB exec argument limit if passed as
+# positional arguments.  `printf` is a shell builtin (no exec), so writing to
+# a temp file is safe.  Feeding via stdin (file redirect) also cures the
+# earlier empty-SYMS hangup: when $SYMS is empty the file is empty — the
+# static-interpose while-loop runs 0 iterations (no blocking `cat` on an open
+# pipe — the /dev/null workaround is no longer needed).
+SYMS_FILE="$TMPDIR_PIPE/${STEM}.syms"
+printf '%s\n' $SYMS > "$SYMS_FILE"
+v "$ROOTDIR"/static-interpose.sh -l "$LIBABICONV" -n "$LIBABICONV_NAME" -p "__" -o "$INTERPOSE64" "$DOLLAR64" < "$SYMS_FILE" || error
 
 if [ "$HAS_DYLD_INFO" -gt 0 ]; then
     # interpose dyld_stub_binder (modern lazy-binding entry point)
