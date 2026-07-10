@@ -480,6 +480,10 @@ add_library(abiconv SHARED
   # a real ModalDialog event pump — so an app's "prompt until valid input" modal
   # loop works (Halo's "Enter Your Halo Product Key" CD-key gate). Needs AppKit.
   carbon_dialog_shim.m
+  # Restore the user's system keyboard input source when a translated app exits
+  # (Halo forces US in-game and leaves it there; snapshot at load, re-select at
+  # exit). Non-invasive: does not suppress the app's in-run layout forcing.
+  keyboard_input_shim.c
   carbon_classic_ui_shim.c # classic TextEdit/List/Drag/Theme (graceful dead surface)
   qt_hitoolbox_shim.c
   carbon_fwd_shim.c
