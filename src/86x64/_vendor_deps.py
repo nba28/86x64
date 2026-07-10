@@ -231,10 +231,20 @@ def vendor(app, sources, dry, native=DEFAULT_NATIVE):
                 continue          # resolves at its absolute path → host-native
             if system_fw_exists(kind, name):
                 continue          # has a modern native home → leave native
-            if name in native:
-                # known to require native execution — never translate it
-                dangling.setdefault((kind, name), set()).add(b.name)
-                continue
+            # `native`-marked (e.g. MobileMe): it must RUN native (its own x86_64
+            # slice), never be translated. If it already resolves at a host /
+            # native home the checks above `continue`d. Reaching here means the
+            # dep is an app-private path that no longer exists (iWork '09's
+            # MobileMe lives at "/Library/Application Support/iWork '09/…" — gone
+            # on modern macOS) AND it is not yet bundled → it must be VENDORED
+            # from a curated source that carries an x86_64 slice, then left
+            # native (m64 translate classifies an x86_64-having binary as
+            # "native" and leaves it alone; rpath-fix repoints the consumer at
+            # the in-bundle copy). Only if no source is found do we flag it
+            # dangling. Without this a `native` framework with no host home was
+            # dropped entirely -> dyld "Library not loaded" at launch
+            # (Numbers/iWork SFApplication -> MobileMe). Falls through to the
+            # shared vendoring block below.
             # An app-private absolute path (not under /System or /usr) that no
             # longer exists, with no native home and not bundled: vendor it in.
             if (kind, name) in handled:
