@@ -41,6 +41,23 @@ extern id objc_retain(id);   /* libobjc ARC entrypoint; not in runtime.h */
 #define LOW_REGION_BASE 0x080000000UL
 #define LOW_REGION_END  0x0F0000000UL
 
+/* Debug-trace env flags, resolved ONCE. These gate diagnostic fprintf paths on
+ * the ObjC/CFString bridge HOT PATH (i386_cfstr_to_real's reject branch, the
+ * wrap/class-lookup tracers). getenv() does a LINEAR SCAN of the environment;
+ * calling it per-conversion turned a rejected-CFString candidate in a tight
+ * loop into a multi-minute 100%-CPU spin (Halo startup: millions of
+ * non-CFString pointers hit the reject branch -> BRIDGE_TRACE()
+ * each time). Cache the answer — the environment never changes mid-run. */
+static int obj_trace_flag(const char *name, int *cache) {
+   int v = *cache;
+   if (__builtin_expect(v < 0, 0)) { v = getenv(name) != NULL; *cache = v; }
+   return v;
+}
+static int g_bridge_trace_cache = -1;
+static int g_wrap_trace_cache   = -1;
+#define BRIDGE_TRACE() obj_trace_flag("OBJC_BRIDGE_TRACE", &g_bridge_trace_cache)
+#define WRAP_TRACE()   obj_trace_flag("OBJC_WRAP_TRACE",   &g_wrap_trace_cache)
+
 /*
  * Proxy arena: a flat low-4GB array of 64-bit reals. A "handle" is the
  * 32-bit address of one slot. unwrap(handle) = *slot. The arena must live
@@ -413,7 +430,7 @@ uint32_t x64_objc_wrap(uint64_t real) {
     * bit per platform) nor a plausible mapped address (0x6000…/0x7ff8…/low)
     * is almost certainly a clobbered register being wrapped — the source of
     * garbage-backed handles that later crash as msgSend receivers. */
-   if (getenv("OBJC_WRAP_TRACE")) {
+   if (WRAP_TRACE()) {
       /* Log EVERY fresh mint: a garbage real can look tagged (odd low byte),
        * so a validity heuristic can't catch it — instead we grep the log for
        * the crashing handle afterwards. ra discriminates the libabiconv call
@@ -465,7 +482,7 @@ uint32_t x64_objc_bounce_cstr(const char *s) {
    }
    memcpy(g_cstr_buf[i], s, n);
    uintptr_t bp = (uintptr_t)g_cstr_buf[i];
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[bp]   bounce_cstr in=%p -> 0x%lx \"%.32s\"\n",
               (void*)s, (unsigned long)bp, s);
       fflush(stderr);
@@ -822,7 +839,7 @@ static id resolve_self_raw(uint32_t self32) {
    }
    if (self32 != 0) {
       if (!mem_readable(sp, 1)) {
-         if (getenv("OBJC_BRIDGE_TRACE")) {
+         if (BRIDGE_TRACE()) {
             fprintf(stderr, "[bp] resolve_self: unmapped self32=0x%08x -> nil\n",
                     self32);
             fflush(stderr);
@@ -830,7 +847,7 @@ static id resolve_self_raw(uint32_t self32) {
          return (id)0;
       }
       id cls = (id)objc_getClass((const char *)(uintptr_t)self32);
-      if (!cls && getenv("OBJC_BRIDGE_TRACE")) {
+      if (!cls && BRIDGE_TRACE()) {
          fprintf(stderr, "[bp] resolve_self: no class named \"%s\" (self32=0x%08x)\n",
                  (const char *)(uintptr_t)self32, self32);
          fflush(stderr);
@@ -863,7 +880,7 @@ static id resolve_self(uint32_t self32) {
    uintptr_t meta = *(const uint64_t *)isa;              /* (obj->isa)->isa: must be a metaclass */
    if (meta < 0x100000000ULL || (meta & 0x7) || !mem_readable(meta, 0x30) ||
        !class_isMetaClass((Class)(uintptr_t)meta)) {
-      if (getenv("OBJC_BRIDGE_TRACE")) {
+      if (BRIDGE_TRACE()) {
          fprintf(stderr, "[bp] resolve_self: MALFORMED receiver self32=0x%08x obj=%p "
                  "isa=0x%lx -> nil\n", self32, obj, (unsigned long)isa);
          fflush(stderr);
@@ -877,7 +894,7 @@ static id resolve_self(uint32_t self32) {
  * an unmapped pointer the same way resolve_self does. */
 static SEL resolve_sel(uint32_t cmd32) {
    if (cmd32 != 0 && !mem_readable((uintptr_t)cmd32, 1)) {
-      if (getenv("OBJC_BRIDGE_TRACE")) {
+      if (BRIDGE_TRACE()) {
          fprintf(stderr, "[bp] resolve_sel: unmapped cmd32=0x%08x -> NULL\n",
                  cmd32);
          fflush(stderr);
@@ -894,7 +911,7 @@ static SEL resolve_sel(uint32_t cmd32) {
 static SEL conv_sel_arg(uint32_t a) {
    if (!a) { return (SEL)0; }
    if (!mem_readable((uintptr_t)a, 1)) {
-      if (getenv("OBJC_BRIDGE_TRACE")) {
+      if (BRIDGE_TRACE()) {
          fprintf(stderr, "[bp] conv_sel_arg: unmapped SEL 0x%08x -> NULL\n", a);
          fflush(stderr);
       }
@@ -1605,7 +1622,7 @@ static int method_is_legacy(Method m) {
 static int marshal_arg_fwd(struct objc_call_plan *plan, struct mcur *c,
                            const char *enc, int conv,
                            const uint32_t *args32, unsigned *ai) {
-   const int trace = getenv("OBJC_BRIDGE_TRACE") != NULL;
+   const int trace = BRIDGE_TRACE();
    const char *t = enc_skip_quals(enc);
    char b = *t;
    if (b == '@' || b == '#' || enc_is_objptr_struct(enc) || enc_is_cfptr(enc)) {
@@ -1768,7 +1785,7 @@ static unsigned fill_method_args(struct objc_call_plan *plan,
     * survive; each is marshalled as an object below (forwarded sends are object
     * messages — see the !enc path). Universal: any forwarding proxy in any app. */
    unsigned nargs = m ? method_getNumberOfArguments(m) : (2 + sel_arg_count(sel));
-   const int trace = getenv("OBJC_BRIDGE_TRACE") != NULL;
+   const int trace = BRIDGE_TRACE();
    const int conv = method_is_legacy(m) ? CONV_I386 : CONV_NATIVE;
    /* legacy-registry override only matters for native methods */
    const char *lt = (conv == CONV_NATIVE && sel) ? seltypes_lookup(sel) : NULL;
@@ -1970,7 +1987,7 @@ static unsigned fill_format_varargs(struct objc_call_plan *plan,
                                     const uint32_t *args32,
                                     unsigned ai, unsigned gp, unsigned gp_cap,
                                     const char *fmt, struct mcur *cur) {
-   const int trace = getenv("OBJC_BRIDGE_TRACE") != NULL;
+   const int trace = BRIDGE_TRACE();
    /* base slot/arg indices, for POSITIONAL specifiers (%N$conv): position N
     * (1-based) maps to the Nth vararg, independent of textual order. Localized
     * NSLocalizedString format strings use these heavily so translators can
@@ -2119,7 +2136,7 @@ static uint32_t alert_panel_common(const char *fn_name, const uint32_t *a,
    id def   = (id)(uintptr_t)unwrap_obj_arg(a[2]);
    id alt   = (id)(uintptr_t)unwrap_obj_arg(a[3]);
    id other = (id)(uintptr_t)unwrap_obj_arg(a[4]);
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[alert] %s%s title=%p def=%p alt=%p other=%p msg=%p\n",
               fn_name, fn ? "" : " (MISSING)", (void *)title, (void *)def,
               (void *)alt, (void *)other, (void *)msg);
@@ -2191,7 +2208,7 @@ static uint32_t cfstring_with_format_core(uint32_t alloc32, uint32_t opts32,
       plan.reg[3], plan.reg[4], plan.reg[5],
       plan.stack[0], plan.stack[1], plan.stack[2], plan.stack[3],
       plan.stack[4], plan.stack[5], plan.stack[6], plan.stack[7]);
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[cfformat] CFStringCreateWithFormat fmt=\"%s\" -> %p\n",
               fmtbuf, (void *)s);
       fflush(stderr);
@@ -2420,7 +2437,7 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
    } else {
       plan->ret_is_obj = 0;
    }
-   if (getenv("OBJC_BRIDGE_TRACE") && sel) {
+   if (BRIDGE_TRACE() && sel) {
       fprintf(stderr, "[bp]   ret_kind=%d rt=\"%s\" sel=%s m=%p nxmm=%u nstk=%u\n",
               plan->ret_is_obj, rt ? rt : "(null)", sel_getName(sel), (void*)m,
               plan->nxmm, plan->nstack);
@@ -2482,7 +2499,7 @@ static id compat_openUntitledDocumentOfType_display(id self, SEL _cmd,
                                                     id type, signed char display) {
    (void)_cmd;
    id doc = msg_id1(self, sel_registerName("makeUntitledDocumentOfType:"), type);
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[compat] openUntitledDocumentOfType:%p display:%d -> doc=%p\n",
               (void *)type, (int)display, (void *)doc);
       fflush(stderr);
@@ -2531,7 +2548,7 @@ static void prokit_font_compat_install(void) {
    if (!m) { return; }
    method_setImplementation(m, (IMP)compat_proSystemFont);
    setenv("ABICONV_PROFONT_COMPAT", "1", 1);
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[compat] swizzled +[NSProFont _proSystemFontWithFontName:"
               "...] -> systemFontOfSize:\n");
       fflush(stderr);
@@ -2905,7 +2922,7 @@ static void prokit_color_neutralize(void) {
    void *fn = find_image_symbol("/ProKit", patches[0].sym);
    if (!fn) {
       static int traced;
-      if (!traced && getenv("OBJC_BRIDGE_TRACE")) {
+      if (!traced && BRIDGE_TRACE()) {
          int pk = 0;
          for (uint32_t i = 0, n = _dyld_image_count(); i < n; ++i) {
             const char *p = _dyld_get_image_name(i);
@@ -2924,7 +2941,7 @@ static void prokit_color_neutralize(void) {
       void *p = (i == 0) ? fn : find_image_symbol("/ProKit", patches[i].sym);
       int ok = p ? patch_tailjmp(p, patches[i].dest) : 0;
       if (i == 0) { rgba_ok = ok; }
-      if (getenv("OBJC_BRIDGE_TRACE")) {
+      if (BRIDGE_TRACE()) {
          fprintf(stderr, "[compat] %s @%p patch %s -> compat\n",
                  patches[i].sym, p, ok ? "OK" : (p ? "FAILED" : "absent"));
          fflush(stderr);
@@ -3035,7 +3052,7 @@ static void color_sweep(void) {
       }
    }
    free(all);
-   if ((swizzled || added) && getenv("OBJC_BRIDGE_TRACE")) {
+   if ((swizzled || added) && BRIDGE_TRACE()) {
       fprintf(stderr, "[compat] NSColor getters: %u swizzled, %u own-entry "
               "added\n", swizzled, added);
       fflush(stderr);
@@ -3161,7 +3178,7 @@ static void appkit_compat_install(void) {
       }
    }
    if (installed == n) done = 1;
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[compat] appkit legacy methods installed %u/%u\n",
               installed, n);
       fflush(stderr);
@@ -3442,7 +3459,7 @@ static int bp_conforms_protocol(struct objc_call_plan *plan, const uint32_t *arg
          conforms = 1;
    }
 
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[bp] conformsToProtocol: prot32=0x%x -> %p (%s) = %d\n",
               prot32, (void *)p, qname ? qname : "(unresolved)", conforms);
       fflush(stderr);
@@ -3530,7 +3547,7 @@ static int bp_invocation_arg(struct objc_call_plan *plan, const uint32_t *args32
     * signature-declared width on both sides */
    if (!(b == '@' || b == '#' || b == ':' || b == '*' || b == '^')) { return 0; }
 
-   const int trace = getenv("OBJC_BRIDGE_TRACE") != NULL;
+   const int trace = BRIDGE_TRACE();
    uint64_t tmp = 0;
    if (is_set || is_sret) {
       const uint32_t v32 = *(const uint32_t *)(uintptr_t)buf32;
@@ -3622,7 +3639,7 @@ static int bp_block_copy(struct objc_call_plan *plan, const uint32_t *args32,
    plan->reg[0]     = result;
    plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
    plan->ret_is_obj = 0;                   /* scalar passthrough: eax = result */
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[bp] block %s on 0x%08x -> 0x%08x\n", s, p, result);
       fflush(stderr);
    }
@@ -3737,7 +3754,7 @@ static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
    plan->reg[0]     = (uint32_t)(uintptr_t)low;
    plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
    plan->ret_is_obj = 0;                     /* scalar passthrough: eax = low ptr */
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[bp] %s -> low 0x%08x\n", s, plan->reg[0]);
       fflush(stderr);
    }
@@ -3811,7 +3828,7 @@ static int bp_fsrep(struct objc_call_plan *plan, const uint32_t *args32,
       plan->nreg = 1;
       plan->ret_is_obj = 0;
       plan->target = (uint64_t)(uintptr_t)x64_ret_identity;
-      if (getenv("OBJC_BRIDGE_TRACE")) {
+      if (BRIDGE_TRACE()) {
          fprintf(stderr, "[bp] getFileSystemRepresentation:maxLength: -> getCString ok=%d\n",
                  (int)ok);
          fflush(stderr);
@@ -3832,7 +3849,7 @@ static int bp_fsrep(struct objc_call_plan *plan, const uint32_t *args32,
    plan->reg[0]     = (uint32_t)(uintptr_t)buf;     /* low-4GB C-string ptr in eax */
    plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
    plan->ret_is_obj = 0;
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[bp] fileSystemRepresentation -> low 0x%08x \"%.64s\"\n",
               (uint32_t)(uintptr_t)buf, buf);
       fflush(stderr);
@@ -3904,7 +3921,7 @@ static int bp_getrects(struct objc_call_plan *plan, const uint32_t *args32,
    plan->reg[0]     = 0;                      /* void return */
    plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
    plan->ret_is_obj = 0;
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[bp] getRectsBeingDrawn:count: -> %ld rects @ low 0x%08x\n",
               ncount, (uint32_t)(uintptr_t)b->rects);
       fflush(stderr);
@@ -3953,7 +3970,7 @@ static int bp_nsdata_nocopy(struct objc_call_plan *plan, const uint32_t *args32,
    plan->reg[0]     = result ? x64_objc_wrap((uint64_t)(uintptr_t)result) : 0;
    plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
    plan->ret_is_obj = 0;                         /* already a low-4GB handle */
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[bp] NSData %s -> native copy (len=%lu)\n", s, len);
       fflush(stderr);
    }
@@ -3993,7 +4010,7 @@ static int bp_deprecated_removefile(struct objc_call_plan *plan,
    plan->nreg = 1;
    plan->ret_is_obj = 0;
    plan->target = (uint64_t)(uintptr_t)x64_ret_identity;
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[bp] removeFileAtPath:handler: -> removeItemAtPath:error: ok=%d\n",
               (int)ok);
       fflush(stderr);
@@ -4055,7 +4072,7 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    appkit_compat_install();
    x64_refresh_data_shadows();
 
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[bp] entry: t=%x self32=0x%08x cmd32=0x%08x args[2..5]=0x%08x 0x%08x 0x%08x 0x%08x arena=[0x%lx..0x%lx)\n",
               pthread_mach_thread_np(pthread_self()),
               args32[0], args32[1], args32[2], args32[3], args32[4], args32[5],
@@ -4093,13 +4110,13 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
       c->tid = pthread_mach_thread_np(pthread_self()); c->valid = 1;
    }
 
-   if (getenv("OBJC_BRIDGE_TRACE") || quinn_play_trace_enabled()) {
+   if (BRIDGE_TRACE() || quinn_play_trace_enabled()) {
       const char *cls_name = "(nil)";
       if (real_self) {
          Class c = object_getClass(real_self);
          if (c) cls_name = class_getName(c);
       }
-      if (getenv("OBJC_BRIDGE_TRACE")) { trace_args("send", cls_name, sel, args32); }
+      if (BRIDGE_TRACE()) { trace_args("send", cls_name, sel, args32); }
       quinn_play_trace("fwd", cls_name, sel);
    }
 
@@ -4199,7 +4216,7 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
                                               sel_getName(sel));
       }
       if (imp) {
-         if (getenv("OBJC_BRIDGE_TRACE")) {
+         if (BRIDGE_TRACE()) {
             fprintf(stderr, "[bp] legacy class-method dispatch \"%s\" -> imp 0x%llx\n",
                     sel_getName(sel), (unsigned long long)imp);
             fflush(stderr);
@@ -4226,7 +4243,7 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
        class_getInstanceMethod(object_getClass(real_self), sel) == NULL) {
       uint64_t imp = legacy_instance_method_imp(object_getClass(real_self), sel);
       if (imp) {
-         if (getenv("OBJC_BRIDGE_TRACE")) {
+         if (BRIDGE_TRACE()) {
             fprintf(stderr, "[bp] legacy instance-method dispatch \"%s\" -> imp 0x%llx\n",
                     sel_getName(sel), (unsigned long long)imp);
             fflush(stderr);
@@ -4313,7 +4330,7 @@ static unsigned plan_stret_return(struct objc_call_plan *plan, Method m,
    }
    if (nsz > 16) {
       if (nsz > PLAN_STRET_MAX) {
-         if (getenv("OBJC_BRIDGE_TRACE")) {
+         if (BRIDGE_TRACE()) {
             fprintf(stderr, "[bp] WARN: stret %zuB exceeds bounce buffer; "
                     "passing i386 buffer raw\n", nsz);
          }
@@ -4343,7 +4360,7 @@ void objc_bridge_prep_stret(struct objc_call_plan *plan, const uint32_t *args32)
    id real_self = resolve_self(args32[1]);
    SEL sel = resolve_sel(args32[2]);
 
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       const char *cls_name = "(nil)";
       if (real_self) {
          Class c = object_getClass(real_self);
@@ -4421,7 +4438,7 @@ void objc_bridge_prep_super(struct objc_call_plan *plan, const uint32_t *args32)
     * [super sel] runs the super's method, not the receiver's override. */
    reverse_note_super(real_receiver, sel, (Class)super_class_id);
 
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       const char *cls_name = "(nil)";
       if (real_receiver) {
          Class c = object_getClass(real_receiver);
@@ -4474,7 +4491,7 @@ void objc_bridge_prep_super_stret(struct objc_call_plan *plan,
 
    reverse_note_super(real_receiver, sel, (Class)super_class_id);
 
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       const char *cls_name = "(nil)";
       if (real_receiver) {
          Class c = object_getClass(real_receiver);
@@ -4912,7 +4929,7 @@ static uint64_t legacy_class_method_imp_byname(const char *clsname,
     * framework class (registry miss) — those class methods, if inherited,
     * are a known gap (we can't dispatch +alloc/+class etc. yet). */
    const struct legacy_objc_class *c = legacy_registry_lookup(clsname);
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[bp]   legacy_lookup(\"%s\",\"%s\"): class=%p isa_ok=%d\n",
               clsname, sel_name, (void*)c,
               c ? ptr_ok(c->isa, sizeof(struct legacy_objc_class)) : 0);
@@ -4923,7 +4940,7 @@ static uint64_t legacy_class_method_imp_byname(const char *clsname,
       if (c && ptr_ok(c->isa, sizeof(struct legacy_objc_class))) {
          const struct legacy_objc_class *meta =
             (const struct legacy_objc_class *)(uintptr_t)c->isa;
-         if (getenv("OBJC_BRIDGE_TRACE")) {
+         if (BRIDGE_TRACE()) {
             const uint32_t *w = ptr_ok(meta->methodLists, 32)
                ? (const uint32_t*)(uintptr_t)meta->methodLists : NULL;
             fprintf(stderr, "[bp]   level %d cur=\"%s\" meta=%p mL=0x%x info=0x%x words=[%x %x %x %x %x %x]\n",
@@ -6271,7 +6288,7 @@ static id legacy_instance_pair(uint32_t p, Class c) {
    objc_setAssociatedObject(r, shadow_assoc_key(), (id)(uintptr_t)p,
                             OBJC_ASSOCIATION_ASSIGN);
    lpair_insert(p, r);
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[lo] paired legacy instance 0x%08x -> %s %p\n",
               p, class_getName(c), (void *)r);
       fflush(stderr);
@@ -6326,7 +6343,7 @@ static id legacy_obj_to_real(uint32_t p) {
          (const struct legacy_objc_class *)(uintptr_t)p;
       if (!ptr_ok(self->name, 1)) { return (id)0; }
       Class c = objc_getClass((const char *)(uintptr_t)self->name);
-      if (c && getenv("OBJC_BRIDGE_TRACE")) {
+      if (c && BRIDGE_TRACE()) {
          fprintf(stderr, "[lo] legacy class 0x%08x \"%s\" -> %p\n",
                  p, (const char *)(uintptr_t)self->name, (void *)c);
          fflush(stderr);
@@ -6338,7 +6355,7 @@ static id legacy_obj_to_real(uint32_t p) {
       if (!ptr_ok(k->name, 1)) { return (id)0; }
       Class c = objc_getClass((const char *)(uintptr_t)k->name);
       if (!c) {
-         if (getenv("OBJC_BRIDGE_TRACE")) {
+         if (BRIDGE_TRACE()) {
             fprintf(stderr, "[lo] legacy instance 0x%08x class \"%s\" NOT "
                     "registered -> passthrough\n",
                     p, (const char *)(uintptr_t)k->name);
@@ -6426,7 +6443,7 @@ static id i386_cfstr_to_real(uint32_t p) {
        * anything readable) but whose layout checks failed. Pin silent
        * passthroughs (-> native "unknown class 0x800xxxxx" _objc_fatal)
        * to the exact failed check. */
-      if (getenv("OBJC_BRIDGE_TRACE")) {
+      if (BRIDGE_TRACE()) {
          unsigned long long w0 = *(const unsigned long long *)(uintptr_t)p;
          unsigned long long w1 =
             ptr_ok(p, 16) ? *(const unsigned long long *)(uintptr_t)(p + 8) : 0;
@@ -6464,7 +6481,7 @@ static id i386_cfstr_to_real(uint32_t p) {
           strnlen((const char *)slid, (size_t)length + 1) == length) {
          sp = slid;
       } else {
-         if (getenv("OBJC_BRIDGE_TRACE")) {
+         if (BRIDGE_TRACE()) {
             fprintf(stderr, "[cfstr] 0x%08x REJECT str cstr=0x%x len=%u "
                     "slide=0x%lx slid=0x%lx\n", p, cstr, length,
                     (unsigned long)sl, (unsigned long)slid);
@@ -6505,7 +6522,7 @@ static id i386_cfstr_to_real(uint32_t p) {
  * objects, raw legacy objects/classes, and otherwise passes through. */
 static uint64_t unwrap_obj_arg(uint32_t a) {
    if (!a) { return 0; }
-   const int utrace = getenv("OBJC_BRIDGE_TRACE") != NULL;
+   const int utrace = BRIDGE_TRACE();
    id sr = shadow_real(a);                 /* R/S shadow or paired legacy obj */
    if (sr) {
       if (utrace) {
@@ -7971,7 +7988,7 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
       }
    }
 
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[rev] t=%x %s[%s] imp=0x%llx self32=0x%x words=%u kind=%d "
               "%splan=%p lowstack=0x%llx tramp=%p\n",
               pthread_mach_thread_np(pthread_self()),
@@ -8069,7 +8086,7 @@ unsigned __int128 _86x64_reverse_ret(struct reverse_plan *plan,
       }
    }
    else { r = (unsigned __int128)eax; }                     /* scalar */
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[revret] t=%x plan=%p kind=%d eax=0x%x edx=0x%x -> 0x%llx\n",
               pthread_mach_thread_np(pthread_self()),
               (void *)plan, plan->ret_kind, eax, edx,
@@ -8388,7 +8405,7 @@ static struct geo_res geo_call(unsigned idx, const uint32_t *a32) {
    plan.nxmm   = cur.xmm;
    unsigned __int128 rr = _86x64_plan_call(&plan, e->fn);
    uint64_t vrax = (uint64_t)rr, vrdx = (uint64_t)(rr >> 64);
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[geo] %s kind=%d gp=%u xmm=%u stk=%zu rax=0x%llx\n",
               e->name, kind, cur.gp, cur.xmm, cur.stk,
               (unsigned long long)vrax);
@@ -8551,7 +8568,7 @@ uint32_t shim_CGPatternCreate(const uint32_t *a) {
    }
    void *info = (void *)(uintptr_t)a[0];
    void *pat  = fn(info, bounds, m, xStep, yStep, tiling, isColored, ncbp);
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[geo] CGPatternCreate colored=%d cb=0x%x -> %p\n",
               isColored, a[15], pat);
       fflush(stderr);
@@ -8629,7 +8646,7 @@ static void reverse_add_methods(Class target, uint32_t methodLists) {
           * falls through to the real native superclass method. (== 0 was the old
           * filter; ptr_ok also catches <0x1000 and unmapped.) */
          if (!ptr_ok(meth[k].imp, 1)) {
-            if (getenv("OBJC_BRIDGE_TRACE")) {
+            if (BRIDGE_TRACE()) {
                fprintf(stderr, "[rt] skip junk method \"%s\" imp=0x%x (implausible)\n",
                        legacy_cstr_ok(meth[k].name)
                           ? (const char *)(uintptr_t)meth[k].name : "?",
@@ -9051,7 +9068,7 @@ extern void objc_exception_throw(id exception);
 
 uint32_t shim_objc_exception_throw(uint32_t *a) {
    const uint32_t exc32 = a[0];
-   const int trace = getenv("OBJC_BRIDGE_TRACE") != NULL;
+   const int trace = BRIDGE_TRACE();
    uint32_t *top = exc_top_slot();
    if (top && *top) {
       struct exc_data32 *d = (struct exc_data32 *)(uintptr_t)*top;
@@ -9097,7 +9114,7 @@ uint32_t shim_class_nextMethodList(uint32_t *a) {
 /* id _objc_setNilReceiver(id) — nil-message hook, removed from the modern
  * runtime. Accept and discard; previous receiver was always nil. */
 uint32_t shim_objc_setNilReceiver(uint32_t *a) {
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[exc1] _objc_setNilReceiver(0x%08x) ignored\n", a[0]);
       fflush(stderr);
    }
@@ -9110,7 +9127,7 @@ uint32_t shim_objc_setNilReceiver(uint32_t *a) {
  * the real peer without re-running -dealloc. */
 uint32_t shim_dealloc_vec(uint32_t *a) {
    id real = resolve_self(a[0]);
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[exc1] (*_dealloc)(0x%08x) -> real %p object_dispose\n",
               a[0], (void *)real);
       fflush(stderr);
@@ -9384,7 +9401,7 @@ uint32_t shim_class_addMethod(uint32_t *a) {
    BOOL ok = class_addMethod((Class)cls, sel, tramp, types);
    rmeth_insert((Class)cls, sel, imp32, types);
    seltypes_insert(sel, types);
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[rt] class_addMethod %s %s imp32=0x%08x -> %d\n",
               class_getName((Class)cls), sel_getName(sel), imp32, (int)ok);
       fflush(stderr);
@@ -9504,7 +9521,7 @@ uint32_t shim_class_getInstanceMethod(uint32_t *a) {
    id cls = resolve_self(a[0]);
    SEL sel = resolve_sel(a[1]);
    Method m = (cls && sel) ? class_getInstanceMethod((Class)cls, sel) : NULL;
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[rt] class_getInstanceMethod a0=0x%08x a1=0x%08x "
               "cls=%s sel=%s -> m=%p\n", a[0], a[1],
               cls ? class_getName((Class)cls) : "(nil)",
@@ -9564,7 +9581,7 @@ uint32_t shim_method_getNumberOfArguments(uint32_t *a) {
 uint32_t shim_method_getImplementation(uint32_t *a) {
    Method m = i386_method_unwrap(a[0]);
    if (!m) { return 0; }
-   if (getenv("OBJC_BRIDGE_TRACE")) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[rt] method_getImplementation(0x%08x) -> handle "
               "(compare-only)\n", a[0]);
       fflush(stderr);
@@ -9608,7 +9625,7 @@ uint32_t shim_method_exchangeImplementations(uint32_t *a) {
       uint64_t ti = e1->imp; const char *tt = e1->types;
       e1->imp = e2->imp; e1->types = e2->types;
       e2->imp = ti;       e2->types = tt;
-      if (getenv("OBJC_BRIDGE_TRACE")) {
+      if (BRIDGE_TRACE()) {
          fprintf(stderr, "[rt] method_exchangeImplementations legacy %s <-> %s\n",
                  s1 ? sel_getName(s1) : "?", s2 ? sel_getName(s2) : "?");
          fflush(stderr);

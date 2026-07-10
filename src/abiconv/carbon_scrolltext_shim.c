@@ -87,7 +87,12 @@ static struct box {
     double text_h;                /* measured total text height             */
     double maxscroll;             /* max(0, text_h - view_h), set at draw    */
     double scroll;                /* 0 .. maxscroll                          */
+    double view_w, view_h;        /* last drawn view size (for hit-mapping)  */
 } g_box[NBOX];
+
+/* scrollbar geometry (must match the draw handler) */
+#define BOX_PAD      4.0
+#define BOX_SCROLLER 14.0
 
 static struct box *box_for_ctrl(void *c) {
     for (int i = 0; i < NBOX; i++) if (c && g_box[i].ctrl == c) return &g_box[i];
@@ -226,7 +231,8 @@ static OSStatus box_draw_handler(void *call, void *event, void *user) {
     HIRectD vb = { 0, 0, 0, 0 };
     if (HIViewGetBounds) HIViewGetBounds(b->ctrl, &vb);
     double w = vb.w > 8 ? vb.w : 8, h = vb.h > 8 ? vb.h : 8;
-    const double pad = 4, scroller = 14;
+    const double pad = BOX_PAD, scroller = BOX_SCROLLER;
+    b->view_w = w; b->view_h = h;             /* remembered for hit-mapping */
     STLOG("draw: view %.0fx%.0f scroll=%.0f\n", w, h, b->scroll);
 
     CGContextSaveGState(ctx);
@@ -284,7 +290,7 @@ static OSStatus box_wheel_handler(void *call, void *event, void *user) {
     return 0;
 }
 
-/* kEventControlHitTest: report part 1 so the view is hittable (wheel routing) */
+/* kEventControlHitTest: report part 1 so the view is hittable (wheel/click) */
 static OSStatus box_hit_handler(void *call, void *event, void *user) {
     (void)call; (void)user;
     DL(SetEventParameter, OSStatus, (void *, uint32_t, uint32_t, unsigned long, const void *));
@@ -292,6 +298,60 @@ static OSStatus box_hit_handler(void *call, void *event, void *user) {
     if (SetEventParameter)
         SetEventParameter(event, 'cprt' /*kEventParamControlPart*/,
                           'cprt' /*typeControlPartCode*/, sizeof part, &part);
+    return 0;
+}
+
+/* ---- kEventControlTrack: drag the scroll thumb ---- */
+/* Map a control-local mouse Y (top-left origin, y down) to a scroll offset so
+ * the thumb center follows the cursor: thumb travels 1..(view_h-th-1). */
+static void box_scroll_to_y(struct box *b, double local_y) {
+    double h = b->view_h, th = h * (h / b->text_h);
+    if (th < 20) th = 20;
+    double travel = h - th - 2; if (travel < 1) travel = 1;
+    double frac = (local_y - th / 2 - 1) / travel;
+    if (frac < 0) frac = 0; if (frac > 1) frac = 1;
+    b->scroll = frac * b->maxscroll;
+}
+
+static OSStatus box_track_handler(void *call, void *event, void *user) {
+    (void)call;
+    struct box *b = (struct box *)user;
+    DL(GetEventParameter, OSStatus, (void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *));
+    DL(HIViewSetNeedsDisplay, OSStatus, (void *, uint8_t));
+    DL(HIViewGetBounds, OSStatus, (void *, HIRectD *));
+    DL(GetGlobalMouse, void, (void *));           /* Point (v,h) top-left global */
+    DL(HIViewConvertPoint, OSStatus, (HIPointD *, void *, void *));
+    DL(StillDown, uint8_t, (void));
+    if (b->maxscroll <= 0) return -9874;          /* nothing to scroll */
+
+    /* The press location arrives as kEventParamMouseLocation (HIPoint, window
+     * coords). Convert to view-local; only start a drag if it's in the
+     * scrollbar column, else let the wheel/selection paths have it. */
+    HIPointD where = { 0, 0 };
+    if (GetEventParameter)
+        GetEventParameter(event, 'mloc' /*kEventParamMouseLocation*/,
+                          'hipt' /*typeHIPoint*/, NULL, sizeof where, NULL, &where);
+    HIPointD local = where;
+    if (HIViewConvertPoint) HIViewConvertPoint(&local, NULL /*window root*/, b->ctrl);
+    double w = b->view_w;
+    if (local.x < w - BOX_SCROLLER - 1) return -9874;   /* not in the scrollbar */
+
+    /* modal drag: follow the mouse until release. GetGlobalMouse + convert each
+     * tick keeps us in view-local space regardless of window moves. */
+    box_scroll_to_y(b, local.y);
+    if (HIViewSetNeedsDisplay) HIViewSetNeedsDisplay(b->ctrl, 1);
+    typedef struct { int16_t v, h; } QDPt;
+    while (StillDown && StillDown()) {
+        QDPt g = { 0, 0 };
+        if (GetGlobalMouse) GetGlobalMouse(&g);
+        HIPointD p = { (double)g.h, (double)g.v };
+        if (HIViewConvertPoint) HIViewConvertPoint(&p, NULL, b->ctrl);
+        box_scroll_to_y(b, p.y);
+        if (HIViewSetNeedsDisplay) HIViewSetNeedsDisplay(b->ctrl, 1);
+        /* let the compositor repaint between samples */
+        CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0 / 60.0, false);
+    }
+    STLOG("track: scroll=%.0f/%.0f\n", b->scroll, b->maxscroll);
     return 0;
 }
 
@@ -372,9 +432,11 @@ uint32_t shim_CreateScrollingTextBoxControl(uint32_t *a) {
     if (InstallEventHandler && GetControlEventTarget) {
         struct { uint32_t cls, kind; } dr = { 'cntl', 4 /*kEventControlDraw*/ };
         struct { uint32_t cls, kind; } ht = { 'cntl', 3 /*kEventControlHitTest*/ };
+        struct { uint32_t cls, kind; } tk = { 'cntl', 51 /*kEventControlTrack*/ };
         void *t = GetControlEventTarget(ctrl);
         InstallEventHandler(t, (void *)box_draw_handler, 1, &dr, b, NULL);
         InstallEventHandler(t, (void *)box_hit_handler, 1, &ht, b, NULL);
+        InstallEventHandler(t, (void *)box_track_handler, 1, &tk, b, NULL);
     }
     if (InstallEventHandler && GetWindowEventTarget) {
         struct { uint32_t cls, kind; } wh = { 'mous', 10 /*kEventMouseWheelMoved*/ };
