@@ -475,7 +475,11 @@ add_library(abiconv SHARED
   # REAL Appearance Manager theme text (DrawThemeTextBox/DrawThemeText/
   # GetThemeTextDimensions) via CoreText — replaces silent no-draw no-ops.
   carbon_themetext_shim.c
-  carbon_dialog_shim.c     # classic Dialog Manager (graceful "no classic dialog")
+  # REAL classic Dialog Manager: materialize ANY 'DLOG'+'DITL' as a modal AppKit
+  # window (editable NSTextField per editText item, NSButton per ctrlItem) run by
+  # a real ModalDialog event pump — so an app's "prompt until valid input" modal
+  # loop works (Halo's "Enter Your Halo Product Key" CD-key gate). Needs AppKit.
+  carbon_dialog_shim.m
   carbon_classic_ui_shim.c # classic TextEdit/List/Drag/Theme (graceful dead surface)
   qt_hitoolbox_shim.c
   carbon_fwd_shim.c

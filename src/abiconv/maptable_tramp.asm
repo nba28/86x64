@@ -900,8 +900,11 @@ _x64_exc_longjmp:
 	MTSHIM	___DisposeDialog,                           _shim_DisposeDialog
 	MTSHIM	___GetDialogCancelItem,                     _shim_GetDialogCancelItem
 	MTSHIM	___GetDialogDefaultItem,                    _shim_GetDialogDefaultItem
+	MTSHIM	___GetDialogItem,                           _shim_GetDialogItem
 	MTSHIM	___GetDialogItemText,                       _shim_GetDialogItemText
+	MTSHIM	___GetDialogWindow,                         _shim_GetDialogWindow
 	MTSHIM	___GetDialogTextEditHandle,                 _shim_GetDialogTextEditHandle
+	MTSHIM	___ClearKeyboardFocus,                      _shim_ClearKeyboardFocus
 	MTSHIM	___GetModalDialogEventMask,                 _shim_GetModalDialogEventMask
 	MTSHIM	___GetNewDialog,                            _shim_GetNewDialog
 	MTSHIM	___ModalDialog,                             _shim_ModalDialog
