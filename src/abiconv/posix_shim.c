@@ -229,6 +229,19 @@ static uint32_t dlsym_shim_for(const char *name) {
       if (dladdr((void *)&dlsym_shim_for, &di) && di.dli_fname) {
          abi = dlopen(di.dli_fname, RTLD_NOLOAD | RTLD_LAZY);
       }
+      /* RTLD_NOLOAD by resolved abspath FAILS when libabiconv was loaded under a
+       * different name than dladdr's realpath — the co-located multi-copy deploy
+       * loads each copy via `@loader_path/libabiconv.dylib`, and dyld keys the
+       * image on that install name, so dlopen(realpath, RTLD_NOLOAD) returns NULL
+       * even though the image is mapped. Falling through then hands dlsym the RAW
+       * marshalling thunk for a shimmed symbol (e.g. __cxa_atexit): the i386
+       * callback it registers is later invoked by native __cxa_finalize with the
+       * x86_64 ABI -> the 4-byte-truncated native arg derefs a NULL fn-ptr ->
+       * jmp *0 (SFTabular check_cxa_atexit, crash pc=0). Fall back to the GLOBAL
+       * namespace: every libabiconv copy exports the same interpose shims, so
+       * RTLD_DEFAULT finds one, and the low-4GB guard below keeps only a callable
+       * (this-image or any-copy) shim. */
+      if (!abi) { abi = RTLD_DEFAULT; }
       abi_ready = 1;
    }
    void *h = abi;
