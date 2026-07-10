@@ -197,6 +197,42 @@ def vendor(app, sources, dry, native=DEFAULT_NATIVE):
     handled = set()          # (kind, name) already vendored / decided
     vendored, unresolved, dangling = [], {}, {}
 
+    def try_vendor(kind, name, consumer):
+        """Vendor (kind, name) from the first source root that has it, copying the
+        framework/dylib into the bundle (preserving Versions/Current symlinks),
+        queueing the copied-in binary for its own dependency recursion. Returns
+        True if vendored (or already handled), False if no source has it. Shared
+        by the app-private-absolute-path path and the unresolved-@rpath-sibling
+        path so both vendor identically (native — the curated x86_64 copy — and
+        left for m64 translate to classify native + rpath-fix to repoint)."""
+        if (kind, name) in handled:
+            return True                    # already decided this round
+        src = search_sources(kind, name, sources)
+        if src is None:
+            return False
+        handled.add((kind, name))
+        dst = bfw / src.name
+        info(f"vendor {src.name}  <- {src}")
+        if dry:
+            print(f"    dry-run: cp -R {src} {dst}")
+        else:
+            if dst.exists():
+                shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
+            if kind == "framework":
+                shutil.copytree(src, dst, symlinks=True)
+            else:
+                shutil.copy2(src, dst)
+        vendored.append(src.name)
+        present.add(src.name)              # now resolvable for later @rpath deps
+        # Recurse into the copied-in binary so its own app-private / @rpath-sibling
+        # deps get vendored too. Its install id is left as shipped — consumers are
+        # rewritten to @rpath by `m64 rpath-fix`, so dyld resolves the in-bundle
+        # copy regardless of the loaded dylib's LC_ID.
+        vb = framework_binary(dst) if kind == "framework" else dst
+        if not dry and vb.exists() and is_macho(vb):
+            queue.append(vb)
+        return True
+
     while queue:
         b = queue.pop()
         key = str(b.resolve())
@@ -211,11 +247,23 @@ def vendor(app, sources, dry, native=DEFAULT_NATIVE):
             if is_bundled(kind, name):
                 continue                              # already in the bundle
             if dep.startswith('@'):
-                # bundle-relative: fine if it resolves anywhere in the bundle,
-                # otherwise just flag it — we never vendor (and translate) over
-                # a @-relative ref, which is reserved for native frameworks the
-                # bundle is expected to supply itself.
-                if os.path.basename(dep) not in present:
+                # bundle-relative: fine if it resolves anywhere in the bundle.
+                if os.path.basename(dep) in present:
+                    continue
+                # Unresolved @rpath/@loader_path/@executable_path dep. This is a
+                # SIBLING a vendored framework was built to load from the bundle
+                # but that was itself never vendored — e.g. our curated QuickTime
+                # references @rpath/NavigationServices + @rpath/CarbonSound, both
+                # x86_64 curated frameworks that live in the source pool. Try to
+                # vendor it from a source root (NATIVE — an x86_64-carrying curated
+                # copy; m64 translate leaves x86_64 binaries native and rpath-fix
+                # points the consumer at the in-bundle copy). Only flag dangling
+                # if no source has it. Without this a vendored framework's own
+                # @rpath sibling deps are dropped -> cascading dyld "Library not
+                # loaded" at launch (Numbers: QuickTime -> NavigationServices ->
+                # CarbonSound). Generic: triggers on the structural "unbundled
+                # @-relative dep that a source pool can satisfy", not an app name.
+                if not try_vendor(kind, name, b.name):
                     dangling.setdefault((kind, name), set()).add(b.name)
                 continue
             if dep.startswith('/System/') or dep.startswith('/usr/'):
@@ -249,32 +297,8 @@ def vendor(app, sources, dry, native=DEFAULT_NATIVE):
             # longer exists, with no native home and not bundled: vendor it in.
             if (kind, name) in handled:
                 continue
-            handled.add((kind, name))
-            src = search_sources(kind, name, sources)
-            if src is None:
+            if not try_vendor(kind, name, b.name):
                 unresolved[(kind, name)] = {b.name}
-                continue
-            # Copy into the bundle (preserving the Versions/Current symlinks).
-            dst = bfw / src.name
-            info(f"vendor {src.name}  <- {src}")
-            if dry:
-                print(f"    dry-run: cp -R {src} {dst}")
-            else:
-                if dst.exists():
-                    shutil.rmtree(dst) if dst.is_dir() else dst.unlink()
-                if kind == "framework":
-                    shutil.copytree(src, dst, symlinks=True)
-                else:
-                    shutil.copy2(src, dst)
-            vendored.append(src.name)
-            # Recurse into the copied-in binary so its own app-private deps
-            # (e.g. SF* cross-references) get vendored too. Its install id is
-            # left as shipped — `translate-bundle` preserves it and consumers
-            # are rewritten to @rpath by `m64 rpath-fix`, so dyld resolves the
-            # in-bundle copy regardless of the loaded dylib's LC_ID.
-            vb = framework_binary(dst) if kind == "framework" else dst
-            if not dry and vb.exists() and is_macho(vb):
-                queue.append(vb)
 
     info(f"vendored {len(vendored)} framework(s)/dylib(s) into {app.name}")
     for v in vendored:
