@@ -249,20 +249,47 @@ static void parse_ditl(Dialog *d, const uint8_t *p, long len) {
 /* Classic dialog coords are top-left origin, points. AppKit content view is
  * bottom-left origin. We flip Y within the window content rect. */
 
-@interface AbiDialogDelegate : NSObject <NSWindowDelegate, NSTextFieldDelegate>
-@end
-
-/* The clicked item number a button posts (its 1-based DITL index), plus a
- * "session ended" sentinel used by ModalDialog. */
-static NSInteger g_lastItemHit = 0;
-
-@implementation AbiDialogDelegate
-- (void)abiButton:(NSButton *)sender {
-    g_lastItemHit = sender.tag;                 /* tag = 1-based DITL item # */
-    if (NSApp.modalWindow) [NSApp stopModalWithCode:sender.tag];
+/* Classic DITL text is MacRoman (or plain ASCII), NOT UTF-8: e.g. Halo's note
+ * uses 0xD5 (curly apostrophe). stringWithUTF8String: returns nil on invalid
+ * UTF-8, and NSTextField setters throw on nil — so decode UTF-8 first, fall back
+ * to MacRoman, and never return nil. */
+static NSString *ns_str(const char *c) {
+    if (!c) return @"";
+    NSString *s = [NSString stringWithUTF8String:c];
+    if (!s) s = [[NSString alloc] initWithBytes:c length:strlen(c)
+                                       encoding:NSMacOSRomanStringEncoding];
+    return s ? s : @"";
 }
-- (BOOL)windowShouldClose:(id)sender { return NO; }  /* modal: driven by items */
-@end
+
+/* Button action IMP. libabiconv is loaded once PER co-located framework, so a
+ * compile-time @implementation would register the same ObjC class in every copy
+ * ("... implemented in both" -> mysterious crashes) AND per-copy statics would
+ * diverge. Instead we register ONE target class at runtime, shared across copies
+ * by name, whose action drives the process-global NSApp modal session via
+ * stopModalWithCode: — ModalDialog gets the item number back through
+ * runModalForWindow's return value (no cross-copy static). */
+static void abi_button_action(id self, SEL _cmd, id sender) {
+    (void)self; (void)_cmd;
+    NSInteger tag = [(NSButton *)sender tag];       /* 1-based DITL item # */
+    if ([NSApp modalWindow]) [NSApp stopModalWithCode:tag];
+}
+static id dialog_target(void) {
+    static id shared;
+    if (shared) return shared;
+    const char *cn = "AbiCarbonDialogTarget";
+    Class cls = objc_getClass(cn);                  /* another copy may have made it */
+    if (!cls) {
+        cls = objc_allocateClassPair([NSObject class], cn, 0);
+        if (cls) {
+            class_addMethod(cls, sel_registerName("abiButton:"),
+                            (IMP)abi_button_action, "v@:@");
+            objc_registerClassPair(cls);
+        }
+    }
+    if (!cls) return nil;
+    shared = [[cls alloc] init];
+    return shared;
+}
 
 /* Build the NSWindow + item views from the parsed DITL. Must run on the main
  * thread (AppKit). */
@@ -279,11 +306,9 @@ static void build_window(Dialog *d, const char *title) {
                     backing:NSBackingStoreBuffered
                       defer:NO];
     win.releasedWhenClosed = NO;
-    if (title && *title) win.title = [NSString stringWithUTF8String:title];
+    if (title && *title) win.title = ns_str(title);
     [win center];
-    AbiDialogDelegate *del = [AbiDialogDelegate new];
-    win.delegate = del;
-    objc_setAssociatedObject(win, "abidel", del, OBJC_ASSOCIATION_RETAIN);
+    id del = dialog_target();                       /* runtime-registered, shared */
 
     NSView *cv = win.contentView;
     NSButton *defaultBtn = nil;
@@ -298,7 +323,7 @@ static void build_window(Dialog *d, const char *title) {
 
         if (it->type == kCtrlItem) {           /* push button */
             NSButton *btn = [[NSButton alloc] initWithFrame:fr];
-            btn.title = [NSString stringWithUTF8String:it->text];
+            btn.title = ns_str(it->text);
             btn.bezelStyle = NSBezelStyleRounded;
             btn.buttonType = NSButtonTypeMomentaryPushIn;
             btn.tag = i + 1;                   /* 1-based DITL item # */
@@ -309,7 +334,7 @@ static void build_window(Dialog *d, const char *title) {
             if (d->defaultItem == i + 1) defaultBtn = btn;
         } else if (it->type == kEditText) {    /* editable text field */
             NSTextField *tf = [[NSTextField alloc] initWithFrame:fr];
-            tf.stringValue = [NSString stringWithUTF8String:it->text];
+            tf.stringValue = ns_str(it->text);
             tf.editable = YES;
             tf.selectable = YES;
             tf.bezeled = YES;
@@ -319,7 +344,7 @@ static void build_window(Dialog *d, const char *title) {
             it->view = tf;
         } else if (it->type == kStatText) {    /* static label */
             NSTextField *lbl = [NSTextField labelWithString:
-                                    [NSString stringWithUTF8String:it->text]];
+                                    ns_str(it->text)];
             lbl.frame = fr;
             lbl.lineBreakMode = NSLineBreakByWordWrapping;
             lbl.maximumNumberOfLines = 0;
@@ -402,9 +427,10 @@ uint32_t shim_ModalDialog(uint32_t *a) {
         NSWindow *win = d->win;
         if (!win.isVisible) { [win makeKeyAndOrderFront:nil]; }
         [NSApp activateIgnoringOtherApps:YES];
-        g_lastItemHit = 0;
+        /* runModalForWindow returns the code passed to stopModalWithCode: (the
+         * button's 1-based DITL item #) — process-global via the shared NSApp,
+         * so it survives the libabiconv multi-copy split. */
         hit = [NSApp runModalForWindow:win];
-        if (hit <= 0) hit = g_lastItemHit;      /* stopModalWithCode path */
     });
     if (hit <= 0) hit = 1;                       /* safety: never 0 */
     if (itemHit) *itemHit = (int16_t)hit;
@@ -460,7 +486,7 @@ static void set_item_text(DItem *it, const char *s) {
     it->text[sizeof it->text - 1] = 0;
     if (it->view && (it->type == kEditText || it->type == kStatText)) {
         NSTextField *tf = (NSTextField *)it->view;
-        NSString *ns = [NSString stringWithUTF8String:it->text];
+        NSString *ns = ns_str(it->text);
         on_main_sync(^{ tf.stringValue = ns ? ns : @""; });
     }
 }
@@ -607,7 +633,7 @@ static uint32_t run_alert(uint32_t *a, const char *kind) {
         parse_ditl(&tmp, ditl, ilen);
         for (int i = 0; i < tmp.nitems; i++)
             if (tmp.items[i].type == kStatText && tmp.items[i].text[0]) {
-                msg = [NSString stringWithUTF8String:tmp.items[i].text]; break;
+                msg = ns_str(tmp.items[i].text); break;
             }
         free(ditl);
     }
