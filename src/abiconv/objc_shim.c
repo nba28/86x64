@@ -6190,12 +6190,31 @@ static Ivar x64_object_setInstanceVariable(id obj, const char *name, void *value
              * the nib retains its top-level objects / view hierarchy. */
             *slot = value ? x64_objc_wrap_ret((uint64_t)(uintptr_t)value) : 0;
          }
-         if (getenv("ABICONV_OUTLET_TRACE")) {
-            fprintf(stderr, "[outlet] -[%s set ivar %s @0x%x] = %p (slot=%p)\n",
-                    class_getName(cls), name, off, value, (void *)slot);
+         /* ALSO write the real (reverse_add_ivars-synthesized) modern ivar on R,
+          * when the class carries one, and hand its Ivar back to the caller:
+          *   - -[NSNibOutletConnector establishConnection] TESTS the returned
+          *     Ivar and, on NULL, logs "Failed to connect (…) outlet … missing
+          *     setter or instance variable" (disassembled: the write above still
+          *     landed, but every outlet looked failed and R's slot stayed nil);
+          *   - keeping R's slot populated makes the outlet visible to NATIVE
+          *     readers (KVC valueForKey:, archiving, class_getInstanceVariable
+          *     users) and seeds push_own_object_ivars' R->S mirror on reverse
+          *     dispatch, instead of leaving R permanently nil.
+          * Raw 8-byte store at the modern offset = native (non-retaining)
+          * object_setInstanceVariable semantics. An ivar found on a NATIVE
+          * ancestor gets exactly the store the un-interposed call would do. */
+         Ivar riv = class_getInstanceVariable(cls, name);
+         if (riv) {
+            ptrdiff_t moff = ivar_getOffset(riv);
+            if (moff > 0) { *(void **)((char *)obj + moff) = value; }
          }
+         if (getenv("ABICONV_OUTLET_TRACE")) {
+            fprintf(stderr, "[outlet] -[%s set ivar %s @0x%x] = %p (slot=%p rivar=%p)\n",
+                    class_getName(cls), name, off, value, (void *)slot, (void *)riv);
+         }
+         return riv;
       }
-      return NULL;   /* return value is ignored by AppKit's connector */
+      return NULL;   /* named ivar unknown to the legacy metadata: connector warns */
    }
    return real_object_setInstanceVariable(obj, name, value);
 }
@@ -6208,9 +6227,13 @@ static Ivar x64_object_getInstanceVariable(id obj, const char *name, void **outV
          uint32_t sh = get_or_create_shadow(obj, cls);
          uint32_t *slot = prop_ivar_slot(sh, off);
          if (outValue) { *outValue = slot ? (void *)resolve_self(*slot) : NULL; }
-      } else if (outValue) {
-         *outValue = NULL;
+         /* non-NULL Ivar on success, mirroring the setter interpose: callers
+          * (AppKit nib machinery among them) test the return to decide whether
+          * the ivar exists at all. The VALUE still comes from the shadow — the
+          * legacy IMPs' authoritative copy. */
+         return class_getInstanceVariable(cls, name);
       }
+      if (outValue) { *outValue = NULL; }
       return NULL;
    }
    return real_object_getInstanceVariable(obj, name, outValue);
