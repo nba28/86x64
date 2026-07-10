@@ -122,21 +122,43 @@ x64_CFPreferencesGetAppIntegerValue(CFStringRef key, CFStringRef applicationID,
 }
 
 /* Private *WithContainer* variants the Get{Boolean,Integer}Value family funnels
- * through — same "absent, no daemon, never deref appID" contract. */
+ * through.
+ *
+ * CAUTION: -[NSUserDefaults integerForKey:] / boolForKey: reach the runtime
+ * through EXACTLY these two private variants (verified live: with an "always
+ * absent" stub here, integerForKey: returned 0 for a key whose objectForKey:
+ * and CFPreferencesGetAppIntegerValue both returned the real value 1). Returning
+ * a blanket "absent" therefore silently zeroes every NSUserDefaults integer/bool
+ * read in the process — which broke Quinn: its new-game code reads
+ * integerForKey:@"QuinnStartingLevel", got 0, and tripped
+ * NSParameterAssert(level >= 1 && level <= 10) at QuinnGame.m:300 -> uncaught
+ * NSException -> abort on pressing Play.
+ *
+ * So these two must NOT lie: they FORWARD to the real CF implementation and
+ * return the genuine stored value. We keep only the NULL-appID guard (Civ IV
+ * Steam's ASLShowFPS read passes a NULL / current-application appID, which
+ * modern CF dereferences as _Nonnull and SIGSEGVs): substitute
+ * kCFPreferencesCurrentApplication for a NULL appID, exactly like libinterpose's
+ * public-API guard, then forward. dyld skips self-interposition, so a direct
+ * call to _CFPreferencesGet...WithContainer from inside THIS same dylib reaches
+ * the REAL CF (not this stub) — no recursion. The cfprefsd XPC-livelock bypass
+ * stays on the *Copy* variants above (the AudioToolbox startup path); these
+ * integer/bool reads are ordinary post-startup NSUserDefaults lookups.
+ * (kCFPreferencesCurrentApplication comes from the included <CoreFoundation.h>.) */
 static Boolean
 x64_pref_get_bool_c(CFStringRef key, CFStringRef appID, CFURLRef container, Boolean *valid)
 {
-	(void) key; (void) appID; (void) container;
-	if (valid) { *valid = false; }
-	return false;
+	if (!appID) { appID = kCFPreferencesCurrentApplication; }
+	if (!appID) { if (valid) { *valid = false; } return false; }
+	return _CFPreferencesGetAppBooleanValueWithContainer(key, appID, container, valid);
 }
 
 static CFIndex
 x64_pref_get_int_c(CFStringRef key, CFStringRef appID, CFURLRef container, Boolean *valid)
 {
-	(void) key; (void) appID; (void) container;
-	if (valid) { *valid = false; }
-	return 0;
+	if (!appID) { appID = kCFPreferencesCurrentApplication; }
+	if (!appID) { if (valid) { *valid = false; } return 0; }
+	return _CFPreferencesGetAppIntegerValueWithContainer(key, appID, container, valid);
 }
 
 static CFArrayRef
