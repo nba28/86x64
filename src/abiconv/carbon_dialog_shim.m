@@ -69,12 +69,18 @@ static int dlg_debug(void) {
 }
 #define DLG(...) do { if (dlg_debug()) { fprintf(stderr, "[dialog] " __VA_ARGS__); fflush(stderr); } } while (0)
 
-/* ---- classic geometry (all big-endian in the resource) ---------------- */
+/* ---- classic geometry -------------------------------------------------
+ * DLOG/DITL/ALRT are big-endian ON DISK, but the modern macOS Resource Manager
+ * BYTE-SWAPS every 16-/32-bit numeric field to host (little-endian) order when
+ * it hands the resource back via Get1Resource (verified against Halo's fork:
+ * itemsID on-disk 0x2711 arrives as bytes `11 27`). Type bytes and the length-
+ * prefixed pascal strings are byte-granular and are NOT swapped. So we read the
+ * numeric fields little-endian (res16/res32); text/type bytes stay verbatim. */
 typedef struct { int16_t top, left, bottom, right; } CRect;
-static inline int16_t be16(const uint8_t *p) { return (int16_t)((p[0] << 8) | p[1]); }
-static inline int32_t be32(const uint8_t *p) {
-    return (int32_t)(((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) |
-                     ((uint32_t)p[2] << 8) | p[3]);
+static inline int16_t res16(const uint8_t *p) { return (int16_t)(p[0] | (p[1] << 8)); }
+static inline int32_t res32(const uint8_t *p) {
+    return (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) |
+                     ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
 }
 
 /* ---- DITL item kinds (classic Dialogs.h) ------------------------------- */
@@ -119,6 +125,10 @@ typedef struct Dialog {
     char         title[256];  /* window title (block-capturable, stable)      */
 } Dialog;
 #define DLG_MAGIC 0x444C4731u  /* 'DLG1' */
+
+/* The most-recently-shown dialog. ModalDialog takes no DialogRef (the classic
+ * Dialog Manager runs the FRONT modal dialog), so we track it here. */
+static struct Dialog *g_front_dialog = NULL;
 
 extern uint32_t x64_objc_wrap(uint64_t real);
 extern uint64_t x64_objc_unwrap(uint32_t h);
@@ -199,7 +209,7 @@ static long read_pstr(const uint8_t *p, long avail, char *out, size_t outsz, int
 static void parse_ditl(Dialog *d, const uint8_t *p, long len) {
     d->nitems = 0;
     if (len < 2) return;
-    int count = be16(p) + 1;               /* stored as count-1 */
+    int count = res16(p) + 1;               /* stored as count-1 */
     if (count < 0) count = 0;
     if (count > DLG_MAX_ITEMS) count = DLG_MAX_ITEMS;
     long off = 2;
@@ -207,26 +217,29 @@ static void parse_ditl(Dialog *d, const uint8_t *p, long len) {
         DItem *it = &d->items[d->nitems];
         memset(it, 0, sizeof *it);
         off += 4;                          /* skip the 4 reserved handle bytes */
-        it->rect.top    = be16(p + off + 0);
-        it->rect.left   = be16(p + off + 2);
-        it->rect.bottom = be16(p + off + 4);
-        it->rect.right  = be16(p + off + 6);
+        it->rect.top    = res16(p + off + 0);
+        it->rect.left   = res16(p + off + 2);
+        it->rect.bottom = res16(p + off + 4);
+        it->rect.right  = res16(p + off + 6);
         off += 8;
         uint8_t t = p[off++];
         it->disabled = (t & kItemDisableBit) ? 1 : 0;
         it->type = t & ~kItemDisableBit;
-        /* body */
+        /* body. NOTE word-alignment is on the ABSOLUTE offset (each item starts
+         * on an even boundary), NOT on the body length: the 13-byte item header
+         * (4 reserved + 8 rect + 1 type) is odd, so read_pstr must NOT self-pad;
+         * we align `off` to even after the whole body (verified against Halo's
+         * DITL 10001: "OK" body = 02 4f 4b, next item lands naturally on even). */
         if (it->type == kStatText || it->type == kEditText ||
             it->type == kCtrlItem  /* button/checkbox/radio: pascal title */) {
-            long c = read_pstr(p + off, len - off, it->text, sizeof it->text, 1);
+            long c = read_pstr(p + off, len - off, it->text, sizeof it->text, 0);
             off += c;
         } else if (it->type == kIconItem || it->type == kPicItem || it->type == kResCtrl) {
             off += 2;                      /* a resource id */
-            if (off & 1) off++;
-        } else { /* userItem / helpItem / unknown: 0-length body (or 1 pad) */
-            if (off < len && p[off] == 0) off++;   /* commonly a 0 length byte */
-            if (off & 1) off++;
+        } else { /* userItem / helpItem / unknown: 1-byte length prefix, 0 body */
+            if (off < len) off += 1 + p[off];
         }
+        if (off & 1) off++;                /* next item is word-aligned */
         d->nitems++;
     }
     DLG("parsed DITL: %d items\n", d->nitems);
@@ -348,9 +361,9 @@ uint32_t shim_GetNewDialog(uint32_t *a) {
      *       Boolean goAway(1)+filler(1) | SInt32 refCon(4) | SInt16 itemsID(2) |
      *       Str255 title | ... */
     CRect bounds;
-    bounds.top = be16(dlog + 0); bounds.left = be16(dlog + 2);
-    bounds.bottom = be16(dlog + 4); bounds.right = be16(dlog + 6);
-    int16_t itemsID = be16(dlog + 18);
+    bounds.top = res16(dlog + 0); bounds.left = res16(dlog + 2);
+    bounds.bottom = res16(dlog + 4); bounds.right = res16(dlog + 6);
+    int16_t itemsID = res16(dlog + 18);
     char titlebuf[256] = "";
     read_pstr(dlog + 20, dlen - 20, titlebuf, sizeof titlebuf, 0);
     free(dlog);
@@ -369,6 +382,7 @@ uint32_t shim_GetNewDialog(uint32_t *a) {
 
     on_main_sync(^{ build_window(d, d->title); });
     if (!d->win) { free(d); return 0; }
+    g_front_dialog = d;         /* the newest dialog is the ModalDialog target */
     DLG("GetNewDialog %d -> DITL %d, %d items, dialog=%p\n", dlogID, itemsID, d->nitems, d);
     return wrap_ptr(d);
 }
@@ -380,8 +394,7 @@ uint32_t shim_GetNewDialog(uint32_t *a) {
 uint32_t shim_ModalDialog(uint32_t *a) {
     int16_t *itemHit = (int16_t *)PTR(1);
     /* The DialogRef isn't an arg to ModalDialog — the classic Dialog Manager
-     * uses the FRONT modal dialog. We track the most-recently-shown dialog. */
-    extern Dialog *g_front_dialog;
+     * runs the FRONT modal dialog (tracked in g_front_dialog). */
     Dialog *d = g_front_dialog;
     if (!d || !d->win) { if (itemHit) *itemHit = 1; return 0; }
     __block NSInteger hit = 0;
@@ -398,10 +411,6 @@ uint32_t shim_ModalDialog(uint32_t *a) {
     DLG("ModalDialog -> item %ld\n", (long)hit);
     return 0;
 }
-
-/* Track the front dialog for ModalDialog (which takes no DialogRef). Set on show
- * (GetNewDialog + ShowWindow) and cleared on dispose. */
-Dialog *g_front_dialog = NULL;
 
 /* Item-handle model. GetDialogItem returns a stable Handle the app then passes
  * to GetDialogItemText/SetDialogItemText (Halo NEVER passes DialogRef+itemNo to
@@ -590,7 +599,7 @@ static uint32_t run_alert(uint32_t *a, const char *kind) {
     long alen = 0;
     uint8_t *alrt = load_resource('ALRT', alrtID, &alen);
     int16_t ditlID = alrtID;
-    if (alrt && alen >= 12) ditlID = be16(alrt + 8);   /* ALRT: Rect(8) + DITL id(2) */
+    if (alrt && alen >= 12) ditlID = res16(alrt + 8);   /* ALRT: Rect(8) + DITL id(2) */
     free(alrt);
     long ilen = 0; uint8_t *ditl = load_resource('DITL', ditlID, &ilen);
     if (ditl) {
