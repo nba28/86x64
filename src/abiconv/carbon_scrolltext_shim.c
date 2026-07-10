@@ -85,7 +85,8 @@ static struct box {
     CTFrameRef frame;             /* full-text frame, lazily built per size */
     double frame_w, frame_h;      /* geometry the cached frame was built for*/
     double text_h;                /* measured total text height             */
-    double scroll;                /* 0 .. max(0, text_h - view_h)           */
+    double maxscroll;             /* max(0, text_h - view_h), set at draw    */
+    double scroll;                /* 0 .. maxscroll                          */
 } g_box[NBOX];
 
 static struct box *box_for_ctrl(void *c) {
@@ -108,6 +109,14 @@ static struct box *box_alloc(void) {
 /* ---- 'TEXT' + 'styl' -> CFAttributedString (resource data is big-endian) ---- */
 static uint16_t be16(const uint8_t *p) { return (uint16_t)((p[0] << 8) | p[1]); }
 static uint32_t be32(const uint8_t *p) { return ((uint32_t)p[0] << 24) | ((uint32_t)p[1] << 16) | ((uint32_t)p[2] << 8) | p[3]; }
+
+/* Classic legible text sizes only: a garbage 'styl' size (see styl-parse note
+ * below) must never produce a giant font that explodes layout to millions of
+ * pixels. 6..48pt covers every real UI text run; anything else -> the default. */
+static double clamp_pt(int size) {
+    if (size < 6 || size > 48) return 11;
+    return (double)size;
+}
 
 static CTFontRef ui_font(double size, int bold, int italic) {
     CTFontRef base = CTFontCreateUIFontForLanguage(kCTFontUIFontSystem, size, NULL);
@@ -136,8 +145,23 @@ static CFAttributedStringRef styled_text(const uint8_t *txt, long tlen,
                                    kCTFontAttributeName, deffont);
     CFRelease(deffont);
 
+    /* Apply the 'styl' style runs (ScrpSTElement, big-endian, 20 bytes each:
+     * startChar@0(4) height@4(2) ascent@6(2) font@8(2) face@10(1)+pad size@12(2)
+     * color@14(6)).
+     *
+     * ROBUSTNESS (ground-truthed): the modern Resource Manager does NOT hand
+     * back the classic 'styl' bytes verbatim — it applies its own normalization
+     * so the master-pointer data is shifted/mangled vs the on-disk resource
+     * (Halo's EULA styl 1024 is `00 01 ...` on disk but `01 00 ...` from
+     * Get1Resource, making a naive parse read runCount=256 and size=3072pt ->
+     * a 10-million-pixel frame that pushed all text off-view = the BLANK EULA
+     * body). Every field is therefore VALIDATED: an implausible run count, a
+     * startChar past the text, or a non-legible point size is skipped, and the
+     * default 11pt run already covers the whole string. The EULA text itself
+     * (a single plain default run) renders correctly from the default alone. */
     if (sty && slen >= 2) {
         int runs = (int)be16(sty);
+        if (runs < 1 || (long)runs * 20 + 2 > slen + 20) runs = 0;  /* sane count */
         const uint8_t *r = sty + 2;
         for (int i = 0; i < runs && (r - sty) + 20 <= slen; i++, r += 20) {
             uint32_t start = be32(r);
@@ -146,11 +170,11 @@ static CFAttributedStringRef styled_text(const uint8_t *txt, long tlen,
             uint8_t  face = r[10];
             int      size = (int16_t)be16(r + 12);
             uint16_t red = be16(r + 14), grn = be16(r + 16), blu = be16(r + 18);
-            if (start >= (uint32_t)n) continue;
+            if (start >= (uint32_t)n) continue;         /* bogus offset: skip */
             if (end > (uint32_t)n) end = (uint32_t)n;
             if (end <= start) continue;
             CFRange rg = CFRangeMake(start, end - start);
-            CTFontRef f = ui_font(size > 0 ? size : 11, face & 1, face & 2);
+            CTFontRef f = ui_font(clamp_pt(size), face & 1, face & 2);
             CFAttributedStringSetAttribute(as, rg, kCTFontAttributeName, f);
             CFRelease(f);
             if (face & 4) {
@@ -214,6 +238,7 @@ static OSStatus box_draw_handler(void *call, void *event, void *user) {
 
     box_layout(b, w - 2 * pad - scroller, h);
     double maxscroll = b->text_h - h; if (maxscroll < 0) maxscroll = 0;
+    b->maxscroll = maxscroll;                     /* wheel handler clamps to this */
     if (b->scroll > maxscroll) b->scroll = maxscroll;
 
     /* text, clipped inside the border */
@@ -249,12 +274,13 @@ static OSStatus box_wheel_handler(void *call, void *event, void *user) {
         GetEventParameter(event, 'mwdl', 'long', NULL, sizeof delta, NULL, &delta);
     }
     if (axis != 1 /*kEventMouseWheelAxisY*/ || !delta) return -9874;
-    double max = b->text_h; /* clamped precisely at draw */
-    b->scroll -= delta * 12.0;
+    /* clamp to maxscroll from the last draw (0 until first draw; re-clamped
+     * there anyway). delta<0 = wheel down = show LATER text = scroll++. */
+    b->scroll -= delta * 24.0;
     if (b->scroll < 0) b->scroll = 0;
-    if (b->scroll > max) b->scroll = max;
+    if (b->maxscroll > 0 && b->scroll > b->maxscroll) b->scroll = b->maxscroll;
     if (HIViewSetNeedsDisplay && b->ctrl) HIViewSetNeedsDisplay(b->ctrl, 1);
-    STLOG("wheel delta=%d scroll=%.0f\n", delta, b->scroll);
+    STLOG("wheel delta=%d scroll=%.0f/%.0f\n", delta, b->scroll, b->maxscroll);
     return 0;
 }
 
