@@ -73,8 +73,23 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift
 all: run-only
+
+# selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
+# (core instruction.cc MOV_MEMv_IMMz abs32-dest arm; Civ IV Steam boost.python
+# registry _Rb_tree header left/right stored &_M_header-0x1000 -> rb_decrement
+# crash at 0x4). The old transform cloned `movl $abs32, abs32` keeping the
+# pointer as a raw imm32 in __text; later pipeline stages re-parse the M64
+# archive and re-resolve only the rip-relative DESTINATION, so any __DATA
+# layout shift left the imm one page stale. The fix emits lea r11,[rip+target];
+# mov [rip+dest],r11d (no pointer immediate survives). The test forces a
+# __DATA page shift with repeated `modify --insert load-dylib` re-parses and
+# asserts the self-referential stores track the final layout. The runtime half
+# of the fixture runs in the main suite as 86_selfref_imm_store. Needs the
+# i386 sysroot; SKIPs without.
+selfref-imm-stage-shift: $(MACHO_TOOL)
+	@bash selfref_imm_stage_shift_test.sh $(MACHO_TOOL)
 
 # byval-int32: guard for the legacy fixed-32 by-value-struct SIZING fix (abigen
 # byval_field_is_int32; Civ HIViewFindByID wall). The 10.6 parse canonicalizes

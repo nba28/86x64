@@ -1331,11 +1331,33 @@ namespace MachO {
                 *     pointer-bearing are rewritten, unlike a blind __text scan.
                 *
                 * (b) ABS32 dest `mov [abs32], imm32` (c7 05 disp32 imm32) — the
-                *     parser put the dest in memdisp and the imm32 in imm. Keep
-                *     the rip-relative form and let the wrapper's runtime __text
-                *     patcher slide the imm (a STANDALONE Immediate avoids a
-                *     bogus dyld rebase for the embedded 32-bit slot). */
-               if (!this->memdisp) {
+                *     parser put the dest in memdisp and the imm32 in imm. Emit
+                *     the SAME lea+store sequence; the destination's abs32
+                *     ModR/M (mod=00 r/m=101) re-reads as rip-relative in
+                *     64-bit mode, so the copied disp32 byte positions are
+                *     patched from `memdisp` at Emit exactly like any other
+                *     rip-relative store.
+                *
+                *     This arm used to clone the instruction, keeping the
+                *     pointer as a RAW imm32 patched by an M64 Immediate blob.
+                *     That imm32 is invisible to the M64 RE-PARSES of the later
+                *     pipeline stages (modify --insert / static-interpose /
+                *     convert): the rip-relative DESTINATION re-resolves against
+                *     each stage's fresh layout, but c7 05 in 64-bit mode is the
+                *     RIP-base parse path, which probes no trailing immediate —
+                *     so the imm kept the transform-stage address. When a later
+                *     stage shifted __DATA (+0x1000 on Civ IV Steam), every
+                *     same-object self-referential store went one page stale:
+                *     boost.python's registry std::set header ended up with
+                *     _M_left/_M_right == &_M_header - 0x1000, failing
+                *     _M_insert_unique's `__j == begin()` leftmost guard →
+                *     _Rb_tree_decrement(&header) on parent=0 → crash at 0x4
+                *     (std::list header next/prev inits went stale the same
+                *     way). lea+store leaves NO pointer immediate in __text, so
+                *     every re-parse re-resolves both references structurally.
+                *     (Guards: tests-i386/86_selfref_imm_store +
+                *     selfref_imm_stage_shift_test.sh.) */
+               {
                   auto *lea_inst = new Instruction<opposite<bits>>(
                      opcode::lea_r11_mem_rip_disp32());
                   lea_inst->memidx = 0;
@@ -1354,17 +1376,16 @@ namespace MachO {
                      mb.push_back(instbuf.at(bi));
                   }
                   auto *mov_inst = new Instruction<opposite<bits>>(opcode_t(mb));
+                  if (this->memdisp) {
+                     /* abs32 destination: patch the copied disp32 rip-relatively
+                      * against the destination blob (carrying any mid-blob
+                      * offset), exactly as the old clone path did. */
+                     mov_inst->memidx = 0;
+                     env.resolve(this->memdisp, &mov_inst->memdisp);
+                     mov_inst->memdisp_offset = this->memdisp_offset;
+                  }
                   return {lea_inst, mov_inst};
                }
-
-               auto *clone = new Instruction<opposite<bits>>(instbuf);
-               clone->memidx = memidx;
-               env.resolve(this->memdisp, &clone->memdisp);
-               auto *m64imm = Immediate<opposite<bits>>::Create(0);
-               env.resolve(imm->pointee, &m64imm->pointee);
-               m64imm->pointee_offset = imm->pointee_offset;
-               clone->imm = m64imm;
-               return {clone};
             }
 
          case XED_IFORM_JMP_MEMv:
