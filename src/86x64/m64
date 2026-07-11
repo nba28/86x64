@@ -210,12 +210,66 @@ def classify(bundle, macho):
     return ("native", rel)               # arm64 / ppc / unknown → leave alone
 
 
+# macOS firmlink remaps — symlinks that just prepend /private to the canonical
+# path. They are NOT an escape (same logical location), so the in-place guard
+# below must not trip on them.
+_FIRMLINKS = {"/tmp", "/var", "/etc"}
+
+
+def _inplace_symlink_escape(target):
+    """When translating `target` IN PLACE (no -o/--output), detect whether the
+    path reaches its real location THROUGH a symlink — the data-loss trap.
+
+    `Apps32/Civilization IV (Steam).app` and `Apps32/Portal 2` are symlinks into
+    the live Steam install; an in-place translate writes THROUGH the link and
+    destroys the read-only i386 source (this actually happened — the tester had to
+    Steam "Verify integrity of game files" to recover, and even then only the
+    main exec came back). `-o <dir>` copies to a fresh tree first, so it is safe.
+
+    Returns (link_path, real_dest) for the SHALLOWEST ESCAPING symlink
+    component, or None if the path contains no escaping symlink (safe to write
+    in place). A symlink "escapes" only if its real target lands OUTSIDE its own
+    parent directory tree — so an intra-bundle link like a framework's
+    `Versions/Current -> A` (target stays inside its parent) is NOT flagged; only
+    a link that jumps to a different tree (Apps32/<app> -> the Steam install) is."""
+    ap = os.path.abspath(target)
+    if ap == os.path.realpath(ap):
+        return None                      # no symlink anywhere in the path
+    cur = os.sep
+    for part in Path(ap).parts[1:]:
+        cur = os.path.join(cur, part)
+        if not os.path.islink(cur) or cur in _FIRMLINKS:
+            continue
+        parent_real = os.path.realpath(os.path.dirname(cur))
+        link_real = os.path.realpath(cur)
+        if os.path.commonpath([parent_real, link_real]) != parent_real:
+            return (cur, link_real)      # jumps out of its own parent tree
+    return None
+
+
 # ---- commands --------------------------------------------------------------
 def cmd_translate(args):
     require(MACHO_TOOL, LIBABICONV, TRANSLATE_BUNDLE)
     target = Path(args.target)
     if not target.exists():
         raise Die(f"no such path: {target}")
+
+    # Data-loss guard: never translate IN PLACE through a symlink (the Steam-
+    # install trap above). `-o <dir>` ditto-copies to a fresh tree first, so it
+    # is always safe and is exempt. Covers `retranslate` too (it funnels here).
+    if not getattr(args, "output", None):
+        esc = _inplace_symlink_escape(target)
+        if esc:
+            link, dest = esc
+            raise Die(
+                f"refusing to translate in place through a symlink:\n"
+                f"    {link}\n"
+                f"      -> {dest}\n"
+                f"  An in-place translate would write THROUGH the link and "
+                f"overwrite that\n  target (e.g. a live Steam install / a "
+                f"read-only i386 source).\n"
+                f"  Re-run with -o to translate a COPY instead, e.g.:\n"
+                f'    m64 translate "{args.target}" -o "$HOME/projects/translations/Apps64"')
 
     # Bundle vs single binary.
     if target.is_dir():

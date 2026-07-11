@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift inplace-symlink-guard
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -310,6 +310,16 @@ carbon-dangling:
 # the end-to-end leg skips if iMovie isn't deployed. No i386 sysroot needed.
 stale-check: $(MACHO_TOOL)
 	@bash stale_check_test.sh $(MACHO_TOOL)
+
+# inplace-symlink-guard: regression guard for the m64 in-place-symlink DATA-LOSS
+# guard (src/86x64/m64: _inplace_symlink_escape / cmd_translate). The Apps32
+# Steam entries are symlinks into the live Steam install; `m64 translate` WITHOUT
+# `-o` used to write THROUGH the link and destroy the i386 source. Asserts the
+# detector flags a cross-tree escape but not an intra-bundle Versions/Current
+# link or a /tmp firmlink, and end-to-end that in-place is refused while `-o`
+# passes. Inspects the m64 module (+ built artifacts if present); no sysroot.
+inplace-symlink-guard:
+	@bash inplace_symlink_guard_test.sh
 
 # ObjC test group. Kept separate from the default `all` so the core
 # (asm/C) suite stays green while ObjC support is still landing. Builds each
