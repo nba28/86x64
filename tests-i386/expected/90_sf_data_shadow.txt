@@ -1,0 +1,5 @@
+sf stdout leg
+sf stderr leg
+sf fprintf 42
+sf ok
+exit_code: 0

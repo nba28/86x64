@@ -1,0 +1,7 @@
+word io ok
+fgetln ok
+lock ok
+setbuffer ok
+popen ok
+all ok
+exit_code: 0
