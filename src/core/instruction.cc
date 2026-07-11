@@ -305,10 +305,27 @@ namespace MachO {
                    * lands inside a multi-byte blob, prefer the containing blob +
                    * offset over the stranded mid-section placeholder so the ref
                    * survives the modify/convert layout shift. override=true.
-                   * Gated to writable __DATA: the containing-blob guess is only
-                   * valid for opaque program data; in __OBJC it corrupts the
-                   * fragile-ABI metadata (see ParseEnv::vmaddr_in_writable_data). */
-                  if (env.vmaddr_in_writable_data(targetaddr)) {
+                   *
+                   * Admits writable __DATA AND read-only opaque const/literal
+                   * data (__TEXT,__const / __cstring / literals), mirroring the
+                   * M32-side Immediate/NonLazySymbolPointer gate (commit
+                   * 7a28d47): a `movswl [rip+disp]` reading the INTERIOR (2 mod
+                   * 4) of a {short,short} __TEXT,__const struct lands mid-blob,
+                   * so add_placeholder strands a placeholder at the interior
+                   * vmaddr; on re-Build that placeholder can't sit inside an
+                   * existing Immediate blob and gets bumped to the next blob
+                   * boundary -> the read misrelocates to the NEXT sibling datum
+                   * (Quinn Preferences: -[QuinnPieceStylePreviewCell
+                   * drawInteriorWithFrame:] `movswl _pieceSize1+2` read the HEIGHT
+                   * of the WRONG piece after the convert-stage re-parse ->
+                   * wrong preview geometry -> blank piece-style previews). The
+                   * containing-blob guess is only valid for opaque program data:
+                   * __OBJC stays excluded (structurally-parsed fragile metadata),
+                   * instruction sections stay excluded (mid-instruction offsets
+                   * don't survive the code rewrite) — both handled by
+                   * vmaddr_in_readonly_opaque_data / vmaddr_in_writable_data. */
+                  if (env.vmaddr_in_writable_data(targetaddr) ||
+                      env.vmaddr_in_readonly_opaque_data(targetaddr)) {
                      env.vmaddr_resolver.resolve_containing(
                         targetaddr,
                         (const SectionBlob<bits> **) &this->memdisp,
