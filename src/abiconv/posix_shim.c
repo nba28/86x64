@@ -337,6 +337,241 @@ int32_t shim_CFBundleGetFunctionPointerForName(uint32_t *a) {
                               nm[0] ? nm : "CFBundleGetFunctionPointerForName");
 }
 
+/* ---- classic NeXT dyld NSSymbol lookup API --------------------------------
+ * NSIsSymbolNameDefined / NSLookupAndBindSymbol / NSAddressOfSymbol (+
+ * NSLookupSymbolInImage, NSNameOfSymbol): the pre-dlopen dynamic-loader API
+ * old Mac ports use as their dlsym (the classic idiom builds "_"+name into a
+ * stack buffer, probes NSIsSymbolNameDefined, then binds + takes the address).
+ * abigen gives these no shim (modern <mach-o/dyld.h> marks them unavailable),
+ * so the translated i386 `call NSIsSymbolNameDefined` reached NATIVE libdyld:
+ * it read its arg from %rdi (garbage — the i386 caller put it on the stack)
+ * and, fatally, returned with a 64-bit `ret` that over-popped the i386 4-byte
+ * return slot, fusing the adjacent slot (arg0, a stack buffer pointer) into
+ * the high 32 bits of the popped PC (Civ IV Steam: deterministic
+ * EXC_BAD_ACCESS at 0x877ffaf0`09babb13 = &stackbuf<<32 | retaddr, the first
+ * runtime symbol probe right after the embedded Python loads; same latent
+ * defect in iPhoto/iWeb via NSLookupSymbolInImage and dbRepair via the trio).
+ *
+ * Exactly the shim_dlsym semantics apply: prefer libabiconv's own interpose
+ * shim for the name (correct ABI + callback reverse-wrapping), else resolve
+ * the native symbol and route it through fnptr_lookup_result so a >4GB native
+ * FUNCTION comes back as a low-4GB i386-callable thunk. NSSymbol is opaque to
+ * the caller; ours is a low-heap record (libabiconv's malloc is the low-4GB
+ * shim heap) so the 4-byte i386 slot holds it losslessly, deduped per name so
+ * repeated probes (GL-extension loops) don't grow without bound. */
+#define NS_SYMBOL_MAGIC 0x4e53796dU              /* 'NSym' */
+struct ns_symbol_rec {
+   uint32_t magic;
+   uint32_t addr;                /* i386-callable value (shim/thunk/handle) */
+   char    *name;                /* low-heap copy, nlist spelling ("_puts") */
+   struct ns_symbol_rec *next;
+};
+static struct ns_symbol_rec *g_ns_symbols = NULL;
+static os_unfair_lock g_ns_symbols_lk = OS_UNFAIR_LOCK_INIT;
+
+/* Resolve an nlist-spelled symbol name ("_puts") to an i386-callable value:
+ * the libabiconv interpose shim if one exists, else the native symbol bridged
+ * by fnptr_lookup_result. 0 = undefined. */
+static uint32_t ns_symbol_resolve(const char *symbolName) {
+   if (symbolName == NULL || symbolName[0] == '\0') { return 0; }
+   const char *bare = (symbolName[0] == '_') ? symbolName + 1 : symbolName;
+   uint32_t shimaddr = dlsym_shim_for(bare);
+   if (shimaddr) { return shimaddr; }
+   void *sym = dlsym(RTLD_DEFAULT, bare);
+   if (sym == NULL) { return 0; }
+   return (uint32_t)fnptr_lookup_result((uint64_t)(uintptr_t)sym, bare);
+}
+
+/* Bind symbolName into a (deduped) NSSymbol record; 0 if undefined. */
+static int32_t ns_symbol_bind(const char *symbolName, const char *api) {
+   if (symbolName == NULL || symbolName[0] == '\0') { return 0; }
+   os_unfair_lock_lock(&g_ns_symbols_lk);
+   for (struct ns_symbol_rec *r = g_ns_symbols; r != NULL; r = r->next) {
+      if (strcmp(r->name, symbolName) == 0) {
+         os_unfair_lock_unlock(&g_ns_symbols_lk);
+         return (int32_t)(uint32_t)(uintptr_t)r;
+      }
+   }
+   os_unfair_lock_unlock(&g_ns_symbols_lk);
+
+   uint32_t addr = ns_symbol_resolve(symbolName);   /* outside the lock: may
+                                                     * dlopen/mint a thunk */
+   if (addr == 0) {
+      if (posix_trace()) {
+         fprintf(stderr, "[posix] %s(\"%s\") -> undefined\n", api, symbolName);
+         fflush(stderr);
+      }
+      return 0;
+   }
+   struct ns_symbol_rec *rec = malloc(sizeof *rec);  /* low-4GB shim heap */
+   size_t len = strlen(symbolName) + 1;
+   char *copy = malloc(len);                         /* NOT strdup: that would
+                                                      * allocate from libc's
+                                                      * high heap */
+   if (rec == NULL || copy == NULL ||
+       ((uintptr_t)rec >> 32) || ((uintptr_t)copy >> 32)) {
+      free(rec); free(copy);
+      return 0;
+   }
+   memcpy(copy, symbolName, len);
+   rec->magic = NS_SYMBOL_MAGIC;
+   rec->addr  = addr;
+   rec->name  = copy;
+   os_unfair_lock_lock(&g_ns_symbols_lk);
+   for (struct ns_symbol_rec *r = g_ns_symbols; r != NULL; r = r->next) {
+      if (strcmp(r->name, symbolName) == 0) {        /* lost a bind race */
+         os_unfair_lock_unlock(&g_ns_symbols_lk);
+         free(copy); free(rec);
+         return (int32_t)(uint32_t)(uintptr_t)r;
+      }
+   }
+   rec->next = g_ns_symbols;
+   g_ns_symbols = rec;
+   os_unfair_lock_unlock(&g_ns_symbols_lk);
+   if (posix_trace()) {
+      fprintf(stderr, "[posix] %s(\"%s\") -> NSSymbol %p addr=0x%x\n",
+              api, symbolName, (void *)rec, addr);
+      fflush(stderr);
+   }
+   return (int32_t)(uint32_t)(uintptr_t)rec;
+}
+
+int32_t shim_NSIsSymbolNameDefined(uint32_t *a) {
+   const char *symbolName = a[0] ? (const char *)(uintptr_t)a[0] : NULL;
+   if (symbolName == NULL || symbolName[0] == '\0') { return 0; }
+   const char *bare = (symbolName[0] == '_') ? symbolName + 1 : symbolName;
+   /* Existence probe only — never mints a thunk (extension probe loops would
+    * drain the pool on symbols the caller never binds). */
+   int defined = dlsym_shim_for(bare) != 0 ||
+                 dlsym(RTLD_DEFAULT, bare) != NULL;
+   if (posix_trace()) {
+      fprintf(stderr, "[posix] NSIsSymbolNameDefined(\"%s\") = %d\n",
+              symbolName, defined);
+      fflush(stderr);
+   }
+   return defined;
+}
+
+int32_t shim_NSLookupAndBindSymbol(uint32_t *a) {
+   const char *symbolName = a[0] ? (const char *)(uintptr_t)a[0] : NULL;
+   return ns_symbol_bind(symbolName, "NSLookupAndBindSymbol");
+}
+
+/* NSLookupSymbolInImage(mh, symbolName, options): resolve in the GLOBAL
+ * namespace rather than scoping to `mh` — the image arg is a translated-side
+ * mach_header the shim layer can't hand to any modern per-image lookup, and
+ * the callers of record (iPhoto/iWeb probing their own frameworks) want the
+ * same shim-first routing anyway. Options (BIND_NOW/RETURN_ON_ERROR) don't
+ * change anything for an eager, non-aborting resolver. */
+int32_t shim_NSLookupSymbolInImage(uint32_t *a) {
+   const char *symbolName = a[1] ? (const char *)(uintptr_t)a[1] : NULL;
+   return ns_symbol_bind(symbolName, "NSLookupSymbolInImage");
+}
+
+int32_t shim_NSAddressOfSymbol(uint32_t *a) {
+   const struct ns_symbol_rec *rec =
+      (const struct ns_symbol_rec *)(uintptr_t)a[0];
+   if (rec == NULL || rec->magic != NS_SYMBOL_MAGIC) { return 0; }
+   return (int32_t)rec->addr;
+}
+
+int32_t shim_NSNameOfSymbol(uint32_t *a) {
+   const struct ns_symbol_rec *rec =
+      (const struct ns_symbol_rec *)(uintptr_t)a[0];
+   if (rec == NULL || rec->magic != NS_SYMBOL_MAGIC) { return 0; }
+   return (int32_t)(uint32_t)(uintptr_t)rec->name;
+}
+
+/* ---- fortify _chk family (mem/str) ----------------------------------------
+ * __memcpy_chk / __memset_chk / __strcat_chk / ... — the checked variants
+ * clang emits for _FORTIFY_SOURCE builds (default since 10.6, so most late
+ * i386 binaries import them). Modern headers expose them only as compiler
+ * builtins (<secure/_string.h>), so abigen has no prototype to shim from and
+ * translated code reached NATIVE libsystem_c: it read its args from
+ * registers (garbage — the i386 caller put them on the stack; observed
+ * __strcat_chk faulting in _platform_strlen on rdi = the dstlen arg) and its
+ * 64-bit `ret` over-popped the i386 4-byte return slot -> fused-PC crash.
+ * Civ IV (Steam) binds __memcpy_chk/__memset_chk/__strcat_chk/__strcpy_chk/
+ * __strncat_chk natively; the vendored Python 2.6 adds __memmove_chk/
+ * __sprintf_chk/__strncpy_chk. Implemented directly (not forwarded to the
+ * native _chk entries) so the i386 "unknown size" sentinel 0xffffffff maps
+ * to no-check rather than a bogus 4GB bound. All pointers are low-4GB i386
+ * buffers and pass straight through. */
+static void chk_fail(const char *fn) {
+   fprintf(stderr, "[posix] %s: buffer overflow detected (fortify)\n", fn);
+   fflush(stderr);
+   abort();
+}
+#define CHK_KNOWN(dstlen) ((dstlen) != 0xffffffffU)
+
+int32_t shim_memcpy_chk(uint32_t *a) {     /* (dst, src, n, dstlen) -> dst */
+   if (CHK_KNOWN(a[3]) && a[2] > a[3]) { chk_fail("__memcpy_chk"); }
+   memcpy((void *)(uintptr_t)a[0], (const void *)(uintptr_t)a[1], a[2]);
+   return (int32_t)a[0];
+}
+
+int32_t shim_memmove_chk(uint32_t *a) {    /* (dst, src, n, dstlen) -> dst */
+   if (CHK_KNOWN(a[3]) && a[2] > a[3]) { chk_fail("__memmove_chk"); }
+   memmove((void *)(uintptr_t)a[0], (const void *)(uintptr_t)a[1], a[2]);
+   return (int32_t)a[0];
+}
+
+int32_t shim_memset_chk(uint32_t *a) {     /* (b, c, n, dstlen) -> b */
+   if (CHK_KNOWN(a[3]) && a[2] > a[3]) { chk_fail("__memset_chk"); }
+   memset((void *)(uintptr_t)a[0], (int)a[1], a[2]);
+   return (int32_t)a[0];
+}
+
+int32_t shim_strcpy_chk(uint32_t *a) {     /* (dst, src, dstlen) -> dst */
+   const char *src = (const char *)(uintptr_t)a[1];
+   if (CHK_KNOWN(a[2]) && strlen(src) + 1 > a[2]) { chk_fail("__strcpy_chk"); }
+   strcpy((char *)(uintptr_t)a[0], src);
+   return (int32_t)a[0];
+}
+
+int32_t shim_stpcpy_chk(uint32_t *a) {     /* (dst, src, dstlen) -> dst+len */
+   const char *src = (const char *)(uintptr_t)a[1];
+   size_t len = strlen(src);
+   if (CHK_KNOWN(a[2]) && len + 1 > a[2]) { chk_fail("__stpcpy_chk"); }
+   memcpy((char *)(uintptr_t)a[0], src, len + 1);
+   return (int32_t)(a[0] + (uint32_t)len);
+}
+
+int32_t shim_strncpy_chk(uint32_t *a) {    /* (dst, src, n, dstlen) -> dst */
+   if (CHK_KNOWN(a[3]) && a[2] > a[3]) { chk_fail("__strncpy_chk"); }
+   strncpy((char *)(uintptr_t)a[0], (const char *)(uintptr_t)a[1], a[2]);
+   return (int32_t)a[0];
+}
+
+int32_t shim_strcat_chk(uint32_t *a) {     /* (dst, src, dstlen) -> dst */
+   char       *dst = (char *)(uintptr_t)a[0];
+   const char *src = (const char *)(uintptr_t)a[1];
+   if (CHK_KNOWN(a[2]) && strlen(dst) + strlen(src) + 1 > a[2]) {
+      chk_fail("__strcat_chk");
+   }
+   strcat(dst, src);
+   return (int32_t)a[0];
+}
+
+int32_t shim_strncat_chk(uint32_t *a) {    /* (dst, src, n, dstlen) -> dst */
+   char       *dst = (char *)(uintptr_t)a[0];
+   const char *src = (const char *)(uintptr_t)a[1];
+   if (CHK_KNOWN(a[3])) {
+      size_t sl = strlen(src);
+      size_t add = sl < a[2] ? sl : a[2];
+      if (strlen(dst) + add + 1 > a[3]) { chk_fail("__strncat_chk"); }
+   }
+   strncat(dst, src, a[2]);
+   return (int32_t)a[0];
+}
+
+/* libgcc __popcountsi2(int) — libSystem re-exports compiler-rt, so the bind
+ * resolves and the native 64-bit ret over-pops just like any other unshimmed
+ * C entry (Civ IV binds it). */
+int32_t shim_popcountsi2(uint32_t *a) {
+   return (int32_t)__builtin_popcount(a[0]);
+}
+
 /* open(const char *path, int oflag, ...):
  *   a[0] = path (low-4GB char*), a[1] = oflag, a[2] = mode (used iff O_CREAT). */
 int32_t shim_open(uint32_t *a) {

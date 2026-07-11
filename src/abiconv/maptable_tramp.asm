@@ -108,6 +108,38 @@
 	MTSHIM	___dlclose,                   _shim_dlclose
 	MTSHIM	___dlerror,                   _shim_dlerror
 
+	;; classic NeXT dyld NSSymbol lookup API — the pre-dlopen dynamic loader
+	;; old Mac ports use as their dlsym ("_"+name probe/bind/address idiom).
+	;; abigen can't shim these (modern <mach-o/dyld.h> marks them unavailable)
+	;; so translated code reached NATIVE libdyld: its 64-bit `ret` over-popped
+	;; the i386 4-byte return slot, fusing arg0 (a stack buffer pointer) into
+	;; the popped PC's high half (Civ IV Steam 0x877ffaf0`09babb13; same latent
+	;; defect in iPhoto/iWeb NSLookupSymbolInImage). posix_shim.c routes the
+	;; result through the dlsym shim-first/callable-thunk machinery.
+	MTSHIM	___NSIsSymbolNameDefined,     _shim_NSIsSymbolNameDefined
+	MTSHIM	___NSLookupAndBindSymbol,     _shim_NSLookupAndBindSymbol
+	MTSHIM	___NSLookupSymbolInImage,     _shim_NSLookupSymbolInImage
+	MTSHIM	___NSAddressOfSymbol,         _shim_NSAddressOfSymbol
+	MTSHIM	___NSNameOfSymbol,            _shim_NSNameOfSymbol
+
+	;; fortify _chk family (mem/str): clang emits these for _FORTIFY_SOURCE
+	;; builds (10.6 default) but modern headers expose them only as compiler
+	;; builtins, so abigen has no prototype -> they bound NATIVE and the
+	;; 64-bit ret over-popped the i386 frame (same fused-PC class as above;
+	;; Civ IV + vendored Python 2.6 both import several). posix_shim.c.
+	MTSHIM	_____memcpy_chk,              _shim_memcpy_chk
+	MTSHIM	_____memmove_chk,             _shim_memmove_chk
+	MTSHIM	_____memset_chk,              _shim_memset_chk
+	MTSHIM	_____strcpy_chk,              _shim_strcpy_chk
+	MTSHIM	_____stpcpy_chk,              _shim_stpcpy_chk
+	MTSHIM	_____strncpy_chk,             _shim_strncpy_chk
+	MTSHIM	_____strcat_chk,              _shim_strcat_chk
+	MTSHIM	_____strncat_chk,             _shim_strncat_chk
+
+	;; libgcc __popcountsi2 (libSystem re-exports compiler-rt; Civ IV binds
+	;; it). Trivial value computation, but the native ret still over-pops.
+	MTSHIM	_____popcountsi2,             _shim_popcountsi2
+
 	;; CFBundleGetFunctionPointerForName: the CF analogue of dlsym. abigen's
 	;; bridge returned the >4GB native fn pointer untouched -> the i386 caller
 	;; truncated it to 32 bits and jumped to garbage (Civ IV GetBSDProcAddress

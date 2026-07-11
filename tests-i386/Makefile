@@ -511,6 +511,12 @@ $(BUILD_DIR)/64_imm_const_text_alias.o: $(SRC_DIR)/64_imm_const_text_alias.c | $
 $(BUILD_DIR)/20_callback_qsort.o: $(SRC_DIR)/20_callback_qsort.c | $(BUILD_DIR)
 	$(CC_I386) -fno-stack-protector -c $< -o $@
 
+# 93_ns_symbol_lookup: same -fno-stack-protector dodge as test 20 (the "_"+name
+# stack buffer would otherwise pull in the mishandled __stack_chk_guard setup).
+# The test exercises the NSSymbol/__strcat_chk shims, not stack protection.
+$(BUILD_DIR)/93_ns_symbol_lookup.o: $(SRC_DIR)/93_ns_symbol_lookup.c | $(BUILD_DIR)
+	$(CC_I386) -fno-stack-protector -c $< -o $@
+
 # 24_libm_float_return: -fno-builtin so floorf/ceilf/sqrt/floor are emitted as
 # real library calls (clang would otherwise constant-fold/inline them as SSE
 # intrinsics), exercising the libm shims + the abigen float/double-return

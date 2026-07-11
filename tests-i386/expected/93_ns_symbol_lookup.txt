@@ -1,0 +1,5 @@
+atoi("42") = 42
+dedup: same
+name: _atoi
+bogus defined: 0
+exit_code: 0

@@ -392,7 +392,7 @@ create_custom_conv_template(exec.asm execvp)
 # its symbol; the C shims live in printf-conv.cc.
 create_custom_conv_template(vva-conv-t.asm
   vsnprintf vsprintf vfprintf vprintf vasprintf __vsnprintf_chk __snprintf_chk
-  printf sprintf fprintf snprintf asprintf dprintf)
+  __vsprintf_chk printf sprintf fprintf snprintf asprintf dprintf)
 
 add_library(abiconv SHARED
   abiconv.asm
@@ -412,6 +412,7 @@ add_library(abiconv SHARED
   $<TARGET_OBJECTS:custom_conv_vasprintf>
   $<TARGET_OBJECTS:custom_conv___vsnprintf_chk>
   $<TARGET_OBJECTS:custom_conv___snprintf_chk>
+  $<TARGET_OBJECTS:custom_conv___vsprintf_chk>
   $<TARGET_OBJECTS:custom_conv_printf>
   $<TARGET_OBJECTS:custom_conv_sprintf>
   $<TARGET_OBJECTS:custom_conv_fprintf>

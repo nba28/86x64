@@ -50,6 +50,18 @@ _dlsym
 _dlclose
 _dlerror
 
+# classic NeXT dyld NSSymbol lookup API (posix_shim.c / maptable_tramp.asm) —
+# the pre-dlopen dynamic loader old ports use as their dlsym. Hand-shimmed so
+# the resolved address comes back i386-callable (shim-first, else low-4GB
+# thunk); the generic bridge would return the raw >4GB native pointer, and an
+# unshimmed call reaches native libdyld whose 64-bit ret over-pops the i386
+# 4-byte return slot (Civ IV Steam fused-PC crash 0x877ffaf0`09babb13).
+_NSIsSymbolNameDefined
+_NSLookupAndBindSymbol
+_NSLookupSymbolInImage
+_NSAddressOfSymbol
+_NSNameOfSymbol
+
 # CFBundleGetFunctionPointerForName (posix_shim.c) — the CF analogue of dlsym:
 # returns a native function pointer the i386 caller calls directly. abigen's
 # bridge returned the >4GB pointer untruncated-but-unwrapped, so the i386 caller

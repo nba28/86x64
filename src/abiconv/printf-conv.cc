@@ -457,6 +457,7 @@ extern "C" unsigned fscanf_conversion_f(const void *args32, void *args64, reg_wi
 /* Not always exposed by <cstdio> depending on feature macros. */
 extern "C" int vasprintf(char **, const char *, va_list);
 extern "C" int __vsnprintf_chk(char *, size_t, int, size_t, const char *, va_list);
+extern "C" int __vsprintf_chk(char *, int, size_t, const char *, va_list);
 
 namespace {
    /* x86_64 System V va_list element — layout-compatible with __va_list_tag. */
@@ -583,6 +584,24 @@ int vasprintf_vshim(const uint32_t *a) {
    va_list va;
    build_native_va_list(fmt, ap, (sysv_va_list_tag *)(void *)va, args64, argtypes);
    return vasprintf(strp, fmt, va);
+}
+
+/* __vsprintf_chk(str, flag, slen, fmt, ap) — the fortified vsprintf. Civ IV
+ * (Steam) binds it; unshimmed it bound NATIVE libc and the 64-bit ret
+ * over-popped the i386 4-byte return slot (fused-PC class). The i386
+ * "unknown size" sentinel 0xffffffff maps to (size_t)-1 so the native check
+ * is skipped rather than bounded at a bogus 4GB. */
+int __vsprintf_chk_vshim(const uint32_t *a) {
+   char        *str  = (char *)(uintptr_t)a[0];
+   int          flag = (int)a[1];
+   size_t       slen = a[2] == 0xffffffffU ? (size_t)-1 : (size_t)a[2];
+   const char  *fmt  = (const char *)(uintptr_t)a[3];
+   const uint32_t *ap = (const uint32_t *)(uintptr_t)a[4];
+   alignas(16) uint64_t args64[VA_SLOTS_MAX];
+   reg_width_t argtypes[VA_SLOTS_MAX];
+   va_list va;
+   build_native_va_list(fmt, ap, (sysv_va_list_tag *)(void *)va, args64, argtypes);
+   return __vsprintf_chk(str, flag, slen, fmt, va);
 }
 
 /* __vsnprintf_chk(str, size, flag, slen, fmt, ap) */
