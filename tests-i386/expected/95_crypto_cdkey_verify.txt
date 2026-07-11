@@ -1,0 +1,5 @@
+A set_mem=1
+B ripemd_oneshot=1 ripemd_stream=1
+C verify_good=1 verify_bad=0
+result=PASS
+exit_code: 42

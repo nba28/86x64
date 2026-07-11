@@ -530,6 +530,20 @@ add_library(abiconv SHARED
   # never dup-emits them.
   ae_shim.c
   ae_tramp.asm
+  # crypto_shim.c / crypto_tramp.asm: the OpenSSL 0.9.7 CD-key/product-key
+  # RSA-signature verification surface Halo imports (CRYPTO_set_mem_functions,
+  # RIPEMD160*, BN_bin2bn, RSA_new/verify/free). These resolve to the LIVE native
+  # libcrypto.0.9.7 in the shared cache, so abigen left them as raw weak binds ->
+  # native 8-byte ret over-popped the i386 4-byte frame -> fused PC crash (Halo
+  # crashed at _CRYPTO_set_mem_functions, the first crypto call, right after the
+  # GL renderer loaded). CRYPTO_set_mem_functions is a no-op (its 3 args are the
+  # app's own i386 allocator callbacks — must NOT be handed to native OpenSSL);
+  # RIPEMD160* forward directly (buffers only); RSA/BN use i386-layout low-4GB
+  # shadow structs (Halo pokes rsa->n@0x10 / rsa->e@0x14 by hand) and rebuild a
+  # native RSA at verify time. Symbols listed in custom.syms so abigen never
+  # dup-emits them.
+  crypto_shim.c
+  crypto_tramp.asm
   # (halo_shim.c / halo_tramp.asm RETIRED: mach_timebase_info / mach_absolute_time
   # are now covered by the universal import-driven modern pass — libSystem maps to
   # <mach/mach_time.h> in includes_auto.h, so abigen emits ___mach_timebase_info /

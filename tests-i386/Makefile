@@ -595,6 +595,16 @@ $(BUILD_DIR)/79_qd_gworld_pixels.i386: $(BUILD_DIR)/79_qd_gworld_pixels.o
 $(BUILD_DIR)/85_quinn_cell_draw.i386: $(BUILD_DIR)/85_quinn_cell_draw.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 95_crypto_cdkey_verify: like 39/49/79/85, the i386 sysroot's openssl headers
+# exist but there is no i386 libcrypto to link, so the OpenSSL 0.9.7 CD-key
+# surface (CRYPTO_set_mem_functions / RIPEMD160* / BN_bin2bn / RSA_new/verify/
+# free) is an undefined dynamic_lookup import resolved at translate time by
+# static-interpose -> libabiconv's ___<sym> crypto shims (crypto_shim.c /
+# crypto_tramp.asm). Mirrors Halo's product-key RSA verify that over-popped the
+# i386 frame on the raw native bind. Overrides %.i386.
+$(BUILD_DIR)/95_crypto_cdkey_verify.i386: $(BUILD_DIR)/95_crypto_cdkey_verify.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # 50_cgaffine_sret: like 49, CoreGraphics isn't in the i386 sysroot, so the
 # CGAffineTransform* builders (CGAffineTransformMakeScale / MakeTranslation /
 # Translate / Concat / Invert) are undefined dynamic_lookup imports resolved at

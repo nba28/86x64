@@ -583,3 +583,17 @@ _NavServicesAvailable
 _NavServicesCanRun
 _NavLoad
 _NavUnload
+
+# OpenSSL 0.9.7 CD-key/product-key RSA-verify surface — hand-shimmed in
+# crypto_shim.c / crypto_tramp.asm (PRESENT native fns in the shared-cache
+# libcrypto.0.9.7; static-interpose renames _CRYPTO_set_mem_functions/_RSA_*/
+# _RIPEMD160*/_BN_bin2bn -> ___...). Listed here so abigen never dup-emits them.
+_CRYPTO_set_mem_functions
+_RIPEMD160_Init
+_RIPEMD160_Update
+_RIPEMD160_Final
+_RIPEMD160
+_BN_bin2bn
+_RSA_new
+_RSA_verify
+_RSA_free
