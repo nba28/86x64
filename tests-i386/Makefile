@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift inplace-symlink-guard vendor-dead-system
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -90,6 +90,19 @@ all: run-only
 # i386 sysroot; SKIPs without.
 selfref-imm-stage-shift: $(MACHO_TOOL)
 	@bash selfref_imm_stage_shift_test.sh $(MACHO_TOOL)
+
+# snapshot-compat: guard for the legacy NSView-snapshot bridge (objc_shim.c
+# legacy_snapshot_compat_install). The pre-10.6 offscreen-window capture idiom
+# (display + lockFocus + -[NSBitmapImageRep initWithFocusedViewRect:]) is dead
+# on modern AppKit (nil rep; downstream "CGImageDestinationFinalize failed for
+# output type 'public.tiff'", empty GL textures — Quinn bitmapFromView/
+# imageFromView -> GLImage board-flip + AnimatedContainerView transitions).
+# The compat swizzles initWithFocusedViewRect: to a cacheDisplayInRect:
+# capture of [NSView focusView] on a hand-built 1x rep (10.6 contract).
+# Self-contained native x86_64 (dlopen of the REAL libabiconv + exported
+# test hook; no i386 sysroot).
+snapshot-compat: $(LIBABICONV)
+	@bash snapshot_compat_test.sh $(LIBABICONV)
 
 # byval-int32: guard for the legacy fixed-32 by-value-struct SIZING fix (abigen
 # byval_field_is_int32; Civ HIViewFindByID wall). The 10.6 parse canonicalizes

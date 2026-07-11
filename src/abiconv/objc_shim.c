@@ -3154,8 +3154,113 @@ static void legacy_glview_1x_install(void) {
    }
 }
 
+/* ---- legacy NSView-snapshot compat (initWithFocusedViewRect:) --------------
+ * The pre-10.6 view-snapshot idiom — render a view into a (possibly never
+ * shown) window, lockFocus, then READ BACK the pixels:
+ *
+ *    [offscreenWindow.contentView addSubview:view];
+ *    [view display];
+ *    [view lockFocus];
+ *    rep = [[NSBitmapImageRep alloc] initWithFocusedViewRect:rect];
+ *    [view unlockFocus];
+ *
+ * is DEAD on modern AppKit (proven natively, macOS 15): for a never-ordered-in
+ * window `[view display]` doesn't even invoke drawRect:, and the deprecated
+ * `initWithFocusedViewRect:` returns nil (no CPU-readable backing store).
+ * Every legacy consumer of the captured image then collapses downstream —
+ * `[NSImage TIFFRepresentation]` logs "CGImageDestinationFinalize failed for
+ * output type 'public.tiff'", GL texture uploads get NULL bitmapData, view-
+ * transition animations composite EMPTY content (Quinn: bitmapFromView /
+ * imageFromView feed GLImage textures for the board flip + AnimatedContainerView
+ * menu switches + QuinnHighscoreAnimationView — all rendered blank).
+ *
+ * Restore the 10.6 contract at its choke point: swizzle
+ * -[NSBitmapImageRep initWithFocusedViewRect:] to synthesize the capture with
+ * the MODERN cacheDisplayInRect:toBitmapImageRep: (which re-renders the view
+ * subtree into the rep regardless of window visibility — verified to call
+ * drawRect: and produce correct pixels for never-shown windows). [NSView
+ * focusView] still tracks lockFocus on modern AppKit, so the focused view is
+ * recoverable without touching lockFocus itself. The rep is hand-built 1x
+ * (pixelsWide == points) to match what 10.6 returned on pre-Retina hardware —
+ * legacy consumers feed rep.bitmapData/bytesPerRow straight into
+ * glTexImage2D and size quads in points (companion to legacy_glview_1x).
+ * A per-thread depth guard falls back to the original IMP if a capture ever
+ * re-enters (cacheDisplay runs drawRect:, and a drawRect: that itself calls
+ * initWithFocusedViewRect: on the view being drawn would recurse). */
+static IMP g_snap_orig_initfvr;
+static __thread int g_snap_depth;
+static id snap_init_with_focused_view_rect(id self, SEL _cmd, CGRect rect) {
+   Class nsview_cls = objc_getClass("NSView");
+   id fv = nsview_cls
+      ? ((id(*)(id, SEL))objc_msgSend)((id)nsview_cls,
+                                       sel_registerName("focusView"))
+      : nil;
+   long pw = (long)(rect.size.width + 0.5);
+   long ph = (long)(rect.size.height + 0.5);
+   if (!fv || g_snap_depth > 0 || pw <= 0 || ph <= 0) {
+      return g_snap_orig_initfvr
+         ? ((id(*)(id, SEL, CGRect))g_snap_orig_initfvr)(self, _cmd, rect)
+         : nil;
+   }
+   /* hand-built 1x rep: pixels == points (the 10.6 return contract) */
+   Class rep_cls = objc_getClass("NSBitmapImageRep");
+   id rep = ((id(*)(id, SEL))objc_msgSend)((id)rep_cls,
+                                           sel_registerName("alloc"));
+   rep = ((id(*)(id, SEL, void *, long, long, long, long, signed char,
+                 signed char, id, long, long))objc_msgSend)(
+      rep,
+      sel_registerName("initWithBitmapDataPlanes:pixelsWide:pixelsHigh:"
+                       "bitsPerSample:samplesPerPixel:hasAlpha:isPlanar:"
+                       "colorSpaceName:bytesPerRow:bitsPerPixel:"),
+      NULL, pw, ph, 8L, 4L, (signed char)1, (signed char)0,
+      (id)CFSTR("NSCalibratedRGBColorSpace"), 0L, 0L);
+   if (!rep) {
+      return g_snap_orig_initfvr
+         ? ((id(*)(id, SEL, CGRect))g_snap_orig_initfvr)(self, _cmd, rect)
+         : nil;
+   }
+   ((void(*)(id, SEL, CGSize))objc_msgSend)(rep, sel_registerName("setSize:"),
+                                            rect.size);
+   ++g_snap_depth;
+   ((void(*)(id, SEL, CGRect, id))objc_msgSend)(
+      fv, sel_registerName("cacheDisplayInRect:toBitmapImageRep:"), rect, rep);
+   --g_snap_depth;
+   /* init contract: consume the alloc'd self, hand back the +1 capture rep */
+   ((void(*)(id, SEL))objc_msgSend)(self, sel_registerName("release"));
+   if (BRIDGE_TRACE()) {
+      fprintf(stderr, "[compat] initWithFocusedViewRect: -> cacheDisplay "
+              "capture of %s %ldx%ld\n", object_getClassName(fv), pw, ph);
+      fflush(stderr);
+   }
+   return rep;
+}
+static void legacy_snapshot_compat_install(void) {
+   static int done = 0;
+   if (done) { return; }
+   /* once per PROCESS (env flag), not per libabiconv copy — a second copy
+    * would capture the first copy's compat IMP as "original" and chain. */
+   if (getenv("ABICONV_SNAPSHOT_COMPAT")) { done = 1; return; }
+   Class rep_cls = objc_getClass("NSBitmapImageRep");
+   if (!rep_cls) { return; }                  /* AppKit not loaded yet: retry */
+   Method m = class_getInstanceMethod(rep_cls,
+                                      sel_registerName("initWithFocusedViewRect:"));
+   if (!m) { return; }
+   setenv("ABICONV_SNAPSHOT_COMPAT", "1", 1);
+   g_snap_orig_initfvr = method_getImplementation(m);
+   method_setImplementation(m, (IMP)snap_init_with_focused_view_rect);
+   done = 1;
+}
+
+static void appkit_compat_install(void);
+/* test hook: force the AppKit legacy-compat installs from a NATIVE harness
+ * (tests-i386/snapshot_compat_test.sh) without a bridge entry — the installs
+ * normally run lazily from objc_bridge_prep/reverse-prep, which a native
+ * guard process never reaches. */
+void _86x64_test_appkit_compat_install(void) { appkit_compat_install(); }
+
 static void appkit_compat_install(void) {
    legacy_glview_1x_install();
+   legacy_snapshot_compat_install();
    /* These self-guard (own env vars) and must keep retrying until THEIR
     * framework loads — NSColor/AppKit early, NSProFont/ProKit much later — so
     * run them BEFORE the `done` short-circuit (which only tracks the AppKit
@@ -4118,6 +4223,38 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
       }
       if (BRIDGE_TRACE()) { trace_args("send", cls_name, sel, args32); }
       quinn_play_trace("fwd", cls_name, sel);
+      /* VIEW-HIERARCHY mutations (QUINN_PLAY_TRACE): translated code
+       * reparenting / hiding views is invisible in the draw-selector traces,
+       * but it is exactly what makes drawn content vanish (the legacy
+       * offscreen-capture idiom reparents views through a hidden window;
+       * animation-end handlers add/remove overlay views). One line per
+       * addSubview: / removeFromSuperview[WithoutNeedingDisplay] /
+       * setHidden: with the ARG's class + the receiver's current window. */
+      if (quinn_play_trace_enabled() && sel) {
+         const char *hsn = sel_getName(sel);
+         int is_add = hsn && !strcmp(hsn, "addSubview:");
+         int is_addpos = hsn && !strcmp(hsn, "addSubview:positioned:relativeTo:");
+         int is_rm  = hsn && (!strcmp(hsn, "removeFromSuperview") ||
+                              !strcmp(hsn, "removeFromSuperviewWithoutNeedingDisplay"));
+         int is_hid = hsn && !strcmp(hsn, "setHidden:");
+         if (is_add || is_addpos || is_rm || is_hid) {
+            id arg0 = (is_add || is_addpos) ? resolve_self(args32[2]) : nil;
+            id win = nil;
+            if (real_self &&
+                ((signed char(*)(id, SEL, SEL))objc_msgSend)(
+                   real_self, sel_registerName("respondsToSelector:"),
+                   sel_registerName("window"))) {
+               win = ((id(*)(id, SEL))objc_msgSend)(real_self,
+                                                    sel_registerName("window"));
+            }
+            fprintf(stderr, "[qpt:hier] %s %s%s%s win=%p%s%u\n",
+                    cls_name, hsn,
+                    arg0 ? " arg=" : "", arg0 ? object_getClassName(arg0) : "",
+                    (void *)win,
+                    is_hid ? " hidden=" : " #", is_hid ? args32[2] : 0u);
+            fflush(stderr);
+         }
+      }
    }
 
    /* i386 block as the receiver of copy/retain/release etc.: handle inline so
@@ -7993,6 +8130,27 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
       const char *cn = class_getName(lookup);
       const char *sn = (sel && mem_readable((uintptr_t)sel, 1)) ? sel_getName(sel)
                                                                  : "(unreadable)";
+      /* WINDOW-IDENTITY line for every legacy-view drawRect: — discriminates
+       * "draws into the visible game window" from "draws into a detached /
+       * offscreen / hidden host" (the steady-state blank-sidebar question:
+       * all draw calls fire with sane args, so if the content never shows,
+       * either the view isn't parented where we think or something composites
+       * over it). window/superview/isVisible are plain native NSView/NSWindow
+       * getters on the real instance — safe before the legacy IMP runs. */
+      if (sn && !strcmp(sn, "drawRect:") && cn &&
+          (strstr(cn, "Quinn") || strstr(cn, "LCD"))) {
+         id win = ((id(*)(id, SEL))objc_msgSend)(self_, sel_registerName("window"));
+         id sv  = ((id(*)(id, SEL))objc_msgSend)(self_, sel_registerName("superview"));
+         signed char vis = win ? ((signed char(*)(id, SEL))objc_msgSend)(
+                                    win, sel_registerName("isVisible")) : 0;
+         long wnum = win ? ((long(*)(id, SEL))objc_msgSend)(
+                              win, sel_registerName("windowNumber")) : -1;
+         signed char hid = ((signed char(*)(id, SEL))objc_msgSend)(
+            self_, sel_registerName("isHiddenOrHasHiddenAncestor"));
+         fprintf(stderr, "[win] %s win=%p num=%ld vis=%d hiddenAnc=%d sv=%s\n",
+                 cn, (void *)win, wnum, (int)vis, (int)hid,
+                 sv ? object_getClassName(sv) : "(nil)");
+      }
       int board_cls = cn && strstr(cn, "BoardView");
       /* Round-3: the board's draw methods are registered but AppKit never calls
        * drawRect:/drawBoardInRect:/drawPieceInRect: -> the board is never
