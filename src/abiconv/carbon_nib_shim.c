@@ -91,6 +91,14 @@ static int g_sd_n;
 static void sd_register(void *ctrl, int kind, void *rec) {
     if (!ctrl || g_sd_n >= SD_MAX) return;
     g_sd[g_sd_n].ctrl = ctrl; g_sd[g_sd_n].kind = kind; g_sd[g_sd_n].rec = rec; g_sd_n++;
+    // Opt-in (ABICONV_CTRL_TRACE): log the real HIView pointer registered as a
+    // self-drawn control, so the settings-window empty-port regression can be
+    // cross-checked against the ControlRef pointer SetControlData resolves to
+    // (carbon_control_shim.c). If those pointers never coincide, the app's
+    // ControlRef arena-handle round-trip is broken (a core/retranslate concern),
+    // not the self-drawn control code.
+    if (getenv("ABICONV_CTRL_TRACE"))
+        fprintf(stderr, "[ctrl] sd_register #%d ptr=%p kind=%d\n", g_sd_n - 1, ctrl, kind);
 }
 static struct sd_entry *sd_find(void *ctrl) {
     for (int i = 0; i < g_sd_n; i++) if (g_sd[i].ctrl == ctrl) return &g_sd[i];
@@ -149,6 +157,9 @@ static OSStatus (*n_HIViewSetNeedsDisplay)(HIViewRef, uint8_t);
 static OSStatus (*n_HIViewGetBounds)(HIViewRef, HIRectD *);
 static OSStatus (*n_HIViewConvertPoint)(void *, HIViewRef, HIViewRef);  /* pt,from,to */
 static OSStatus (*n_HIViewSetVisible)(HIViewRef, uint8_t);
+// window-shown title bridge: apply the NSWindow title once the window materializes.
+static void *   (*n_GetWindowEventTarget)(WindowRef);       /* EventTargetRef (ptr) */
+static OSStatus (*n_RemoveEventHandler)(void *);            /* EventHandlerRef */
 
 static int g_resolved;
 static void resolve_once(void) {
@@ -165,9 +176,13 @@ static void resolve_once(void) {
     R(CreateNewMenu); R(AppendMenuItemTextWithCFString); R(SetMenuID);
     R(InsertMenu); R(DeleteMenu); R(PopUpMenuSelect);
     R(HIViewSetNeedsDisplay); R(HIViewGetBounds); R(HIViewConvertPoint); R(HIViewSetVisible);
+    R(RemoveEventHandler);
 #undef R
     n_GetControlEventTarget2 = (void *)dlsym(RTLD_DEFAULT, "GetControlEventTarget");
     n_InstallEventHandler2   = (void *)dlsym(RTLD_DEFAULT, "InstallEventHandler");
+    // GetWindowEventTarget returns a 64-bit EventTargetRef pointer; resolve directly
+    // (not via the R() macro whose n_<f> types differ) to keep all 64 bits.
+    n_GetWindowEventTarget   = (void *)dlsym(RTLD_DEFAULT, "GetWindowEventTarget");
 }
 
 // ---- nibref -> objects.xib absolute path table (small, single-threaded UI) ----
@@ -874,21 +889,83 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
 // NSWindow by its CGWindowID via [NSApp windowWithWindowNumber:] and setTitle:, so
 // the title bar shows the nib's window title ("Halo Graphics Settings").  All via
 // the objc runtime C API to keep this a pure-C TU.
-static void set_nswindow_title(WindowRef win, CFStringRef title) {
-    if (!win || !title) return;
+// Returns 1 if the title landed on a backing NSWindow, 0 if the NSWindow could not
+// be located yet (so a caller can retry later) or the runtime path is unavailable.
+static int set_nswindow_title(WindowRef win, CFStringRef title) {
+    if (!win || !title) return 0;
     static uint32_t (*HIWindowGetCGWindowID)(WindowRef);
     if (!HIWindowGetCGWindowID)
         HIWindowGetCGWindowID = (uint32_t (*)(WindowRef))dlsym(RTLD_DEFAULT, "HIWindowGetCGWindowID");
-    if (!HIWindowGetCGWindowID) return;
+    if (!HIWindowGetCGWindowID) return 0;
     uint32_t cgid = HIWindowGetCGWindowID(win);
-    if (!cgid) return;
+    if (!cgid) return 0;
     Class NSApplication = objc_getClass("NSApplication");
-    if (!NSApplication) return;
+    if (!NSApplication) return 0;
     id nsapp = ((id (*)(id, SEL))objc_msgSend)((id)NSApplication, sel_getUid("sharedApplication"));
-    if (!nsapp) return;
+    if (!nsapp) return 0;
     id nswin = ((id (*)(id, SEL, long))objc_msgSend)(nsapp, sel_getUid("windowWithWindowNumber:"), (long)cgid);
-    if (!nswin) return;
+    if (!nswin) return 0;
     ((void (*)(id, SEL, id))objc_msgSend)(nswin, sel_getUid("setTitle:"), (id)title);
+    return 1;
+}
+
+// ---- UNIVERSAL window-title bridge (fires when the window is actually SHOWN) ----
+// set_nswindow_title only works once the AppKit NSWindow backing the Carbon window
+// exists, but that NSWindow is materialized LAZILY when the window is first shown
+// (the WindowManagement bridge in carbon_appkit_host.c creates it on show). Calling
+// set_nswindow_title right after CreateNewWindow — before the window is shown —
+// finds no backing NSWindow (windowWithWindowNumber: -> nil) and silently no-ops,
+// leaving the title bar blank. So instead install a ONE-SHOT kEventWindowShown
+// handler on the window's event target: when the window is shown (NSWindow now
+// exists) apply the title, then remove the handler. Universal for every Carbon nib
+// window built by build_window (no app-name gating), and a graceful no-op if any of
+// GetWindowEventTarget / HIWindowGetCGWindowID / windowWithWindowNumber: is missing.
+struct win_title { CFStringRef title; WindowRef win; void *self; /* EventHandlerRef */ };
+
+static OSStatus window_shown(void *call, void *ev, void *ud) {
+    (void)call; (void)ev;
+    struct win_title *wt = (struct win_title *)ud;
+    if (!wt) return (OSStatus)-9874 /*eventNotHandledErr*/;
+    // The backing NSWindow is materialized lazily during the first show/draw cycle;
+    // apply the title only when it has actually appeared. Keep the handler installed
+    // until the title lands (some show/activate/draw events fire before the NSWindow's
+    // CGWindowID is resolvable), then unhook ourselves so we run at most once useful.
+    if (set_nswindow_title(wt->win, wt->title)) {
+        if (wt->self && n_RemoveEventHandler) n_RemoveEventHandler(wt->self);
+        if (wt->title) CFRelease(wt->title);
+        free(wt);
+    }
+    return (OSStatus)-9874;   // pass through so the standard show/draw handling still runs
+}
+
+// Arrange for `title` to be applied to the window's backing NSWindow once the window
+// materializes. Retains a copy of the title so it survives to the handler. Registers
+// for the earliest events by which the NSWindow reliably exists — shown, activated,
+// and draw-content — because on a Carbon-hosted NSWindow the CGWindowID may not be
+// resolvable at the very first kEventWindowShown; the handler retries until it lands.
+static void title_on_show(WindowRef win, CFStringRef title) {
+    if (!win || !title) return;
+    if (set_nswindow_title(win, title)) return;   // already materialized — done now
+    if (!n_InstallEventHandler2 || !n_GetWindowEventTarget) return;  // graceful no-op
+    void *tgt = n_GetWindowEventTarget(win);
+    if (!tgt) return;
+    struct win_title *wt = (struct win_title *)calloc(1, sizeof *wt);
+    if (!wt) return;
+    wt->win = win;
+    wt->title = (CFStringRef)CFRetain(title);
+    void *href = NULL;   /* EventHandlerRef out-param, so window_shown can remove itself */
+    struct { uint32_t cls, kind; } specs[] = {
+        { 'wind', 24 /*kEventWindowShown*/       },
+        { 'wind', 5  /*kEventWindowActivated*/   },
+        { 'wind', 2  /*kEventWindowDrawContent*/ },
+    };
+    if (n_InstallEventHandler2(tgt, (void *)window_shown, 3, specs, wt, &href) == 0) {
+        wt->self = href;
+    } else {
+        // install failed — clean up (title stays blank, same graceful degradation
+        // as before the bridge existed).
+        CFRelease(wt->title); free(wt);
+    }
 }
 
 // Custom-build window `wname` from objects.xib. Returns a WindowRef or NULL.
@@ -938,7 +1015,10 @@ static WindowRef build_window(const char *xibpath, CFStringRef wname) {
     }
     CFStringRef titleCF = cfs(title);
     if (n_SetWindowTitleWithCFString) n_SetWindowTitleWithCFString(win, titleCF);
-    if (title[0]) set_nswindow_title(win, titleCF);   // paint the title-bar text
+    // Paint the title-bar text on the backing NSWindow. The NSWindow is created
+    // lazily when the window is first shown, so defer to a one-shot kEventWindowShown
+    // handler (see title_on_show) rather than acting now (when it doesn't exist yet).
+    if (title[0]) title_on_show(win, titleCF);
 
     ControlRef root = NULL;
     if (!n_CreateRootControl || n_CreateRootControl(win, &root) != 0 || !root)

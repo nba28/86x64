@@ -113,12 +113,22 @@ if [ -n "$HALO" ]; then
   XIB="$HALO/Contents/Resources/English.lproj/Halo.nib/objects.xib"
   cat > "$TMP/h.c" <<EOF
 #include "$HDR"
+#include <string.h>
 int main(int argc, char **argv){
     long len; char *x = nibx_slurp(argv[1], &len); if(!x) return 2;
     int id = nibx_nametable_id(x, "Graphics");
     printf("Halo Graphics id=%d\n", id);
     if (id < 0) return 1;
     long ws = nibx_window_offset(x, id); if (ws < 0) return 1;
+    long we = nibx_match_end(x, ws); if (we <= ws) return 1;
+    // The UNIVERSAL window-title bridge (title_on_show/window_shown in
+    // carbon_nib_shim.c) applies the nib's window title to the backing NSWindow when
+    // the window is shown. Guard the exact fact it depends on: the Graphics window's
+    // title parses to "Halo Graphics Settings" (the OS X reference title). A blank/
+    // wrong parse here would surface as a blank title bar even with the bridge.
+    char wt[128]=""; nibx_str(x, ws, we, "title", wt, sizeof wt); nibx_unescape(wt);
+    printf("Halo Graphics title=%s\n", wt);
+    if (strcmp(wt, "Halo Graphics Settings") != 0) { fprintf(stderr,"title mismatch\n"); return 1; }
     // count IBCarbonEditText within the file (the dropped-class gap the shim fixes)
     int n=0; const char *p=x; while((p=strstr(p,"class=\"IBCarbonEditText\""))){n++;p+=4;}
     printf("Halo IBCarbonEditText count=%d\n", n);

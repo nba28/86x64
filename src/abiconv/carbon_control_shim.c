@@ -31,10 +31,27 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <dlfcn.h>
 
 extern uint64_t x64_objc_unwrap(uint32_t h);
 extern uint32_t x64_objc_wrap(uint64_t real);
+
+// Opt-in diagnostic (ABICONV_CTRL_TRACE): the settings-window port/IP edit fields
+// are self-drawn HIViews serviced only when the ControlRef the app passes to
+// SetControlData/GetControlData resolves (via UNWRAP -> sd_find) to a registered
+// field. If a freshly-translated app delivers a different ControlRef arena handle
+// than GetControlByID returned, the self-drawn gate misses, the value goes to
+// storage-less native, and the field renders EMPTY. This trace prints the raw i386
+// handle, the unwrapped 64-bit pointer, and whether it matched a self-drawn field,
+// so the empty-port regression can be pinned on-target in one run (does NOT change
+// behavior). eventNotHandledErr-style tags are printed as FourCC where sensible.
+static int ctrl_trace(void) {
+	static int t = -1;
+	if (t < 0) t = getenv("ABICONV_CTRL_TRACE") != NULL;
+	return t;
+}
 
 // self-drawn Control Manager registry (carbon_nib_shim.c): service edit-text /
 // popup value + text + enable requests before falling through to native.
@@ -147,7 +164,15 @@ uint32_t shim_SetControlData(uint32_t *a) {
     uint32_t tag = a[2];
     uint32_t size = a[3];
     void *data = (void *)(uintptr_t)a[4];
-    if (sd_ctrl_get_text(c, NULL, 0) >= 0) {   // c is one of our edit fields
+    int is_ours = sd_ctrl_get_text(c, NULL, 0) >= 0;
+    if (ctrl_trace()) {
+        uint32_t h = (data && (tag == 'cfst')) ? *(uint32_t *)data : 0;
+        fprintf(stderr, "[ctrl] SetControlData ctrl_h=0x%08x -> ptr=%p ours=%d "
+                        "tag=%c%c%c%c size=%u cfstr_h=0x%08x\n",
+                a[0], c, is_ours,
+                (char)(tag>>24),(char)(tag>>16),(char)(tag>>8),(char)tag, size, h);
+    }
+    if (is_ours) {   // c is one of our edit fields
         if (tag == 'cfst' && data) {
             // the buffer holds an i386 CFStringRef (arena handle) -> unwrap to real
             uint32_t h = *(uint32_t *)data;
@@ -171,7 +196,12 @@ uint32_t shim_GetControlData(uint32_t *a) {
     uint32_t maxsz = a[3];
     void *data = (void *)(uintptr_t)a[4];
     uint32_t *actual = (uint32_t *)(uintptr_t)a[5];
-    if (sd_ctrl_get_text(c, NULL, 0) >= 0) {   // our edit field
+    int is_ours = sd_ctrl_get_text(c, NULL, 0) >= 0;
+    if (ctrl_trace())
+        fprintf(stderr, "[ctrl] GetControlData ctrl_h=0x%08x -> ptr=%p ours=%d "
+                        "tag=%c%c%c%c\n", a[0], c, is_ours,
+                (char)(tag>>24),(char)(tag>>16),(char)(tag>>8),(char)tag);
+    if (is_ours) {   // our edit field
         if (tag == 'cfst' && data) {
             const void *cf = NULL;
             sd_ctrl_get_cfstring(c, &cf);
