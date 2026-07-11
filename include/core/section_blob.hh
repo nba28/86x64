@@ -358,6 +358,68 @@ namespace MachO {
    };
 
    /*
+    * `__DATA,__86x64_abs32`: the EXACT table of 4-byte __TEXT fields that hold
+    * PRE-SLIDE intra-image absolute addresses dyld cannot rebase, for the
+    * runtime slide patchers (objc_slide.c patch_text_abs32 / wrapper_setup.c
+    * fixup_translated_dylib_slots). Two field kinds:
+    *   - the disp32 of a kept absolute `[disp32(,idx,scale)]` memory operand
+    *     (i386 switch/table addressing that x86_64 cannot express rip-relative
+    *     because of the index register; macho-tool rebases the disp to the
+    *     image's pre-slide M64 vmaddr at convert and the runtime must add the
+    *     ASLR slide);
+    *   - a 4-byte absolute pointer slot in a __TEXT data section (switch jump
+    *     tables in __TEXT,__const; dyld rejects 4-byte local relocs).
+    * Before this table the runtime found these sites with a byte-pattern scan
+    * over __text — which both MISSED forms (Civ IV CRC-32 xor wall) and
+    * produced PHANTOM matches that straddled real instructions and corrupted
+    * them when "patched" (Civ IV: a `c7 45 00` byte train formed by a call-sim
+    * jmp rel32 tail + the landing `movl %eax,disp32(%rip)` store was patched
+    * as a mov-imm32, turning the landing instruction into garbage; MD5 IV
+    * constants like 0x10325476 that alias the image span were slid). The blob
+    * graph knows the exact sites, so serialize them.
+    *
+    * Synthesized by Archive::inject_abs32_section at Build (M64 only). On a
+    * later modify/convert reparse, Parse re-resolves each field to the blob
+    * now containing it (the __86x64_xrel pattern) so this build's Emit
+    * re-emits the field's post-re-layout address — never stale.
+    *
+    * On-disk (little-endian; translated images live <4GB):
+    *   u32 magic = MAGIC ("ab32")
+    *   u32 count
+    *   count * u32 field_vmaddr     // pre-slide address of the 4-byte field,
+    *                                // sorted ascending
+    */
+   template <Bits bits>
+   class Abs32Blob: public SectionBlob<bits> {
+   public:
+      static constexpr uint32_t MAGIC = 0x32336261u; /* "ab32" */
+      struct Ent {
+         const SectionBlob<bits> *blob = nullptr; /*!< blob containing the field */
+         std::size_t off = 0;                     /*!< field = blob->loc.vmaddr+off */
+      };
+      std::vector<Ent> ents;
+
+      virtual std::size_t size() const override { return 8 + ents.size() * 4; }
+      virtual void Emit(Image& img, std::size_t offset) const override;
+
+      static Abs32Blob<bits> *Create() { return new Abs32Blob(); }
+      /* Re-parse an already-emitted __86x64_abs32 section (a modify/convert
+       * reparse): read each field vmaddr back and RE-RESOLVE it to the blob
+       * currently containing it, so Emit re-emits the field's NEW vmaddr after
+       * this build's re-layout. */
+      static SectionBlob<bits> *Parse(const Image& img, const Location& loc,
+                                      ParseEnv<bits>& env);
+      virtual Abs32Blob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
+         throw error("Abs32Blob is synthesized post-transform and is never transformed");
+      }
+
+   private:
+      Abs32Blob() {}
+      Abs32Blob(const Location& loc, ParseEnv<bits>& env): SectionBlob<bits>(loc, env) {}
+      template <Bits> friend class Abs32Blob;
+   };
+
+   /*
     * `__DATA,__86x64_pcmap`: the original-i386 <-> translated-x86_64 instruction
     * address map the libabiconv C++ exception unwinder (eh_shim.c) needs.  The
     * translated binary carries the ORIGINAL i386 __eh_frame/__gcc_except_tab

@@ -172,6 +172,16 @@ namespace MachO {
       void inject_pcmap_section();
       void inject_ehlsda_section();
 
+      /* Synthesize __DATA,__86x64_abs32: the exact table of 4-byte __TEXT
+       * fields holding pre-slide absolute intra-image addresses (abs
+       * [disp32+idx*scale] operand disps + __TEXT data-section pointer slots)
+       * for the runtime slide patchers (objc_slide.c patch_text_abs32 /
+       * wrapper_setup.c), replacing their byte-pattern scan heuristics. M64
+       * only; idempotent (a reparse lifts the section into a re-resolving
+       * Abs32Blob, see section.cc). Called from Build alongside
+       * inject_pcmap_section. */
+      void inject_abs32_section();
+
       template <template <Bits> class Blob>
       Blob<b> *find_blob(std::size_t vmaddr) const {
          for (Segment<b> *segment : segments()) {

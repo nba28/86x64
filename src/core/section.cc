@@ -85,6 +85,21 @@ namespace MachO {
          }
       }
 
+      /* The runtime abs32-slide site table (Archive::inject_abs32_section /
+       * objc_slide.c patch_text_abs32). Same re-parse contract as __86x64_xrel:
+       * lift it back into a live Abs32Blob that RE-RESOLVES each field to the
+       * blob now containing it, so a later stage's re-layout re-emits correct
+       * addresses instead of freezing stale ones (the __86x64_pcmap drift
+       * lesson). Only M64 carries this section. */
+      if (std::string(sect.sectname,
+                      strnlen(sect.sectname, sizeof(sect.sectname))) == "__86x64_abs32") {
+         if constexpr (bits == Bits::M64) {
+            return new Section<bits>(img, offset, env, Abs32Blob<bits>::Parse);
+         } else {
+            return new Section<bits>(img, offset, env, DataBlob<bits>::Parse);
+         }
+      }
+
       /*
        * Normalise: test by SECTION_TYPE (low 8 bits), not the full flags
        * field, so attribute bits (PURE_INSTRUCTIONS, NO_TOC, etc.) don't

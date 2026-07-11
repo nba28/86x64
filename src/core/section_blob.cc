@@ -354,6 +354,60 @@ namespace MachO {
    }
 
    template <Bits bits>
+   void Abs32Blob<bits>::Emit(Image& img, std::size_t offset) const {
+      /* Resolve each field's final vmaddr (blob locs are set during Build) and
+       * sort so the runtime walks/patches in ascending address order. */
+      std::vector<uint32_t> rows;
+      rows.reserve(ents.size());
+      for (const Ent& e : ents) {
+         if (e.blob == nullptr) { continue; }
+         rows.push_back(static_cast<uint32_t>(e.blob->loc.vmaddr + e.off));
+      }
+      std::sort(rows.begin(), rows.end());
+      img.at<uint32_t>(offset + 0) = MAGIC;
+      img.at<uint32_t>(offset + 4) = static_cast<uint32_t>(rows.size());
+      std::size_t p = offset + 8;
+      for (const uint32_t r : rows) {
+         img.at<uint32_t>(p) = r;
+         p += 4;
+      }
+      /* dropped (unresolved) entries leave a short tail: zero-fill it so the
+       * section stays well-formed (count above is the emitted row count). */
+      const std::size_t end = offset + size();
+      for (; p < end; p += 4) { img.at<uint32_t>(p) = 0; }
+   }
+
+   template <Bits bits>
+   SectionBlob<bits> *Abs32Blob<bits>::Parse(const Image& img, const Location& loc,
+                                             ParseEnv<bits>& env) {
+      /* One blob for the WHOLE section. Reconstruct the field list and
+       * RE-RESOLVE each field vmaddr to the blob currently containing it, so
+       * this build's Emit writes the field's post-re-layout address (the
+       * __86x64_xrel pattern — a DataBlob round-trip would freeze the baked
+       * vmaddrs and go stale when a later pass shifts the layout). */
+      auto *blob = new Abs32Blob<bits>(loc, env);
+      const uint32_t magic = img.at<uint32_t>(loc.offset + 0);
+      if (magic != MAGIC) {
+         throw error("__86x64_abs32: bad magic 0x%08x on reparse", magic);
+      }
+      const uint32_t count = img.at<uint32_t>(loc.offset + 4);
+      blob->ents.reserve(count); /* keep &ents.back() stable for deferred resolve */
+      for (uint32_t i = 0; i < count; ++i) {
+         const uint32_t field_vmaddr =
+            img.at<uint32_t>(loc.offset + 8 + static_cast<std::size_t>(i) * 4);
+         if (field_vmaddr == 0) { continue; } /* zero-filled tail */
+         Ent ent;
+         blob->ents.push_back(ent);
+         /* resolve_containing handles a field at a blob start (offset 0) AND
+          * one inside a multi-byte blob (a disp32 mid-instruction); fires in
+          * do_resolve_containing once every section's blobs are registered. */
+         env.vmaddr_resolver.resolve_containing(
+            field_vmaddr, &blob->ents.back().blob, &blob->ents.back().off);
+      }
+      return blob;
+   }
+
+   template <Bits bits>
    void PcmapBlob<bits>::Emit(Image& img, std::size_t offset) const {
       const uint32_t anchor_vmaddr =
          anchor ? static_cast<uint32_t>(anchor->loc().vmaddr) : 0;
@@ -489,6 +543,9 @@ namespace MachO {
 
    template class XrelBlob<Bits::M32>;
    template class XrelBlob<Bits::M64>;
+
+   template class Abs32Blob<Bits::M32>;
+   template class Abs32Blob<Bits::M64>;
 
    template class PcmapBlob<Bits::M32>;
    template class PcmapBlob<Bits::M64>;

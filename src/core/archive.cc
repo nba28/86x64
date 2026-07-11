@@ -215,6 +215,11 @@ namespace MachO {
       inject_pcmap_section();
       inject_ehlsda_section();
 
+      /* Emit the exact runtime abs32-slide site table (M64 only; idempotent —
+       * a reparse carries the section as a live re-resolving Abs32Blob). Must
+       * also run before the layout accounting below. */
+      inject_abs32_section();
+
       /* Manufacture a modern LC_DYLD_INFO_ONLY for a classic image (opt-in via
        * convert --synthesize-dyld-info). Runs AFTER inject_xrel_section so the
        * 4-byte external-reloc RTTI slots still get their runtime __86x64_xrel
@@ -712,6 +717,115 @@ namespace MachO {
          if (std::getenv("MACHO_BUILD_DEBUG")) {
             fprintf(stderr, "inject_pcmap_section: %zu instructions -> "
                     "__DATA,__86x64_pcmap\n", blob->ents.size());
+         }
+      }
+   }
+
+   template <Bits b>
+   void Archive<b>::inject_abs32_section() {
+      if constexpr (b != Bits::M64) {
+         return; /* M32 builds are intermediate; the table describes M64 fields */
+      } else {
+         Segment<b> *data_seg = segment(SEG_DATA);
+         if (data_seg == nullptr) { return; }
+
+         /* Idempotent: a reparse (modify/convert) of an already-translated
+          * dylib carries the section as a live Abs32Blob (section.cc lifts it)
+          * whose Parse re-resolved every field to the current blobs — Emit
+          * re-emits it correctly; never inject a second copy. */
+         for (Segment<b> *seg : segments()) {
+            for (Section<b> *s : seg->sections) {
+               if (s->name() == "__86x64_abs32") { return; }
+            }
+         }
+
+         auto *blob = Abs32Blob<b>::Create();
+         for (Segment<b> *seg : segments()) {
+            const std::string segname(
+               seg->segment_command.segname,
+               strnlen(seg->segment_command.segname,
+                       sizeof(seg->segment_command.segname)));
+            if (segname != SEG_TEXT) { continue; }
+            for (Section<b> *s : seg->sections) {
+               for (SectionBlob<b> *sb : s->content) {
+                  if (auto *inst = dynamic_cast<Instruction<b> *>(sb)) {
+                     /* A kept absolute `[disp32(,idx,scale)]` memory operand:
+                      * Emit writes memdisp->loc.vmaddr (+offset) as an
+                      * absolute 32-bit displacement the runtime must slide.
+                      * (rip-relative forms re-derive memdisp_absolute=false
+                      * at parse/transform and need no slide.) */
+                     if (inst->memdisp == nullptr || !inst->memdisp_absolute) {
+                        continue;
+                     }
+                     const unsigned disp_bits =
+                        xed_decoded_inst_get_memory_displacement_width_bits(
+                           &inst->xedd, inst->memidx);
+                     if (disp_bits != 32) { continue; }
+                     /* disp32 sits at the instruction tail, before any trailing
+                      * immediate: prefixes|opcode|modrm|sib|disp32|imm. */
+                     const xed_operand_values_t *ops =
+                        xed_decoded_inst_operands(&inst->xedd);
+                     std::size_t immbytes = 0;
+                     if (xed_operand_values_has_immediate(ops)) {
+                        immbytes =
+                           xed_decoded_inst_get_immediate_width_bits(&inst->xedd)
+                           / 8;
+                     }
+                     if (inst->instbuf.size() < immbytes + 4) { continue; }
+                     typename Abs32Blob<b>::Ent ent;
+                     ent.blob = inst;
+                     ent.off = inst->instbuf.size() - immbytes - 4;
+                     blob->ents.push_back(ent);
+                  } else if (auto *im = dynamic_cast<Immediate<b> *>(sb)) {
+                     /* A 4-byte absolute pointer slot in a __TEXT data section
+                      * (switch jump tables in __TEXT,__const): Emit writes
+                      * pointee->loc.vmaddr — pre-slide, and dyld rejects
+                      * 4-byte local relocs, so the runtime must slide it.
+                      * (Immediates with no pointee are integer constants;
+                      * JumpTableEntry blobs emit anchor-relative deltas that
+                      * need no slide — both excluded.) */
+                     if (im->pointee == nullptr) { continue; }
+                     typename Abs32Blob<b>::Ent ent;
+                     ent.blob = im;
+                     ent.off = 0;
+                     blob->ents.push_back(ent);
+                  }
+               }
+            }
+         }
+         /* Emit the table EVEN WHEN EMPTY for our own translated output (the
+          * image links libabiconv — the pipeline inserts that load before
+          * convert): an empty site list is valid ground truth that tells the
+          * runtime "nothing to slide — do NOT fall back to the byte-pattern
+          * scan", whose value-window heuristic would still slide integer
+          * constants that alias the image span (guard 95_abs32_imm_const).
+          * For anything that does NOT link libabiconv (native binaries passed
+          * through `macho-tool modify` in unrelated flows), keep the old
+          * behavior: only add the section when it has content. */
+         if (blob->ents.empty()) {
+            bool links_abiconv = false;
+            for (const DylibCommand<b> *dc :
+                    this->template subcommands<DylibCommand>()) {
+               if (dc->dylib_cmd.cmd == LC_LOAD_DYLIB &&
+                   dc->name.find("libabiconv") != std::string::npos) {
+                  links_abiconv = true;
+                  break;
+               }
+            }
+            if (!links_abiconv) { delete blob; return; }
+         }
+
+         auto *sect = Section<b>::Synthetic(SEG_DATA, "__86x64_abs32",
+                                            S_REGULAR, /*align=*/2);
+         sect->segment = data_seg;
+         sect->content.push_back(blob);
+         blob->section = sect;
+         blob->segment = data_seg;
+         data_seg->sections.push_back(sect);
+         invalidate_segments_cache();
+         if (std::getenv("MACHO_BUILD_DEBUG")) {
+            fprintf(stderr, "inject_abs32_section: %zu abs32 site(s) -> "
+                    "__DATA,__86x64_abs32\n", blob->ents.size());
          }
       }
    }

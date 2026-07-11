@@ -120,6 +120,8 @@ static void fixup_translated_dylib_slots(void) {
       int is_translated = 0;
       uintptr_t data_runtime_addr = 0;
       uintptr_t data_size = 0;
+      uintptr_t abs32_runtime_addr = 0;
+      uintptr_t abs32_size = 0;
       /*
        * Collect the actual pre-slide vmaddr span of this dylib by
        * walking its LC_SEGMENT_64 list. The old code keyed every imm32
@@ -159,7 +161,10 @@ static void fixup_translated_dylib_slots(void) {
                   if (strcmp(sects[s].sectname, "__data") == 0) {
                      data_runtime_addr = sects[s].addr + slide;
                      data_size = sects[s].size;
-                     break;
+                  } else if (strncmp(sects[s].sectname, "__86x64_abs32",
+                                     sizeof(sects[s].sectname)) == 0) {
+                     abs32_runtime_addr = sects[s].addr + slide;
+                     abs32_size = sects[s].size;
                   }
                }
             }
@@ -172,6 +177,69 @@ static void fixup_translated_dylib_slots(void) {
        * pointed slots at libsystem high-memory addresses). */
       redirect_stdio_symbol_ptrs(mh64, slide);
       if (slide == 0) continue;
+
+      /* EXACT-TABLE PATH for the __TEXT sites. A current-pipeline translation
+       * carries __DATA,__86x64_abs32 (Archive::inject_abs32_section): the
+       * tool's own list of every 4-byte __TEXT field holding a pre-slide
+       * absolute intra-image address (abs [disp32+idx*scale] operand disps +
+       * __TEXT,__const pointer slots). Apply it and SKIP the __TEXT byte-scan
+       * targets below — the scan's phantom matches straddled real
+       * instructions and corrupted them (Civ IV boost.python wall; MD5 IV
+       * constants slid). objc_slide.c's add-image pass normally runs first
+       * and this is a no-op (values already outside the pre-slide window);
+       * it stays as the backstop for non-RUN_INITS and post-main loads. */
+      int have_abs32_table = 0;
+      if (abs32_runtime_addr != 0 && abs32_size >= 8) {
+         const uint32_t *hdr = (const uint32_t *)abs32_runtime_addr;
+         if (hdr[0] == 0x32336261u /* "ab32" */) {
+            uint32_t cnt = hdr[1];
+            if ((uintptr_t)cnt * 4 + 8 > abs32_size) {
+               cnt = (uint32_t)((abs32_size - 8) / 4);
+            }
+            const uint32_t *sites = hdr + 2;
+            have_abs32_table = 1;
+            /* Entries are sorted. mprotect per site CLUSTER (gap > 16 pages
+             * starts a new cluster), NOT one [first,last] span: the pages
+             * between __text and __TEXT,__const can refuse PROT_WRITE under
+             * Rosetta and a whole-span mprotect fails ENOMEM (mirrors
+             * objc_slide.c's table pass). */
+            size_t patched = 0;
+            for (uint32_t e = 0; e < cnt; ) {
+               uint32_t e2 = e + 1;
+               uintptr_t clo = (uintptr_t)sites[e] + slide;
+               uintptr_t chi = clo + 4;
+               while (e2 < cnt) {
+                  uintptr_t a = (uintptr_t)sites[e2] + slide;
+                  if (a > chi + 16 * 0x1000) break;
+                  if (a + 4 > chi) chi = a + 4;
+                  ++e2;
+               }
+               uintptr_t pg = clo & ~(uintptr_t)0xFFF;
+               size_t pglen = ((chi + 0xFFF) & ~(uintptr_t)0xFFF) - pg;
+               if (mprotect((void *)pg, pglen, PROT_READ | PROT_WRITE) != 0) {
+                  perror("wrapper: mprotect rw __86x64_abs32 cluster");
+                  e = e2;
+                  continue;
+               }
+               for (uint32_t k = e; k < e2; ++k) {
+                  uint32_t *f = (uint32_t *)((uintptr_t)sites[k] + slide);
+                  uint32_t v;
+                  memcpy(&v, f, sizeof v);
+                  if (v >= dylib_vmaddr_lo && v < dylib_vmaddr_hi) {
+                     v = (uint32_t)((uintptr_t)v + slide);
+                     memcpy(f, &v, sizeof v);
+                     ++patched;
+                  }
+               }
+               mprotect((void *)pg, pglen, PROT_READ | PROT_EXEC);
+               e = e2;
+            }
+            if (getenv("WRAPPER_DEBUG")) {
+               fprintf(stderr, "wrapper: abs32 table slid %zu/%u "
+                       "site(s) in %s\n", patched, (unsigned)cnt, base);
+            }
+         }
+      }
 
       /* Walk relevant sections 4 bytes at a time; rewrite any slot whose
        * value points into the dylib's expected (pre-slide) vmaddr range.
@@ -246,6 +314,11 @@ static void fixup_translated_dylib_slots(void) {
                }
             }
             if (matched < 0) continue;
+            /* The exact table above already covered every __TEXT site; the
+             * byte-scan would only re-introduce its phantom matches. */
+            if (have_abs32_table && strcmp(seg->segname, "__TEXT") == 0) {
+               continue;
+            }
 
             uintptr_t addr = sects[s].addr + slide;
             size_t sz = sects[s].size;
@@ -487,6 +560,25 @@ static void fixup_translated_dylib_slots(void) {
                      else if (mod == 0x1) { imm_off = k + 3;  inst_len = 7;  }
                      else if (mod == 0x2) { imm_off = k + 6;  inst_len = 10; }
                      else continue;
+                     /* PHANTOM tighteners (mirrors objc_slide.c's pass 2; a
+                      * mid-instruction byte train can form a plausible
+                      * `c7 45/05 ...` — the Civ IV boost.python wall was a
+                      * call-sim jmp rel32 tail + the landing store patched as
+                      * a mov-imm32):
+                      *  - `mov [rbp+0x0], imm32` is never real compiler
+                      *    output (it would clobber the saved frame pointer);
+                      *  - a real `mov [rip+disp32], imm32` pointer store
+                      *    targets one of the image's own globals — require
+                      *    the dest inside the image span. */
+                     if (mod == 0x1 && p[k + 2] == 0x00) continue;
+                     if (mod == 0x0) {
+                        uint32_t destdisp;
+                        memcpy(&destdisp, p + k + 2, sizeof destdisp);
+                        const uint64_t dest = (uint64_t)sects[s].addr + k + 10
+                           + (int64_t)(int32_t)destdisp;
+                        if (dest < dylib_vmaddr_lo || dest >= dylib_vmaddr_hi)
+                           continue;
+                     }
                   } else continue;
                   if (imm_off + 4 > sz) continue;
                   uint32_t v;

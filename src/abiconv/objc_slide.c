@@ -34,6 +34,7 @@
 #include <mach-o/loader.h>
 #include <mach-o/dyld.h>
 #include <mach-o/nlist.h>
+#include <mach-o/getsect.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <fcntl.h>
@@ -992,6 +993,83 @@ static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
                              uint64_t vmaddr_lo, uint64_t vmaddr_hi,
                              const char *imgname) {
    if (slide == 0 || vmaddr_lo >= vmaddr_hi) { return; }
+
+   /* EXACT-TABLE PATH. A current-pipeline translation carries
+    * __DATA,__86x64_abs32 (Archive::inject_abs32_section): the tool's own
+    * list of every 4-byte __TEXT field that holds a pre-slide intra-image
+    * absolute address (abs [disp32+idx*scale] operand disps + __TEXT,__const
+    * pointer slots). Walk it and add the slide — no byte-pattern scan at all.
+    * The scan below stays ONLY as the legacy fallback for older translations:
+    * on Civ IV (Steam) it produced 10 pass-1 + 5 pass-2 PHANTOM matches that
+    * straddled real instructions and corrupted them when "patched" (a
+    * `c7 45 00` train formed by a call-sim jmp rel32 tail + the landing
+    * `movl %eax,disp32(%rip)` became `mov [rbp+0],imm32` -> the landing
+    * decayed to garbage -> the boost.python registration wall), plus 33
+    * integer constants aliasing the image span (MD5 IVs 0x10325476 among
+    * them) silently slid. Idempotent across the N libabiconv copies and the
+    * wrapper's later pass: a slid value falls outside the pre-slide window
+    * and is skipped. ABICONV_ABS32_NO_TABLE=1 forces the legacy scan (A/B
+    * debugging). */
+   if (getenv("ABICONV_ABS32_NO_TABLE") == NULL) {
+      unsigned long absz = 0;
+      const uint8_t *ab = getsectiondata(mh64, "__DATA", "__86x64_abs32", &absz);
+      if (ab != NULL && absz >= 8 &&
+          ((const uint32_t *)ab)[0] == 0x32336261u /* "ab32" */) {
+         uint32_t cnt = ((const uint32_t *)ab)[1];
+         if ((unsigned long)cnt * 4 + 8 > absz) {
+            cnt = (uint32_t)((absz - 8) / 4);
+         }
+         const uint32_t *sites = (const uint32_t *)(ab + 8);
+         size_t patched = 0;
+         /* Entries are sorted. Do NOT mprotect one [first,last] span: the
+          * table covers __text AND __TEXT,__const, and the pages BETWEEN them
+          * (__unwind_info/__gcc_except_tab/...) can refuse PROT_WRITE under
+          * Rosetta -> a single 27MB mprotect fails ENOMEM (observed on Civ IV)
+          * and nothing gets slid. Instead cluster consecutive sites (new
+          * cluster when the gap exceeds 16 pages) and RW exactly each
+          * cluster's page range — mirroring the per-section mprotects the
+          * legacy scan always did. */
+         for (uint32_t i = 0; i < cnt; ) {
+            uint32_t j = i + 1;
+            uintptr_t clo = (uintptr_t)sites[i] + (uintptr_t)slide;
+            uintptr_t chi = clo + 4;
+            while (j < cnt) {
+               uintptr_t a = (uintptr_t)sites[j] + (uintptr_t)slide;
+               if (a > chi + 16 * 0x1000) { break; }
+               if (a + 4 > chi) { chi = a + 4; }
+               ++j;
+            }
+            uintptr_t pg = clo & ~(uintptr_t)0xFFF;
+            size_t pglen = ((chi + 0xFFF) & ~(uintptr_t)0xFFF) - pg;
+            if (mprotect((void *)pg, pglen, PROT_READ | PROT_WRITE) != 0) {
+               fprintf(stderr, "abiconv abs32-table: mprotect RW failed for "
+                       "cluster %#lx+%#zx of %s: %s — %u site(s) left "
+                       "UNPATCHED\n", (unsigned long)pg, pglen, imgname,
+                       strerror(errno), (unsigned)(j - i));
+               i = j;
+               continue;
+            }
+            for (uint32_t k = i; k < j; k++) {
+               uint32_t *f = (uint32_t *)((uintptr_t)sites[k] + (uintptr_t)slide);
+               uint32_t v;
+               memcpy(&v, f, sizeof v);
+               if (v >= vmaddr_lo && v < vmaddr_hi) { /* still pre-slide */
+                  v = (uint32_t)((uint64_t)v + (uint64_t)slide);
+                  memcpy(f, &v, sizeof v);
+                  ++patched;
+               }
+            }
+            mprotect((void *)pg, pglen, PROT_READ | PROT_EXEC);
+            i = j;
+         }
+         if (g_verbose) {
+            fprintf(stderr, "abiconv abs32 table: slid %zu/%u site(s) in %s\n",
+                    patched, (unsigned)cnt, imgname);
+         }
+         return;
+      }
+   }
+
    const uint8_t *lcp = (const uint8_t *)(mh64 + 1);
    for (uint32_t ci = 0; ci < mh64->ncmds; ci++) {
       const struct load_command *lc = (const struct load_command *)lcp;
@@ -1021,34 +1099,45 @@ static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
           * false positives (a random in-range byte train that something
           * already modified in memory is left alone). If the file cannot be
           * read, SKIP the section rather than risk a double patch. */
+         /* mmap the on-disk bytes rather than shim-malloc(25MB)+pread: the
+          * low-4GB shim heap can transiently fail a large alloc (ASLR-layout
+          * dependent), and the resulting SILENT skip left the whole __text
+          * unpatched — Civ IV's flaky face: the CRC-32 xor read its table at
+          * the unslid preferred vmaddr (KERN_INVALID at 0x11fb5d1c) in the
+          * runs where the alloc failed, while other runs patched fine. A
+          * PROT_READ file mapping needs no heap and may land anywhere. */
          uint8_t *orig = NULL;
+         void *omap = MAP_FAILED;
+         size_t omap_len = 0;
          {
             int fd = open(imgname, O_RDONLY);
             if (fd >= 0) {
-               orig = (uint8_t *)malloc(sz);
-               if (orig) {
-                  ssize_t got = pread(fd, orig, sz, (off_t)sect->offset);
-                  if (got != (ssize_t)sz) { free(orig); orig = NULL; }
+               const off_t foff = (off_t)sect->offset;
+               const off_t aoff = foff & ~(off_t)0xFFF;
+               omap_len = (size_t)(foff - aoff) + sz;
+               omap = mmap(NULL, omap_len, PROT_READ, MAP_PRIVATE, fd, aoff);
+               if (omap != MAP_FAILED) {
+                  orig = (uint8_t *)omap + (foff - aoff);
                }
                close(fd);
             }
          }
          if (!orig) {
-            if (g_verbose) {
-               fprintf(stderr, "abiconv text_abs32: cannot read on-disk "
-                       "%s,%s of %s — skipping\n", seg->segname,
-                       sect->sectname, imgname);
-            }
+            /* NOT gated on g_verbose: a skipped section is a latent crash
+             * (every abs32 site in it stays unslid). */
+            fprintf(stderr, "abiconv text_abs32: cannot map on-disk "
+                    "%s,%s of %s — section left UNPATCHED\n", seg->segname,
+                    sect->sectname, imgname);
             continue;
          }
          uintptr_t pg = addr & ~(uintptr_t)0xFFF;
          size_t pglen = ((addr + sz + 0xFFF) & ~(uintptr_t)0xFFF) - pg;
          if (mprotect((void *)pg, pglen, PROT_READ | PROT_WRITE) != 0) {
-            if (g_verbose) {
-               fprintf(stderr, "abiconv text_abs32: mprotect RW failed for "
-                       "%s,%s of %s: %s\n", seg->segname, sect->sectname,
-                       imgname, strerror(errno));
-            }
+            /* NOT gated on g_verbose (same latent-crash reasoning as above). */
+            fprintf(stderr, "abiconv text_abs32: mprotect RW failed for "
+                    "%s,%s of %s: %s — section left UNPATCHED\n", seg->segname,
+                    sect->sectname, imgname, strerror(errno));
+            munmap(omap, omap_len);
             continue;
          }
 
@@ -1221,6 +1310,26 @@ static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
                   else if (mod == 0x1) { imm_off = k + 3; inst_len = 7;  }
                   else if (mod == 0x2) { imm_off = k + 6; inst_len = 10; }
                   else { continue; }
+                  /* PHANTOM tighteners (this pass has no instruction-boundary
+                   * ground truth; a mid-instruction byte train can form a
+                   * plausible `c7 45/05 ...`):
+                   *  - `mov [rbp+0x0], imm32` is never real compiler output
+                   *    (it would clobber the saved frame pointer). The Civ IV
+                   *    boost.python wall was EXACTLY this shape: the last 3
+                   *    bytes of a call-sim `jmp rel32` (…c7 45 00) + the
+                   *    landing store's first 4 bytes read as the "imm32".
+                   *  - a real `mov [rip+disp32], imm32` pointer store targets
+                   *    one of the image's own __DATA globals; a phantom's
+                   *    random disp32 points anywhere. Require the dest to
+                   *    land inside the image span. */
+                  if (mod == 0x1 && p[k + 2] == 0x00) { continue; }
+                  if (mod == 0x0) {
+                     uint32_t destdisp;
+                     memcpy(&destdisp, p + k + 2, sizeof destdisp);
+                     const uint64_t dest = (uint64_t)sect->addr + k + 10 +
+                        (int64_t)(int32_t)destdisp;
+                     if (dest < vmaddr_lo || dest >= vmaddr_hi) { continue; }
+                  }
                } else { continue; }
                if (imm_off + 4 > sz) { continue; }
                uint32_t fv, mv;
@@ -1234,7 +1343,7 @@ static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
                }
             }
          }
-         free(orig);
+         munmap(omap, omap_len);
 
          mprotect((void *)pg, pglen, PROT_READ | PROT_EXEC);
          if (g_verbose) {
@@ -1278,6 +1387,16 @@ static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
                 * so the slide==0 standalone-dylib test never caught it. Skip the
                 * whole section here; bind_external_relocs owns its slots. */
                if (strncmp(sect->sectname, "__86x64_xrel", 16) == 0) { continue; }
+               /* __86x64_abs32 entries are 4-aligned intra-image __TEXT
+                * addresses BY DESIGN — sliding them here would make the
+                * abs32-table pass (run right after) compute double-slid field
+                * addresses and fail its mprotect on unmapped pages. The other
+                * metadata tables' values never alias the window today, but
+                * skip them on principle: they are OUR bookkeeping, not the
+                * program's pointers. */
+               if (strncmp(sect->sectname, "__86x64_abs32", 16) == 0) { continue; }
+               if (strncmp(sect->sectname, "__86x64_pcmap", 16) == 0) { continue; }
+               if (strncmp(sect->sectname, "__86x64_ehlsda", 16) == 0) { continue; }
                if (sect->size < 4) { continue; }
                void *base = (void *)(uintptr_t)(sect->addr + slide);
                const size_t page = 4096;
