@@ -202,6 +202,22 @@ namespace MachO {
        * (see vmaddr_in_writable_data). */
       bool vmaddr_in_indexed_table_target(std::size_t vmaddr) const;
 
+      /* True iff `vmaddr` lands in a READ-ONLY, NON-CODE section (no
+       * S_ATTR_PURE_INSTRUCTIONS/S_ATTR_SOME_INSTRUCTIONS): `__TEXT,__const`,
+       * `__TEXT,__cstring`, literal sections, etc. Companion to
+       * vmaddr_in_writable_data for the pointer-VALUE mid-blob fallbacks
+       * (Immediate / NonLazySymbolPointer): once the caller has decided a
+       * value IS a pointer, an INTERIOR (non-blob-start) address into opaque
+       * read-only data must relocate exactly like the aligned/blob-start case
+       * — leaving it raw guarantees a stale pre-slide vmaddr in the output
+       * (Quinn Preferences: `movl $_pieceMatrix2,(%esp)` with _pieceMatrix2 at
+       * 2 mod 4 in `__TEXT,__const` stayed 0xb3a36 -> EXC_BAD_ACCESS in the
+       * native callee; its 4-aligned siblings relocated fine). Read-only
+       * segments are never `__OBJC` (writable), and instruction sections are
+       * excluded because a mid-instruction byte offset is meaningless after
+       * the M32->M64 transform rewrites the code bytes. */
+      bool vmaddr_in_readonly_opaque_data(std::size_t vmaddr) const;
+
       /* True iff vmaddr falls in a constant/string/code section that is a
        * high-confidence pointer target (__cstring/__cfstring/__const/__text/
        * __objc* etc.). Used to disambiguate a `mov [reg+disp], imm32` whose

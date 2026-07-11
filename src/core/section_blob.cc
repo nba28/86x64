@@ -32,11 +32,17 @@ namespace MachO {
           * load) whose target sits inside a multi-byte blob misses exact-key
           * resolve; attach to the containing blob + offset so the load/pointer
           * relocates to the exact byte instead of being left unrelocated.
-          * Gated to writable __DATA: the nearest-containing-blob guess is only
-          * valid for opaque program data. In __OBJC (also writable) the
-          * fragile-ABI metadata is parsed structurally, so the guess corrupts
-          * category/method lists (regressed +[NSObject isLogEnabled]). */
-         if (env.vmaddr_in_writable_data(value)) {
+          * Gated to OPAQUE data: writable __DATA plus read-only non-code
+          * sections (__TEXT,__const / __cstring / literals — Quinn Preferences:
+          * `movl $_pieceMatrix2,(%esp)` with the table interior at 2 mod 4 in
+          * __TEXT,__const stayed a stale raw 0xb3a36 -> EXC_BAD_ACCESS in the
+          * native callee, while its 4-aligned siblings relocated). NOT __OBJC
+          * (writable, but the fragile-ABI metadata is parsed structurally, so
+          * the containing-blob guess corrupts category/method lists — regressed
+          * +[NSObject isLogEnabled]) and NOT instruction sections (mid-
+          * instruction offsets are meaningless after the M32->M64 rewrite). */
+         if (env.vmaddr_in_writable_data(value) ||
+             env.vmaddr_in_readonly_opaque_data(value)) {
             env.vmaddr_resolver.resolve_containing(value, &pointee, &pointee_offset);
          }
       }
@@ -130,9 +136,12 @@ namespace MachO {
           * interior address), leaving pointee null → the slot emits 0 → the
           * translated byte-load dereferences NULL. Attach to the containing
           * blob + offset so the slot relocates to the exact byte. Gated to
-          * writable __DATA like Immediate (the nearest-blob guess is only valid
-          * for opaque program data, not structurally-parsed __OBJC metadata). */
-         if (env.vmaddr_in_writable_data(value)) {
+          * OPAQUE data like Immediate: writable __DATA plus read-only non-code
+          * sections (a slot holding an interior __TEXT,__const pointer has the
+          * same stale/NULL failure) — never structurally-parsed __OBJC
+          * metadata, never instruction sections. */
+         if (env.vmaddr_in_writable_data(value) ||
+             env.vmaddr_in_readonly_opaque_data(value)) {
             env.vmaddr_resolver.resolve_containing(
                value, (const SectionBlob<bits> **) &pointee, &pointee_offset);
          }

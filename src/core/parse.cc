@@ -148,6 +148,27 @@ namespace MachO {
    }
 
    template <Bits bits>
+   bool ParseEnv<bits>::vmaddr_in_readonly_opaque_data(std::size_t vmaddr) const {
+      for (Segment<bits> *seg : archive.segments()) {
+         if ((seg->segment_command.initprot & VM_PROT_WRITE) != 0) { continue; }
+         if (std::strncmp(seg->segment_command.segname, SEG_PAGEZERO,
+                          sizeof(seg->segment_command.segname)) == 0) { continue; }
+         if (std::strncmp(seg->segment_command.segname, SEG_LINKEDIT,
+                          sizeof(seg->segment_command.segname)) == 0) { continue; }
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(vmaddr)) { continue; }
+            /* opaque data only — mid-instruction offsets don't survive the
+             * M32->M64 transform's code rewrite. */
+            return (sec->sect.flags &
+                    (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) == 0;
+         }
+         return false;   /* in segment but between/outside sections */
+      }
+      return false;
+   }
+
+   template <Bits bits>
    bool ParseEnv<bits>::imm_bounds_relocated_table(std::size_t vmaddr) const {
       /* Find a relocated pointer-immediate base B <= vmaddr (the loop base) and
        * require B and vmaddr to lie in the SAME segment — a table's base and its
