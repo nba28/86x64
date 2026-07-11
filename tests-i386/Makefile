@@ -529,6 +529,15 @@ $(BUILD_DIR)/51_structret_regclass.i386: $(BUILD_DIR)/51_structret_regclass.o
 $(BUILD_DIR)/79_qd_gworld_pixels.i386: $(BUILD_DIR)/79_qd_gworld_pixels.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 85_quinn_cell_draw: like 49, CoreGraphics isn't in the i386 sysroot, so every
+# CG entry (CGBitmapContextCreate / CGColorSpaceCreateDeviceRGB / CGContextSetAlpha
+# / SetFillColor[Space] / FillRect / DrawImage / CGImage*) is an undefined
+# dynamic_lookup import resolved at translate time by static-interpose ->
+# libabiconv's ___CG* shims (geo table + cg_color_shim). Offscreen pixel-readback
+# repro of Quinn's _QuinnGeneralFastDrawCells. Overrides %.i386.
+$(BUILD_DIR)/85_quinn_cell_draw.i386: $(BUILD_DIR)/85_quinn_cell_draw.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # 50_cgaffine_sret: like 49, CoreGraphics isn't in the i386 sysroot, so the
 # CGAffineTransform* builders (CGAffineTransformMakeScale / MakeTranslation /
 # Translate / Concat / Invert) are undefined dynamic_lookup imports resolved at
