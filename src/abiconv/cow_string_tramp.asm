@@ -132,6 +132,18 @@
 	MTSHIM      ____ZNKSs7compareEPKc,                                                       _shim_Ss_compare_cstr
 	MTSHIM      ____ZNKSs7compareERKSs,                                                      _shim_Ss_compare_str
 	MTSHIM      ____ZNKSs7compareEmmPKcm,                                                    _shim_Ss_compare_sub_cstr
+; ---- out-of-line COW internals + remaining narrow members (Civ IV Steam) ----
+	MTSHIM      ____ZNSs4_Rep10_M_disposeERKSaIcE,                                          _shim_Ss_rep_dispose
+	MTSHIM      ____ZNSs12_M_leak_hardEv,                                                   _shim_Ss_leak_hard
+	MTSHIM      ____ZNSs9_M_mutateEmmm,                                                     _shim_Ss_mutate
+	MTSHIM      ____ZNSs14_M_replace_auxEmmmc,                                              _shim_Ss_replace_aux
+	MTSHIM      ____ZNSs4swapERSs,                                                          _shim_Ss_swap
+	MTSHIM      ____ZNSs6appendEPKcm,                                                       _shim_Ss_append_buf
+	MTSHIM      ____ZNSs7replaceEmmPKcm,                                                    _shim_Ss_replace_pos_buf
+	MTSHIM      ____ZNKSs4findEPKcmm,                                                       _shim_Ss_find_buf3
+	MTSHIM      ____ZNKSs13find_first_ofEPKcmm,                                             _shim_Ss_ffo_buf3
+	MTSHIM      ____ZNKSs17find_first_not_ofEPKcmm,                                         _shim_Ss_ffno_buf3
+	MTSHIM      ____ZNKSsixEm,                                                              _shim_Ss_cindex
 ; ---- wide std::wstring members ----
 	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEEC1Ev,                                      _shim_Sw_ctor_default
 	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEEC2Ev,                                      _shim_Sw_ctor_default
@@ -160,6 +172,10 @@
 	MTSHIM      ____ZNKSbIwSt11char_traitsIwESaIwEE4findEwm,                                 _shim_Sw_find_ch
 	MTSHIM      ____ZNKSbIwSt11char_traitsIwESaIwEE7compareEPKw,                             _shim_Sw_compare_cstr
 	MTSHIM      ____ZNKSbIwSt11char_traitsIwESaIwEE7compareERKS2_,                           _shim_Sw_compare_str
+	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE4_Rep10_M_disposeERKS1_,                   _shim_Sw_rep_dispose
+	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE12_M_leak_hardEv,                          _shim_Sw_leak_hard
+	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE9_M_mutateEmmm,                            _shim_Sw_mutate
+	MTSHIM      ____ZNKSbIwSt11char_traitsIwESaIwEE4findEPKwmm,                              _shim_Sw_find_buf3
 ; ---- iterator==, allocator no-ops, list node ops, terminate ----
 	MTSHIM      ____ZN9__gnu_cxxeqIPKcSsEEbRKNS_17__normal_iteratorIT_T0_EES8_,              _shim_iter_eq
 	MTSHIM      ____ZNSaIcEC1Ev,                                                             _shim_alloc_noop

@@ -1,0 +1,11 @@
+narrow empty rep: len=0 cap=0 ref=0
+wide empty rep: len=0
+identity: shared
+dispose empty ok len=0
+append5: 'abcde' size=5
+find(cde,0,3)=2
+cindex[2]=c
+replace_aux: 'axxxxde'
+swap: s='' t='axxxxde'
+done
+exit_code: 0

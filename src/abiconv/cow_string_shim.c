@@ -83,10 +83,45 @@ static int chr_cmp(const uint8_t *a, const uint8_t *b, int cw) {
 }
 
 /* ---- the shared, never-freed empty rep (one per width), low-4GB ---- */
+/*
+ * EXPORTED DATA SHADOWS of libstdc++'s _S_empty_rep_storage (narrow + wide).
+ *
+ * GCC-4.x inlines the COW fast paths (default ctor, _M_dispose/_M_refcopy
+ * empty-rep identity checks) into the TARGET's own code, referencing the
+ * DATA symbol _S_empty_rep_storage directly through a non-lazy pointer slot.
+ * Left un-shadowed, dyld binds that 8-byte slot to the NATIVE x86_64
+ * libstdc++ in the shared cache (>4GB) and the translated i386 32-bit
+ * `movl slot(%rip),%reg` reads a TRUNCATED low-32 address -> deref faults
+ * (Civ IV Steam: first static initializer, slot 0x11e5e100 held
+ * 0x00007ff955019680, code deref'd 0x55019680). Exporting the storage here
+ * (C identifier ___ZNSs... assembles to ____ZNSs..., which static-interpose
+ * redirects the target's __ZNSs... import to) keeps the bind below 4GB.
+ *
+ * Layout is GNU's: size_type[(sizeof(_Rep_base)+sizeof(_CharT)+
+ * sizeof(size_type)-1)/sizeof(size_type)] = 16 zeroed bytes on i386 for both
+ * widths — {length=0, capacity=0, refcount=0} header + a NUL char at +12.
+ * It must stay all-zero and never be freed; the guarded GNU fast paths (and
+ * our rep_dispose/rep_grab below) never mutate the empty rep.
+ */
+uint64_t ___ZNSs4_Rep20_S_empty_rep_storageE[2] = {0, 0};
+uint64_t ___ZNSbIwSt11char_traitsIwESaIwEE4_Rep20_S_empty_rep_storageE[2] = {0, 0};
+
 static pthread_mutex_t g_empty_mu = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t g_empty_narrow = 0, g_empty_wide = 0;
 
 static uint32_t empty_data(int cw) {
+    /* Use the EXPORTED storage: translated images that inline the COW fast
+     * paths reference _S_empty_rep_storage directly through their (static-
+     * interposed) data bind, so the shim functions must share the SAME rep
+     * for the `p == empty` identity checks to hold across both worlds.
+     * libabiconv is mapped below 4GB (wrapper layout invariant, same as the
+     * init-stack trampoline); if it ever is not, fall back to a malloc'd rep
+     * (the shim malloc is the low-4GB heap) — inlined readers see the bound
+     * shadow either way. */
+    uintptr_t s = (uintptr_t)(cw == 1
+        ? (void *)___ZNSs4_Rep20_S_empty_rep_storageE
+        : (void *)___ZNSbIwSt11char_traitsIwESaIwEE4_Rep20_S_empty_rep_storageE);
+    if (!(s >> 32)) return (uint32_t)s + 12;
     uint32_t *slot = (cw == 1) ? &g_empty_narrow : &g_empty_wide;
     uint32_t v = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
     if (v) return v;
@@ -167,7 +202,7 @@ static uint32_t str_replace_raw(uint32_t *obj, uint32_t pos, uint32_t n1,
         uint8_t *d = bytes_of(p);
         memmove(d + (size_t)(pos + n2) * cw, d + (size_t)(pos + n1) * cw,
                 (size_t)(len - pos - n1) * cw);
-        if (n2) memcpy(d + (size_t)pos * cw, tmp, (size_t)n2 * cw);
+        if (tmp) memcpy(d + (size_t)pos * cw, tmp, (size_t)n2 * cw);
         set_len_term(r, newlen, cw);
         free(tmp);
         return p;
@@ -177,7 +212,7 @@ static uint32_t str_replace_raw(uint32_t *obj, uint32_t pos, uint32_t n1,
     uint8_t *nd = (uint8_t *)nr + 12;
     uint8_t *od = bytes_of(p);
     memcpy(nd, od, (size_t)pos * cw);                                   /* head  */
-    if (n2) memcpy(nd + (size_t)pos * cw, tmp, (size_t)n2 * cw);        /* middle*/
+    if (tmp) memcpy(nd + (size_t)pos * cw, tmp, (size_t)n2 * cw);       /* middle*/
     memcpy(nd + (size_t)(pos + n2) * cw, od + (size_t)(pos + n1) * cw,  /* tail  */
            (size_t)(len - pos - n1) * cw);
     set_len_term(nr, newlen, cw);
@@ -427,6 +462,56 @@ static uint32_t g_ffo_str(uint32_t *a, int cw)   { uint32_t p = *obj_at(a, 0), s
 static uint32_t g_ffno_cstr(uint32_t *a, int cw) { uint32_t p = *obj_at(a, 0); return ffno_buf(p, rep_of(p)->length, a[1], chr_len(a[1], cw), a[2], cw); }
 static uint32_t g_ffno_str(uint32_t *a, int cw)  { uint32_t p = *obj_at(a, 0), s = *obj_at(a, 1); return ffno_buf(p, rep_of(p)->length, s, rep_of(s)->length, a[2], cw); }
 
+/* 3-arg buffer search variants: (const char* s, pos, n) — note the set/needle
+ * LENGTH is the LAST i386 slot (a[3]), pos the middle one (a[2]). */
+static uint32_t g_find_buf3(uint32_t *a, int cw) { uint32_t p = *obj_at(a, 0); return find_buf(p, rep_of(p)->length, a[1], a[3], a[2], cw); }
+static uint32_t g_ffo_buf3(uint32_t *a, int cw)  { uint32_t p = *obj_at(a, 0); return ffo_buf(p, rep_of(p)->length, a[1], a[3], a[2], cw); }
+static uint32_t g_ffno_buf3(uint32_t *a, int cw) { uint32_t p = *obj_at(a, 0); return ffno_buf(p, rep_of(p)->length, a[1], a[3], a[2], cw); }
+
+/* --- out-of-line COW internals (called from the target's inlined header
+ *     fast paths; `this` conventions per GNU libstdc++-v3 basic_string) --- */
+/* _Rep::_M_dispose(const alloc&): `this` IS the rep HEADER (not the string
+ * object) — its char data starts at this+12. */
+static uint32_t g_rep_dispose_member(uint32_t *a, int cw) { rep_dispose(a[0] + 12, cw); return 0; }
+/* _M_leak_hard(): make the rep unique, then mark it leaked — str_leak. */
+static uint32_t g_leak_hard(uint32_t *a, int cw) { str_leak(obj_at(a, 0), cw); return 0; }
+/* _M_mutate(pos, n1, n2): make unique + open an n2-char UNINITIALIZED gap at
+ * pos (the caller fills it). src=0 keeps the gap uninitialized. */
+static uint32_t g_mutate(uint32_t *a, int cw) { str_replace_raw(obj_at(a, 0), a[1], a[2], 0, a[3], cw); return 0; }
+/* _M_replace_aux(pos, n1, n2, c): replace [pos,pos+n1) with n2 copies of c. */
+static uint32_t g_replace_aux(uint32_t *a, int cw) {
+    uint32_t n2 = a[3], c = a[4];
+    void *fill = NULL;
+    if (n2) {
+        fill = malloc((size_t)n2 * cw);
+        if (cw == 1) memset(fill, (int)(c & 0xff), n2);
+        else { uint32_t *w = (uint32_t *)fill; for (uint32_t i = 0; i < n2; i++) w[i] = c; }
+    }
+    str_replace_raw(obj_at(a, 0), a[1], a[2], (uint32_t)(uintptr_t)fill, n2, cw);
+    free(fill);
+    return a[0];
+}
+/* swap(string&): stateless allocators — just exchange the two _M_p words. */
+static uint32_t g_swap(uint32_t *a, int cw) {
+    (void)cw;
+    uint32_t *o1 = obj_at(a, 0), *o2 = obj_at(a, 1);
+    uint32_t t = *o1; *o1 = *o2; *o2 = t;
+    return 0;
+}
+/* append(const char* s, n) */
+static uint32_t g_append_buf(uint32_t *a, int cw) {
+    uint32_t *obj = obj_at(a, 0);
+    str_replace_raw(obj, rep_of(*obj)->length, 0, a[1], a[2], cw);
+    return a[0];
+}
+/* replace(pos, n1, const char* s, n2) */
+static uint32_t g_replace_pos_buf(uint32_t *a, int cw) {
+    str_replace_raw(obj_at(a, 0), a[1], a[2], a[3], a[4], cw);
+    return a[0];
+}
+/* CONST operator[](n): no leak, direct read pointer. */
+static uint32_t g_cindex(uint32_t *a, int cw) { return *obj_at(a, 0) + a[1] * cw; }
+
 /* --- compare --- */
 static int cmp_buf(uint32_t d1, uint32_t l1, uint32_t d2, uint32_t l2, int cw) {
     uint32_t n = l1 < l2 ? l1 : l2;
@@ -513,6 +598,17 @@ uint32_t shim_Ss_compare_cstr(uint32_t *a){ return g_compare_cstr(a, 1); }
 uint32_t shim_Ss_compare_str(uint32_t *a) { return g_compare_str(a, 1); }
 uint32_t shim_Ss_compare_sub_cstr(uint32_t *a){ return g_compare_sub_cstr(a, 1); }
 uint32_t shim_Ss_substr(uint32_t *a)      { return g_substr(a, 1); }
+uint32_t shim_Ss_rep_dispose(uint32_t *a) { return g_rep_dispose_member(a, 1); }
+uint32_t shim_Ss_leak_hard(uint32_t *a)   { return g_leak_hard(a, 1); }
+uint32_t shim_Ss_mutate(uint32_t *a)      { return g_mutate(a, 1); }
+uint32_t shim_Ss_replace_aux(uint32_t *a) { return g_replace_aux(a, 1); }
+uint32_t shim_Ss_swap(uint32_t *a)        { return g_swap(a, 1); }
+uint32_t shim_Ss_append_buf(uint32_t *a)  { return g_append_buf(a, 1); }
+uint32_t shim_Ss_replace_pos_buf(uint32_t *a){ return g_replace_pos_buf(a, 1); }
+uint32_t shim_Ss_find_buf3(uint32_t *a)   { return g_find_buf3(a, 1); }
+uint32_t shim_Ss_ffo_buf3(uint32_t *a)    { return g_ffo_buf3(a, 1); }
+uint32_t shim_Ss_ffno_buf3(uint32_t *a)   { return g_ffno_buf3(a, 1); }
+uint32_t shim_Ss_cindex(uint32_t *a)      { return g_cindex(a, 1); }
 
 /* WIDE std::wstring (Sb<wchar_t>) */
 uint32_t shim_Sw_ctor_default(uint32_t *a){ return g_ctor_default(a, 4); }
@@ -537,6 +633,10 @@ uint32_t shim_Sw_find_ch(uint32_t *a)     { return g_find_ch(a, 4); }
 uint32_t shim_Sw_compare_cstr(uint32_t *a){ return g_compare_cstr(a, 4); }
 uint32_t shim_Sw_compare_str(uint32_t *a) { return g_compare_str(a, 4); }
 uint32_t shim_Sw_substr(uint32_t *a)      { return g_substr(a, 4); }
+uint32_t shim_Sw_rep_dispose(uint32_t *a) { return g_rep_dispose_member(a, 4); }
+uint32_t shim_Sw_leak_hard(uint32_t *a)   { return g_leak_hard(a, 4); }
+uint32_t shim_Sw_mutate(uint32_t *a)      { return g_mutate(a, 4); }
+uint32_t shim_Sw_find_buf3(uint32_t *a)   { return g_find_buf3(a, 4); }
 
 /* operator+ (sret) */
 uint32_t shim_Ss_opplus_cstr_str(uint32_t *a) {  /* (const char* lhs, const string& rhs) */
