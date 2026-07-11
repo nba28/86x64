@@ -1,0 +1,8 @@
+ok map_create
+ok map_lookup_by_equal_key
+ok map_count_dedup
+ok map_value_replaced
+ok hash_create
+ok hash_count_dedup
+ok hash_member_by_equal
+exit_code: 0

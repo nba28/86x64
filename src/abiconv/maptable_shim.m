@@ -338,6 +338,7 @@ KEY_SHADOW(NSNonRetainedObjectMapKeyCallBacks, CB_MAP_KEY_NONRETAINED);
 KEY_SHADOW(NSOwnedPointerMapKeyCallBacks,    CB_MAP_KEY_OWNEDPTR);
 
 HASH_SHADOW(NSNonOwnedPointerHashCallBacks,  CB_HASH_NONOWNED);
+HASH_SHADOW(NSObjectHashCallBacks,           CB_HASH_OBJECT);
 
 /* ===========================================================================
  * Legacy "old-style" NSUserDefaults locale compat (generic, NOT app-specific).
