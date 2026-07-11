@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift inplace-symlink-guard
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift inplace-symlink-guard vendor-dead-system
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -320,6 +320,19 @@ stale-check: $(MACHO_TOOL)
 # passes. Inspects the m64 module (+ built artifacts if present); no sysroot.
 inplace-symlink-guard:
 	@bash inplace_symlink_guard_test.sh
+
+# vendor-dead-system: regression guard for the DEAD-ABSOLUTE-SYSTEM-PATH auto-
+# vendor in src/86x64/_vendor_deps.py. An i386 app links a system framework by
+# absolute path Apple later REMOVED (Civ IV / iPhoto embed Python 2.6 via
+# /System/.../Python.framework/Versions/2.6/Python; modern macOS ships no Python
+# 2.x) -> dyld hard-fails at load. The fix auto-vendors a dead /System//usr dep
+# (path neither on disk nor in the dyld shared cache, no native home) so
+# rpath-fix can repoint the consumer at @rpath/... Asserts the dyld-cache oracle
+# (libSystem cache-served=loadable vs removed Python 2.6=dead) and end-to-end
+# that vendor() pulls the dead framework while leaving cache-served libs and
+# already-in-bundle leaves alone. Pure Python-module unit test; no sysroot.
+vendor-dead-system:
+	@bash vendor_dead_system_test.sh
 
 # ObjC test group. Kept separate from the default `all` so the core
 # (asm/C) suite stays green while ObjC support is still landing. Builds each

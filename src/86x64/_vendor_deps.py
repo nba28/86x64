@@ -30,6 +30,7 @@ absolute reference to @rpath. So the intended order is:
 usage: _vendor_deps.py <app> [--source DIR]... [--dry-run]
 """
 import argparse
+import ctypes
 import os
 import re
 import shutil
@@ -119,6 +120,41 @@ def fw_name(path):
 # as other removed frameworks surface. (General follow-up: replace this curated set
 # with a live `arch -x86_64` dlopen loadability probe — see todo_gaps.)
 HOLLOW_SHELL_SYSTEM_FRAMEWORKS = {"QuickTime"}
+
+
+# dyld's own "is this path served by the shared cache?" oracle. On modern macOS
+# almost every /usr/lib/*.dylib and /System framework has NO file on disk — it
+# lives only in the dyld shared cache — so a bare os.path.exists() is False even
+# for perfectly loadable system libraries (libSystem.B.dylib, libobjc.A.dylib,
+# Foundation, …). _dyld_shared_cache_contains_path() answers the real question:
+# True  = dyld can load it (leave native, never vendor);
+# False = neither on disk nor in the cache = REMOVED (must vendor a translated
+#         copy). This cleanly separates "gone" (Python 2.6, QuickTime) from
+#         "cache-only" (libSystem) without any per-name allow/deny list.
+def _make_cache_probe():
+    try:
+        fn = ctypes.CDLL(None)._dyld_shared_cache_contains_path
+        fn.restype = ctypes.c_bool
+        fn.argtypes = [ctypes.c_char_p]
+        return lambda p: bool(fn(p.encode()))
+    except (AttributeError, OSError):
+        return None
+_CACHE_CONTAINS = _make_cache_probe()
+
+
+def system_dep_loadable(dep):
+    """True iff the OS-owned dependency at absolute path `dep` can actually be
+    loaded on this host — either it exists as a file on disk, or dyld serves it
+    from the shared cache. False means the framework/dylib was REMOVED from the
+    OS (e.g. Python 2.6, or a hollow-shell framework) and must be vendored, else
+    the translated app dyld-fails at load. If the probe API is unavailable we
+    conservatively fall back to os.path.exists (never over-vendors, but may miss
+    a removed framework on that host)."""
+    if os.path.exists(dep):
+        return True
+    if _CACHE_CONTAINS is not None:
+        return _CACHE_CONTAINS(dep)
+    return False
 
 
 def system_fw_exists(kind, name):
@@ -267,13 +303,39 @@ def vendor(app, sources, dry, native=DEFAULT_NATIVE):
                     dangling.setdefault((kind, name), set()).add(b.name)
                 continue
             if dep.startswith('/System/') or dep.startswith('/usr/'):
-                # OS-owned location → normally native and left alone. EXCEPTION:
-                # a hollow-shell framework (dir present but x86_64 binary stripped
-                # from the dyld cache, e.g. QuickTime) is NOT loadable, so fall
-                # through to vendoring instead of skipping — otherwise the app
-                # dyld-fails at load ("Library not loaded: .../QuickTime").
-                if not (kind == "framework"
-                        and name in HOLLOW_SHELL_SYSTEM_FRAMEWORKS):
+                # OS-owned location → normally native and left alone. Two EXCEPTIONS
+                # fall through to vendoring instead of skipping, else the app
+                # dyld-fails at load ("Library not loaded: <dep>"):
+                #   1. a hollow-shell framework (the .framework dir + Info.plist
+                #      still exist but the x86_64 binary was stripped from the dyld
+                #      cache, e.g. QuickTime) — flagged by the curated set; and
+                #   2. a DEAD absolute system path — the framework/dylib is GONE
+                #      from disk entirely (Apple removed it), e.g. i386-era apps
+                #      linking /System/Library/Frameworks/Python.framework/
+                #      Versions/2.6/Python (Civ IV's embedded Python, iPhoto's, …).
+                #      Modern macOS ships no Python 2.x; the whole framework dir is
+                #      absent. This is universal — any i386 app linking a removed
+                #      system framework hits it — and needs no per-name list: the
+                #      signal is "dyld cannot load the exact install path (neither
+                #      on disk nor in the shared cache) AND there is no modern
+                #      native home for it". system_dep_loadable() handles the
+                #      cache-only case so real system libs (libSystem, libobjc,
+                #      Foundation — files absent but cache-served) still
+                #      short-circuit and are never vendored.
+                hollow = (kind == "framework"
+                          and name in HOLLOW_SHELL_SYSTEM_FRAMEWORKS)
+                dead = (not system_dep_loadable(dep)
+                        and not system_fw_exists(kind, name))
+                # A dead absolute /System path whose leaf is ALREADY somewhere in
+                # the bundle (e.g. Python's own Extras hold
+                # libsvn_swig_py-1.0.dylib, recorded with its dead /System install
+                # path but shipped inside Python.framework/…/Extras/lib) is not
+                # actually missing — rpath-fix will repoint the consumer at the
+                # in-bundle copy. Don't re-vendor it. Mirrors the @-relative
+                # present-in-bundle short-circuit above.
+                if dead and os.path.basename(dep) in present:
+                    continue
+                if not (hollow or dead):
                     continue
             elif os.path.exists(dep):
                 continue          # resolves at its absolute path → host-native
