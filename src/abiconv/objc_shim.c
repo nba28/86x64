@@ -7995,17 +7995,28 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
                              || !strcmp(sn, "boardDidChange:matrices:"));
       if (board_cls || chain_sel) {
          uint32_t shadow = self32;
+         /* The REAL x86_64 object is the ground-truth instance identity: the
+          * shadow is keyed on it (objc_getAssociatedObject(real,g_ctrl)), so
+          * two calls with the SAME real but DIFFERENT shadow == a shadow-aliasing
+          * bug. myPlayer@0x54 lives on QuinnBoardView (the super) and is written
+          * by -[QuinnBoardView setPlayer:] via the subclass's [super setPlayer:];
+          * drawRect:/drawBoardInRect: read it. Logging real+shadow+myPlayer for
+          * setPlayer: (write) AND drawRect:/drawBoardInRect: (read) shows whether
+          * the write and the read land on the same shadow of the same instance. */
+         uint64_t real64 = (uint64_t)(uintptr_t)shadow_real(shadow);
          if (board_cls) {
             uint32_t myplayer = (shadow && mem_readable((uintptr_t)shadow + 0x54, 4))
                                 ? *(const uint32_t *)(uintptr_t)(shadow + 0x54) : 0xBADBAD;
-            fprintf(stderr, "[guard] %s[%s] shadow=0x%x myPlayer@0x54=0x%x\n",
-                    cn ? cn : "?", sn, shadow, myplayer);
-            if (sn && !strcmp(sn, "setPlayer:"))
-               fprintf(stderr, "[guard]   -> setPlayer: writes newPlayer=0x%x into shadow"
-                       " 0x%x+0x54\n", plan->frame[head + 2], shadow);
+            fprintf(stderr, "[guard] %s[%s] real=0x%llx shadow=0x%x myPlayer@0x54=0x%x%s\n",
+                    cn ? cn : "?", sn, (unsigned long long)real64, shadow, myplayer,
+                    myplayer == 0 ? "  <-- NIL: board draw will bail" : "");
+            if (sn && (!strcmp(sn, "setPlayer:")))
+               fprintf(stderr, "[guard]   -> setPlayer: writes newPlayer=0x%x into"
+                       " real=0x%llx shadow=0x%x+0x54\n", plan->frame[head + 2],
+                       (unsigned long long)real64, shadow);
          } else {
-            fprintf(stderr, "[guard] REDRAW-CHAIN: %s[%s] self32=0x%x\n",
-                    cn ? cn : "?", sn, shadow);
+            fprintf(stderr, "[guard] REDRAW-CHAIN: %s[%s] real=0x%llx self32=0x%x\n",
+                    cn ? cn : "?", sn, (unsigned long long)real64, shadow);
          }
          fflush(stderr);
       }
