@@ -385,6 +385,8 @@ struct popup {
     void   *view;                  /* the hiview */
     CRect   r;                     /* nib frame (bounds fallback) */
     int     enabled;               /* 1 = interactive (default) */
+    uint32_t command;              /* nib HICommand to fire on change (0 = none) */
+    void   *win;                   /* owning window (for ProcessHICommand) */
 };
 static int16_t g_popup_menu_id = 5000;
 
@@ -449,16 +451,40 @@ static OSStatus popup_track(void *call, void *ev, void *ud) {
                                      (int16_t)(pu->selected > 0 ? pu->selected : 1));
     if (n_DeleteMenu) n_DeleteMenu(pu->menuID);
     int16_t item = (int16_t)(res & 0xffff);
-    if (item >= 1 && item <= pu->nitems) {
+    if (item >= 1 && item <= pu->nitems && item != pu->selected) {
         pu->selected = item;
         if (n_HIViewSetNeedsDisplay && pu->view) n_HIViewSetNeedsDisplay(pu->view, 1);
+        // Fire the popup's HICommand so the app's command handler runs its
+        // settings logic (e.g. the value-changed harvest) exactly as a real
+        // popup button would when the user picks a new item.
+        if (pu->command) {
+            static OSStatus (*phc)(const void *, void *);
+            if (!phc) phc = (void *)dlsym(RTLD_DEFAULT, "ProcessHICommand");
+            if (phc) { HICommandLite hc = { 0, pu->command }; phc(&hc, NULL); }
+        }
     }
+    return noErr;
+}
+
+// kEventControlHitTest: a base com.apple.hiview is not hit-testable by default, so
+// mouse-downs pass straight through and it never gets kEventControlTrack/SetData.
+// Report the whole view as a single clickable part (return kEventParamControlPart)
+// so HIToolbox routes the click to this control and then dispatches Hit/Track.
+static OSStatus sd_hittest(void *call, void *ev, void *ud) {
+    (void)call; (void)ud;
+    static OSStatus (*gep)(void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *);
+    static OSStatus (*sep)(void *, uint32_t, uint32_t, unsigned long, const void *);
+    if (!gep) gep = (void *)dlsym(RTLD_DEFAULT, "GetEventParameter");
+    if (!sep) sep = (void *)dlsym(RTLD_DEFAULT, "SetEventParameter");
+    // report the point is inside -> part 1 (kControlButtonPart / a generic hot part)
+    int16_t part = 1;
+    if (sep) sep(ev, 'cprt' /*kEventParamControlPart*/, 'cprt', sizeof part, &part);
     return noErr;
 }
 
 // Build a self-drawn popup at r with the menu items nested in [lo,hi) of the nib.
 static ControlRef make_popup(const char *x, long lo, long hi, const CRect *r,
-                             ControlRef parent) {
+                             ControlRef parent, WindowRef win) {
     ControlRef c = NULL;
     if (!n_HIObjectCreate) return NULL;
     n_HIObjectCreate(CFSTR("com.apple.hiview"), NULL, (HIObjectRef *)&c);
@@ -469,6 +495,8 @@ static ControlRef make_popup(const char *x, long lo, long hi, const CRect *r,
     pu->view = c;
     if (r) pu->r = *r;
     pu->enabled = 1;
+    pu->win = win;
+    { uint32_t cmd = 0; if (nibx_ostype(x, lo, hi, "command", &cmd)) pu->command = cmd; }
     sd_register(c, SD_POPUP, pu);
     pu->menuID = g_popup_menu_id++;
     if (n_CreateNewMenu) n_CreateNewMenu(pu->menuID, 0, &pu->menu);
@@ -513,10 +541,12 @@ static ControlRef make_popup(const char *x, long lo, long hi, const CRect *r,
         pu->selected = pu->nitems ? 1 : 0;              /* default to first */
     if (n_InstallEventHandler2 && n_GetControlEventTarget2) {
         void *tgt = (void *)n_GetControlEventTarget2(c);
-        struct { uint32_t cls, kind; } dr = { 'cntl', 4  /*kEventControlDraw*/ };
-        struct { uint32_t cls, kind; } hk = { 'cntl', 1  /*kEventControlHit*/  };
-        struct { uint32_t cls, kind; } tk = { 'cntl', 51 /*kEventControlTrack*/};
-        n_InstallEventHandler2(tgt, (void *)popup_draw, 1, &dr, pu, NULL);
+        struct { uint32_t cls, kind; } dr = { 'cntl', 4  /*kEventControlDraw*/    };
+        struct { uint32_t cls, kind; } ht = { 'cntl', 3  /*kEventControlHitTest*/ };
+        struct { uint32_t cls, kind; } hk = { 'cntl', 1  /*kEventControlHit*/     };
+        struct { uint32_t cls, kind; } tk = { 'cntl', 51 /*kEventControlTrack*/   };
+        n_InstallEventHandler2(tgt, (void *)popup_draw,  1, &dr, pu, NULL);
+        n_InstallEventHandler2(tgt, (void *)sd_hittest,  1, &ht, pu, NULL);
         n_InstallEventHandler2(tgt, (void *)popup_track, 1, &hk, pu, NULL);
         n_InstallEventHandler2(tgt, (void *)popup_track, 1, &tk, pu, NULL);
     }
@@ -597,6 +627,47 @@ static OSStatus edit_setdata(void *call, void *ev, void *ud) {
     return (OSStatus)-9874;  /* eventNotHandledErr: let HIToolbox handle other tags */
 }
 
+// kEventControlSetFocusPart: accept keyboard focus so the field can be typed into.
+// The event's part is >0 to focus, 0 to unfocus; echo it back as accepted.
+static OSStatus edit_focus(void *call, void *ev, void *ud) {
+    (void)call;
+    struct edit *e = (struct edit *)ud;
+    static OSStatus (*gep)(void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *);
+    static OSStatus (*sep)(void *, uint32_t, uint32_t, unsigned long, const void *);
+    if (!gep) gep = (void *)dlsym(RTLD_DEFAULT, "GetEventParameter");
+    if (!sep) sep = (void *)dlsym(RTLD_DEFAULT, "SetEventParameter");
+    int16_t part = 0;
+    if (gep) gep(ev, 'cprt', 'cprt', NULL, sizeof part, NULL, &part);
+    if (e) { e->focused = part != 0; if (e->view && n_HIViewSetNeedsDisplay) n_HIViewSetNeedsDisplay(e->view, 1); }
+    if (sep) sep(ev, 'cprt', 'cprt', sizeof part, &part);   /* accept the focus */
+    return noErr;
+}
+
+// kEventControlKeyDown / kEventTextInputUnicodeForKeyEvent: edit the field text.
+static OSStatus edit_key(void *call, void *ev, void *ud) {
+    (void)call;
+    struct edit *e = (struct edit *)ud;
+    if (!e || !e->enabled) return (OSStatus)-9874;
+    static OSStatus (*gep)(void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *);
+    if (!gep) gep = (void *)dlsym(RTLD_DEFAULT, "GetEventParameter");
+    if (!gep) return (OSStatus)-9874;
+    char ch = 0;
+    // kEventParamKeyMacCharCodes 'kchr' typeChar 'TEXT'
+    if (gep(ev, 'kchr', 'TEXT', NULL, sizeof ch, NULL, &ch) != 0) return (OSStatus)-9874;
+    int n = (int)strlen(e->text);
+    if (ch == 8 || ch == 127) {            /* backspace / delete */
+        if (n > 0) e->text[n - 1] = 0;
+    } else if (ch == 13 || ch == 3 || ch == 9) {
+        return (OSStatus)-9874;            /* return/enter/tab: let the app handle */
+    } else if (ch >= 32 && ch < 127 && n < (int)sizeof e->text - 1) {
+        e->text[n] = ch; e->text[n + 1] = 0;
+    } else {
+        return (OSStatus)-9874;
+    }
+    if (e->view && n_HIViewSetNeedsDisplay) n_HIViewSetNeedsDisplay(e->view, 1);
+    return noErr;
+}
+
 static ControlRef make_edit_field(const char *x, long lo, long hi, const CRect *r,
                                   ControlRef parent) {
     (void)x; (void)lo; (void)hi;
@@ -609,10 +680,16 @@ static ControlRef make_edit_field(const char *x, long lo, long hi, const CRect *
     if (e) { e->view = c; if (r) e->r = *r; e->enabled = 1; sd_register(c, SD_EDIT, e); }
     if (e && n_InstallEventHandler2 && n_GetControlEventTarget2) {
         void *tgt = n_GetControlEventTarget2(c);
-        struct { uint32_t cls, kind; } dr = { 'cntl', 4  /*kEventControlDraw*/    };
-        struct { uint32_t cls, kind; } sd = { 'cntl', 20 /*kEventControlSetData*/ };
+        struct { uint32_t cls, kind; } dr = { 'cntl', 4  /*kEventControlDraw*/     };
+        struct { uint32_t cls, kind; } sd = { 'cntl', 20 /*kEventControlSetData*/  };
+        struct { uint32_t cls, kind; } ht = { 'cntl', 3  /*kEventControlHitTest*/  };
+        struct { uint32_t cls, kind; } fp = { 'cntl', 4013/*kEventControlSetFocusPart*/ };
+        struct { uint32_t cls, kind; } kd = { 'cntl', 11 /*kEventControlKeyDown*/  };
         n_InstallEventHandler2(tgt, (void *)edit_draw,    1, &dr, e, NULL);
         n_InstallEventHandler2(tgt, (void *)edit_setdata, 1, &sd, e, NULL);
+        n_InstallEventHandler2(tgt, (void *)sd_hittest,   1, &ht, e, NULL);
+        n_InstallEventHandler2(tgt, (void *)edit_focus,   1, &fp, e, NULL);
+        n_InstallEventHandler2(tgt, (void *)edit_key,     1, &kd, e, NULL);
     }
     if (n_HIViewSetVisible) n_HIViewSetVisible(c, 1);   // base hiview starts hidden
     if (parent) n_HIViewAddSubview(parent, c);
@@ -740,7 +817,7 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
             // clicking opens it via PopUpMenuSelect. make_popup embeds it itself.
             // Wire its ControlID so Halo's GetControlByID({'Lens',0})/
             // SetControl32BitValue resolves the popup at runtime.
-            ControlRef pc = make_popup(x, il, ih, &r, parent);
+            ControlRef pc = make_popup(x, il, ih, &r, parent, win);
             if (pc) wire_ids(x, il, ih, pc);
             p = oe; continue;
         } else if (!strcmp(cls, "IBCarbonGroupBox")) {
