@@ -245,6 +245,15 @@ int   fsetpos(FILE *fp, const fpos_t *pos)   { file_shim_ensure(); return real_f
 
 /* ----- status ------------------------------------------------------------- */
 
+/* fflush was the ONE resolved-but-never-wrapped entry point in this file:
+ * the abigen ___fflush shim's `call _fflush` reached the real libc with the
+ * raw low-4GB shim struct, whose zeroed pad reads as _extra == NULL ->
+ * flockfile -> pthread_mutex_lock(&NULL->fl_mutex) -> EXC_BAD_ACCESS at 0x8.
+ * Any translated `fflush(stdout/stderr/fopen'd FILE*)` crashed (fflush(NULL)
+ * was safe: resolve_file passes NULL through = libc flush-all). Guarded by
+ * tests-i386 90_fflush_file. */
+int fflush(FILE *fp) { file_shim_ensure(); return real_fflush(resolve_file(fp)); }
+
 int  feof(FILE *fp)     { file_shim_ensure(); return real_feof(resolve_file(fp)); }
 int  ferror(FILE *fp)   { file_shim_ensure(); return real_ferror(resolve_file(fp)); }
 void clearerr(FILE *fp) { file_shim_ensure(); real_clearerr(resolve_file(fp)); }

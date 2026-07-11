@@ -1,0 +1,5 @@
+before fflush
+stderr leg
+ok file leg
+after fflush
+exit_code: 0
