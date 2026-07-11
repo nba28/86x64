@@ -1134,7 +1134,8 @@ static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
                         op == 0x2F) ||
                        (op == 0x51 || (op >= 0x54 && op <= 0x5F)) ||
                        (op == 0x6E || op == 0x6F || op == 0x7E || op == 0x7F ||
-                        op == 0xD6 || op == 0xE6);
+                        op == 0xD6 || op == 0xE6) ||
+                       (op == 0xAF /* imul r32, [tbl(,i,s)] */);
                } else if (op >= 0xD8 && op <= 0xDF) {
                   /* x87 escape opcodes: fld/fst/fadd/fmul/... with a memory
                    * operand — the pre-SSE compilers' indexed FP-table form
@@ -1144,13 +1145,49 @@ static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
                   ok = 1;
                } else if (op == 0xFF) {
                   const uint8_t reg = modrm & 0x38;
-                  ok = (reg == 0x20 /* /4 jmp */) || (reg == 0x10 /* /2 call */);
+                  ok = (reg == 0x20 /* /4 jmp */) || (reg == 0x10 /* /2 call */)
+                       || (reg == 0x00 /* /0 inc */) || (reg == 0x08 /* /1 dec */)
+                       || (reg == 0x30 /* /6 push */);
                } else {
-                  /* 8B load / 89 STORE / 03 add / 8D LEA (address-of-element:
-                   * Civ IV `lea eax,[disp32+rax*8]` computing
-                   * &FConsoleCmd::m_SigTypes[i], then passed to strcmp). */
-                  ok = (op == 0x8B) || (op == 0x03) || (op == 0x89) ||
-                       (op == 0x8D);
+                  /* 8B load / 89 STORE / 8D LEA (address-of-element: Civ IV
+                   * `lea eax,[disp32+rax*8]` computing
+                   * &FConsoleCmd::m_SigTypes[i], then passed to strcmp) — and
+                   * the single-byte ALU family with a memory operand and NO
+                   * trailing immediate, BOTH directions: `op r32,[tbl(,i,s)]`
+                   * loads 03/0B/13/1B/23/2B/33/3B (add/or/adc/sbb/and/sub/
+                   * xor/cmp) and the read-modify-write / compare
+                   * `op [tbl(,i,s)],r32` forms 01/09/11/19/21/29/31/39, plus
+                   * test (85) and xchg (87). Any /r: the SIB base=disp32
+                   * shape already disambiguates a table access. The one that
+                   * FOUND this gap: Civ IV's CRC-32
+                   * `xorl tbl(,%eax,4),%edx` (67 33 14 85 disp32) — the
+                   * table-BUILD stores (89) were slid but the xor LOAD kept
+                   * the pre-slide disp32 -> KERN_INVALID at the preferred
+                   * vmaddr on the first byte checksummed (the twin store/
+                   * load asymmetry proven from the live process: store disp
+                   * patched, xor disp raw).
+                   *
+                   * IMMEDIATE-group forms (81/83 ALU-imm, C7 mov-imm, F7
+                   * test-imm) are DELIBERATELY excluded here: macho-tool's
+                   * instruction.cc `[disp32+idx*scale]` handler SKIPS a
+                   * memory operand that also carries a trailing imm32
+                   * (has_trailing_imm32 guard — xed_patch_disp can't cleanly
+                   * patch the disp+imm combo), so those disps ship at the
+                   * UN-rebased i386 vmaddr, which never lands in this pass's
+                   * M64 [vmaddr_lo,vmaddr_hi) window — matching them would do
+                   * nothing but widen the false-positive surface (and Pass 2
+                   * below already handles the C7 store form). That
+                   * translate-time gap is a separate concern. Byte-operand
+                   * forms (8A/88/02/…) and scale=1/2 SIBs also stay excluded
+                   * (different shape, none observed). */
+                  ok = (op == 0x8B) || (op == 0x89) || (op == 0x8D) ||
+                       (op == 0x03) || (op == 0x0B) || (op == 0x13) ||
+                       (op == 0x1B) || (op == 0x23) || (op == 0x2B) ||
+                       (op == 0x33) || (op == 0x3B) ||
+                       (op == 0x01) || (op == 0x09) || (op == 0x11) ||
+                       (op == 0x19) || (op == 0x21) || (op == 0x29) ||
+                       (op == 0x31) || (op == 0x39) ||
+                       (op == 0x85) || (op == 0x87);
                }
                if (!ok) { continue; }
                uint32_t fv, mv;

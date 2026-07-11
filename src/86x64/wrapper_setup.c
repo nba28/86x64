@@ -298,11 +298,38 @@ static void fixup_translated_dylib_slots(void) {
                   { 0xFF, 0x24 },
                   /* FF /2: call [disp32 + idx*4]; ModR/M for /2 is 010 -> 0x14 */
                   { 0xFF, 0x14 },
+                  /* FF /0,/1,/6: inc/dec/push [disp32 + idx*4] */
+                  { 0xFF, 0x04 },
+                  { 0xFF, 0x0C },
+                  { 0xFF, 0x34 },
                   /* 8B /r: mov rN, [disp32 + idx*4]; we accept any /r since
                    * the SIB-base=disp32 distinguishes the addressing. */
                   { 0x8B, 0x00 },  /* matched as "8B + any ModR/M with mod=00,rm=100" */
-                  /* 03 /r: add rN, [disp32 + idx*4] */
-                  { 0x03, 0x00 },
+                  /* Single-byte ALU family with a memory operand and NO
+                   * trailing immediate, BOTH directions: `op rN,[disp32+
+                   * idx*s]` loads 03/0B/13/1B/23/2B/33/3B (add/or/adc/sbb/
+                   * and/sub/xor/cmp) and the read-modify-write / compare
+                   * `op [disp32+idx*s],rN` forms 01/09/11/19/21/29/31/39,
+                   * plus test (85) and xchg (87). The one that FOUND the gap:
+                   * Civ IV's CRC-32 `xorl tbl(,%eax,4),%edx`
+                   * (67 33 14 85 disp32) — its table-BUILD stores (89) were
+                   * slid but the xor LOAD kept the pre-slide disp32 ->
+                   * KERN_INVALID at the preferred vmaddr. (objc_slide.c's
+                   * patch_text_abs32 carries the same set and runs first at
+                   * add-image time; this wrapper pass stays the backstop.)
+                   * The immediate-group forms 81/83/F7/C7 are excluded here
+                   * to match objc_slide.c: macho-tool skips rebasing a
+                   * `[disp32+idx]`+imm32 memory operand at translate time
+                   * (has_trailing_imm32), so their disps ship at the
+                   * un-rebased i386 vmaddr and never fall in this pass's
+                   * dylib window. */
+                  { 0x03, 0x00 }, { 0x0B, 0x00 }, { 0x13, 0x00 },
+                  { 0x1B, 0x00 }, { 0x23, 0x00 }, { 0x2B, 0x00 },
+                  { 0x33, 0x00 }, { 0x3B, 0x00 },
+                  { 0x01, 0x00 }, { 0x09, 0x00 }, { 0x11, 0x00 },
+                  { 0x19, 0x00 }, { 0x21, 0x00 }, { 0x29, 0x00 },
+                  { 0x31, 0x00 }, { 0x39, 0x00 },
+                  { 0x85, 0x00 }, { 0x87, 0x00 },
                   /* 89 /r: mov [disp32 + idx*4], rN — the STORE form. Missing
                    * from this table until Civ IV s21: NiStaticDataManager::
                    * AddLibrary writes its ms_apfnInitFunctions bss array via
@@ -387,7 +414,8 @@ static void fixup_translated_dylib_slots(void) {
                                    || (op == 0x51 || (op >= 0x54 && op <= 0x5F))
                                    || (op == 0x6E || op == 0x6F || op == 0x7E
                                        || op == 0x7F || op == 0xD6
-                                       || op == 0xE6);
+                                       || op == 0xE6)
+                                   || (op == 0xAF /* imul r32, [tbl(,i,s)] */);
                   } else if (op >= 0xD8 && op <= 0xDF) {
                      /* x87 escape opcodes: fld/fst/fadd/... memory forms — the
                       * pre-SSE compilers' indexed FP-table access
