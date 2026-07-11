@@ -1,0 +1,3 @@
+
+wide ok
+exit_code: 0

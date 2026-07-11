@@ -2,6 +2,21 @@
 #include <dirent.h>
 #include <stdlib.h>
 #include <stdio.h>
+/* <wchar.h>: the wide-char stdio family (fgetwc/fputwc/fgetws/fputws/getwc/
+ * putwc/ungetwc/fwide) is FILE*-taking and was in the abigen consider set
+ * (from libSystem) but had NO prototype here, so abigen emitted no ___fgetwc
+ * shim and the bind fell through to native libc — the i386 4-byte-ret call
+ * over-popped by the native 8-byte ret (fused PC) AND, on a std/fopen'd shim,
+ * the raw shim FILE* faulted (the fflush/file_shim class). Providing the
+ * prototypes lets abigen emit the pointer-widening shims, whose `call _fgetwc`
+ * reaches file_shim.c's FILE*-unwrapping definitions. This also brings the
+ * rest of the wide-char surface abigen can marshal (mb/wc conversion:
+ * mbrtowc/wcrtomb/mbsrtowcs/..., wmem*, wcscoll/wcsxfrm/wcwidth, wcstoul/...);
+ * the hand-shimmed _wcs* string family (wchar_shim.c, in custom.syms) is
+ * skipped by abigen so there is no double-emission. The varargs wide-printf/
+ * scanf (fwprintf/fwscanf/vfwprintf/vfwscanf) are variadic → abigen skips them
+ * (file_shim.c still defines them for a future hand-wire). */
+#include <wchar.h>
 #include <unistd.h>
 #include <sys/ptrace.h>   /* ptrace(): legacy anti-debug call sites (e.g. iWeb
                            * SFUAssertionHandler). Without a shim the i386
