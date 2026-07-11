@@ -871,6 +871,12 @@ _x64_exc_longjmp:
 	MTSHIM	___EmbedControl,                            _shim_EmbedControl
 	MTSHIM	___EnableMenuCommand,                       _shim_EnableMenuCommand
 	MTSHIM	___GetControlCommandID,                     _shim_GetControlCommandID
+	MTSHIM	___GetControlData,                          _shim_GetControlData
+	MTSHIM	___SetControlData,                          _shim_SetControlData
+	MTSHIM	___GetControlValue,                         _shim_GetControlValue
+	MTSHIM	___SetControlValue,                         _shim_SetControlValue
+	MTSHIM	___ActivateControl,                         _shim_ActivateControl
+	MTSHIM	___DeactivateControl,                       _shim_DeactivateControl
 	MTSHIM	___GetControlID,                            _shim_GetControlID
 	MTSHIM	___GetControlMaximum,                       _shim_GetControlMaximum
 	MTSHIM	___GetControlMinimum,                       _shim_GetControlMinimum

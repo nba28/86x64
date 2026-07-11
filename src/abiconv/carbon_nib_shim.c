@@ -69,6 +69,32 @@ typedef struct { uint32_t signature; int32_t id; } CtrlID;
 typedef struct { uint32_t attributes; uint32_t commandID; } HICommandLite;
 typedef struct { double x, y, w, h; } HIRectD;
 
+// ---- self-drawn control registry -----------------------------------------
+// The settings-window popups and edit fields are self-drawn com.apple.hiviews
+// (the classic popup/edit-text controls were removed from 64-bit HIToolbox).  The
+// app drives them with classic Control Manager calls — SetControl32BitValue /
+// GetControl32BitValue (popup selection), SetControlData / GetControlData
+// (kControlEditText*Tag for the port/IP text), (De)ActivateControl (enable state).
+// Those calls arrive in the Control-Manager MTSHIM shims (carbon_ui_shim.c,
+// carbon_control_shim.c), which forward to this registry: if the ControlRef is one
+// of ours we service it (store the value, redraw, and remember it for read-back);
+// otherwise the shim forwards to native HIToolbox for the real (checkbox/button)
+// controls.  Registered by the make_* builders; the records live for the window's
+// life (a bounded one-time settings-window leak, as elsewhere in this file).
+enum { SD_POPUP = 1, SD_EDIT = 2 };
+struct sd_entry { void *ctrl; int kind; void *rec; };
+#define SD_MAX 128
+static struct sd_entry g_sd[SD_MAX];
+static int g_sd_n;
+static void sd_register(void *ctrl, int kind, void *rec) {
+    if (!ctrl || g_sd_n >= SD_MAX) return;
+    g_sd[g_sd_n].ctrl = ctrl; g_sd[g_sd_n].kind = kind; g_sd[g_sd_n].rec = rec; g_sd_n++;
+}
+static struct sd_entry *sd_find(void *ctrl) {
+    for (int i = 0; i < g_sd_n; i++) if (g_sd[i].ctrl == ctrl) return &g_sd[i];
+    return NULL;
+}
+
 // ---- window attribute bits (MacWindows.h) ----
 #define kWinCompositing   (1u << 19)
 #define kWinStdHandler    (1u << 25)
@@ -358,6 +384,7 @@ struct popup {
     char    label[64];             /* the popup's own title, drawn to the left */
     void   *view;                  /* the hiview */
     CRect   r;                     /* nib frame (bounds fallback) */
+    int     enabled;               /* 1 = interactive (default) */
 };
 static int16_t g_popup_menu_id = 5000;
 
@@ -441,6 +468,8 @@ static ControlRef make_popup(const char *x, long lo, long hi, const CRect *r,
     if (!pu) { if (parent) n_HIViewAddSubview(parent, c); return c; }
     pu->view = c;
     if (r) pu->r = *r;
+    pu->enabled = 1;
+    sd_register(c, SD_POPUP, pu);
     pu->menuID = g_popup_menu_id++;
     if (n_CreateNewMenu) n_CreateNewMenu(pu->menuID, 0, &pu->menu);
     if (pu->menu && n_SetMenuID) n_SetMenuID(pu->menu, pu->menuID);
@@ -507,7 +536,7 @@ static ControlRef make_popup(const char *x, long lo, long hi, const CRect *r,
 // carbon event to the view's own handler, so we intercept it there, store the
 // string, and redraw — no SetControlData interposition (which would need a
 // retranslate) required.  Universal for any IBCarbonEditText.
-struct edit { char text[128]; void *view; CRect r; };
+struct edit { char text[128]; void *view; CRect r; int enabled; int focused; };
 
 static OSStatus edit_draw(void *call, void *ev, void *ud) {
     (void)call;
@@ -577,7 +606,7 @@ static ControlRef make_edit_field(const char *x, long lo, long hi, const CRect *
     if (!c) return NULL;
     set_frame(c, r);
     struct edit *e = (struct edit *)calloc(1, sizeof *e);
-    if (e) { e->view = c; if (r) e->r = *r; }
+    if (e) { e->view = c; if (r) e->r = *r; e->enabled = 1; sd_register(c, SD_EDIT, e); }
     if (e && n_InstallEventHandler2 && n_GetControlEventTarget2) {
         void *tgt = n_GetControlEventTarget2(c);
         struct { uint32_t cls, kind; } dr = { 'cntl', 4  /*kEventControlDraw*/    };
@@ -588,6 +617,92 @@ static ControlRef make_edit_field(const char *x, long lo, long hi, const CRect *
     if (n_HIViewSetVisible) n_HIViewSetVisible(c, 1);   // base hiview starts hidden
     if (parent) n_HIViewAddSubview(parent, c);
     return c;
+}
+
+// ==================== self-drawn Control Manager bridge ====================
+// Called from the Control-Manager MTSHIM shims (carbon_ui_shim.c /
+// carbon_control_shim.c).  Each returns 1 if `ctrl` is one of our self-drawn
+// controls (and it serviced the request), 0 otherwise so the shim forwards to
+// native HIToolbox for the real (checkbox/button/static-text) controls.
+static void sd_redraw(void *view) {
+    if (view && n_HIViewSetNeedsDisplay) n_HIViewSetNeedsDisplay(view, 1);
+}
+
+// SetControl32BitValue(ctrl, value): for a popup, `value` selects the 1-based menu
+// item (Halo pushes the detected/saved selection here at window-load).
+int sd_ctrl_set_value(void *ctrl, int32_t value) {
+    struct sd_entry *e = sd_find(ctrl);
+    if (!e) return 0;
+    if (e->kind == SD_POPUP) {
+        struct popup *pu = (struct popup *)e->rec;
+        if (value >= 1 && value <= pu->nitems) pu->selected = value;
+        else if (value == 0 && pu->nitems) pu->selected = 1;  /* clamp */
+        sd_redraw(pu->view);
+    }
+    return 1;
+}
+
+// GetControl32BitValue(ctrl): return the popup's current 1-based selection.
+int sd_ctrl_get_value(void *ctrl, int32_t *out) {
+    struct sd_entry *e = sd_find(ctrl);
+    if (!e) return 0;
+    if (out) *out = (e->kind == SD_POPUP) ? ((struct popup *)e->rec)->selected : 0;
+    return 1;
+}
+
+// SetControlData(ctrl, ..., kControlEditTextCFStringTag, &cfstr): edit field text.
+int sd_ctrl_set_cfstring(void *ctrl, const void *cfstr) {
+    struct sd_entry *e = sd_find(ctrl);
+    if (!e || e->kind != SD_EDIT) return 0;
+    struct edit *ed = (struct edit *)e->rec;
+    ed->text[0] = 0;
+    CFStringRef cf = (CFStringRef)cfstr;
+    if (cf && CFGetTypeID(cf) == CFStringGetTypeID())
+        CFStringGetCString(cf, ed->text, sizeof ed->text, kCFStringEncodingUTF8);
+    sd_redraw(ed->view);
+    return 1;
+}
+
+// SetControlData(ctrl, ..., kControlEditTextTextTag, ptr,len): raw (MacRoman) bytes.
+int sd_ctrl_set_text(void *ctrl, const char *buf, int len) {
+    struct sd_entry *e = sd_find(ctrl);
+    if (!e || e->kind != SD_EDIT) return 0;
+    struct edit *ed = (struct edit *)e->rec;
+    int n = len; if (n < 0) n = 0; if (n > (int)sizeof ed->text - 1) n = sizeof ed->text - 1;
+    if (buf && n) memcpy(ed->text, buf, n);
+    ed->text[n] = 0;
+    sd_redraw(ed->view);
+    return 1;
+}
+
+// GetControlData(ctrl, ..., kControlEditTextTextTag): copy the current text out.
+// Returns the text length (>=0) if ours, or -1 if not one of our controls.
+int sd_ctrl_get_text(void *ctrl, char *buf, int bufsz) {
+    struct sd_entry *e = sd_find(ctrl);
+    if (!e || e->kind != SD_EDIT) return -1;
+    struct edit *ed = (struct edit *)e->rec;
+    int n = (int)strlen(ed->text);
+    if (buf && bufsz > 0) { int c = n < bufsz ? n : bufsz - 1; memcpy(buf, ed->text, c); buf[c] = 0; }
+    return n;
+}
+
+// GetControlData(ctrl, ..., kControlEditTextCFStringTag): create a CFString of the
+// current text.  Returns 1 (and *out = a +1 CFStringRef the caller releases) if ours.
+int sd_ctrl_get_cfstring(void *ctrl, const void **out) {
+    struct sd_entry *e = sd_find(ctrl);
+    if (!e || e->kind != SD_EDIT) return 0;
+    struct edit *ed = (struct edit *)e->rec;
+    if (out) *out = CFStringCreateWithCString(NULL, ed->text, kCFStringEncodingUTF8);
+    return 1;
+}
+
+// (De)ActivateControl / enable state: dim + make the control inert.
+int sd_ctrl_set_enabled(void *ctrl, int enabled) {
+    struct sd_entry *e = sd_find(ctrl);
+    if (!e) return 0;
+    if (e->kind == SD_POPUP) { ((struct popup *)e->rec)->enabled = enabled; sd_redraw(((struct popup *)e->rec)->view); }
+    else if (e->kind == SD_EDIT) { ((struct edit *)e->rec)->enabled = enabled; sd_redraw(((struct edit *)e->rec)->view); }
+    return 1;
 }
 
 // Build every control directly under [lo,hi) and embed into `parent`.

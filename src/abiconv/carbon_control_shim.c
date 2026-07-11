@@ -36,6 +36,16 @@
 extern uint64_t x64_objc_unwrap(uint32_t h);
 extern uint32_t x64_objc_wrap(uint64_t real);
 
+// self-drawn Control Manager registry (carbon_nib_shim.c): service edit-text /
+// popup value + text + enable requests before falling through to native.
+extern int sd_ctrl_set_value(void *ctrl, int32_t value);
+extern int sd_ctrl_get_value(void *ctrl, int32_t *out);
+extern int sd_ctrl_set_cfstring(void *ctrl, const void *cfstr);
+extern int sd_ctrl_set_text(void *ctrl, const char *buf, int len);
+extern int sd_ctrl_get_text(void *ctrl, char *buf, int bufsz);
+extern int sd_ctrl_get_cfstring(void *ctrl, const void **out);
+extern int sd_ctrl_set_enabled(void *ctrl, int enabled);
+
 typedef int32_t OSStatus;
 typedef struct { int16_t top, left, bottom, right; } CRect;
 
@@ -103,6 +113,102 @@ uint32_t shim_GetControlRegion(uint32_t *a) { (void)a; return 0; }
 // SInt16 GetControlVariant(ControlRef) -> 0 (kControlNoVariant)
 uint32_t shim_GetControlVariant(uint32_t *a) { (void)a; return 0; }
 void     shim_DumpControlHierarchy(uint32_t *a) { (void)a; }
+
+// ---- Control value + data + activation on self-drawn controls ----
+// The settings-window popups and edit fields are self-drawn HIViews with no
+// classic Control Manager storage, so the app's value/data/activation calls are
+// serviced by the self-drawn registry (carbon_nib_shim.c).  For every OTHER
+// (native checkbox/button) control we forward to the real HIToolbox entry so it
+// keeps behaving.  These were previously abigen-generated straight to native,
+// which silently dropped the port/IP text and popup selection the app pushes.
+
+// void SetControlValue(ControlRef, SInt16)  — 16-bit classic value.
+void shim_SetControlValue(uint32_t *a) {
+    void *c = UNWRAP(0);
+    int32_t v = (int16_t)(a[1] & 0xffff);
+    if (sd_ctrl_set_value(c, v)) return;
+    DL(SetControlValue, void, (void *, int16_t));
+    if (SetControlValue && c) SetControlValue(c, (int16_t)v);
+}
+// SInt16 GetControlValue(ControlRef)
+uint32_t shim_GetControlValue(uint32_t *a) {
+    void *c = UNWRAP(0);
+    int32_t v = 0;
+    if (sd_ctrl_get_value(c, &v)) return (uint32_t)(uint16_t)v;
+    DL(GetControlValue, int16_t, (void *));
+    if (GetControlValue && c) return (uint32_t)(uint16_t)GetControlValue(c);
+    return 0;
+}
+
+// OSStatus SetControlData(ControlRef, ControlPartCode, ResType tag, Size, const void*)
+//   i386 cdecl slots: [0]=ctrl [1]=part [2]=tag [3]=size [4]=data ptr
+uint32_t shim_SetControlData(uint32_t *a) {
+    void *c = UNWRAP(0);
+    uint32_t tag = a[2];
+    uint32_t size = a[3];
+    void *data = (void *)(uintptr_t)a[4];
+    if (sd_ctrl_get_text(c, NULL, 0) >= 0) {   // c is one of our edit fields
+        if (tag == 'cfst' && data) {
+            // the buffer holds an i386 CFStringRef (arena handle) -> unwrap to real
+            uint32_t h = *(uint32_t *)data;
+            const void *cf = (const void *)(uintptr_t)x64_objc_unwrap(h);
+            sd_ctrl_set_cfstring(c, cf);
+        } else if (tag == 'text' && data) {
+            sd_ctrl_set_text(c, (const char *)data, (int)size);
+        }
+        return 0;   /* noErr — handled by the self-drawn edit field */
+    }
+    DL(SetControlData, OSStatus, (void *, int16_t, uint32_t, long, const void *));
+    if (SetControlData && c) return (uint32_t)SetControlData(c, (int16_t)a[1], tag, (long)size, data);
+    return 0;
+}
+
+// OSStatus GetControlData(ControlRef, ControlPartCode, ResType, Size max, void* data, Size* actual)
+//   i386 cdecl slots: [0]=ctrl [1]=part [2]=tag [3]=maxSize [4]=data [5]=actualSize*
+uint32_t shim_GetControlData(uint32_t *a) {
+    void *c = UNWRAP(0);
+    uint32_t tag = a[2];
+    uint32_t maxsz = a[3];
+    void *data = (void *)(uintptr_t)a[4];
+    uint32_t *actual = (uint32_t *)(uintptr_t)a[5];
+    if (sd_ctrl_get_text(c, NULL, 0) >= 0) {   // our edit field
+        if (tag == 'cfst' && data) {
+            const void *cf = NULL;
+            sd_ctrl_get_cfstring(c, &cf);
+            *(uint32_t *)data = cf ? x64_objc_wrap((uint64_t)(uintptr_t)cf) : 0;
+            if (actual) *actual = 4;
+        } else if (tag == 'text' && data) {
+            int n = sd_ctrl_get_text(c, (char *)data, (int)maxsz);
+            if (actual) *actual = (uint32_t)(n < 0 ? 0 : n);
+        } else if (actual) *actual = 0;
+        return 0;
+    }
+    DL(GetControlData, OSStatus, (void *, int16_t, uint32_t, long, void *, long *));
+    if (GetControlData && c) {
+        long act = 0;
+        OSStatus st = GetControlData(c, (int16_t)a[1], tag, (long)maxsz, data, &act);
+        if (actual) *actual = (uint32_t)act;
+        return (uint32_t)st;
+    }
+    return 0;
+}
+
+// OSStatus ActivateControl/DeactivateControl(ControlRef): enable/disable state.
+uint32_t shim_ActivateControl(uint32_t *a) {
+    void *c = UNWRAP(0);
+    if (sd_ctrl_set_enabled(c, 1)) return 0;
+    DL(ActivateControl, OSStatus, (void *));
+    if (ActivateControl && c) return (uint32_t)ActivateControl(c);
+    return 0;
+}
+uint32_t shim_DeactivateControl(uint32_t *a) {
+    void *c = UNWRAP(0);
+    if (sd_ctrl_set_enabled(c, 0)) return 0;
+    DL(DeactivateControl, OSStatus, (void *));
+    if (DeactivateControl && c) return (uint32_t)DeactivateControl(c);
+    return 0;
+}
+
 // Removed control creators (scrollbar/popup): the nib loader materializes
 // these via HIObject; a direct classic creator call is dead surface.
 // (CreateScrollingTextBoxControl is REAL now — carbon_scrolltext_shim.m.)

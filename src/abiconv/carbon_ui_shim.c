@@ -11,12 +11,24 @@
 
 #include <stdint.h>
 #include <string.h>
+#include <dlfcn.h>
 
 #define PTR(n) ((void *)(uintptr_t)args[(n)])
 #define UI_NO_ERR   (0)
 #define UI_PARAM_ERR (-50)
 
 typedef struct { int16_t v, h; } QDPoint;
+
+// arena bridge + self-drawn Control Manager registry (carbon_nib_shim.c).  A
+// translated ControlRef arrives as a low-4GB arena handle; unwrap to the real
+// 64-bit HIView pointer before matching it against the self-drawn registry or
+// forwarding to native HIToolbox.
+extern uint64_t x64_objc_unwrap(uint32_t h);
+extern uint32_t x64_objc_wrap(uint64_t real);
+extern int sd_ctrl_set_value(void *ctrl, int32_t value);
+extern int sd_ctrl_get_value(void *ctrl, int32_t *out);
+#define UICTRL(n) ((void *)(uintptr_t)x64_objc_unwrap(args[(n)]))
+#define UIDL(fn, ret, a) static ret (*fn) a; if (!fn) fn = (ret (*) a)dlsym(RTLD_DEFAULT, #fn)
 
 // ---- Window Manager update / port / refcon (no classic window): no-op or noErr ----
 void     shim_BeginUpdate(uint32_t *args)       { (void)args; }
@@ -32,13 +44,33 @@ uint32_t shim_SetWindowProxyCreatorAndType(uint32_t *args) { (void)args; return 
 // GetWindowRegion(window, code, RgnHandle ioWinRgn): leaves the caller's region as-is.
 uint32_t shim_GetWindowRegion(uint32_t *args)   { (void)args; return UI_NO_ERR; }
 
-// ---- Control Manager (classic 16/32-bit value controls): no-op / zero ----
+// ---- Control Manager (classic 16/32-bit value controls) ----
 void     shim_Draw1Control(uint32_t *args)           { (void)args; }
-void     shim_SetControl32BitValue(uint32_t *args)   { (void)args; }
 void     shim_SetControl32BitMaximum(uint32_t *args) { (void)args; }
 void     shim_SetControlMaximum(uint32_t *args)      { (void)args; }
-uint32_t shim_GetControl32BitValue(uint32_t *args)   { (void)args; return 0; }
 uint32_t shim_GetControlPopupMenuHandle(uint32_t *a) { (void)a; return 0; }  // MenuRef NULL
+
+// SetControl32BitValue(ControlRef, SInt32 value): for a self-drawn popup this
+// selects the pushed menu item; for a real (checkbox/radio) control forward to
+// native so its state and appearance update.  (The old no-op silently dropped the
+// value Halo pushes at window-load — every popup showed item 0.)
+void shim_SetControl32BitValue(uint32_t *args) {
+    void *c = UICTRL(0);
+    int32_t v = (int32_t)args[1];
+    if (sd_ctrl_set_value(c, v)) return;
+    UIDL(SetControl32BitValue, void, (void *, int32_t));
+    if (SetControl32BitValue && c) SetControl32BitValue(c, v);
+}
+
+// GetControl32BitValue(ControlRef): current value (popup selection / checkbox state).
+uint32_t shim_GetControl32BitValue(uint32_t *args) {
+    void *c = UICTRL(0);
+    int32_t out = 0;
+    if (sd_ctrl_get_value(c, &out)) return (uint32_t)out;
+    UIDL(GetControl32BitValue, int32_t, (void *));
+    if (GetControl32BitValue && c) return (uint32_t)GetControl32BitValue(c);
+    return 0;
+}
 
 // ---- Appearance / Theme text: REAL CoreText implementations moved to
 // carbon_themetext_shim.c (DrawThemeTextBox / DrawThemeText /
