@@ -539,6 +539,7 @@ _x64_exc_longjmp:
 	MTSHIM	___objc_getClassList,           _shim_objc_getClassList
 	MTSHIM	___objc_copyClassList,          _shim_objc_copyClassList
 	MTSHIM	___object_getInstanceVariable,  _shim_object_getInstanceVariable
+	MTSHIM	___object_setInstanceVariable,  _shim_object_setInstanceVariable
 
 ;; ---------------------------------------------------------------------
 ;; Carbon Memory Manager (carbon_memory.c): classic Handle/Ptr on the low-4GB

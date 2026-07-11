@@ -6226,12 +6226,25 @@ static Ivar x64_object_getInstanceVariable(id obj, const char *name, void **outV
       if (legacy_ivar_offset(cls, name, &off)) {
          uint32_t sh = get_or_create_shadow(obj, cls);
          uint32_t *slot = prop_ivar_slot(sh, off);
-         if (outValue) { *outValue = slot ? (void *)resolve_self(*slot) : NULL; }
+         Ivar riv = class_getInstanceVariable(cls, name);
+         if (outValue) {
+            /* Prefer the shadow (the legacy IMPs' authoritative copy). But an
+             * outlet connected purely through R's modern synthesized ivar (the
+             * setter interpose / KVC / nib connector all write R) may not have
+             * seeded this freshly-created shadow yet (push_own_object_ivars
+             * mirrors R->S only on reverse dispatch). Fall back to R's modern
+             * slot so a forward read observes the connected value either way. */
+            id v = slot ? resolve_self(*slot) : NULL;
+            if (!v && riv) {
+               ptrdiff_t moff = ivar_getOffset(riv);
+               if (moff > 0) { v = *(id *)((char *)obj + moff); }
+            }
+            *outValue = (void *)v;
+         }
          /* non-NULL Ivar on success, mirroring the setter interpose: callers
           * (AppKit nib machinery among them) test the return to decide whether
-          * the ivar exists at all. The VALUE still comes from the shadow — the
-          * legacy IMPs' authoritative copy. */
-         return class_getInstanceVariable(cls, name);
+          * the ivar exists at all. */
+         return riv;
       }
       if (outValue) { *outValue = NULL; }
       return NULL;
@@ -9740,20 +9753,43 @@ uint32_t shim_objc_copyClassList(uint32_t *a) {
    return (uint32_t)(uintptr_t)out;
 }
 
+/* TRANSLATED-caller direction of the object_[sg]etInstanceVariable bridge (i386
+ * cdecl -> SysV). object_setInstanceVariable is NOT abigen-shimmed (libobjc is
+ * not in the consider set), so a translated i386 call to it bound straight to
+ * NATIVE libobjc, which read x86_64 REGISTER args -> garbage self/name/value ->
+ * EXC_BAD_ACCESS (any fragile-ObjC1 app that connects its own outlets in code —
+ * i.e. calls object_setInstanceVariable itself rather than through AppKit's nib
+ * connector). object_getInstanceVariable HAS a hand shim but called native
+ * libobjc, which MISSES a legacy class's SHADOW ivars (the ivars live in the
+ * per-instance i386 shadow, not the modern class) and only traced.
+ *
+ * Both now route through the SAME legacy-aware interposers the NATIVE-caller
+ * direction uses (x64_object_[sg]etInstanceVariable): resolve the i386 self/value
+ * handles to their real objects, apply the shadow<->R logic, and re-wrap the
+ * results into the i386 representation the translated caller expects. Universal:
+ * the twin of the native nib-outlet bridge, for the in-code direction. */
+uint32_t shim_object_setInstanceVariable(uint32_t *a) {
+   id real = resolve_self(a[0]);
+   if (!real || !legacy_cstr_ok(a[1])) { return 0; }
+   /* the i386 `value` arg is an i386 representation (shadow / arena handle /
+    * raw legacy obj); resolve it to the real object so the interpose stores the
+    * correct target (it re-wraps it back into the shadow's i386 handle). */
+   void *val = a[2] ? (void *)(uintptr_t)resolve_self(a[2]) : NULL;
+   Ivar iv = x64_object_setInstanceVariable(real,
+                                            (const char *)(uintptr_t)a[1], val);
+   return iv ? x64_objc_wrap((uint64_t)(uintptr_t)iv) : 0;
+}
+
 /* Legacy-registered classes carry their ivars in the i386 SHADOW, not the
- * modern class, so the native lookup legitimately misses there — trace it. */
+ * modern class; the legacy-aware interpose reads the shadow (native libobjc
+ * would miss it). Route through it, then re-wrap the out-value + returned Ivar
+ * into the i386 representation the translated caller expects. */
 uint32_t shim_object_getInstanceVariable(uint32_t *a) {
    id real = resolve_self(a[0]);
    if (!real || !legacy_cstr_ok(a[1])) { return 0; }
    void *val = NULL;
-   Ivar iv = object_getInstanceVariable(real, (const char *)(uintptr_t)a[1],
-                                        &val);
-   if (!iv) {
-      fprintf(stderr, "[rt] object_getInstanceVariable(0x%08x, \"%s\"): no "
-              "native ivar (legacy shadow ivars not bridged)\n",
-              a[0], (const char *)(uintptr_t)a[1]);
-      fflush(stderr);
-   }
+   Ivar iv = x64_object_getInstanceVariable(real, (const char *)(uintptr_t)a[1],
+                                            &val);
    if (a[2] && ptr_ok(a[2], 4)) {
       uint64_t v = (uint64_t)(uintptr_t)val;
       *(uint32_t *)(uintptr_t)a[2] =

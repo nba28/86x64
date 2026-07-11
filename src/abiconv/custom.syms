@@ -329,6 +329,7 @@ _objc_sync_exit
 _object_getClass
 _object_getClassName
 _object_getInstanceVariable
+_object_setInstanceVariable
 _object_isClass
 _object_setClass
 _sel_getName
