@@ -51,6 +51,8 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>   // self-drawn group-box frame
 #include <CoreText/CoreText.h>           // group-box title
+#include <objc/message.h>                // set the backing NSWindow's title
+#include <objc/runtime.h>
 #include "carbon_nib_parse.h"   // pure, headless-testable nib XML reader
 
 // arena bridge (objc_shim.c): i386 handle / i386 CFSTR constant <-> real 64-bit ptr.
@@ -865,6 +867,30 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
     }
 }
 
+// Set the title on the AppKit NSWindow backing a Carbon WindowRef.  On modern
+// macOS a Carbon window is hosted by an NSWindow (carbon_appkit_host.c loads
+// AppKit), and SetWindowTitleWithCFString on a movable-modal window does NOT paint
+// a title in the frame (the window-server title stays empty).  Locate the backing
+// NSWindow by its CGWindowID via [NSApp windowWithWindowNumber:] and setTitle:, so
+// the title bar shows the nib's window title ("Halo Graphics Settings").  All via
+// the objc runtime C API to keep this a pure-C TU.
+static void set_nswindow_title(WindowRef win, CFStringRef title) {
+    if (!win || !title) return;
+    static uint32_t (*HIWindowGetCGWindowID)(WindowRef);
+    if (!HIWindowGetCGWindowID)
+        HIWindowGetCGWindowID = (uint32_t (*)(WindowRef))dlsym(RTLD_DEFAULT, "HIWindowGetCGWindowID");
+    if (!HIWindowGetCGWindowID) return;
+    uint32_t cgid = HIWindowGetCGWindowID(win);
+    if (!cgid) return;
+    Class NSApplication = objc_getClass("NSApplication");
+    if (!NSApplication) return;
+    id nsapp = ((id (*)(id, SEL))objc_msgSend)((id)NSApplication, sel_getUid("sharedApplication"));
+    if (!nsapp) return;
+    id nswin = ((id (*)(id, SEL, long))objc_msgSend)(nsapp, sel_getUid("windowWithWindowNumber:"), (long)cgid);
+    if (!nswin) return;
+    ((void (*)(id, SEL, id))objc_msgSend)(nswin, sel_getUid("setTitle:"), (id)title);
+}
+
 // Custom-build window `wname` from objects.xib. Returns a WindowRef or NULL.
 static WindowRef build_window(const char *xibpath, CFStringRef wname) {
     char wc[256]; if (!CFStringGetCString(wname, wc, sizeof wc, kCFStringEncodingUTF8)) return NULL;
@@ -910,7 +936,9 @@ static WindowRef build_window(const char *xibpath, CFStringRef wname) {
             free(x); return NULL;
         }
     }
-    if (n_SetWindowTitleWithCFString) n_SetWindowTitleWithCFString(win, cfs(title));
+    CFStringRef titleCF = cfs(title);
+    if (n_SetWindowTitleWithCFString) n_SetWindowTitleWithCFString(win, titleCF);
+    if (title[0]) set_nswindow_title(win, titleCF);   // paint the title-bar text
 
     ControlRef root = NULL;
     if (!n_CreateRootControl || n_CreateRootControl(win, &root) != 0 || !root)
