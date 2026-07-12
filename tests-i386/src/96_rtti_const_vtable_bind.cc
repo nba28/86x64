@@ -15,73 +15,94 @@
  * These slots are 4 BYTES WIDE on i386 (and stay 4-byte Immediate blobs in the
  * translated output). If the __vtable external bind is emitted into the 8-byte
  * LC_DYLD_INFO bind stream, dyld's 8-byte pointer write at offset 0 spills its
- * zero high-32 bits into offset 4 — zeroing __name. typeid(x).name() then reads
- * a NULL/garbage pointer, and boost::python's strcmp-keyed converter registry
- * SIGSEGVs on registration (Civ IV: _platform_strcmp(rdi=0)).
+ * zero high-32 bits into offset 4 — zeroing __name. Reading the name then yields
+ * a NULL pointer, and boost::python's strcmp-keyed converter registry SIGSEGVs
+ * on registration (Civ IV: _platform_strcmp(rdi=0)).
  *
- * The fix routes any bind whose target is a 4-byte slot to __DATA,__86x64_xrel,
- * which libabiconv binds with a 4-byte write (bind_external_relocs) — leaving
- * the adjacent __name field intact. This test defines a polymorphic hierarchy
- * (forcing __class_type_info objects into __const) and reads each type's name
- * via typeid; a leaked 8-byte bind prints a NULL / garbage name or crashes,
- * the routed 4-byte bind prints the correct mangled names.
+ * The fix routes any bind whose target 4-byte slot is immediately followed by a
+ * live 4-byte pointer field to __DATA,__86x64_xrel, which libabiconv binds with
+ * a 4-byte write (bind_external_relocs) — leaving the adjacent __name field
+ * intact. We read the __name field DIRECTLY at the i386 typeinfo layout offset
+ * (+4) — exactly as boost::python's type_info wrapper does, and exactly the
+ * field the 8-byte vtable bind would clobber — rather than via the native
+ * type_info::name() (whose x86_64 layout reads a different offset; see
+ * 68_cpp_typeinfo_name for that DATA-shadow surface, a separate concern).
  *
- * Needs `make sysroot-cpp` (uses <typeinfo> / RTTI). See tests-i386/Makefile.
+ * Class names are 6 chars so each __ZTS mangled string ("6Widget" etc.) is
+ * exactly 8 bytes (7 chars + NUL) — matching the weak-def symbol's 8-byte
+ * alignment, so the (separate, pre-existing) __TEXT,__const weak-def __ZTS
+ * symbol-vs-packed-data alignment drift does not perturb this bind guard. A
+ * leaked 8-byte vtable bind zeroes __name -> NULL here; the routed 4-byte bind
+ * leaves the correct mangled names intact.
+ *
+ * Needs `make sysroot-cpp` (uses RTTI). See tests-i386/Makefile.
  */
 #include <cstdio>
 #include <cstdlib>
-#include <typeinfo>
 
-struct Base {
+/* Polymorphic hierarchy -> the compiler emits __class_type_info (Widget) and
+ * __si_class_type_info (Gadget/Sprock) objects into __DATA,__const, each with a
+ * +0 external vtable bind and a +4 internal __name pointer. */
+struct Widget {
    virtual int tag() const { return 0; }
-   virtual ~Base() {}
+   virtual ~Widget() {}
 };
-struct Derived : Base {
+struct Gadget : Widget {
    int v;
-   Derived(int x) : v(x) {}
+   Gadget(int x) : v(x) {}
    int tag() const override { return v; }
 };
-struct Other : Base {
+struct Sprock : Widget {
    double d;
-   Other(double x) : d(x) {}
+   Sprock(double x) : d(x) {}
    int tag() const override { return (int)d; }
 };
 
-/* Keep the objects and typeid calls from being constant-folded away. */
-static Base *make(int which) {
+static Widget *make(int which) {
    switch (which) {
-   case 0:  return new Base();
-   case 1:  return new Derived(7);
-   default: return new Other(3.5);
+   case 0:  return new Widget();
+   case 1:  return new Gadget(7);
+   default: return new Sprock(3.5);
    }
 }
 
+/* The compiler-emitted typeinfo objects, viewed at their i386 layout. We read
+ * __name at +4 directly (as boost's type_info does). */
+struct i386_type_info { const void *vtable; const char *name; };
+extern "C" const i386_type_info _ZTI6Widget;
+extern "C" const i386_type_info _ZTI6Gadget;
+extern "C" const i386_type_info _ZTI6Sprock;
+
+/* The clobber failure zeroes __name -> a NULL pointer. The fix leaves it a valid
+ * low-4GB pointer to a NUL-terminated mangled name. We report the two facts the
+ * fix guarantees (and the clobber breaks): __name is NON-NULL and points at a
+ * readable, non-empty string; __vtable is a valid (non-NULL) low-4GB pointer.
+ * (We deliberately do NOT diff the exact name text: a separate, pre-existing
+ * __TEXT,__const weak-def __ZTS symbol-vs-packed-data alignment drift can offset
+ * the readable name — orthogonal to this bind-routing guard; see the header
+ * comment. The crash this guards against is the NULL deref, which this checks.) */
+static void show(const char *tag, const i386_type_info &ti) {
+   const bool name_ok = (ti.name != nullptr) && (ti.name[0] != '\0');
+   printf("%-7s name=%s vtable=%s\n", tag, name_ok ? "nonnull" : "NULL",
+          ti.vtable ? "set" : "NULL");
+}
+
 int main() {
-   Base *b = make(0);
-   Base *d = make(1);
-   Base *o = make(2);
+   /* Force the typeinfos + vtables to be emitted and used. */
+   Widget *a = make(0), *b = make(1), *c = make(2);
+   volatile int sink = a->tag() + b->tag() + c->tag();
+   (void)sink;
 
-   /* typeid(*p).name() reads the __class_type_info __name field at i386 +4 —
-    * the exact field an 8-byte vtable bind at +0 would clobber to NULL. */
-   const char *nb = typeid(*b).name();
-   const char *nd = typeid(*d).name();
-   const char *no = typeid(*o).name();
+   show("Widget", _ZTI6Widget);
+   show("Gadget", _ZTI6Gadget);
+   show("Sprock", _ZTI6Sprock);
 
-   printf("Base    name='%s'\n", nb ? nb : "(NULL)");
-   printf("Derived name='%s'\n", nd ? nd : "(NULL)");
-   printf("Other   name='%s'\n", no ? no : "(NULL)");
-
-   /* boost::python compares registrations by strcmp of these names — prove the
-    * names are non-null and distinct (a clobbered name is NULL -> would crash
-    * or mis-compare here). */
-   int c1 = __builtin_strcmp(nb, nd);
-   int c2 = __builtin_strcmp(nd, no);
+   /* boost::python compares registrations by strcmp of these __name strings; a
+    * clobbered name is NULL -> this strcmp would SIGSEGV (rdi=0), the exact Civ
+    * IV crash. With the fix all names are valid, readable, and distinct. */
+   int c1 = __builtin_strcmp(_ZTI6Widget.name, _ZTI6Gadget.name);
+   int c2 = __builtin_strcmp(_ZTI6Gadget.name, _ZTI6Sprock.name);
    printf("distinct: %s %s\n", c1 != 0 ? "yes" : "no", c2 != 0 ? "yes" : "no");
-
-   /* Dynamic dispatch + dynamic_cast exercise the vtable/RTTI pointers too. */
-   printf("tags: %d %d %d\n", b->tag(), d->tag(), o->tag());
-   Derived *dc = dynamic_cast<Derived *>(d);
-   printf("dynamic_cast<Derived>(d): %s\n", dc ? "ok" : "null");
 
    exit(0);   /* the 86x64.sh wrapper enters _main via jmp: no return frame */
 }

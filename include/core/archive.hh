@@ -137,6 +137,20 @@ namespace MachO {
       void insert(SectionBlob<b> *blob, const Location& loc, Relation rel);
       void remove_commands(uint32_t cmd);
 
+      /* Move every LC_DYLD_INFO bind (regular/weak/lazy) whose target slot is a
+       * 4-byte Immediate (an i386 __DATA,__const RTTI/vtable pointer that stays
+       * 4 bytes wide in the M64 output) OUT of the dyld bind stream and INTO the
+       * Dysymtab's xrel_entries, so inject_xrel_section binds them 4-byte-wide at
+       * load via libabiconv. dyld's 8-byte pointer write into such a 4-byte slot
+       * spills its zero high-32 into the adjacent 4-byte field (the typeinfo
+       * __name), zeroing it -> typeid().name()==NULL -> boost::python strcmp
+       * SIGSEGV (Civ IV). Binds into real 8-byte SymbolPointer slots
+       * (__nl_symbol_ptr/__la_symbol_ptr) are left in the dyld stream. M64 only;
+       * runs BEFORE inject_xrel_section. Structural (triggers on slot width, not
+       * an RTTI-name match) + universal for any C++ target with __const
+       * external-vtable/RTTI binds. */
+      void divert_narrow_const_binds_to_xrel();
+
       /* Synthesize the __DATA,__86x64_xrel section from the Dysymtab's lifted
        * classic external relocations (M64 only; no-op otherwise / if empty / if
        * already present). Called at the top of Build so the section is laid out

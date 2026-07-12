@@ -202,10 +202,19 @@ namespace MachO {
 
    template <Bits b>
    std::size_t Archive<b>::Build(std::size_t offset) {
+      /* Divert 4-byte __DATA,__const RTTI/vtable binds out of the (8-byte) dyld
+       * bind streams and into the Dysymtab's xrel_entries FIRST, so the
+       * inject_xrel_section below picks them up. Without this, dyld's 8-byte
+       * write into a 4-byte typeinfo vtable slot clobbers the adjacent __name
+       * field (Civ IV boost.python NULL-strcmp). M64-only, no-op if no such
+       * binds. */
+      divert_narrow_const_binds_to_xrel();
+
       /* Inject our runtime-bind metadata section (classic external relocs that
-       * dyld can't process) before laying out, so it shares __DATA's layout and
-       * its XrelBlob::Emit can read each slot blob's resolved vmaddr. M64-only,
-       * no-op when there are no lifted relocs. */
+       * dyld can't process + the diverted narrow __const binds above) before
+       * laying out, so it shares __DATA's layout and its XrelBlob::Emit can read
+       * each slot blob's resolved vmaddr. M64-only, no-op when there are no
+       * lifted relocs. */
       inject_xrel_section();
 
       /* Emit the C++ exception PC map + per-function LSDA table (M64 only; inert
@@ -345,16 +354,111 @@ namespace MachO {
    }
 
    template <Bits b>
+   void Archive<b>::divert_narrow_const_binds_to_xrel() {
+      if constexpr (b != Bits::M64) {
+         return; /* M32 builds are intermediate; XrelBlob is M64-output only */
+      } else {
+         DyldInfo<b> *dyld = this->template subcommand<DyldInfo>();
+         if (dyld == nullptr) { return; }
+
+         auto *dysymtab = this->template subcommand<Dysymtab>();
+         if (dysymtab == nullptr) { return; }
+
+         const bool dbg = std::getenv("MACHO_BUILD_DEBUG") != nullptr;
+         std::size_t moved = 0;
+
+         /* A bind's target slot is a NARROW (4-byte) data slot when its resolved
+          * blob is an Immediate (Immediate::size()==4 in both M32 and M64 — the
+          * i386 __const RTTI/vtable pointer never widens). A dyld BIND_TYPE_
+          * POINTER write is 8 bytes wide in x86_64, so binding such a slot writes
+          * into the next 4 bytes too. That is only HARMFUL when the next 4-byte
+          * field is itself a live pointer we need (the classic case: an i386
+          * __class_type_info object {__vtable@0=external bind; __name@4=internal
+          * pointer to __ZTS} — the 8-byte vtable bind zeroes __name -> NULL
+          * typeid().name() -> boost::python strcmp SIGSEGV, Civ IV). When the
+          * following 4 bytes hold an integer (e.g. a global block literal's
+          * {isa@0=bind; flags@4=0x50000000 integer}) the wide write is benign and
+          * the bind MUST stay in the dyld stream (native 8-byte ObjC isa; test
+          * 37_objc_blocks). So we divert a narrow bind ONLY when the immediately-
+          * following blob is a live 4-byte pointer that the wide write would
+          * clobber.  Structural + universal (adjacency of two 4-byte pointer
+          * fields), never an RTTI-name match. SymbolPointer slots
+          * (__nl/__la_symbol_ptr) are genuine 8-byte pointers and never match.
+          *
+          * We test the +4 neighbour by CONTENT ORDER, not by loc.vmaddr: this
+          * pass runs at the top of Build BEFORE the layout that assigns each
+          * blob's final loc.vmaddr, so those addresses are stale here — but the
+          * section's content list is already in address order and an Immediate is
+          * always exactly 4 bytes (Immediate::size()), so the blob immediately
+          * following `slot` in `content` is exactly the +4 field. */
+         auto clobbers_adjacent_pointer = [&] (const SectionBlob<b> *slot) -> bool {
+            const Section<b> *sect = slot->section;
+            if (sect == nullptr) { return false; }
+            const auto& content = sect->content;
+            auto it = std::find(content.begin(), content.end(), slot);
+            if (it == content.end()) { return false; }
+            ++it;
+            /* Skip zero-size marker blobs (Placeholder: add_placeholder emits one
+             * at a symbol address that lands mid-section — e.g. the __ZTS name
+             * symbol at the typeinfo __name field — and it occupies no bytes) to
+             * reach the real +4 pointer field. */
+            while (it != content.end() && (*it)->size() == 0) { ++it; }
+            if (it == content.end()) { return false; }
+            const SectionBlob<b> *next = *it;
+            if (auto *im = dynamic_cast<const Immediate<b> *>(next)) {
+               return im->pointee != nullptr;
+            }
+            if (dynamic_cast<const SymbolPointer<b> *>(next) != nullptr) { return true; }
+            if (dynamic_cast<const JumpTableEntry<b> *>(next) != nullptr) { return true; }
+            return false;
+         };
+
+         auto divert = [&] (auto& bindees) {
+            for (auto it = bindees.begin(); it != bindees.end(); ) {
+               auto *node = *it;
+               const SectionBlob<b> *slot = node->blob;
+               if (slot != nullptr &&
+                   dynamic_cast<const Immediate<b> *>(slot) != nullptr &&
+                   clobbers_adjacent_pointer(slot)) {
+                  typename Dysymtab<b>::XrelEntry e;
+                  e.slot = slot;
+                  e.name = node->sym;                 /* linker name, leading '_' */
+                  e.addend = static_cast<int32_t>(node->addend);
+                  e.orig_vmaddr = slot->loc.vmaddr;   /* diagnostic */
+                  dysymtab->xrel_entries.push_back(std::move(e));
+                  it = bindees.erase(it);
+                  ++moved;
+               } else {
+                  ++it;
+               }
+            }
+         };
+
+         if (dyld->bind      != nullptr) { divert(dyld->bind->bindees); }
+         if (dyld->weak_bind != nullptr) { divert(dyld->weak_bind->bindees); }
+         if (dyld->lazy_bind != nullptr) { divert(dyld->lazy_bind->bindees); }
+
+         if (dbg) {
+            fprintf(stderr, "divert_narrow_const_binds_to_xrel: moved %zu "
+                    "4-byte __const bind(s) to xrel_entries\n", moved);
+         }
+      }
+   }
+
+   template <Bits b>
    void Archive<b>::inject_xrel_section() {
       if constexpr (b != Bits::M64) {
          return; /* M32 builds are intermediate; XrelBlob is M64-output only */
       } else {
-         /* Classic images only (no LC_DYLD_INFO) — exactly the set whose
-          * external relocs we drop (symtab.cc) and whose pointer slots are
-          * 4-byte. A modern image's binds live in the dyld_info stream and its
-          * relocs are 8-byte; we must never write our 4-byte entries there. */
-         if (this->template subcommand<DyldInfo>() != nullptr) { return; }
-
+         /* xrel_entries hold ONLY genuine 4-byte slots by construction: the
+          * classic-image external-reloc lift (symtab.cc lift_external_relocs)
+          * only runs for LC_DYSYMTAB-only images (4-byte pointer slots), and the
+          * modern-image path (divert_narrow_const_binds_to_xrel, run just above)
+          * only diverts binds whose target is a 4-byte Immediate. So we no longer
+          * gate on the absence of a DyldInfo — a modern non-PIE C++ exec (Civ IV
+          * Steam) legitimately carries a DyldInfo AND diverted narrow __const
+          * binds, and both need the runtime __86x64_xrel section. An image with
+          * no such slots leaves xrel_entries empty and this is a no-op. */
          auto *dysymtab = this->template subcommand<Dysymtab>();
          if (dysymtab == nullptr || dysymtab->xrel_entries.empty()) { return; }
 
