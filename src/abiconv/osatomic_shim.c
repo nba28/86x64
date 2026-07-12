@@ -36,6 +36,9 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <libkern/OSAtomic.h>
+#include <mach-o/dyld.h>
+#include <mach-o/getsect.h>
+#include <mach-o/loader.h>
 
 /* Real native primitives (libabiconv's own calls are NOT static-interposed). */
 #pragma clang diagnostic push
@@ -103,12 +106,45 @@ int32_t shim_OSAtomicAdd32Barrier(uint32_t *a) { return osatomic_add32_common(a,
  * / divsd is wrong. Inert (one getenv) when the env var is unset. which: 0 =
  * udivdi3 (a=dividend, b=divisor, result=quotient); 1 = fixunsdfdi (a=input
  * double bits, result=int64 out). */
+/* Find the mach_header of the translated image whose text contains a given
+ * runtime PC (matched on the low 32 bits — the i386 4-byte return frame only
+ * preserves the low half). Returns the slid base (== the header address, which
+ * is the image's load address) or 0. Scans all loaded images; a translated
+ * target dylib lives in the low 4 GB, so its header low32 uniquely brackets the
+ * captured return address's low32. */
+static uintptr_t caller_image_base(uint32_t ret_low32) {
+   uint32_t count = _dyld_image_count();
+   for (uint32_t i = 0; i < count; i++) {
+      const struct mach_header *mh = _dyld_get_image_header(i);
+      if (!mh) { continue; }
+      uintptr_t base = (uintptr_t)mh;
+      /* __TEXT covers [base, base + text vmsize). Bracket the low32. */
+      unsigned long tsz = 0;
+      const uint8_t *txt = getsegmentdata((const struct mach_header_64 *)mh,
+                                          "__TEXT", &tsz);
+      if (!txt) { continue; }
+      uint32_t lo = (uint32_t)base, hi = (uint32_t)(base + tsz);
+      if (lo <= ret_low32 && ret_low32 < hi) { return base; }
+   }
+   return 0;
+}
+
 /* Zero-divisor breadcrumb for the 64-bit integer div/mod helpers. Called from
  * libgcc_shim.asm just before the faulting `div`/`idiv` WHEN the divisor is 0,
  * so a would-be #DE becomes a diagnosable log line identifying the i386 caller
- * (ret = the 4-byte return address at [rsp] on entry, i.e. the site in the
- * translated image + a Halo.dylib load-base). Gated by ABICONV_LIBGCC_TRACE.
- * which: 0=udivdi3 1=umoddi3 2=divdi3 3=moddi3. */
+ * (ret = the 4-byte return address at [rsp] on entry, i.e. the low32 of the site
+ * in the translated image). Gated by ABICONV_LIBGCC_TRACE. which: 0=udivdi3
+ * 1=umoddi3 2=divdi3 3=moddi3.
+ *
+ * OPTIONAL globals dump (ABICONV_DIVZERO_DUMP=<hexoff>[,<hexoff>...]): for each
+ * comma-separated hex OFFSET, print the 8 bytes at (caller_image_base + offset).
+ * This turns a display-gated div-by-zero into a self-contained diagnosis WITHOUT
+ * lldb — e.g. for Halo the offsets of the timer-frequency globals
+ * ([0x5b32a0]=+0xc38b60, [0x3b1b88]=+0xa37450, guard [0x3a8740]=+0xa2e008) reveal
+ * whether calibration ran (freq!=0), whether the copy propagated it (divisor),
+ * and whether the run-once guard was stale. Universal: the caller image is found
+ * structurally from the return PC; offsets are supplied by whoever is
+ * diagnosing, never baked in. */
 void abiconv_libgcc_divzero(uint64_t a, uint64_t ret, uint64_t which) {
    static int on = -1;
    if (on < 0) { on = getenv("ABICONV_LIBGCC_TRACE") ? 1 : 0; }
@@ -116,6 +152,25 @@ void abiconv_libgcc_divzero(uint64_t a, uint64_t ret, uint64_t which) {
    static const char *nm[4] = { "udivdi3", "umoddi3", "divdi3", "moddi3" };
    fprintf(stderr, "[libgcc] DIV-BY-ZERO in %s: dividend=0x%llx i386_ret=0x%llx\n",
            nm[which & 3], (unsigned long long)a, (unsigned long long)ret);
+
+   const char *dump = getenv("ABICONV_DIVZERO_DUMP");
+   if (dump && *dump) {
+      uintptr_t base = caller_image_base((uint32_t)ret);
+      if (!base) {
+         fprintf(stderr, "[libgcc]   (no caller image found for ret=0x%llx; "
+                 "cannot dump globals)\n", (unsigned long long)ret);
+         return;
+      }
+      fprintf(stderr, "[libgcc]   caller image base=0x%lx\n", (unsigned long)base);
+      char buf[256];
+      strncpy(buf, dump, sizeof buf - 1); buf[sizeof buf - 1] = '\0';
+      for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+         uint64_t off = strtoull(tok, NULL, 16);
+         uint64_t val = *(volatile uint64_t *)(base + off);
+         fprintf(stderr, "[libgcc]   [image+0x%llx] = 0x%016llx\n",
+                 (unsigned long long)off, (unsigned long long)val);
+      }
+   }
 }
 
 void abiconv_libgcc_log(uint64_t a, uint64_t b, uint64_t result, uint64_t which) {
