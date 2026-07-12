@@ -536,22 +536,27 @@ namespace MachO {
                 * the same code to work after transform we have to rewrite
                 * disp32 to the new vmaddr of the table.
                 *
-                * Skip when the instruction also carries a trailing
-                * 32-bit immediate (e.g. `MOV_MEMv_IMMz` =
-                * `mov [disp32+idx*4], imm32`). xed_patch_disp doesn't
-                * handle that combo cleanly — the runtime patcher in
-                * wrapper_setup.c will rewrite the disp32 if its value
-                * lands in our dylib's vmaddr range.
+                * IMMEDIATE-group forms (`mov [disp32+idx*4], imm32` C7 /0,
+                * the ALU `81/83 /r`, `test` F6/F7 /0, byte `C6 /0`/`80 /r`)
+                * are captured EXACTLY like the plain load/store/rmw forms:
+                * the disp32 sits BEFORE the trailing immediate
+                * (prefixes|opcode|modrm|sib|disp32|imm per the ISA), Emit's
+                * xed_patch_disp patches it positionally from the decode
+                * (proven by the `[abs32]`+imm8 branch above, live since the
+                * iPhoto 12_static_byte_flag fix), and inject_abs32_section
+                * subtracts the immediate width when recording the field for
+                * the runtime slide. These forms USED to be skipped here
+                * (`has_trailing_imm32` gate) in deference to the runtime
+                * byte-pattern scan — which commit 2b7076a's exact
+                * __86x64_abs32 table SUPERSEDED (the scan corrupted real
+                * instructions at scale), so the skip shipped a RAW i386
+                * disp32 with no rebase and no table entry: Halo's renderer
+                * `movl $imm32, tab(,%esi,4)` (C7 04 B5) faulted at the
+                * i386-era address after the graphics-settings dialog
+                * (guard 98_abs32_imm_group).
                 */
-               const xed_iform_enum_t iform = xed_decoded_inst_get_iform_enum(&xedd);
-               const bool has_trailing_imm32 =
-                  xed_operand_values_has_immediate(operands)
-                  && xed_decoded_inst_get_immediate_width_bits(operands) == 32;
-               (void)iform; /* keep for future selective handling */
-
                const ssize_t disp = xed_decoded_inst_get_memory_displacement(operands, i);
-               if (!has_trailing_imm32
-                   && disp >= 0x1000 && (std::size_t)disp < 0x80000000U
+               if (disp >= 0x1000 && (std::size_t)disp < 0x80000000U
                    && !memdisp) {
                   memidx = i;
                   memdisp_absolute = true;
@@ -634,6 +639,27 @@ namespace MachO {
                   memdisp_absolute = true;
                   env.vmaddr_resolver.resolve((std::size_t) disp,
                                               (const SectionBlob<bits> **) &this->memdisp);
+                  /* mid-blob fallback (mirrors the `[disp32+idx*scale]`
+                   * branch above): a table base INSIDE a multi-byte blob —
+                   * notably EVERY zerofill (__bss/__common) variable, since
+                   * a zerofill section parses as ONE spanning ZeroBlob
+                   * extent — misses the exact-key resolve, leaving memdisp
+                   * null. The transform's slide-correct `lea r11,[rip+..];
+                   * op [base+r11]` rewrite gates on memdisp, so a null
+                   * silently degraded to the byte-identical copy shipping
+                   * the RAW i386 disp32 (Halo renderer: `movb $0,
+                   * 0x453cc0(%edx)` C6 82 into the __DATA zerofill tail ->
+                   * EXC_BAD_ACCESS write at the unmapped i386 address after
+                   * the graphics-settings dialog; guard 98_abs32_imm_group).
+                   * Same non-__OBJC admission as the indexed form: this
+                   * disp32 is a DEREFERENCED table base, never an integer
+                   * constant. */
+                  if (env.vmaddr_in_indexed_table_target((std::size_t) disp)) {
+                     env.vmaddr_resolver.resolve_containing(
+                        (std::size_t) disp,
+                        (const SectionBlob<bits> **) &this->memdisp,
+                        &this->memdisp_offset);
+                  }
                }
             }
          }
@@ -2772,6 +2798,12 @@ namespace MachO {
                      (opcode::lea_r11_mem_rip_disp32());
                   lea_inst->memidx = 0;
                   env.resolve(memdisp, &lea_inst->memdisp);
+                  /* Carry any intra-blob byte offset from the parser's
+                   * containing fallback (a zerofill-interior or mid-blob
+                   * table base resolves as spanning-extent + offset) so
+                   * r11 = the exact table base, not the extent start —
+                   * mirrors the SIB-form rewrite above. Normally 0. */
+                  lea_inst->memdisp_offset = memdisp_offset;
 
                   /* rebuild the operation with [base + r11*1] addressing */
                   opcode_t buf;

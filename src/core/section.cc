@@ -1034,6 +1034,17 @@ namespace MachO {
                env.vmaddr_resolver.cancel(
                   (std::size_t)disp,
                   (const SectionBlob<bits> **)&inst->memdisp);
+               /* ... and its CONTAINING fallback (instruction.cc registers
+                * both): the raw disp of an anchored access routinely ALIASES
+                * a zerofill span (an array offset like 0x124f80 lands inside
+                * the 1.5MB __common ZeroBlob extent), so the pending
+                * containing-resolve would fire in do_resolve_containing()
+                * and clobber the authoritative anchor+disp target with
+                * extent+aliasing-offset (guard 96_zerofill_common_interior).
+                * Mirrors the (2c) heuristic-immediate cancel below. */
+               env.vmaddr_resolver.cancel_containing(
+                  (std::size_t)disp,
+                  (const SectionBlob<bits> **)&inst->memdisp);
 
                inst->memidx = i;
                inst->memdisp = target_blob;
@@ -1105,6 +1116,45 @@ namespace MachO {
                (std::size_t)inst->imm->value,
                (const SectionBlob<bits> **)&inst->imm->pointee);
             inst->imm->pointee = nullptr;
+         }
+
+         /* (2d) Cancel the `[base+disp32]` absolute-table heuristic inside
+          *      PIC-anchored code when the base is NOT an anchor. Same
+          *      function-granularity reasoning as (2c): PIC codegen reaches
+          *      globals anchor-relative or through slot-loaded pointers, so
+          *      a `[reg+disp32]` whose base is an ORDINARY pointer register
+          *      is pointer+OFFSET arithmetic — its raw disp32 aliasing a
+          *      segment (routinely a megabyte zerofill span: 0x124f80 =
+          *      &array[150000]-&array inside the __common extent) must NOT
+          *      resolve as an absolute table base. The parse-time probe
+          *      (instruction.cc, gated on a non-PIE MH_EXECUTE IMAGE) can't
+          *      see function granularity — and a non-PIE LINK routinely
+          *      contains -fPIC objects (guard 96_zerofill_common_interior's
+          *      main: `movl $imm32, 0x124f80(%slotbase)` was mis-lea'd once
+          *      the containing fallback admitted extent interiors).
+          *      Anchor-based forms were taken over by (2) above
+          *      (pic_anchored=true, excluded here); genuine absolute
+          *      `[base+disp32]` sites live in fixed-address non-PIC
+          *      functions — no live anchors — and keep the heuristic
+          *      (Halo's C6 82 zerofill store, guard 98_abs32_imm_group). */
+         if (!anchors.empty() && inst->memdisp_absolute && !inst->pic_anchored) {
+            const xed_operand_values_t* mops =
+               xed_decoded_inst_operands_const(&xedd);
+            const xed_reg_enum_t mbase =
+               xed_decoded_inst_get_base_reg(mops, inst->memidx);
+            if (mbase != XED_REG_INVALID) {
+               const ssize_t mdisp =
+                  xed_decoded_inst_get_memory_displacement(mops, inst->memidx);
+               env.vmaddr_resolver.cancel(
+                  (std::size_t)mdisp,
+                  (const SectionBlob<bits> **)&inst->memdisp);
+               env.vmaddr_resolver.cancel_containing(
+                  (std::size_t)mdisp,
+                  (const SectionBlob<bits> **)&inst->memdisp);
+               inst->memdisp = nullptr;
+               inst->memdisp_offset = 0;
+               inst->memdisp_absolute = false;
+            }
          }
 
          /* (2b) Track the anchor through a frame-slot spill/reload so a
