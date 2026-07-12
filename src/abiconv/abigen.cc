@@ -67,7 +67,39 @@ struct ABIConversion {
       sym(sym), function_type(function_type), regs(regs) {}
 
    virtual ~ABIConversion() {}
-   
+
+   /* The name the shim FORWARDS TO natively. Callers bind to the exported
+    * global <prefix>sym (which keeps its suffix so classic/modern binds still
+    * resolve), but the inner extern/call must target a symbol that STILL EXISTS
+    * in modern libSystem. The legacy 10.5-era POSIX conformance-variant aliases
+    * (`_usleep$UNIX2003`, `_write$UNIX2003`, `_foo$UNIX2003$NOCANCEL`, ...) were
+    * REMOVED from modern macOS: dyld leaves their dynamic-lookup slot NULL, so a
+    * shim that inner-calls `<name>$UNIX2003` does `jmpq *NULL` -> rip=0 on first
+    * use (Portal 2's libtier0 CalculateCPUFreq -> usleep was the first hit). The
+    * bare modern symbol is the conforming one, so strip the dead suffix for the
+    * forward target only. Same policy as 86x64.sh's strip-bind,suffix=$UNIX2003
+    * (which strips it from TRANSLATED targets' binds); this closes the gap for
+    * libabiconv's OWN internal forward. UNIVERSAL: fires on the structural
+    * `$UNIX2003`/`$NOCANCEL` conformance suffix, not any app or symbol. */
+   std::string native_target() const {
+      std::string t = sym;
+      /* Repeatedly peel any trailing conformance modifier so a compound
+       * `$UNIX2003$NOCANCEL` (either order) collapses to the bare name. */
+      bool changed = true;
+      while (changed) {
+         changed = false;
+         for (const std::string suffix : {std::string("$UNIX2003"),
+                                          std::string("$NOCANCEL")}) {
+            if (t.size() > suffix.size() &&
+                t.compare(t.size() - suffix.size(), suffix.size(), suffix) == 0) {
+               t.resize(t.size() - suffix.size());
+               changed = true;
+            }
+         }
+      }
+      return t;
+   }
+
    static CXType handle_type(CXType type) {
       return clang_getCanonicalType(type);
    }
@@ -876,7 +908,7 @@ struct ABIConversion {
    void emit_body(std::ostream& os, const Symbols& ignore_structs,
                   const std::string& override_prefix) {
       os << "\tglobal\t" << override_prefix << sym << std::endl;
-      os << "\textern\t" << sym << std::endl;
+      os << "\textern\t" << native_target() << std::endl;
 
       os << override_prefix << sym << ":" << std::endl;
 
@@ -1414,7 +1446,7 @@ struct FunctionConversion: ABIConversion {
       ABIConversion(args..., {&rdi, &rsi, &rdx, &rcx, &r8, &r9}) {}
 
    virtual void emit_call(std::ostream& os) const override {
-      emit_inst(os, "call", sym);
+      emit_inst(os, "call", native_target());
    }
 };
 
