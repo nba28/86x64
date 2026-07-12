@@ -103,6 +103,21 @@ int32_t shim_OSAtomicAdd32Barrier(uint32_t *a) { return osatomic_add32_common(a,
  * / divsd is wrong. Inert (one getenv) when the env var is unset. which: 0 =
  * udivdi3 (a=dividend, b=divisor, result=quotient); 1 = fixunsdfdi (a=input
  * double bits, result=int64 out). */
+/* Zero-divisor breadcrumb for the 64-bit integer div/mod helpers. Called from
+ * libgcc_shim.asm just before the faulting `div`/`idiv` WHEN the divisor is 0,
+ * so a would-be #DE becomes a diagnosable log line identifying the i386 caller
+ * (ret = the 4-byte return address at [rsp] on entry, i.e. the site in the
+ * translated image + a Halo.dylib load-base). Gated by ABICONV_LIBGCC_TRACE.
+ * which: 0=udivdi3 1=umoddi3 2=divdi3 3=moddi3. */
+void abiconv_libgcc_divzero(uint64_t a, uint64_t ret, uint64_t which) {
+   static int on = -1;
+   if (on < 0) { on = getenv("ABICONV_LIBGCC_TRACE") ? 1 : 0; }
+   if (!on) { return; }
+   static const char *nm[4] = { "udivdi3", "umoddi3", "divdi3", "moddi3" };
+   fprintf(stderr, "[libgcc] DIV-BY-ZERO in %s: dividend=0x%llx i386_ret=0x%llx\n",
+           nm[which & 3], (unsigned long long)a, (unsigned long long)ret);
+}
+
 void abiconv_libgcc_log(uint64_t a, uint64_t b, uint64_t result, uint64_t which) {
    static int on = -1;
    if (on < 0) { on = getenv("ABICONV_LIBGCC_TRACE") ? 1 : 0; }

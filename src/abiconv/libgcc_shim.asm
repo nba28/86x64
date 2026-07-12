@@ -34,6 +34,7 @@
    global _____fixunssfdi
    extern __dyld_stub_binder_flag
    extern _abiconv_libgcc_log     ; gated runtime breadcrumb (osatomic_shim.c)
+   extern _abiconv_libgcc_divzero ; gated zero-divisor breadcrumb (osatomic_shim.c)
 
 ;; If we were reached through a lazy stub, dyld_stub_binder may have left rsp
 ;; needing the same fixup the other custom shims apply (see getopt.asm). The
@@ -85,10 +86,39 @@
    pop rbp
 %endmacro
 
+;; When the 64-bit divisor (r9) is 0, a hardware `div`/`idiv` raises #DE (SIGFPE)
+;; -- the crash class this instrumentation diagnoses. Instead of faulting, log a
+;; gated breadcrumb naming the i386 caller (its 4-byte return address is at
+;; [rsp], the args being just above it) and return 0 (quotient AND remainder),
+;; which matches how well-behaved i386 code already guards its own div-by-zero
+;; (Halo site 0x1b460b: `testl %edx,%edx; jne ..; xorl %eax,%eax` -> 0). This
+;; keeps a mis-computed divisor from taking down the process while the upstream
+;; source is fixed, and the trace pinpoints WHICH divide. %1 = which (0..3).
+%macro DIVZERO_GUARD 1
+   test r9, r9
+   jne %%ok
+   push rbp                     ; align + preserve across the SysV log call
+   mov rbp, rsp
+   and rsp, ~0xf
+   mov rdi, r8                  ; arg0 = dividend
+   mov esi, [rbp + 8]           ; arg1 = i386 return address (was [rsp] pre-push)
+   mov rdx, %1                  ; arg2 = which
+   call _abiconv_libgcc_divzero
+   mov rsp, rbp
+   pop rbp
+   xor eax, eax                 ; result low = 0
+   xor edx, edx                 ; result high = 0
+   mov r11d, [rsp]              ; i386 return address
+   add rsp, 4                   ; consume the return slot
+   jmp r11
+%%ok:
+%endmacro
+
 _____udivdi3:
    STUB_FIXUP
    mov r8, [rsp + 4]            ; a
    mov r9, [rsp + 12]           ; b
+   DIVZERO_GUARD 0
    mov rax, r8
    xor edx, edx
    div r9                       ; rax = quotient, rdx = remainder
@@ -99,6 +129,7 @@ _____umoddi3:
    STUB_FIXUP
    mov r8, [rsp + 4]
    mov r9, [rsp + 12]
+   DIVZERO_GUARD 1
    mov rax, r8
    xor edx, edx
    div r9
@@ -108,6 +139,7 @@ _____divdi3:
    STUB_FIXUP
    mov r8, [rsp + 4]
    mov r9, [rsp + 12]
+   DIVZERO_GUARD 2
    mov rax, r8
    cqo                          ; sign-extend rax into rdx:rax
    idiv r9                      ; rax = quotient, rdx = remainder
@@ -117,6 +149,7 @@ _____moddi3:
    STUB_FIXUP
    mov r8, [rsp + 4]
    mov r9, [rsp + 12]
+   DIVZERO_GUARD 3
    mov rax, r8
    cqo
    idiv r9
