@@ -1,0 +1,7 @@
+Base    name='4Base'
+Derived name='7Derived'
+Other   name='5Other'
+distinct: yes yes
+tags: 0 7 3
+dynamic_cast<Derived>(d): ok
+exit_code: 0
