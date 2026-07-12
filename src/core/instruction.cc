@@ -450,6 +450,7 @@ namespace MachO {
                      imm_is_ptr = false;
                   }
                   imm = Immediate<bits>::Parse(img, loc + imm_idx, env, imm_is_ptr);
+                  imm->heuristic = true; /* value-alias probe (see Immediate) */
                } else if (has_small_imm && dest_is_data) {
                   /* Relocate the absolute disp32 (the memory operand). The
                    * trailing imm8/imm16 is a scalar that stays verbatim in
@@ -797,6 +798,7 @@ namespace MachO {
                }
             }
             imm = Immediate<bits>::Parse(img, loc + imm_idx, env, imm_is_ptr);
+            imm->heuristic = true; /* value-alias probe (see Immediate) */
          }
          break;
 
@@ -835,6 +837,7 @@ namespace MachO {
                }
             }
             imm = Immediate<bits>::Parse(img, loc + imm_idx, env, imm_is_ptr);
+            imm->heuristic = true; /* value-alias probe (see Immediate) */
          }
          break;
       default:
@@ -926,6 +929,7 @@ namespace MachO {
                }
                if (in_seg) {
                   imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);
+                  imm->heuristic = true; /* value-alias probe (see Immediate) */
                }
             }
          }
@@ -992,6 +996,7 @@ namespace MachO {
             }
             if (ptr_target) {
                imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);
+               imm->heuristic = true; /* value-alias probe (see Immediate) */
             }
          }
       }

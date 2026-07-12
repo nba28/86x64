@@ -517,6 +517,15 @@ $(BUILD_DIR)/20_callback_qsort.o: $(SRC_DIR)/20_callback_qsort.c | $(BUILD_DIR)
 $(BUILD_DIR)/93_ns_symbol_lookup.o: $(SRC_DIR)/93_ns_symbol_lookup.c | $(BUILD_DIR)
 	$(CC_I386) -fno-stack-protector -c $< -o $@
 
+# 96_zerofill_common_interior: -fcommon so the 1.5MB tentative array lands in
+# __DATA,__common (clang's default -fno-common would use __bss — also zerofill,
+# but the huge-__common shape is the Halo SIGFPE repro: file offset 0, no file
+# bytes, 0x186a00 of vmaddr span). Guards the ZeroBlob extent rework (vmaddr-
+# only reservation, extent splits at symbol placeholders, zerofill-as-segment-
+# tail section ordering) + the PIC-anchored zerofill-alias immediate cancel.
+$(BUILD_DIR)/96_zerofill_common_interior.o: $(SRC_DIR)/96_zerofill_common_interior.c | $(BUILD_DIR)
+	$(CC_I386) -fcommon -c $< -o $@
+
 # 24_libm_float_return: -fno-builtin so floorf/ceilf/sqrt/floor are emitted as
 # real library calls (clang would otherwise constant-fold/inline them as SSE
 # intrinsics), exercising the libm shims + the abigen float/double-return

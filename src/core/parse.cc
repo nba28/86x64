@@ -148,6 +148,21 @@ namespace MachO {
    }
 
    template <Bits bits>
+   bool ParseEnv<bits>::vmaddr_in_zerofill(std::size_t vmaddr) const {
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(vmaddr)) { continue; }
+            const uint32_t stype = sec->sect.flags & SECTION_TYPE;
+            return stype == S_ZEROFILL || stype == S_GB_ZEROFILL ||
+                   stype == S_THREAD_LOCAL_ZEROFILL;
+         }
+         return false; /* in segment but between/outside sections */
+      }
+      return false;
+   }
+
+   template <Bits bits>
    bool ParseEnv<bits>::vmaddr_in_readonly_opaque_data(std::size_t vmaddr) const {
       for (Segment<bits> *seg : archive.segments()) {
          if ((seg->segment_command.initprot & VM_PROT_WRITE) != 0) { continue; }

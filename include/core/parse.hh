@@ -218,6 +218,19 @@ namespace MachO {
        * the M32->M64 transform rewrites the code bytes. */
       bool vmaddr_in_readonly_opaque_data(std::size_t vmaddr) const;
 
+      /* True iff `vmaddr` lands inside a ZEROFILL section (S_ZEROFILL /
+       * S_GB_ZEROFILL / S_THREAD_LOCAL_ZEROFILL — __DATA,__bss/__common).
+       * Zerofill sections legitimately span megabytes of vmaddr space while
+       * occupying zero file bytes, so an integer constant/offset is far more
+       * likely to ALIAS their range than any file-backed section's. Gates the
+       * DetectPicAnchoredDisps cancellation of heuristic pointer-immediates:
+       * inside PIC-anchored code the compiler never emits absolute-address
+       * immediates (globals are reached anchor-relative), so an immediate that
+       * aliases a zerofill span there is an anchor/base-relative OFFSET (e.g.
+       * `addl $0x124f80, %edx` computing &array[i]) and relocating it would
+       * corrupt the pointer arithmetic (Halo-class zerofill repro). */
+      bool vmaddr_in_zerofill(std::size_t vmaddr) const;
+
       /* True iff vmaddr falls in a constant/string/code section that is a
        * high-confidence pointer target (__cstring/__cfstring/__const/__text/
        * __objc* etc.). Used to disambiguate a `mov [reg+disp], imm32` whose

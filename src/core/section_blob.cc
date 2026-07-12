@@ -75,6 +75,36 @@ namespace MachO {
    }
 
    template <Bits bits>
+   ZeroBlob<bits>::ZeroBlob(const Image& img, const Location& loc, ParseEnv<bits>& env):
+      SectionBlob<bits>(loc, env)
+   {
+      /* ONE extent spanning from loc.vmaddr to the section end. Never read
+       * file bytes: a zerofill section has none (input header offset=0), so
+       * the historical per-byte sweep fabricated blobs from other sections'
+       * bytes / past EOF. Section::Parse1's linear sweep then steps by
+       * size() and terminates after this single blob. */
+      size_ = 1;
+      if (env.current_section != nullptr) {
+         const auto& cs = env.current_section->sect;
+         const std::size_t sect_end = (std::size_t)cs.addr + (std::size_t)cs.size;
+         if (loc.vmaddr < sect_end) {
+            size_ = sect_end - loc.vmaddr;
+         }
+      }
+   }
+
+   template <Bits bits>
+   void ZeroBlob<bits>::Build(BuildEnv<bits>& env) {
+      /* Reserve VMADDR space only. Zerofill occupies no file bytes, so the
+       * file-offset cursor must not advance (a zerofill section contributes
+       * to segment vmsize, not filesize — advancing the offset bloated every
+       * translated image by the zerofill span and skewed the offset-delta
+       * section size at Section::Build). */
+      this->loc = env.loc;
+      env.loc.vmaddr += this->active ? size_ : 0;
+   }
+
+   template <Bits bits>
    void DataBlob<bits>::Emit(Image& img, std::size_t offset) const {
       img.at<uint8_t>(offset) = data;
    }
@@ -166,6 +196,7 @@ namespace MachO {
       SectionBlob<bits>(other, env), value(other.value), pointee(nullptr),
       pointee_offset(other.pointee_offset)
    {
+      heuristic = other.heuristic;
       env.resolve(other.pointee, &pointee);
    }
 
@@ -531,6 +562,9 @@ namespace MachO {
 
    template class DataBlob<Bits::M32>;
    template class DataBlob<Bits::M64>;
+
+   template class ZeroBlob<Bits::M32>;
+   template class ZeroBlob<Bits::M64>;
 
    template class CFStringBlob<Bits::M32>;
    template class CFStringBlob<Bits::M64>;

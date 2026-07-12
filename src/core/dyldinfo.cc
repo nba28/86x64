@@ -220,6 +220,15 @@ namespace MachO {
       flags(flags), blob(nullptr), index(index), weak(weak)
    {
       env.vmaddr_resolver.resolve(vmaddr, &blob);
+      /* Containing-blob fallback for a bind targeting a zerofill INTERIOR
+       * (classic weak-coalesced C++ commons): zerofill parses as spanning
+       * ZeroBlob extents (split only at placeholder anchors), so an interior
+       * target has no exact-key blob registered. Gated to zerofill — for
+       * file-backed sections a mid-blob bind target keeps the historical
+       * exact-only behavior. */
+      if (env.vmaddr_in_zerofill(vmaddr)) {
+         env.vmaddr_resolver.resolve_containing(vmaddr, &blob, &blob_offset);
+      }
       /* weak binds carry no dylib ordinal (implicit weak lookup), so there is
        * nothing to resolve and nothing to emit for the dylib. */
       if (dylib_special == 0 && !weak) {
@@ -343,7 +352,7 @@ namespace MachO {
              * in segments with zerofill content. A mismatch that
              * straddles a LEB128 length boundary would corrupt every
              * later LC. */
-            (1 + leb128_size(blob->loc.vmaddr - blob->segment->loc().vmaddr)) +
+            (1 + leb128_size(blob->loc.vmaddr + blob_offset - blob->segment->loc().vmaddr)) +
             (1 + (sym.size() + 1)) +
             1;
       } else {
@@ -356,7 +365,7 @@ namespace MachO {
           */
          return
             /* vmaddr delta to match Emit() — see non-lazy case above. */
-            (1 + leb128_size(blob->loc.vmaddr - blob->segment->loc().vmaddr)) +
+            (1 + leb128_size(blob->loc.vmaddr + blob_offset - blob->segment->loc().vmaddr)) +
             dylib_opcode_size() +
             (1 + (sym.size() + 1)) +
             1 +
@@ -435,7 +444,7 @@ namespace MachO {
          offset += leb128_encode(img, offset, addend);
 
          img.at<uint8_t>(offset++) = BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | blob->segment->id;
-         const std::size_t segoff = blob->loc.vmaddr - blob->segment->loc().vmaddr;
+         const std::size_t segoff = blob->loc.vmaddr + blob_offset - blob->segment->loc().vmaddr;
          offset += leb128_encode(img, offset, segoff);
 
          img.at<uint8_t>(offset++) = BIND_OPCODE_SET_SYMBOL_TRAILING_FLAGS_IMM | flags;
@@ -445,7 +454,7 @@ namespace MachO {
       } else {
          /* LAZY */
          img.at<uint8_t>(offset++) = BIND_OPCODE_SET_SEGMENT_AND_OFFSET_ULEB | blob->segment->id;
-         const std::size_t segoff = blob->loc.vmaddr - blob->segment->loc().vmaddr;
+         const std::size_t segoff = blob->loc.vmaddr + blob_offset - blob->segment->loc().vmaddr;
          offset += leb128_encode(img, offset, segoff);
 
          offset += emit_dylib_opcode(img, offset);
@@ -486,6 +495,7 @@ namespace MachO {
       if (dylib_special == 0 && !weak) {
          env.resolve(other.dylib, &dylib);
       }
+      blob_offset = other.blob_offset;
       env.resolve(other.blob, &blob);
    }
 

@@ -1070,6 +1070,43 @@ namespace MachO {
             }
          }
 
+         /* (2c) Cancel HEURISTIC pointer-immediates that alias a ZEROFILL
+          *      span inside PIC-anchored code. The bare-immediate heuristics
+          *      (instruction.cc PUSH/MOV/ADD/CMP/c7-stack families) classify
+          *      an imm32 as a pointer when its VALUE lands in a segment's
+          *      vmaddr range — an accepted false-positive risk for compact
+          *      file-backed sections, but catastrophic for zerofill:
+          *      __DATA,__common/__bss legitimately spans megabytes (Halo:
+          *      0x15cf10), so ordinary array-offset arithmetic aliases it
+          *      constantly (`addl $0x124f80, %edx` computing &array[150000]
+          *      against a base loaded from a non-lazy slot). Relocating such
+          *      an offset ADDS the translated section base into pure pointer
+          *      arithmetic -> garbage address -> SIGBUS/SIGFPE class.
+          *
+          *      Context the parse-time probe lacks, this pass has: a LIVE PIC
+          *      anchor means the enclosing function is PIC codegen, and PIC
+          *      code NEVER embeds absolute-address immediates (globals are
+          *      reached anchor-relative / through slots — the same reasoning
+          *      as the heuristic's own MH_PIE image-level gate, applied at
+          *      function granularity). So inside an anchored region, an
+          *      immediate aliasing zerofill is an OFFSET: cancel its pending
+          *      exact + containing resolutions and drop any already-attached
+          *      pointee so it emits verbatim. Non-PIC functions (no anchor)
+          *      keep the heuristic — fixed-address images genuinely bake
+          *      absolute zerofill pointers into immediates. Structural
+          *      pointer operands (bare `[disp32]`, non-lazy slots) are NOT
+          *      Immediate::heuristic and are never cancelled. */
+         if (!anchors.empty() && inst->imm != nullptr && inst->imm->heuristic &&
+             env.vmaddr_in_zerofill(inst->imm->value)) {
+            env.vmaddr_resolver.cancel(
+               (std::size_t)inst->imm->value,
+               (const SectionBlob<bits> **)&inst->imm->pointee);
+            env.vmaddr_resolver.cancel_containing(
+               (std::size_t)inst->imm->value,
+               (const SectionBlob<bits> **)&inst->imm->pointee);
+            inst->imm->pointee = nullptr;
+         }
+
          /* (2b) Track the anchor through a frame-slot spill/reload so a
           *      reloaded copy in another register is also recognized.
           *        spill:  mov %anchor_reg, disp(%ebp|%esp)
@@ -1642,6 +1679,44 @@ namespace MachO {
 
    template <Bits bits>
    void Section<bits>::Build(BuildEnv<bits>& env) {
+      /* ZEROFILL sections (S_ZEROFILL / S_GB_ZEROFILL / S_THREAD_LOCAL_ZEROFILL
+       * — __DATA,__bss/__common) reserve VMADDR space only: they occupy no
+       * file bytes, so the file-offset cursor must not move (a zerofill
+       * section contributes to segment vmsize, not filesize; Segment::Build's
+       * filesize = offset delta then stays correct automatically). Align the
+       * vmaddr only, pin the header's offset to 0 (the Mach-O convention for
+       * zerofill), and derive the header size from the VMADDR delta — the
+       * generic offset-delta below would report 0 once the blobs stop
+       * advancing the offset cursor. Content is the spanning ZeroBlob
+       * extent(s) plus zero-size placeholders (symbol/export/memdisp
+       * anchors), whose Build assigns their final interior vmaddrs. */
+      {
+         const uint32_t stype = sect.flags & SECTION_TYPE;
+         if (stype == S_ZEROFILL || stype == S_GB_ZEROFILL ||
+             stype == S_THREAD_LOCAL_ZEROFILL) {
+            env.loc.vmaddr = align_up(env.loc.vmaddr,
+                                      (std::size_t)1 << sect.align);
+            sect.addr = env.loc.vmaddr;
+            sect.offset = 0;
+            for (SectionBlob<bits> *elem : content) {
+               elem->Build(env);
+            }
+            sect.size = env.loc.vmaddr - (std::size_t)sect.addr;
+            /* Zerofill carries no section relocations (there are no file
+             * bytes to relocate); emit the conventional reloff=0/nreloc=0
+             * instead of a junk cursor offset. */
+            sect.nreloc = relocs.size();
+            if (relocs.empty()) {
+               sect.reloff = 0;
+            } else {
+               Location relloc;
+               env.allocate(sect.nreloc * RelocationInfo<bits>::size(), relloc);
+               sect.reloff = relloc.offset;
+            }
+            return;
+         }
+      }
+
       env.align(sect.align);
       loc(env.loc);
 
@@ -1819,6 +1894,84 @@ namespace MachO {
    template <Bits bits>
    void Section<bits>::Parse2(ParseEnv<bits>& env) {
       auto content_it = content.begin();
+
+      /* ZEROFILL sections parse as ONE spanning ZeroBlob extent (no per-byte
+       * blobs — see ZeroBlob), so a placeholder whose vmaddr lands INSIDE the
+       * extent (an interior __bss/__common symbol value, export entry, or
+       * instruction memdisp target — the common case: every zerofill variable
+       * beyond the first) has no blob boundary to sit at. The generic path
+       * below would bump it past the extent ("past last blob" -> section
+       * end), so its Build-time vmaddr — and with it every nlist n_value /
+       * export address / rip-relative disp resolved through it — would be
+       * wrong. Instead SPLIT the extent at the placeholder's vmaddr:
+       *   [start, end)  ->  [start, ph) + placeholder + [ph, end)
+       * Both halves stay registered in the vmaddr resolver (the tail
+       * registers on creation), so interior resolve_containing() lookups
+       * still snap to a covering extent + exact byte offset, and Build lays
+       * the pieces out back-to-back — vmaddr-identical to the unsplit span. */
+      {
+         const uint32_t stype = sect.flags & SECTION_TYPE;
+         if (stype == S_ZEROFILL || stype == S_GB_ZEROFILL ||
+             stype == S_THREAD_LOCAL_ZEROFILL) {
+            for (auto placeholder_it = env.placeholders.lower_bound(sect.addr);
+                 placeholder_it != env.placeholders.end() &&
+                    placeholder_it->first < sect.addr + sect.size;
+                 placeholder_it = env.placeholders.erase(placeholder_it))
+               {
+                  const std::size_t ph_vmaddr = placeholder_it->first;
+                  Placeholder<bits> *placeholder = placeholder_it->second;
+                  placeholder->segment = env.current_segment;
+                  placeholder->section = this;
+
+                  /* First blob whose extent reaches (or starts at/past) the
+                   * placeholder. Placeholders arrive in ascending vmaddr
+                   * order, so the cursor never rewinds. */
+                  while (content_it != content.end() &&
+                         (*content_it)->loc.vmaddr + (*content_it)->size() <=
+                            ph_vmaddr) {
+                     ++content_it;
+                  }
+                  if (content_it == content.end() ||
+                      (*content_it)->loc.vmaddr >= ph_vmaddr) {
+                     /* At a blob boundary (split point of an earlier
+                      * placeholder, or the section start) — insert before,
+                      * exactly like the generic path. end() means past every
+                      * extent (malformed span); append like the generic
+                      * fallback so downstream resolution still has a target. */
+                     content.insert(content_it, placeholder);
+                     continue;
+                  }
+
+                  auto *extent = dynamic_cast<ZeroBlob<bits> *>(*content_it);
+                  if (extent == nullptr) {
+                     /* Interior of a non-extent blob (cannot happen in a
+                      * zerofill section parsed by ZeroBlob::Parse; guard for
+                      * synthetic content). Mirror the generic soft-mismatch:
+                      * warn + insert before the NEXT blob. */
+                     fprintf(stderr,
+                             "warning: placeholder vmaddr 0x%zx inside "
+                             "non-extent blob in zerofill section %s\n",
+                             ph_vmaddr, name().c_str());
+                     auto next_it = std::next(content_it);
+                     content.insert(next_it, placeholder);
+                     continue;
+                  }
+
+                  /* Split the extent. */
+                  const std::size_t head = ph_vmaddr - extent->loc.vmaddr;
+                  const std::size_t tail = extent->size_ - head;
+                  extent->size_ = head;
+                  ZeroBlob<bits> *tail_extent = ZeroBlob<bits>::Create(
+                     Location(extent->loc.offset + head, ph_vmaddr), env, tail);
+                  tail_extent->segment = env.current_segment;
+                  tail_extent->section = this;
+                  auto next_it = std::next(content_it);
+                  content.insert(next_it, placeholder);
+                  content.insert(next_it, tail_extent);
+               }
+            return;
+         }
+      }
 
       /* for each placeholder, find blob in this section to insert it before */
       for (auto placeholder_it = env.placeholders.lower_bound(sect.addr);

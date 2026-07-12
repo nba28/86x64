@@ -353,6 +353,27 @@ namespace MachO {
       return total_size;
    }
 
+   /* Insert a synthesized section BEFORE any zerofill section in the segment.
+    * Zerofill (__bss/__common) must be the segment's vmaddr TAIL: it occupies
+    * no file bytes, so any file-backed section placed after it would break the
+    * segment's linear file<->vm correspondence (offset delta != vmaddr delta)
+    * AND overlay its file bytes onto the zerofill's mapped page — dyld maps
+    * [fileoff, fileoff+filesize) contiguously, so the zerofill range inside
+    * that span would read the later section's CONTENT instead of zeros
+    * (observed: __86x64_pcmap rows appearing in __bss globals once zerofill
+    * stopped advancing the file cursor). Mirrors the __jt_ptrs placement in
+    * Dysymtab::synthesize_undef_jump_stubs. */
+   template <Bits b>
+   static void insert_section_before_zerofill(Segment<b> *seg, Section<b> *sect) {
+      auto insert_it = seg->sections.end();
+      for (auto it = seg->sections.begin(); it != seg->sections.end(); ++it) {
+         const uint32_t st = (*it)->sect.flags & SECTION_TYPE;
+         if (st == S_ZEROFILL || st == S_GB_ZEROFILL ||
+             st == S_THREAD_LOCAL_ZEROFILL) { insert_it = it; break; }
+      }
+      seg->sections.insert(insert_it, sect);
+   }
+
    template <Bits b>
    void Archive<b>::divert_narrow_const_binds_to_xrel() {
       if constexpr (b != Bits::M64) {
@@ -497,7 +518,7 @@ namespace MachO {
          sect->content.push_back(blob);
          blob->section = sect;
          blob->segment = data_seg;
-         data_seg->sections.push_back(sect);
+         insert_section_before_zerofill(data_seg, sect);
          invalidate_segments_cache();
 
          if (std::getenv("MACHO_BUILD_DEBUG")) {
@@ -816,7 +837,7 @@ namespace MachO {
          sect->content.push_back(blob);
          blob->section = sect;
          blob->segment = data_seg;
-         data_seg->sections.push_back(sect);
+         insert_section_before_zerofill(data_seg, sect);
          invalidate_segments_cache();
          if (std::getenv("MACHO_BUILD_DEBUG")) {
             fprintf(stderr, "inject_pcmap_section: %zu instructions -> "
@@ -925,7 +946,7 @@ namespace MachO {
          sect->content.push_back(blob);
          blob->section = sect;
          blob->segment = data_seg;
-         data_seg->sections.push_back(sect);
+         insert_section_before_zerofill(data_seg, sect);
          invalidate_segments_cache();
          if (std::getenv("MACHO_BUILD_DEBUG")) {
             fprintf(stderr, "inject_abs32_section: %zu abs32 site(s) -> "
@@ -986,7 +1007,7 @@ namespace MachO {
          sect->content.push_back(blob);
          blob->section = sect;
          blob->segment = data_seg;
-         data_seg->sections.push_back(sect);
+         insert_section_before_zerofill(data_seg, sect);
          invalidate_segments_cache();
          if (std::getenv("MACHO_BUILD_DEBUG")) {
             fprintf(stderr, "inject_ehlsda_section: %zu functions -> "

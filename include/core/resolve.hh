@@ -157,6 +157,20 @@ namespace MachO {
          todo_containing.emplace_back(pointer, offset_out, key, override);
       }
 
+      /* Cancel a pending resolve_containing() for `key` whose destination is
+       * `pointer` (the containing-fallback sibling of cancel() above). Used
+       * when a later analysis pass reinterprets an operand as a non-pointer —
+       * e.g. DetectPicAnchoredDisps recognising that a heuristic pointer-
+       * immediate inside PIC-anchored code is really an anchor-relative
+       * OFFSET that merely aliases a zerofill section's (huge) vmaddr span.
+       * Without cancellation do_resolve_containing() would attach the
+       * immediate to the spanning ZeroBlob and mis-relocate the constant. */
+      void cancel_containing(const T& key, const U **pointer) {
+         todo_containing.remove_if([&](const std::tuple<const U **, std::size_t *, T, bool>& n) {
+            return std::get<0>(n) == pointer && std::get<2>(n) == key;
+         });
+      }
+
       void do_resolve_containing() {
        if constexpr (resolver_has_size<U>::value) {
          for (auto& node : todo_containing) {

@@ -85,6 +85,12 @@ namespace MachO {
       std::string sym;
       uint8_t flags;
       const SectionBlob<bits> *blob;
+      /* Intra-blob byte offset when the bind target resolved via the
+       * containing-blob fallback: a classic weak-coalesced bind can target an
+       * INTERIOR __common/__bss address (C++ commons), which since the
+       * ZeroBlob extent rework no longer has a per-byte blob registered at
+       * every zerofill vmaddr. Zero for exact-key resolutions. */
+      std::size_t blob_offset = 0;
       uint32_t index;
       /* weak_bind entry: no dylib ordinal (implicit weak lookup, -3); emit no
        * SET_DYLIB opcode and skip dylib resolution (dylib stays null). */

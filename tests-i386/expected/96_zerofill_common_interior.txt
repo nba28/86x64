@@ -1,0 +1,6 @@
+via_runtime_ptr=1122334455667788
+via_baked_ptr=1122334455667788
+baked_eq_runtime=1
+zero_neighbor=0
+after_marker=7
+exit_code: 42

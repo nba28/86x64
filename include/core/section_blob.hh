@@ -83,23 +83,53 @@ namespace MachO {
       template <Bits b> friend class DataBlob;
    };
 
+   /*
+    * One logical EXTENT of a zerofill section (S_ZEROFILL / S_GB_ZEROFILL /
+    * S_THREAD_LOCAL_ZEROFILL — __DATA,__bss/__common). Zerofill sections have
+    * NO file bytes (input header: offset=0), only a vmaddr span, so they must
+    * never be parsed from — or laid out into — file bytes. Parse creates ONE
+    * ZeroBlob spanning [loc.vmaddr, section end); Section::Parse2 splits the
+    * extent at every interior placeholder vmaddr (nlist symbol values, export
+    * entries, instruction memdisp targets) so those references keep resolving
+    * to exact addresses, while resolve_containing() snaps arbitrary interior
+    * pointers (non-lazy slots, pointer immediates) to the covering extent +
+    * byte offset.
+    *
+    * Build (overridden) reserves VMADDR space only: the file-offset cursor
+    * must NOT advance — a zerofill section contributes to segment vmsize, not
+    * filesize. The historical per-byte parse (one 1-byte ZeroBlob per section
+    * byte, driven by the file-offset sweep) both fabricated file offsets for
+    * 1.5MB of nonexistent bytes (bloating every downstream image and skewing
+    * the derived section size) and flooded the resolvers with per-byte keys
+    * that let integer offsets aliasing the huge span resolve "exactly" —
+    * the Halo renderer SIGFPE class. Emit writes nothing.
+    */
    template <Bits bits>
    class ZeroBlob: public SectionBlob<bits> {
    public:
-      virtual std::size_t size() const override { return 1; }
+      std::size_t size_ = 1; /*!< extent byte count (whole section at parse;
+                                  shortened when Parse2 splits at a
+                                  placeholder) */
+      virtual std::size_t size() const override { return size_; }
       virtual void Emit(Image& img, std::size_t offset) const override {}
+      virtual void Build(BuildEnv<bits>& env) override;
 
       static SectionBlob<bits> *Parse(const Image& img, const Location& loc, ParseEnv<bits>& env)
       { return new ZeroBlob(img, loc, env); }
+      /* Split tail (Section::Parse2): an extent starting at loc spanning
+       * `size` bytes, registered in the vmaddr resolver like any parsed blob. */
+      static ZeroBlob<bits> *Create(const Location& loc, ParseEnv<bits>& env, std::size_t size)
+      { return new ZeroBlob(loc, env, size); }
       virtual ZeroBlob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override
       { return new ZeroBlob<opposite<bits>>(*this, env); }
-      
+
    private:
-      ZeroBlob(const Image& img, const Location& loc, ParseEnv<bits>& env):
-         SectionBlob<bits>(loc, env) {}
+      ZeroBlob(const Image& img, const Location& loc, ParseEnv<bits>& env);
+      ZeroBlob(const Location& loc, ParseEnv<bits>& env, std::size_t size):
+         SectionBlob<bits>(loc, env), size_(size) {}
       ZeroBlob(const ZeroBlob<opposite<bits>>& other, TransformEnv<opposite<bits>>& env):
-         SectionBlob<bits>(other, env) {}
-      
+         SectionBlob<bits>(other, env), size_(other.size_) {}
+
       template <Bits b> friend class ZeroBlob;
    };
 
@@ -202,6 +232,16 @@ namespace MachO {
       std::size_t pointee_offset = 0;             /*!< intra-blob byte offset when
                                                       pointee came from a
                                                       containing-blob fallback */
+      /*!< The pointer classification came from a VALUE-ALIAS probe ("imm32
+       * lands inside a segment's vmaddr range"), not from the instruction's
+       * structure (a bare `[disp32]` operand IS an address; an ALU/stack
+       * immediate merely MIGHT be). Lets a later analysis pass with better
+       * context (DetectPicAnchoredDisps: PIC-anchored code never embeds
+       * absolute-address immediates) cancel the speculative resolution —
+       * required for values aliasing a huge zerofill span, where the
+       * false-positive rate of the probe is catastrophic. Set at the
+       * heuristic Immediate::Parse call sites in instruction.cc. */
+      bool heuristic = false;
       virtual std::size_t size() const override { return sizeof(uint32_t); }
       
       static Immediate<bits> *Parse(const Image& img, const Location& loc, ParseEnv<bits>& env,
