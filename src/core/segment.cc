@@ -112,7 +112,38 @@ namespace MachO {
          segment_command.vmaddr = env.loc.vmaddr;
       }
       
+      /* Build the sections. When the segment transitions from file-backed to
+       * ZEROFILL (__bss/__common), page-align the vmaddr AND advance the file
+       * offset cursor to the same page boundary ONCE, at the first zerofill
+       * section. Rationale: the segment's filesize is derived below from the
+       * (page-rounded) file-offset cursor. If the first zerofill section began at
+       * a non-page-aligned vmaddr immediately after a file-backed section (e.g.
+       * Halo's synthesized __86x64_abs32 table ends mid-page right before __bss),
+       * that page round-up spilled up to a page of FILE backing INTO the zerofill
+       * vmaddr — so __bss/__common bytes were mapped from the file instead of
+       * anonymous zero-fill. On Halo that placed a C++ static-init RUN-ONCE GUARD
+       * FLAG at __bss[0] on a file page (a latent non-zero-guard hazard). Zerofill
+       * sections advance vmaddr but not the offset cursor, so BEFORE any zerofill
+       * the two cursors track with a constant segment skew (vmaddr - offset ==
+       * segment.vmaddr - segment.fileoff); that equality pinpoints the first
+       * zerofill. Aligning both cursors there makes the file-backed extent end
+       * EXACTLY on the zerofill page boundary, so every zerofill byte is genuine
+       * zero-fill and the page-rounded filesize no longer overlaps it. The offset
+       * bump is a hole the emitter zero-pads; no file-backed section moves (they
+       * were already laid out). */
+      const std::size_t seg_skew = segment_command.vmaddr - segment_command.fileoff;
+      bool zf_aligned = false;
       for (Section<bits> *sect : sections) {
+         const uint32_t stype = sect->sect.flags & SECTION_TYPE;
+         const bool is_zf = (stype == S_ZEROFILL || stype == S_GB_ZEROFILL ||
+                             stype == S_THREAD_LOCAL_ZEROFILL);
+         if (is_zf && !zf_aligned &&
+             (env.loc.vmaddr - env.loc.offset) == seg_skew) {
+            /* first zerofill, cursors still in sync -> snap both to a page */
+            env.loc.vmaddr = align_up(env.loc.vmaddr, PAGESIZE);
+            env.loc.offset = align_up(env.loc.offset, PAGESIZE);
+            zf_aligned = true;
+         }
          sect->Build(env);
       }
 
@@ -126,7 +157,7 @@ namespace MachO {
       /* post-conditions for vmaddr */
       env.loc.vmaddr = align_up(env.loc.vmaddr, PAGESIZE);
       env.loc.offset = align_up(env.loc.offset, PAGESIZE); /* experimental! */
-      
+
       segment_command.filesize = env.loc.offset - segment_command.fileoff;
       segment_command.vmsize = align_up<size_t>(env.loc.vmaddr - segment_command.vmaddr, PAGESIZE);
    }
