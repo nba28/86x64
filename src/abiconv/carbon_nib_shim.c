@@ -157,6 +157,16 @@ static OSStatus (*n_HIViewSetNeedsDisplay)(HIViewRef, uint8_t);
 static OSStatus (*n_HIViewGetBounds)(HIViewRef, HIRectD *);
 static OSStatus (*n_HIViewConvertPoint)(void *, HIViewRef, HIViewRef);  /* pt,from,to */
 static OSStatus (*n_HIViewSetVisible)(HIViewRef, uint8_t);
+// content-view resolution: the root returned by HIViewGetRoot spans the whole window
+// STRUCTURE (title bar + content); nib control coords are CONTENT-relative, so
+// self-drawn controls must attach to the content view, not the structure root.
+static HIViewRef (*n_HIViewGetFirstSubview)(HIViewRef);
+static OSStatus  (*n_GetWindowBounds)(WindowRef, uint16_t /*regionCode*/, CRect *);
+// editability: a bare com.apple.hiview advertises NO features, so HIToolbox never
+// routes keyboard focus to it (SetKeyboardFocus -> errCantFocus) and the edit field
+// can't be typed into. kHIViewFeatureGetsFocusOnClick makes a click focus the view so
+// our edit_focus/edit_key handlers fire.
+static OSStatus  (*n_HIViewChangeFeatures)(HIViewRef, uint64_t /*set*/, uint64_t /*clear*/);
 // window-shown title bridge: apply the NSWindow title once the window materializes.
 static void *   (*n_GetWindowEventTarget)(WindowRef);       /* EventTargetRef (ptr) */
 static OSStatus (*n_RemoveEventHandler)(void *);            /* EventHandlerRef */
@@ -176,7 +186,7 @@ static void resolve_once(void) {
     R(CreateNewMenu); R(AppendMenuItemTextWithCFString); R(SetMenuID);
     R(InsertMenu); R(DeleteMenu); R(PopUpMenuSelect);
     R(HIViewSetNeedsDisplay); R(HIViewGetBounds); R(HIViewConvertPoint); R(HIViewSetVisible);
-    R(RemoveEventHandler);
+    R(RemoveEventHandler); R(HIViewGetFirstSubview); R(GetWindowBounds); R(HIViewChangeFeatures);
 #undef R
     n_GetControlEventTarget2 = (void *)dlsym(RTLD_DEFAULT, "GetControlEventTarget");
     n_InstallEventHandler2   = (void *)dlsym(RTLD_DEFAULT, "InstallEventHandler");
@@ -709,6 +719,10 @@ static ControlRef make_edit_field(const char *x, long lo, long hi, const CRect *
         n_InstallEventHandler2(tgt, (void *)edit_key,     1, &kd, e, NULL);
     }
     if (n_HIViewSetVisible) n_HIViewSetVisible(c, 1);   // base hiview starts hidden
+    // A bare hiview advertises no features, so HIToolbox won't route keyboard focus to
+    // it and the field is non-editable. Advertise kHIViewFeatureGetsFocusOnClick (1<<8)
+    // so a click focuses the field (via sd_hittest) and edit_focus/edit_key service typing.
+    if (n_HIViewChangeFeatures) n_HIViewChangeFeatures(c, (1ull << 8), 0);
     if (parent) n_HIViewAddSubview(parent, c);
     return c;
 }
@@ -867,6 +881,17 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
             // resolves the field for the app's runtime value set.
             ControlRef ec = make_edit_field(x, il, ih, &r, parent);
             if (ec) wire_ids(x, il, ih, ec);
+            if (ec && getenv("ABICONV_CTRL_TRACE")) {
+                // Log the created field's ControlID signature so an on-target run can
+                // confirm the port fields ('Sprt'/'Cprt') were built + registered, and
+                // cross-check the ptr against the one SetControlData later resolves.
+                uint32_t sig = 0; int cid = 0;
+                int hs = nibx_ostype(x, il, ih, "controlSignature", &sig);
+                nibx_int(x, il, ih, "controlID", &cid);
+                fprintf(stderr, "[ctrl] make_edit_field ec=%p sig=%c%c%c%c id=%d\n", ec,
+                        hs ? (char)(sig>>24) : '?', hs ? (char)(sig>>16) : '?',
+                        hs ? (char)(sig>>8)  : '?', hs ? (char)sig : '?', cid);
+            }
             p = oe; continue;
         } else if (!strcmp(cls, "IBCarbonSeparator") ||
                    !strcmp(cls, "IBCarbonRelevanceBar") || !strcmp(cls, "IBCarbonLittleArrows")) {
@@ -968,6 +993,61 @@ static void title_on_show(WindowRef win, CFStringRef title) {
     }
 }
 
+// ---- content-view resolution (UNIVERSAL layout-origin fix) -----------------
+// A nib stores every control's bounds in the window's CONTENT coordinate system
+// (origin at the top-left of the content region, i.e. just below the title bar).
+// But HIViewGetRoot(win) returns the ROOT view, which spans the whole window
+// STRUCTURE (title bar + content) — its bounds are ~22px (the title-bar height)
+// TALLER than the content region and its origin (0,0) sits at the structure top.
+// Native Create*Control(win, ...) auto-embed into the real content view, so they
+// land correctly; but the self-drawn controls (group frame / popup / edit field)
+// attach with HIViewAddSubview(parent, ...). If `parent` is the structure root,
+// their content-relative y is measured from the structure top, so they render
+// ~22px too HIGH and collide with the title bar (the "Rendering Pipeline" group
+// box overlapping the title bar). Fix: embed the self-drawn controls into the
+// CONTENT view instead. The content view is the root's subview sized to the
+// window's content region (HIViewFindByID(kHIViewWindowContentID) is not reliably
+// tagged on these bridged windows, so identify it structurally by height). This is
+// universal for every Carbon nib window build_window materializes (no app gating);
+// a graceful fall-back to the root keeps behavior unchanged if it can't be found.
+static ControlRef content_view_of(WindowRef win, ControlRef root) {
+    if (!root) return root;
+    if (!n_HIViewGetFirstSubview || !n_HIViewGetBounds) return root;
+    // content-region height in the window's local coords (bottom - top).
+    double content_h = 0;
+    if (n_GetWindowBounds) {
+        CRect cr = { 0, 0, 0, 0 };
+        if (n_GetWindowBounds(win, 33 /*kWindowContentRgn*/, &cr) == 0)
+            content_h = (double)(cr.bottom - cr.top);
+    }
+    HIRectD rb = { 0, 0, 0, 0 };
+    n_HIViewGetBounds(root, &rb);
+    // If the root already matches the content region (no oversized title-bar
+    // band), it IS the content view — attach directly.
+    if (content_h > 0 && rb.h <= content_h + 1.0) return root;
+    // Otherwise the content view is the root's subview whose height matches the
+    // content region (fall back to the first subview, then the root itself).
+    HIViewRef first = n_HIViewGetFirstSubview(root);
+    if (content_h > 0) {
+        for (HIViewRef v = first; v; ) {
+            HIRectD vb = { 0, 0, 0, 0 };
+            n_HIViewGetBounds(v, &vb);
+            if (vb.h >= content_h - 1.0 && vb.h <= content_h + 1.0) return v;
+            // HIViewGetNextView walks siblings; resolve lazily to avoid a new decl.
+            static HIViewRef (*next)(HIViewRef);
+            if (!next) next = (HIViewRef (*)(HIViewRef))dlsym(RTLD_DEFAULT, "HIViewGetNextView");
+            v = next ? next(v) : NULL;
+        }
+        // known oversized root but no height-matched subview: prefer the first
+        // subview (the content view is conventionally the root's first child).
+        return first ? first : root;
+    }
+    // We could not measure the content region (GetWindowBounds unavailable), so we
+    // cannot prove the root is oversized — attach to the root as before (no descent),
+    // which is correct whenever there is no title-bar band. Never risk mis-descending.
+    return root;
+}
+
 // Custom-build window `wname` from objects.xib. Returns a WindowRef or NULL.
 static WindowRef build_window(const char *xibpath, CFStringRef wname) {
     char wc[256]; if (!CFStringGetCString(wname, wc, sizeof wc, kCFStringEncodingUTF8)) return NULL;
@@ -1023,13 +1103,19 @@ static WindowRef build_window(const char *xibpath, CFStringRef wname) {
     ControlRef root = NULL;
     if (!n_CreateRootControl || n_CreateRootControl(win, &root) != 0 || !root)
         root = n_HIViewGetRoot ? n_HIViewGetRoot(win) : NULL;
+    // Self-drawn controls must embed into the CONTENT view, not the structure root,
+    // or their content-relative nib y is measured from the title-bar top and they
+    // render ~22px too high (group box collides with the title bar). See
+    // content_view_of. Native Create*Control(win,...) already target the content
+    // view, so this only redirects the HIViewAddSubview(parent,...) placements.
+    ControlRef parent_view = content_view_of(win, root);
 
     const char *rc = strstr(x + ws, "class=\"IBCarbonRootControl\"");
     if (rc && rc - x < we) {
         long rs = rc - x; while (rs > ws && strncmp(x + rs, "<object ", 8)) rs--;
         const char *gt = strchr(x + rs, '>'); long rlo = gt ? gt - x + 1 : rs;
         long rend = nibx_match_end(x, rs); if (rend < 0 || rend > we) rend = we;
-        build_children(x, rlo, rend, root, win);
+        build_children(x, rlo, rend, parent_view, win);
     }
     free(x);
     return win;

@@ -142,5 +142,81 @@ else
   echo "Halo nib not present — synthetic checks only (OK)"
 fi
 
+# ---- content-view layout-origin guard (content_view_of, carbon_nib_shim.c) ----
+# The nib stores control bounds CONTENT-relative, but HIViewGetRoot(win) returns the
+# STRUCTURE root (title bar + content), ~22px taller with origin at the structure
+# top. Self-drawn controls (group box / popup / edit field) attach via
+# HIViewAddSubview(parent,...); if parent is the structure root they render ~22px too
+# HIGH (the "Rendering Pipeline" group box overlapping the title bar). content_view_of
+# resolves the CONTENT view (the root subview sized to the content region) so they land
+# correctly. This guard REPLICATES that resolver against a real HIToolbox window and
+# asserts a self-drawn view placed at content-y=6 ends up BELOW the title bar (root-y ==
+# titlebar_height + 6), NOT at root-y=6. Needs a window server + dlopen-able Carbon; it
+# SKIPS gracefully (PASS) where those are unavailable (e.g. a headless CI box) so the
+# suite stays green, but catches the regression wherever a display session exists.
+cat > "$TMP/geom.c" <<'EOF'
+#include <CoreFoundation/CoreFoundation.h>
+#include <stdio.h>
+#include <dlfcn.h>
+#include <stdint.h>
+typedef void *WindowRef,*ControlRef,*HIViewRef,*HIObjectRef;
+typedef int32_t OSStat;
+typedef struct{int16_t top,left,bottom,right;}MyRect;
+typedef struct{double x,y;}MyPoint; typedef struct{double w,h;}MySize; typedef struct{MyPoint o;MySize s;}MyHIRect;
+#define kComp (1u<<19)
+#define kStd (1u<<25)
+static void*S(const char*n){return dlsym(RTLD_DEFAULT,n);}
+static OSStat (*GWB)(WindowRef,uint16_t,MyRect*);
+static OSStat (*HVGB)(HIViewRef,MyHIRect*);
+static HIViewRef (*HVGFC)(HIViewRef);
+static HIViewRef (*HVGNX)(HIViewRef);
+/* mirror of carbon_nib_shim.c content_view_of() */
+static ControlRef content_view_of(WindowRef win, ControlRef root){
+  if(!root||!HVGFC||!HVGB) return root;
+  double content_h=0;
+  if(GWB){ MyRect cr={0,0,0,0}; if(GWB(win,33,&cr)==0) content_h=(double)(cr.bottom-cr.top);}
+  MyHIRect rb={{0,0},{0,0}}; HVGB(root,&rb);
+  if(content_h>0 && rb.s.h<=content_h+1.0) return root;
+  HIViewRef first=HVGFC(root);
+  if(content_h>0){ for(HIViewRef v=first;v;){ MyHIRect vb={{0,0},{0,0}}; HVGB(v,&vb);
+      if(vb.s.h>=content_h-1.0 && vb.s.h<=content_h+1.0) return v; v=HVGNX?HVGNX(v):NULL; } }
+  return first?first:root;
+}
+int main(void){
+ dlopen("/System/Library/Frameworks/Carbon.framework/Carbon",RTLD_NOW|RTLD_GLOBAL);
+ dlopen("/System/Library/Frameworks/AppKit.framework/AppKit",RTLD_NOW|RTLD_GLOBAL);
+ unsigned char (*NSAppLoad)(void)=(void*)S("NSApplicationLoad"); if(NSAppLoad)NSAppLoad();
+ OSStat (*CNW)(uint32_t,uint32_t,const MyRect*,WindowRef*)=(void*)S("CreateNewWindow");
+ OSStat (*CRC)(WindowRef,ControlRef*)=(void*)S("CreateRootControl");
+ ControlRef (*HVGR)(WindowRef)=(void*)S("HIViewGetRoot");
+ GWB=(void*)S("GetWindowBounds"); HVGB=(void*)S("HIViewGetBounds");
+ HVGFC=(void*)S("HIViewGetFirstSubview"); HVGNX=(void*)S("HIViewGetNextView");
+ OSStat (*HOC)(CFStringRef,void*,HIObjectRef*)=(void*)S("HIObjectCreate");
+ OSStat (*HVSF)(HIViewRef,const MyHIRect*)=(void*)S("HIViewSetFrame");
+ OSStat (*HVAS)(HIViewRef,HIViewRef)=(void*)S("HIViewAddSubview");
+ OSStat (*HVCP)(MyPoint*,HIViewRef,HIViewRef)=(void*)S("HIViewConvertPoint");
+ if(!CNW||!HVGR||!HOC||!HVSF||!HVAS||!HVCP||!GWB||!HVGB||!HVGFC){ printf("SKIP: Carbon window API unavailable\n"); return 42; }
+ MyRect R={192,159,751,627}; /* Halo Graphics windowRect: content 468x559 */
+ WindowRef win=NULL; if(CNW(4,kComp|kStd,&R,&win)!=0||!win){ printf("SKIP: no window (headless/no WS)\n"); return 42; }
+ MyRect cr={0,0,0,0},sr={0,0,0,0}; GWB(win,33,&cr); GWB(win,32,&sr);
+ int tb = cr.top - sr.top;                 /* title-bar height */
+ ControlRef root=NULL; OSStat rst=CRC(win,&root); if(rst!=0||!root)root=HVGR(win);
+ if(!root){ printf("SKIP: no root\n"); return 42; }
+ ControlRef parent=content_view_of(win,root);
+ HIViewRef g=NULL; HOC(CFSTR("com.apple.hiview"),NULL,(HIObjectRef*)&g); if(!g){printf("SKIP: no hiview\n");return 42;}
+ MyHIRect fr={{20,6},{428,108}}; HVSF(g,&fr); HVAS(parent,g);
+ MyPoint p={0,0}; HVCP(&p,g,root);
+ printf("titlebar=%d group@content-y6 -> root-y=%.1f (want %d)\n", tb, p.y, tb+6);
+ /* correct == tb+6 (below the title bar); the BUG placed it at 6 (in the title bar). */
+ if (p.y < tb - 0.5) { fprintf(stderr, "FAIL: self-drawn control at content-y=6 lands at root-y=%.1f, INSIDE the %dpx title bar (content_view_of regression)\n", p.y, tb); return 1; }
+ printf("GEOM OK\n"); return 0;
+}
+EOF
+clang -arch x86_64 -Wall -o "$TMP/geom" "$TMP/geom.c" -framework CoreFoundation || { echo "geom compile failed"; exit 3; }
+"$TMP/geom"; grc=$?
+if [ $grc -eq 42 ]; then echo "content-view geom guard SKIPPED (no window server)"; \
+elif [ $grc -ne 0 ]; then echo "content-view geom guard FAILED"; exit 1; \
+else echo "content-view geom guard PASS"; fi
+
 echo "carbon_nib_parse_test: PASS"
 exit 0

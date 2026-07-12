@@ -167,10 +167,18 @@ uint32_t shim_SetControlData(uint32_t *a) {
     int is_ours = sd_ctrl_get_text(c, NULL, 0) >= 0;
     if (ctrl_trace()) {
         uint32_t h = (data && (tag == 'cfst')) ? *(uint32_t *)data : 0;
+        // Also echo the raw 'text' bytes the app is pushing (the port default
+        // "2302"/"2303"): on-target this shows whether the value reaches the field
+        // (ours=1) and what it is, vs falling through to native (ours=0 -> empty).
+        char txt[24] = "";
+        if (tag == 'text' && data) {
+            uint32_t n = size < sizeof txt - 1 ? size : sizeof txt - 1;
+            memcpy(txt, data, n); txt[n] = 0;
+        }
         fprintf(stderr, "[ctrl] SetControlData ctrl_h=0x%08x -> ptr=%p ours=%d "
-                        "tag=%c%c%c%c size=%u cfstr_h=0x%08x\n",
+                        "tag=%c%c%c%c size=%u cfstr_h=0x%08x text='%s'\n",
                 a[0], c, is_ours,
-                (char)(tag>>24),(char)(tag>>16),(char)(tag>>8),(char)tag, size, h);
+                (char)(tag>>24),(char)(tag>>16),(char)(tag>>8),(char)tag, size, h, txt);
     }
     if (is_ours) {   // c is one of our edit fields
         if (tag == 'cfst' && data) {
