@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -262,6 +262,18 @@ nopie-exec-dylib-rebase: $(MACHO_TOOL)
 # Needs the i386 sysroot + ABICONV_RUN_INITS (set by the script); SKIPs without.
 dyld-multicopy: $(MACHO_TOOL)
 	@bash dyld_multicopy_test.sh $(MACHO_TOOL)
+
+# zerofill-reslide: regression for the zerofill-section double-slide fix
+# (objc_slide.c slide_data_fnptrs skips S_ZEROFILL/S_GB_ZEROFILL/
+# S_THREAD_LOCAL_ZEROFILL). A __bss/__common word is always a RUNTIME value
+# (no file bytes), so a second co-located libabiconv copy's add-image re-scan
+# must never re-slide it (Civ IV: GTokenizer::FreeAllBuffers()'s __common
+# buffer array double-slid -> write-into-read-only-__TEXT at exit). Native
+# unit test over objc_slide.c.o's test-only export with a forced nonzero
+# slide (the harness can't slide translated no_pie images). SKIPs without the
+# built objc_slide.c.o.
+zerofill-reslide: $(MACHO_TOOL)
+	@bash zerofill_reslide_test.sh $(MACHO_TOOL)
 
 # stripped-stackarg-procptr: regression for the stripped-binary stack-arg
 # ProcPtr relocation fix (core instruction.cc; Halo CE renderer-check event

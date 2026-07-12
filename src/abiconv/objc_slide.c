@@ -1378,6 +1378,27 @@ static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
                    type == S_LAZY_SYMBOL_POINTERS ||
                    type == S_MOD_INIT_FUNC_POINTERS ||
                    type == S_MOD_TERM_FUNC_POINTERS) { continue; }
+               /* NEVER scan zerofill sections (__bss / __common / TLS
+                * zerofill). They have NO file bytes, so a translate-time
+                * relocated static pointer physically CANNOT live here — the
+                * translator only ever rewrites pointers in file-backed
+                * sections. Every 4-byte word here is written at RUNTIME by
+                * the program (a heap pointer, an int, a live object field).
+                * The value-window predicate below is only sound BEFORE the
+                * program runs; a co-located libabiconv copy (multicopy
+                * deploy) whose add-image callback re-fires AFTER static
+                * inits would re-scan this image, and by then the image's
+                * vacated preferred-vmaddr window has been recycled by the
+                * low-4GB heap, so a legitimate runtime heap pointer is
+                * indistinguishable from an unslid static slot -> it gets a
+                * SECOND slide and turns into a wild (e.g. r-x __TEXT)
+                * address (Civ IV: GTokenizer::FreeAllBuffers()'s __common
+                * buffer array double-slid -> write-into-__TEXT at exit).
+                * Skipping zerofill is exact: nothing the translator wrote
+                * ever needs sliding here. */
+               if (type == S_ZEROFILL ||
+                   type == S_GB_ZEROFILL ||
+                   type == S_THREAD_LOCAL_ZEROFILL) { continue; }
                if (strncmp(sect->sectname, "__cfstring", 16) == 0) { continue; }
                /* __86x64_xrel records carry a `slot_vmaddr` field that is itself
                 * a 4-aligned intra-image __DATA pointer. Sliding it here would
@@ -1439,6 +1460,21 @@ static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
       fprintf(stderr, "abiconv objc_slide: slid %zu intra-image 4-byte "
               "__DATA pointer slots in %s\n", total_slid, imgname);
    }
+}
+
+/* Test-only entry point (zerofill_reslide_test.sh): drive slide_data_fnptrs
+ * over a caller-built in-memory Mach-O header with a chosen nonzero slide, so
+ * a guard can assert the zerofill-skip STRUCTURALLY without needing the live
+ * image to actually load at a slid address (the tests-i386 harness always
+ * places translated no_pie images at their preferred base -> real slide == 0,
+ * which would make an end-to-end double-slide unreproducible). Adds no behavior
+ * to normal execution — nothing in libabiconv calls it. */
+void _86x64_test_slide_data_fnptrs(const struct mach_header_64 *mh64,
+                                   long slide,
+                                   uint64_t text_lo, uint64_t text_hi,
+                                   uint64_t vmaddr_lo, uint64_t vmaddr_hi) {
+   slide_data_fnptrs(mh64, (intptr_t)slide, text_lo, text_hi,
+                     vmaddr_lo, vmaddr_hi, "test");
 }
 
 /* real 64-bit pointer -> low-4GB proxy handle (objc_shim.c). */
