@@ -53,7 +53,6 @@
 
 #include <CoreServices/CoreServices.h>
 #include <dlfcn.h>
-#include <libgen.h>
 #include <os/lock.h>
 #include <pthread.h>
 #include <stdint.h>
@@ -137,12 +136,33 @@ static int ae_trace(void) {
 
 typedef OSErr (*ae_handler_fn)(const AppleEvent *, AppleEvent *, SRefCon);
 
-/* Is `fn` a NATIVE address in our own runtime image (i.e. a cb_bridge
- * trampoline from NewAEEventHandlerUPP -> x64_cb_wrap), vs a bare translated
- * i386 proc in the app's dylib?  Compared by image basename so any of the
- * multi-copy libabiconv instances matches (dladdr resolves to whichever copy
- * holds the trampoline). */
+/* Is `fn` a NATIVE-ABI address (i.e. a cb_bridge trampoline from
+ * NewAEEventHandlerUPP -> x64_cb_wrap), vs a bare translated i386 proc in the
+ * app's dylib (UPP == ProcPtr on Mach-O Carbon, so apps legally install the
+ * proc bare — Civ IV does)?  Decide by MECHANISM first: the authoritative
+ * cb_tramp-table range test for THIS copy's trampolines.  Only then fall back
+ * to the image-identity heuristic (a trampoline minted by ANOTHER of the
+ * multi-copy libabiconv instances), comparing the dladdr image basenames.
+ *
+ * ⚠ Darwin basename(3) copies into ONE static internal buffer and returns it,
+ * so the old `strcmp(basename(a), basename(b))` compared that buffer with
+ * ITSELF — always equal — and EVERY handler (including bare translated i386
+ * procs) classified "native".  The native call then let the handler's i386
+ * 4-byte `ret` under-pop the 8-byte native return frame: rsp came back
+ * skewed +4, and ae_native_dispatch's own epilogue `ret` fused the saved
+ * rbp's zero high half with the low half of the OUTER (AE Manager) return
+ * address -> rip = 0xXXXXXXXX`00000000 (Civ IV kAEOpenApplication:
+ * rip=0x173efb8b`00000000, r11=ae_native_dispatch+362).  Compare path tails
+ * with strrchr instead — no shared static storage. */
+int x64_cb_fn_is_tramp(uint32_t fn32);   /* cb_bridge.c: tramp-table range */
+
+static const char *ae_path_base(const char *p) {
+   const char *s = strrchr(p, '/');
+   return s ? s + 1 : p;
+}
+
 static int ae_fn_is_native_tramp(uint32_t fn32) {
+   if (x64_cb_fn_is_tramp(fn32)) { return 1; }   /* THIS copy's trampoline */
    Dl_info self, target;
    if (!dladdr((void *)&ae_fn_is_native_tramp, &self) || !self.dli_fname) {
       return 0;
@@ -150,10 +170,8 @@ static int ae_fn_is_native_tramp(uint32_t fn32) {
    if (!dladdr((void *)(uintptr_t)fn32, &target) || !target.dli_fname) {
       return 0;
    }
-   char a[1024], b[1024];
-   strncpy(a, self.dli_fname, sizeof a - 1); a[sizeof a - 1] = 0;
-   strncpy(b, target.dli_fname, sizeof b - 1); b[sizeof b - 1] = 0;
-   return strcmp(basename(a), basename(b)) == 0;   /* both libabiconv.dylib */
+   return strcmp(ae_path_base(self.dli_fname),
+                 ae_path_base(target.dli_fname)) == 0;   /* another copy's */
 }
 
 /* The native handler installed with real AE for every app handler. */

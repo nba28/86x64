@@ -132,6 +132,14 @@ static int cb_tramp_slot(uint32_t fn32) {
    return (int)((f - lo) / stride);
 }
 
+/* Is fn32 one of THIS copy's native callback trampolines?  Authoritative
+ * (tramp-table range) test, exported so native-vs-i386 callback-value
+ * classification elsewhere (ae_shim.c's AE handler dispatch) can decide by
+ * MECHANISM instead of image-name heuristics. */
+int x64_cb_fn_is_tramp(uint32_t fn32) {
+   return cb_tramp_slot(fn32) >= 0;
+}
+
 uint64_t x64_cb_wrap(uint32_t fn32, const x64_cb_sig *sig) {
    if (fn32 == 0) { return 0; }
 

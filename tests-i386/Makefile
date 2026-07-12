@@ -199,8 +199,15 @@ cg-color:
 # (ae_shim.c). Self-contained (native x86_64 cc + CoreServices, no i386 sysroot):
 # links the real ae_shim.c and proves (A) the shadow registry preserves a FULL
 # >4GB native AEDesc pointer across the 32-bit i386 shadow key (the old path
-# truncated it -> Civ 'oapp' AEGetParamDesc crash) and (B) shim_AEGetParamPtr
-# resolves a registered shadow to the ORIGINAL native descriptor.
+# truncated it -> Civ 'oapp' AEGetParamDesc crash); (B) shim_AEGetParamPtr
+# resolves a registered shadow to the ORIGINAL native descriptor; (C)
+# ae_native_dispatch enters a bare i386 handler (low-4GB, out-of-image; UPP ==
+# ProcPtr on Mach-O so apps install the proc bare) via _86x64_call_i386 — the
+# old classifier compared Darwin basename(3)'s single static buffer with
+# itself (always equal), called EVERY handler natively, and the i386 4-byte
+# ret under-popped the native frame -> fused return PC (Civ 'oapp'
+# rip=0x173efb8b`00000000); (D) a cb_bridge trampoline handler keeps the
+# native fast path (x64_cb_fn_is_tramp).
 ae-shadow:
 	@bash ae_shadow_test.sh
 
