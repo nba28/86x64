@@ -8,6 +8,8 @@
 #include "build.hh"
 #include "parse.hh"
 #include "transform.hh"
+#include "archive.hh"   /* PcmapBlob/EhlsdaBlob::Parse walk env.archive.segments() */
+#include "section.hh"
 
 namespace MachO {
 
@@ -443,13 +445,22 @@ namespace MachO {
       const uint32_t anchor_vmaddr =
          anchor ? static_cast<uint32_t>(anchor->loc().vmaddr) : 0;
       /* Resolve each instruction's final translated vmaddr (set at Build) and
-       * sort by the section-relative offset so the runtime can binary-search. */
+       * sort by the section-relative offset so the runtime can binary-search.
+       * A parse-lifted row whose re-resolution missed keeps its on-disk
+       * trans_off verbatim (raw_trans_off fallback) — better a frozen row than
+       * a dropped one, since the runtime interpolates between rows. */
       std::vector<std::pair<int32_t, uint32_t>> rows;
       rows.reserve(ents.size());
       for (const Ent& e : ents) {
-         if (e.trans == nullptr) { continue; }
-         const int32_t trans_off =
-            static_cast<int32_t>(static_cast<uint32_t>(e.trans->loc.vmaddr) - anchor_vmaddr);
+         int32_t trans_off;
+         if (e.trans != nullptr) {
+            trans_off = static_cast<int32_t>(
+               static_cast<uint32_t>(e.trans->loc.vmaddr + e.off) - anchor_vmaddr);
+         } else if (e.raw_trans_off != INT32_MIN) {
+            trans_off = e.raw_trans_off;
+         } else {
+            continue;
+         }
          rows.emplace_back(trans_off, e.orig);
       }
       std::sort(rows.begin(), rows.end());
@@ -461,6 +472,59 @@ namespace MachO {
          img.at<uint32_t>(p + 4) = r.second;
          p += 8;
       }
+      /* dropped (unresolvable inject-time) entries leave a short tail: zero it
+       * so the section stays well-formed (count above is the emitted count). */
+      const std::size_t end = offset + size();
+      for (; p < end; p += 4) { img.at<uint32_t>(p) = 0; }
+   }
+
+   template <Bits bits>
+   SectionBlob<bits> *PcmapBlob<bits>::Parse(const Image& img, const Location& loc,
+                                             ParseEnv<bits>& env) {
+      /* One blob for the WHOLE section (the __86x64_xrel/__86x64_abs32
+       * pattern). Reconstruct the rows and RE-RESOLVE each translated
+       * instruction (old __text vmaddr + trans_off) to the blob currently
+       * containing it, so this build's Emit re-emits the row against the
+       * post-re-layout addresses. `orig` stays verbatim: it lives in the
+       * frozen ORIGINAL-i386 address space, which the generic DataParser
+       * round-trip this replaces used to pointer-detect and corrupt whenever
+       * the input image's base aliased the M64 layout window (guard
+       * pcmap_stage_shift_test.sh). */
+      auto *blob = new PcmapBlob<bits>(loc, env);
+      const uint32_t magic = img.at<uint32_t>(loc.offset + 0);
+      if (magic != MAGIC) {
+         throw error("__86x64_pcmap: bad magic 0x%08x on reparse", magic);
+      }
+      /* Anchor on __text, exactly like inject_pcmap_section: the stored
+       * trans_offs are relative to its CURRENT (on-disk) vmaddr; Emit
+       * re-derives them against its post-re-layout vmaddr. __TEXT precedes
+       * __DATA in every image we emit, so the section object already exists. */
+      const Section<bits> *text = nullptr;
+      for (Segment<bits> *seg : env.archive.segments()) {
+         for (Section<bits> *s : seg->sections) {
+            if (s->name() == "__text") { text = s; break; }
+         }
+         if (text != nullptr) { break; }
+      }
+      if (text == nullptr) {
+         throw error("__86x64_pcmap reparse: no __text section to anchor on");
+      }
+      blob->anchor = text;
+      const std::size_t text_addr = text->sect.addr;
+      const uint32_t count = img.at<uint32_t>(loc.offset + 4);
+      blob->ents.reserve(count); /* keep &ents.back() stable for deferred resolve */
+      for (uint32_t i = 0; i < count; ++i) {
+         const std::size_t eo = loc.offset + 8 + static_cast<std::size_t>(i) * 8;
+         Ent ent;
+         ent.raw_trans_off = img.at<int32_t>(eo + 0);
+         ent.orig          = img.at<uint32_t>(eo + 4);
+         blob->ents.push_back(ent);
+         env.vmaddr_resolver.resolve_containing(
+            text_addr + static_cast<std::size_t>(
+               static_cast<int64_t>(blob->ents.back().raw_trans_off)),
+            &blob->ents.back().trans, &blob->ents.back().off);
+      }
+      return blob;
    }
 
    template <Bits bits>
@@ -471,9 +535,15 @@ namespace MachO {
       std::vector<Row> rows;
       rows.reserve(ents.size());
       for (const Ent& e : ents) {
-         if (e.func == nullptr) { continue; }
          Row r;
-         r.func_off = static_cast<int32_t>(static_cast<uint32_t>(e.func->loc.vmaddr) - text_vmaddr);
+         if (e.func != nullptr) {
+            r.func_off = static_cast<int32_t>(
+               static_cast<uint32_t>(e.func->loc.vmaddr + e.off) - text_vmaddr);
+         } else if (e.raw_func_off != INT32_MIN) {
+            r.func_off = e.raw_func_off;   /* parse-lifted frozen fallback */
+         } else {
+            continue;
+         }
          r.orig_func = e.orig_func;
          r.lsda_off = e.lsda_off;
          rows.push_back(r);
@@ -489,6 +559,49 @@ namespace MachO {
          img.at<int32_t>(p + 8) = r.lsda_off;
          p += 12;
       }
+      const std::size_t end = offset + size();
+      for (; p < end; p += 4) { img.at<uint32_t>(p) = 0; }
+   }
+
+   template <Bits bits>
+   SectionBlob<bits> *EhlsdaBlob<bits>::Parse(const Image& img, const Location& loc,
+                                              ParseEnv<bits>& env) {
+      /* Same re-parse contract as PcmapBlob::Parse: re-resolve the translated
+       * function entry (old __text vmaddr + trans_func_off); orig_func (frozen
+       * i386 space) and lsda_off (__gcc_except_tab-relative, copied verbatim)
+       * stay untouched. */
+      auto *blob = new EhlsdaBlob<bits>(loc, env);
+      const uint32_t magic = img.at<uint32_t>(loc.offset + 0);
+      if (magic != MAGIC) {
+         throw error("__86x64_ehlsda: bad magic 0x%08x on reparse", magic);
+      }
+      const Section<bits> *text = nullptr;
+      for (Segment<bits> *seg : env.archive.segments()) {
+         for (Section<bits> *s : seg->sections) {
+            if (s->name() == "__text") { text = s; break; }
+         }
+         if (text != nullptr) { break; }
+      }
+      if (text == nullptr) {
+         throw error("__86x64_ehlsda reparse: no __text section to anchor on");
+      }
+      blob->text_anchor = text;
+      const std::size_t text_addr = text->sect.addr;
+      const uint32_t count = img.at<uint32_t>(loc.offset + 4);
+      blob->ents.reserve(count); /* keep &ents.back() stable for deferred resolve */
+      for (uint32_t i = 0; i < count; ++i) {
+         const std::size_t eo = loc.offset + 8 + static_cast<std::size_t>(i) * 12;
+         Ent ent;
+         ent.raw_func_off = img.at<int32_t>(eo + 0);
+         ent.orig_func    = img.at<uint32_t>(eo + 4);
+         ent.lsda_off     = img.at<int32_t>(eo + 8);
+         blob->ents.push_back(ent);
+         env.vmaddr_resolver.resolve_containing(
+            text_addr + static_cast<std::size_t>(
+               static_cast<int64_t>(blob->ents.back().raw_func_off)),
+            &blob->ents.back().func, &blob->ents.back().off);
+      }
+      return blob;
    }
 
    template <Bits bits>

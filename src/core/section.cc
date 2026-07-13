@@ -100,6 +100,36 @@ namespace MachO {
          }
       }
 
+      /* The C++ exception PC map + per-function LSDA table
+       * (Archive::inject_pcmap_section / inject_ehlsda_section; consumed by
+       * libabiconv eh_shim.c). Same re-parse contract as __86x64_xrel /
+       * __86x64_abs32: lift each back into a live blob whose Parse re-resolves
+       * the TRANSLATED side of every row (old __text vmaddr + trans_off -> the
+       * instruction blob now there) and keeps the ORIGINAL-i386 side verbatim.
+       * The generic DataParser route these used to take pointer-detects any
+       * 4-byte word aliasing a segment vmaddr — for an input image based inside
+       * the M64 layout window the frozen i386 `orig` fields alias, so a later
+       * stage's layout shift re-emitted them "rebased": the deployed pcmap
+       * mapped translated PCs to WRONG original PCs and every C++ throw found
+       * the wrong LSDA/landing pad (guard pcmap_stage_shift_test.sh). Only M64
+       * carries these sections. */
+      if (std::string(sect.sectname,
+                      strnlen(sect.sectname, sizeof(sect.sectname))) == "__86x64_pcmap") {
+         if constexpr (bits == Bits::M64) {
+            return new Section<bits>(img, offset, env, PcmapBlob<bits>::Parse);
+         } else {
+            return new Section<bits>(img, offset, env, DataBlob<bits>::Parse);
+         }
+      }
+      if (std::string(sect.sectname,
+                      strnlen(sect.sectname, sizeof(sect.sectname))) == "__86x64_ehlsda") {
+         if constexpr (bits == Bits::M64) {
+            return new Section<bits>(img, offset, env, EhlsdaBlob<bits>::Parse);
+         } else {
+            return new Section<bits>(img, offset, env, DataBlob<bits>::Parse);
+         }
+      }
+
       /*
        * Normalise: test by SECTION_TYPE (low 8 bits), not the full flags
        * field, so attribute bits (PURE_INSTRUCTIONS, NO_TOC, etc.) don't

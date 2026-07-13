@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -90,6 +90,19 @@ all: run-only
 # i386 sysroot; SKIPs without.
 selfref-imm-stage-shift: $(MACHO_TOOL)
 	@bash selfref_imm_stage_shift_test.sh $(MACHO_TOOL)
+
+# pcmap-stage-shift: guard for the __86x64_pcmap/__86x64_ehlsda STAGE-SHIFT
+# staleness (core section.cc reparse routing + PcmapBlob/EhlsdaBlob::Parse).
+# The C++ EH unwinder's PC map used to round-trip M64 re-parses through the
+# generic DataParser, which pointer-detects rows whose frozen i386 `orig`
+# vmaddrs alias the image's own range (any input based inside the M64 layout
+# window) and re-emits them "rebased" by any later layout shift -> every throw
+# in the deployed binary resolved the wrong original PC/LSDA. The fix lifts
+# both sections back into live blobs that re-resolve the TRANSLATED side and
+# keep the original-i386 side verbatim (the __86x64_xrel/abs32 pattern).
+# Needs the i386 sysroot + staged libstdc++; SKIPs without.
+pcmap-stage-shift: $(MACHO_TOOL)
+	@bash pcmap_stage_shift_test.sh $(MACHO_TOOL)
 
 # snapshot-compat: guard for the legacy NSView-snapshot bridge (objc_shim.c
 # legacy_snapshot_compat_install). The pre-10.6 offscreen-window capture idiom

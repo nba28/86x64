@@ -467,8 +467,16 @@ namespace MachO {
     * code now lives at different x86_64 addresses; only the blob graph knows the
     * correspondence, so it must be serialized here.
     *
-    * Synthesized post-transform by Archive::inject_pcmap_section; never parsed or
-    * transformed.  trans offsets are stored RELATIVE TO THE __text SECTION (not
+    * Synthesized post-transform by Archive::inject_pcmap_section; never
+    * transformed. On a later modify/convert reparse, Parse lifts it back into a
+    * live PcmapBlob (the __86x64_xrel/__86x64_abs32 pattern) that RE-RESOLVES
+    * each row's translated instruction, so a stage that re-layouts the image
+    * re-emits correct rows — the generic DataParser round-trip it used to take
+    * pointer-detected `orig` fields that alias the image's own vmaddr range
+    * (any input image based inside the M64 layout window) and "rebased" them by
+    * the shift delta, silently corrupting the EH map (guard
+    * pcmap_stage_shift_test.sh).  trans offsets are stored RELATIVE TO THE
+    * __text SECTION (not
     * the image base) because the later EXECUTE->DYLIB convert shifts segment
     * vmaddrs by the header-size delta while preserving each section's internal
     * byte layout — a section-relative offset is convert-invariant, an
@@ -488,7 +496,14 @@ namespace MachO {
       static constexpr uint32_t MAGIC = 0x366d6370u; /* "pcm6" */
       struct Ent {
          const SectionBlob<bits> *trans = nullptr;   /*!< translated insn blob */
+         std::size_t off = 0;                        /*!< insn = trans->loc.vmaddr+off
+                                                          (mid-blob reparse fallback) */
          uint32_t orig = 0;                          /*!< original i386 vmaddr */
+         int32_t raw_trans_off = INT32_MIN;          /*!< parse-lifted row's on-disk
+                                                          trans_off; frozen fallback
+                                                          when re-resolution missed
+                                                          (INT32_MIN = inject-time
+                                                          ent, no fallback) */
       };
       std::vector<Ent> ents;
       const Section<bits> *anchor = nullptr;         /*!< __text (trans base) */
@@ -497,11 +512,19 @@ namespace MachO {
       virtual void Emit(Image& img, std::size_t offset) const override;
 
       static PcmapBlob<bits> *Create() { return new PcmapBlob(); }
+      /* Re-parse an already-emitted __86x64_pcmap section (a modify/convert
+       * reparse): read each row back and RE-RESOLVE its translated instruction
+       * (old __text vmaddr + trans_off) to the blob currently containing it, so
+       * Emit re-emits the row against this build's re-layout. orig fields stay
+       * verbatim — they live in the frozen original-i386 address space. */
+      static SectionBlob<bits> *Parse(const Image& img, const Location& loc,
+                                      ParseEnv<bits>& env);
       virtual PcmapBlob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
          throw error("PcmapBlob is synthesized post-transform and is never transformed");
       }
    private:
       PcmapBlob() {}
+      PcmapBlob(const Location& loc, ParseEnv<bits>& env): SectionBlob<bits>(loc, env) {}
       template <Bits> friend class PcmapBlob;
    };
 
@@ -529,6 +552,8 @@ namespace MachO {
       static constexpr uint32_t MAGIC = 0x366c6865u; /* "ehl6" */
       struct Ent {
          const SectionBlob<bits> *func = nullptr;    /*!< translated func entry */
+         std::size_t off = 0;                        /*!< func = func->loc.vmaddr+off
+                                                          (mid-blob reparse fallback) */
          uint32_t orig_func = 0;                     /*!< original i386 func start */
          int32_t lsda_off = 0;                       /*!< LSDA offset within
                                                           __gcc_except_tab (the
@@ -537,6 +562,11 @@ namespace MachO {
                                                           intra-section offset is
                                                           transform/convert-
                                                           invariant) */
+         int32_t raw_func_off = INT32_MIN;           /*!< parse-lifted row's on-disk
+                                                          trans_func_off; frozen
+                                                          fallback when re-resolution
+                                                          missed (INT32_MIN =
+                                                          inject-time ent) */
       };
       std::vector<Ent> ents;
       const Section<bits> *text_anchor = nullptr;    /*!< __text (func base) */
@@ -545,11 +575,17 @@ namespace MachO {
       virtual void Emit(Image& img, std::size_t offset) const override;
 
       static EhlsdaBlob<bits> *Create() { return new EhlsdaBlob(); }
+      /* Re-parse an already-emitted __86x64_ehlsda section — same contract as
+       * PcmapBlob::Parse: re-resolve trans_func_off, keep orig_func/lsda_off
+       * verbatim (frozen i386 / __gcc_except_tab-relative address spaces). */
+      static SectionBlob<bits> *Parse(const Image& img, const Location& loc,
+                                      ParseEnv<bits>& env);
       virtual EhlsdaBlob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
          throw error("EhlsdaBlob is synthesized post-transform and is never transformed");
       }
    private:
       EhlsdaBlob() {}
+      EhlsdaBlob(const Location& loc, ParseEnv<bits>& env): SectionBlob<bits>(loc, env) {}
       template <Bits> friend class EhlsdaBlob;
    };
 
