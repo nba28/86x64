@@ -664,7 +664,7 @@ namespace MachO {
             }
          }
       }
-      
+
       /* Relative Branches */
       if (xed_operand_values_has_branch_displacement(operands)) {
          const ssize_t brdisp = xed_decoded_inst_get_branch_displacement(operands);
@@ -1363,6 +1363,34 @@ namespace MachO {
                return {mov};
             }
 
+         /* The whole `<op> r/m32, imm32` IMMEDIATE-group family (C7 /0 mov,
+          * 81 /0../7 add/or/adc/sbb/and/sub/xor/cmp, F7 /0 test) shares one
+          * translation when the imm32 is a pointer: compute the relocated
+          * pointer in r11 and re-encode the operation in its `/r` (reg-source)
+          * MR form against the SAME destination operand. Every one of these
+          * has a byte-identical MR sibling (verified against the ISA refs:
+          * 01/09/11/19/21/29/31/39/85/89), the ModR/M layout is common
+          * (opcode|modrm|sib?|disp?|imm32), and lea does not touch EFLAGS, so
+          * the rewrite is semantics-preserving for the flag-setting members
+          * too ([mem] OP r11d with the original operand order).
+          *
+          * Pre-fix only MOV was cased; the others fell to the default rule,
+          * whose flavor-1 assumption ("the imm IS the disp32") patched the
+          * DESTINATION displacement with the IMMEDIATE's pointee and left the
+          * raw i386 imm32 bytes unpatched — e.g. `cmpl $_fn, _handler`
+          * (81 3D disp32 imm32, comparing a global fn-ptr against a function
+          * address) read the FUNCTION BODY and compared it against the stale
+          * i386 address: both operands wrong (guard 87_alu_absdest_imm_ptr). */
+         case XED_IFORM_ADD_MEMv_IMMz:
+         case XED_IFORM_OR_MEMv_IMMz:
+         case XED_IFORM_ADC_MEMv_IMMz:
+         case XED_IFORM_SBB_MEMv_IMMz:
+         case XED_IFORM_AND_MEMv_IMMz:
+         case XED_IFORM_SUB_MEMv_IMMz:
+         case XED_IFORM_XOR_MEMv_IMMz:
+         case XED_IFORM_CMP_MEMv_IMMz:
+         case XED_IFORM_TEST_MEMv_IMMz_F7r0:
+         case XED_IFORM_TEST_MEMv_IMMz_F7r1: /* F7 /1 alias, same semantics */
          case XED_IFORM_MOV_MEMv_IMMz:
             {
                /* `mov mem, imm32` where imm32 is a pointer. Two dest shapes:
@@ -1406,33 +1434,70 @@ namespace MachO {
                 *     (Guards: tests-i386/86_selfref_imm_store +
                 *     selfref_imm_stage_shift_test.sh.) */
                {
-                  auto *lea_inst = new Instruction<opposite<bits>>(
-                     opcode::lea_r11_mem_rip_disp32());
-                  lea_inst->memidx = 0;
-                  env.resolve(imm->pointee, &lea_inst->memdisp);
-                  lea_inst->memdisp_offset = imm->pointee_offset;
+                  /* `/r` MR-form opcode for this member (ISA-verified):
+                   * op [mem], r32. */
+                  uint8_t mr_op;
+                  switch (xed_decoded_inst_get_iform_enum(&xedd)) {
+                  case XED_IFORM_ADD_MEMv_IMMz: mr_op = 0x01; break;
+                  case XED_IFORM_OR_MEMv_IMMz:  mr_op = 0x09; break;
+                  case XED_IFORM_ADC_MEMv_IMMz: mr_op = 0x11; break;
+                  case XED_IFORM_SBB_MEMv_IMMz: mr_op = 0x19; break;
+                  case XED_IFORM_AND_MEMv_IMMz: mr_op = 0x21; break;
+                  case XED_IFORM_SUB_MEMv_IMMz: mr_op = 0x29; break;
+                  case XED_IFORM_XOR_MEMv_IMMz: mr_op = 0x31; break;
+                  case XED_IFORM_CMP_MEMv_IMMz: mr_op = 0x39; break;
+                  case XED_IFORM_TEST_MEMv_IMMz_F7r0:
+                  case XED_IFORM_TEST_MEMv_IMMz_F7r1: mr_op = 0x85; break;
+                  default:                      mr_op = 0x89; break; /* MOV */
+                  }
+                  /* The ModR/M-reuse below assumes a bare 1-byte opcode at
+                   * instbuf[0] (C7/81/F7 — a 0x66 prefix can't reach here,
+                   * the imm-width gate routes imm16 forms elsewhere). A
+                   * legacy-prefixed encoding (segment override) would shift
+                   * the ModR/M; bail to the dual-resolve clone below rather
+                   * than corrupt the rewrite. */
+                  const uint8_t b0 = instbuf.at(0);
+                  if (b0 == 0xC7 || b0 == 0x81 || b0 == 0xF7) {
+                     auto *lea_inst = new Instruction<opposite<bits>>(
+                        opcode::lea_r11_mem_rip_disp32());
+                     lea_inst->memidx = 0;
+                     env.resolve(imm->pointee, &lea_inst->memdisp);
+                     lea_inst->memdisp_offset = imm->pointee_offset;
 
-                  /* mov [mem], r11d : REX.R + 0x89 + modrm(reg=r11) + sib/disp.
-                   * Reuse the original c7 /0 ModR/M + any SIB/disp bytes
-                   * (everything after the ModR/M except the trailing imm32);
-                   * swap the reg field to r11 (low 3 = 011) and add REX.R. */
-                  std::vector<uint8_t> mb;
-                  mb.push_back(0x44);                                   /* REX.R */
-                  mb.push_back(0x89);                                   /* MOV r/m32,r32 */
-                  mb.push_back((uint8_t)((instbuf.at(1) & 0xC7) | (0x3 << 3)));
-                  for (std::size_t bi = 2; bi + sizeof(uint32_t) < instbuf.size(); ++bi) {
-                     mb.push_back(instbuf.at(bi));
+                     /* op [mem], r11d : REX.R + mr_op + modrm(reg=r11) + sib/disp.
+                      * Reuse the original /n ModR/M + any SIB/disp bytes
+                      * (everything after the ModR/M except the trailing imm32);
+                      * swap the reg field to r11 (low 3 = 011) and add REX.R. */
+                     std::vector<uint8_t> mb;
+                     mb.push_back(0x44);                                /* REX.R */
+                     mb.push_back(mr_op);                               /* op r/m32,r32 */
+                     mb.push_back((uint8_t)((instbuf.at(1) & 0xC7) | (0x3 << 3)));
+                     for (std::size_t bi = 2; bi + sizeof(uint32_t) < instbuf.size(); ++bi) {
+                        mb.push_back(instbuf.at(bi));
+                     }
+                     auto *mov_inst = new Instruction<opposite<bits>>(opcode_t(mb));
+                     if (this->memdisp) {
+                        /* abs32 destination: patch the copied disp32 rip-relatively
+                         * against the destination blob (carrying any mid-blob
+                         * offset), exactly as the old clone path did. */
+                        mov_inst->memidx = 0;
+                        env.resolve(this->memdisp, &mov_inst->memdisp);
+                        mov_inst->memdisp_offset = this->memdisp_offset;
+                     }
+                     return {lea_inst, mov_inst};
                   }
-                  auto *mov_inst = new Instruction<opposite<bits>>(opcode_t(mb));
+                  /* Prefixed encoding: dual-resolve clone — destination disp
+                   * from THIS->memdisp, pointer imm re-emitted via the
+                   * transformed Immediate (translate-time-correct; the baked
+                   * imm is the accepted fallback for this exotic shape). */
+                  auto *clone = new Instruction<opposite<bits>>(instbuf);
+                  clone->memidx = 0;
                   if (this->memdisp) {
-                     /* abs32 destination: patch the copied disp32 rip-relatively
-                      * against the destination blob (carrying any mid-blob
-                      * offset), exactly as the old clone path did. */
-                     mov_inst->memidx = 0;
-                     env.resolve(this->memdisp, &mov_inst->memdisp);
-                     mov_inst->memdisp_offset = this->memdisp_offset;
+                     env.resolve(this->memdisp, &clone->memdisp);
+                     clone->memdisp_offset = this->memdisp_offset;
                   }
-                  return {lea_inst, mov_inst};
+                  clone->imm = imm->Transform_one(env);
+                  return {clone};
                }
             }
 
@@ -1674,13 +1739,24 @@ namespace MachO {
                clone->memidx = 0;
 
                /*
-                * Two flavors hit this default:
+                * Three flavors hit this default:
+                *
+                *  0. BOTH a captured destination (`this->memdisp`, the abs32
+                *     [disp32]-dest arm) AND a trailing imm32 the parser
+                *     marked as a pointer — an iform outside the explicit
+                *     IMMEDIATE-group family above (e.g. `imul r32, [abs32],
+                *     imm32`). The flavor-1 rule below would patch the
+                *     DESTINATION disp with the IMMEDIATE's pointee (both
+                *     operands wrong). Resolve each operand from its own
+                *     source instead: disp32 from this->memdisp, trailing
+                *     imm32 via the transformed Immediate.
                 *
                 *  1. `[abs32]`-form memory operand (i386 mod=00 r/m=101).
                 *     The ModR/M byte means rip-relative in x86_64, so the
                 *     bytes already encode the right opcode/operand
                 *     structure — we just need to recompute disp32 against
-                *     the new RIP via `memdisp`.
+                *     the new RIP via `memdisp` (here the parser's simple-
+                *     pointer path stored the disp32 AS the imm).
                 *
                 *  2. instruction with a literal imm32 that happens to be
                 *     a pointer (e.g. `mov [rsp+N], <cstring_addr>` from
@@ -1690,9 +1766,16 @@ namespace MachO {
                 *     Keep `imm` on the clone instead so Emit writes the
                 *     resolved pointee value over the trailing 4 bytes.
                 *
-                * Distinguish via XED's memory-displacement width on the
-                * decoded clone: nonzero ⇒ flavor 1, zero ⇒ flavor 2.
+                * Distinguish 1 vs 2 via XED's memory-displacement width on
+                * the decoded clone: nonzero ⇒ flavor 1, zero ⇒ flavor 2.
                 */
+               if (this->memdisp) {
+                  clone->memidx = 0;
+                  env.resolve(this->memdisp, &clone->memdisp);
+                  clone->memdisp_offset = this->memdisp_offset;
+                  clone->imm = imm->Transform_one(env);
+                  return {clone};
+               }
                const xed_decoded_inst_t* clone_xedd = &clone->xedd;
                const xed_operand_values_t* clone_ops =
                   xed_decoded_inst_operands_const(clone_xedd);
