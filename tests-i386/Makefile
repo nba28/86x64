@@ -684,6 +684,15 @@ $(BUILD_DIR)/56_cf_collection_value_ret.i386: $(BUILD_DIR)/56_cf_collection_valu
 $(BUILD_DIR)/53_cf_format_valist.i386: $(BUILD_DIR)/53_cf_format_valist.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 98_cf_append_format_valist: like 53, CF isn't in the i386 sysroot, so
+# CFStringCreateWithCString / CFStringCreateMutable / CFStringAppendFormatAndArguments
+# (the va_list APPEND shim that builds Civ IV's standard-alert title+message) /
+# CFStringGetCString/Length are undefined dynamic_lookup imports resolved at
+# translate time by static-interpose -> libabiconv's ___CF* shims. Guards that
+# the append path DELIVERS CONTENT (the blank-alert follow-on). Overrides %.i386.
+$(BUILD_DIR)/98_cf_append_format_valist.i386: $(BUILD_DIR)/98_cf_append_format_valist.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +
 # abi-insert + static-interpose + wrap. Bare `macho-tool transform` output
 # isn't standalone-runnable because the i386 entry semantics (high-address

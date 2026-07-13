@@ -1,4 +1,5 @@
 CFStringGetLength=15
 copy.len=15
+copy.text_ok=1 text="hello, identity"
 done
 exit_code: 0

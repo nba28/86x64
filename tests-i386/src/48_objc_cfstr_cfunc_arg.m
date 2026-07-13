@@ -61,6 +61,16 @@ int main(void) {
    CFStringRef copy = CFStringCreateCopy(kCFAllocatorDefault, s);
    printf("copy.len=%ld\n", copy ? (long)CFStringGetLength(copy) : -1);
 
+   /* CONTENT round-trip (not just length): the Civ IV CreateStandardAlert
+    * blank-alert follow-on proved a shim can pass a NON-crashing but EMPTY
+    * string. Read the actual bytes back through the CFStringGetCString shim
+    * and confirm they equal the payload — a bridge that dropped the content
+    * (e.g. an over-eager sentinel/reject) would return an empty buffer here
+    * while still "not crashing". */
+   char back[64] = {0};
+   Boolean ok = CFStringGetCString(copy, back, sizeof back, kCFStringEncodingUTF8);
+   printf("copy.text_ok=%d text=\"%s\"\n", ok ? 1 : 0, back);
+
    puts("done");
    /* exit(0), not `return`: the translated-binary return-from-main path is a
     * separate known wrapper gap (rc=0x1 / rip=1) unrelated to this CF test;

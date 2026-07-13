@@ -55,8 +55,15 @@ static int obj_trace_flag(const char *name, int *cache) {
 }
 static int g_bridge_trace_cache = -1;
 static int g_wrap_trace_cache   = -1;
+static int g_argstr_trace_cache = -1;
 #define BRIDGE_TRACE() obj_trace_flag("OBJC_BRIDGE_TRACE", &g_bridge_trace_cache)
 #define WRAP_TRACE()   obj_trace_flag("OBJC_WRAP_TRACE",   &g_wrap_trace_cache)
+/* Narrow, low-noise diagnostic (NOT the OBJC_BRIDGE_TRACE firehose): dump the
+ * RESOLVED content of every object arg unwrapped for a native call, with the
+ * caller's return address. Used to answer "what string does Civ's
+ * CreateStandardAlert actually pass, and does it round-trip non-empty" without
+ * drowning in Halo/Civ's millions of non-CFString unwrap probes. */
+#define ARGSTR_TRACE() obj_trace_flag("ABICONV_ARGSTR_TRACE", &g_argstr_trace_cache)
 
 /*
  * Proxy arena: a flat low-4GB array of 64-bit reals. A "handle" is the
@@ -6702,7 +6709,51 @@ static id i386_cfstr_to_real(uint32_t p) {
 /* Unwrap an i386 `@`/`#` argument to a real x86_64 id for a call into the
  * modern runtime. Handles arena proxy handles, R/S shadows, paired legacy
  * objects, raw legacy objects/classes, and otherwise passes through. */
-static uint64_t unwrap_obj_arg(uint32_t a) {
+/* Render a resolved native id/CFStringRef into buf for the ARGSTR diagnostic.
+ * Toll-free: CFStringGetCString works on both NSString and CFStringRef. Prints
+ * "(nil)" for 0, "(-1 sentinel)" for the CF default-text sentinel, and
+ * "(non-string CFTypeID=N)" for a non-CFString object; never dereferences a
+ * raw non-object value. Diagnostic-only; guarded by the caller. */
+static void argstr_describe(uint64_t real, char *buf, size_t n) {
+   if (real == 0)      { snprintf(buf, n, "(nil)"); return; }
+   if (real == ~0ULL)  { snprintf(buf, n, "(-1 sentinel)"); return; }
+   /* Decide whether it's safe to hand `real` to CF. A TAGGED pointer (low bit
+    * set on x86_64, or an obfuscated NSString with the tag bit) is NOT
+    * dereferenceable but CFGetTypeID/CFStringGet* decode it fine — pass it
+    * through. An UNTAGGED pointer must be 8-aligned AND readable (its isa slot
+    * readable) to be a real object; otherwise it is a passthrough low i386
+    * value (unwrap's final fallthrough) — describe it verbatim rather than
+    * faulting CFGetTypeID inside a diagnostic. */
+   const int tagged = (real & 0x1) != 0;          /* x86_64 tagged-ptr low bit */
+   if (!tagged) {
+      /* an untagged object pointer must be 8-aligned and readable; CFGetTypeID
+       * then robustly validates it IS a CF object. (Don't pre-deref the isa —
+       * a signed/obfuscated isa on newer runtimes would false-reject a real
+       * heap CFString.) A passthrough low i386 value fails the readable check
+       * and is described verbatim instead of faulting CFGetTypeID. */
+      if ((real & 0x7) || !mem_readable((uintptr_t)real, 8)) {
+         snprintf(buf, n, "(raw 0x%llx, not an object)",
+                  (unsigned long long)real);
+         return;
+      }
+   }
+   CFTypeRef t = (CFTypeRef)(uintptr_t)real;
+   if (CFGetTypeID(t) == CFStringGetTypeID()) {
+      CFIndex len = CFStringGetLength((CFStringRef)t);
+      char tmp[256];
+      if (CFStringGetCString((CFStringRef)t, tmp, sizeof tmp,
+                             kCFStringEncodingUTF8)) {
+         snprintf(buf, n, "CFString len=%ld \"%s\"", (long)len, tmp);
+      } else {
+         snprintf(buf, n, "CFString len=%ld (uncopyable)", (long)len);
+      }
+   } else {
+      snprintf(buf, n, "(non-string CFTypeID=%lu)",
+               (unsigned long)CFGetTypeID(t));
+   }
+}
+
+static uint64_t unwrap_obj_arg_core(uint32_t a) {
    if (!a) { return 0; }
    if (a == 0xffffffffu) {
       /* The all-ones i386 word is the classic Carbon/CF "-1 sentinel", not a
@@ -6772,6 +6823,18 @@ static uint64_t unwrap_obj_arg(uint32_t a) {
       fflush(stderr);
    }
    return (uint64_t)a;                      /* nil-ish / already-low passthrough */
+}
+
+static uint64_t unwrap_obj_arg(uint32_t a) {
+   uint64_t r = unwrap_obj_arg_core(a);
+   if (__builtin_expect(ARGSTR_TRACE(), 0)) {
+      char desc[320];
+      argstr_describe(r, desc, sizeof desc);
+      fprintf(stderr, "[argstr] i386=0x%08x -> %s (caller=%p)\n",
+              a, desc, __builtin_return_address(0));
+      fflush(stderr);
+   }
+   return r;
 }
 
 /* ---- ObjC type-encoding scanners ---- */

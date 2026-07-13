@@ -1,0 +1,3 @@
+title.len=24 ok=1 "Cannot load Civ (err 42)"
+msg.len=17 ok=1 "Please reinstall."
+exit_code: 0
