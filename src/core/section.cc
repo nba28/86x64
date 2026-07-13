@@ -1093,15 +1093,31 @@ namespace MachO {
                 * the next blob in Parse2, so the emitted rip-relative disp
                 * skews to the neighbouring datum (+offset). Prefer the
                 * containing blob + byte offset so the emit targets the exact
-                * interior byte and survives the modify/convert re-layout. Gated
-                * to writable __DATA like the sibling paths (the containing-blob
-                * guess corrupts fragile-ABI __OBJC metadata — see
-                * ParseEnv::vmaddr_in_writable_data); override=true replaces the
-                * placeholder when a containing blob exists, else the placeholder
-                * resolution stands (e.g. a __bss zerofill target with no blob).
-                * The M32→M64 transform propagates memdisp_offset onto the
-                * synthesised rip-relative instruction. */
-               if (env.vmaddr_in_writable_data(target)) {
+                * interior byte and survives the modify/convert re-layout.
+                * Admits writable __DATA AND read-only opaque const/literal
+                * data, mirroring the M64 [rip+disp] re-parse gate in
+                * instruction.cc (the Quinn _pieceSize1+2 fix): an anchored
+                * access to the INTERIOR of a packed __TEXT,__const struct —
+                * clang -O0 PIC copies a {u16,u16,u16} initializer template
+                * via `movl 0x6b(%anchor); movw 0x6f(%anchor)`, and when a
+                * preceding odd-length __cstring leaves __const misaligned
+                * mod 4, the +4 field lands mid-Immediate — otherwise strands
+                * its placeholder, and Parse2 parks it at the SECTION END: the
+                * translated load reads end-of-section padding instead of the
+                * field (RGBColor c={0,0,0xFFFF} printed blue=0; guard
+                * 97_pic_const_interior_field, the 6-byte odd-struct
+                * aggregate-init field report). An anchored target is a
+                * DEREFERENCED address, never an integer constant, so the
+                * containing-blob guess is always valid for opaque program
+                * data; __OBJC (fragile parsed metadata) and instruction
+                * sections stay excluded by the predicates. override=true
+                * replaces the placeholder when a containing blob exists, else
+                * the placeholder resolution stands (e.g. a __bss zerofill
+                * target with no blob). The M32→M64 transform propagates
+                * memdisp_offset onto the synthesised rip-relative
+                * instruction. */
+               if (env.vmaddr_in_writable_data(target) ||
+                   env.vmaddr_in_readonly_opaque_data(target)) {
                   env.vmaddr_resolver.resolve_containing(
                      target,
                      (const SectionBlob<bits> **)&inst->memdisp,
