@@ -1093,6 +1093,32 @@ namespace MachO {
                      break;
                   }
                }
+               /* FIXED-LOAD image, WRITABLE file-backed __DATA target (the
+                * Civ IV pointer-immediate wall): a non-PIE MH_EXECUTE baking
+                * `movl $&anon_static, field(%reg)` — Civ stores the interior
+                * pointer of an anonymous ZEROED static string block
+                * (0x145ea60, no symbol, no content for the vtable probe:
+                * `movzbl -2(%rax)` reads its zero length field) into ~97
+                * object fields; the raw i386 __data address shipped
+                * unrelocated -> EXC_BAD_ACCESS at first deref. The same
+                * fixed-load gate already justifies relocating data-aliasing
+                * immediates for the MOV/PUSH/ADD-to-REG family (a
+                * position-independent image NEVER bakes absolute data
+                * addresses; a fixed-load one genuinely does), so admit the
+                * store form under it too, with two structural narrowings
+                * against integer-ivar false positives: the value must be
+                * 4-ALIGNED (the DataParser misaligned-data-range rule) and
+                * must land in file-backed writable data, NOT a zerofill
+                * span (__bss/__common legitimately spans megabytes and
+                * aliases huge integer ranges — the section.cc (2c) lesson;
+                * vmaddr_in_writable_data also excludes fragile __OBJC). */
+               if (!ptr_target && (value & 3) == 0 &&
+                   env.archive.header.filetype == MH_EXECUTE &&
+                   (env.archive.header.flags & MH_PIE) == 0 &&
+                   env.vmaddr_in_writable_data(value) &&
+                   !env.vmaddr_in_zerofill(value)) {
+                  ptr_target = true;
+               }
             }
             if (ptr_target) {
                imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);
