@@ -1,0 +1,6 @@
+size=32
+err=0 version=1 movable=1 help=0
+defText=0xffffffff cancelText=0x0 otherText=0x0
+defBtn=1 cancelBtn=0 pos=0 flags=0
+icon=0xaaaaaaaa
+exit_code: 0

@@ -636,6 +636,19 @@ $(BUILD_DIR)/79_qd_gworld_pixels.i386: $(BUILD_DIR)/79_qd_gworld_pixels.o
 $(BUILD_DIR)/85_quinn_cell_draw.i386: $(BUILD_DIR)/85_quinn_cell_draw.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 97_carbon_fixed32_paramrec: Carbon/HIToolbox isn't in the i386 sysroot, so
+# GetStandardAlertDefaultParams is an undefined dynamic_lookup import resolved
+# at translate time by static-interpose -> libabiconv's legacy-pass shim.
+# Guards the legacy fixed-32 RECORD layout family (written_is_fixed32_long in
+# record_decl::populate_fields): a UInt32 field canonicalized to `unsigned
+# long` by the -arch i386 parse must stay 4 bytes in the NATIVE record image
+# (keeping AlertStdCFStringAlertParamRec.defaultText at its true pack(2)
+# offset 6 — the Civ IV CreateStandardAlert __CF_IS_OBJC crash), plus the
+# (CFStringRef)-1 kAlertDefaultOKText sentinel round-trip through
+# x64_objc_wrap / unwrap_obj_arg. Overrides %.i386.
+$(BUILD_DIR)/97_carbon_fixed32_paramrec.i386: $(BUILD_DIR)/97_carbon_fixed32_paramrec.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # 95_crypto_cdkey_verify: like 39/49/79/85, the i386 sysroot's openssl headers
 # exist but there is no i386 libcrypto to link, so the OpenSSL 0.9.7 CD-key
 # surface (CRYPTO_set_mem_functions / RIPEMD160* / BN_bin2bn / RSA_new/verify/

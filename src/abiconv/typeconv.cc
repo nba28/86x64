@@ -50,6 +50,38 @@ record_decl::record_decl(CXType type): cursor(clang_getTypeDeclaration(type)) {
    populate_fields();
 }
 
+/* See typeconv.hh. Walks the AS-WRITTEN typedef chain of a `long`-canonical
+ * type for a "*32"-suffixed name (SInt32/UInt32 and everything built on them).
+ * Single source of truth: abigen's byval machinery (byval_field_is_int32) and
+ * record_decl::populate_fields both call this. */
+bool written_is_fixed32_long(CXType written, CXTypeKind canon_kind) {
+   if (canon_kind != CXType_Long && canon_kind != CXType_ULong) {
+      return false;
+   }
+   CXType t = written;
+   for (int depth = 0; depth < 8 && t.kind == CXType_Typedef; ++depth) {
+      CXCursor d = clang_getTypeDeclaration(t);
+      CXString ns = clang_getCursorSpelling(d);
+      const char *cs = clang_getCString(ns);
+      const std::string name(cs ? cs : "");
+      clang_disposeString(ns);
+      if (name.size() >= 2 && name.compare(name.size() - 2, 2, "32") == 0) {
+         return true;
+      }
+      t = clang_getTypedefDeclUnderlyingType(d);
+   }
+   return false;
+}
+
+CXType effective_field_type(CXType canonical, CXType written) {
+   if (written_is_fixed32_long(written, canonical.kind)) {
+      CXType eff = canonical;
+      eff.kind = (canonical.kind == CXType_ULong) ? CXType_UInt : CXType_Int;
+      return eff;
+   }
+   return canonical;
+}
+
 void record_decl::populate_fields() {
    /* A struct may be FORWARD-DECLARED (opaque, no body) before its full
     * definition appears later in the translation unit — extremely common in
@@ -70,7 +102,29 @@ void record_decl::populate_fields() {
                case CXCursor_FieldDecl:
                   {
                      CXType written = clang_getCursorType(c);
-                     CXType type = clang_getCanonicalType(written);
+                     /* Store the EFFECTIVE canonical type: a legacy fixed-32
+                      * typedef field (SInt32/UInt32/OSType/... under the
+                      * -arch i386 parse) is marshalled as Int/UInt (4 bytes on
+                      * BOTH sides — the native framework was compiled from the
+                      * modern headers where the same typedef is `int`), not
+                      * the 8-byte native `long` its canonical kind implies.
+                      * This feeds convert_record / sizeof_struct /
+                      * alignof_record, so a by-pointer deep-copied record
+                      * (AlertStdCFStringAlertParamRec, EventRecord, ...) gets
+                      * the true native field offsets. See typeconv.hh. */
+                     CXType canon = clang_getCanonicalType(written);
+                     CXType type;
+                     if (canon.kind == CXType_ConstantArray &&
+                         written.kind == CXType_ConstantArray) {
+                        /* Keep the WRITTEN array: its element retains the
+                         * typedef sugar, so the typedef-aware sizeof_type /
+                         * convert recursion applies the fixed-32 correction
+                         * PER ELEMENT (MatrixRecord = Fixed[3][3] is 4-byte
+                         * native elements, not the canonical-long 8). */
+                        type = written;
+                     } else {
+                        type = effective_field_type(canon, written);
+                     }
                      field_types.push_back(type);
                      field_types_written.push_back(written);
                   }
@@ -285,6 +339,14 @@ void conversion::convert(std::ostream& os, CXType type, const Location& src, con
       convert_record(os, type,
                      dynamic_cast<const MemoryLocation&>(src),
                      dynamic_cast<const MemoryLocation&>(dst));
+      break;
+
+   case CXType_Typedef:
+      /* Sugared constant-array ELEMENT (see populate_fields: a written array
+       * is kept so its element retains the typedef name). Convert as the
+       * effective canonical — fixed-32 corrected (Fixed -> Int). */
+      convert(os, effective_field_type(clang_getCanonicalType(type), type),
+              src, dst);
       break;
 
    case CXType_FunctionProto:
@@ -1212,6 +1274,14 @@ size_t sizeof_type(CXType type, arch a) {
       return sizeof_type(clang_getArrayElementType(type), a) * clang_getArraySize(type);
    case CXType_Record:
       return sizeof_record(type, a);
+
+   case CXType_Typedef:
+      /* A WRITTEN (sugared) type reaches the layout machinery only via the
+       * constant-array element path (populate_fields keeps a written array so
+       * its element retains the typedef sugar). Apply the fixed-32 correction
+       * and recurse on the effective canonical (Fixed -> 4-byte native Int,
+       * not the canonical-long 8). */
+      return sizeof_type(effective_field_type(clang_getCanonicalType(type), type), a);
 
    case CXType_FunctionProto:
       // TODO: May need to address this case in the future.

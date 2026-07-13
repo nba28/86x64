@@ -43,6 +43,32 @@ bool cf_void_ref_type(CXType orig);
  * (never spelled *Handle) is still deep-copied as a real out-pointer. */
 bool is_opaque_handle_type(CXType written);
 
+/* Legacy fixed-32 typedef correction. The LEGACY -arch i386 header parse
+ * canonicalizes the fixed-width Mac typedefs (SInt32/UInt32/OSType/OSStatus/
+ * OptionBits/Fixed/FourCharCode/...) to `long`/`unsigned long` — 4 bytes on
+ * i386 (correct) but 8 on x86_64 per the canonical kind. The NATIVE framework
+ * was built from the MODERN headers, where the SAME typedef is `int` = 4
+ * bytes. Detected by walking the AS-WRITTEN typedef chain for a name ending
+ * in "32" (every fixed-width Mac typedef chains through SInt32/UInt32, incl.
+ * Fixed/Fract/UnsignedFixed) with a `long`-family canonical. A pointer-width
+ * `long` typedef (CFIndex/NSInteger/Size) never chains through "*32" and
+ * keeps its genuine 4->8 widening. INERT in the modern LP64 parse (there the
+ * canonical is already Int/UInt). Hoisted from abigen's byval machinery so
+ * the by-POINTER record deep-copy applies the same correction (Civ IV
+ * CreateStandardAlert: AlertStdCFStringAlertParamRec.version widened to 8 ->
+ * every following field shifted +4 -> HIToolbox read the defaultText
+ * CFStringRef across the movable/helpButton bytes = 0xffffffffffff0000). */
+bool written_is_fixed32_long(CXType written, CXTypeKind canon_kind);
+
+/* The canonical type a field should be MARSHALLED as: substitutes kind
+ * Int/UInt for a legacy fixed-32 `long`, else returns `canonical` unchanged.
+ * NOTE: the returned CXType carries the ORIGINAL canonical `data` with only
+ * `.kind` swapped — valid for this module's kind-switched layout/emission
+ * machinery (sizeof_type, alignof_type, get_type_xxx, convert_int), NOT for
+ * clang_* layout queries (they would see the original `long`). Scalar-only,
+ * so no such query happens downstream. */
+CXType effective_field_type(CXType canonical, CXType written);
+
 size_t sizeof_type(CXType type, arch a);
 size_t sizeof_type(CXTypeKind type_kind, arch a);
 

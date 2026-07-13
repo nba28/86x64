@@ -395,6 +395,15 @@ void x64_rstash_set_depth(uint32_t n) {
 /* real 64-bit object -> 32-bit handle the translated code can store. */
 uint32_t x64_objc_wrap(uint64_t real) {
    if (real == 0) { return 0; }
+   if (real == ~0ULL) {
+      /* -1 sentinel (kAlertDefault*Text = (CFStringRef)-1, kCFNotFound
+       * handles): keep it a SENTINEL on the i386 side too, symmetric with
+       * unwrap_obj_arg's 0xffffffff -> ~0ULL widening. Minting an arena
+       * handle would hide the value from the app's own `== -1` compares
+       * (GetStandardAlertDefaultParams fills defaultText = -1 that apps
+       * legitimately test against kAlertDefaultOKText). */
+      return 0xffffffffu;
+   }
    arena_init();
 
    /* The probe+insert is a read-modify-write on the shared `map`: serialize it
@@ -6695,6 +6704,16 @@ static id i386_cfstr_to_real(uint32_t p) {
  * objects, raw legacy objects/classes, and otherwise passes through. */
 static uint64_t unwrap_obj_arg(uint32_t a) {
    if (!a) { return 0; }
+   if (a == 0xffffffffu) {
+      /* The all-ones i386 word is the classic Carbon/CF "-1 sentinel", not a
+       * pointer: kAlertDefaultOKText/CancelText/OtherText = (CFStringRef)-1,
+       * kCFNotFound-style handles, MAP_FAILED. 0xffffffff can never be a real
+       * i386 object/handle (the last page is never mapped), so widen it to
+       * the native 64-bit -1 the callee compares against. Zero-extending
+       * handed HIToolbox 0x00000000ffffffff -> treated as a live CFStringRef
+       * -> CFStringCreateCopy faulted (Civ IV CreateStandardAlert title). */
+      return ~0ULL;
+   }
    const int utrace = BRIDGE_TRACE();
    id sr = shadow_real(a);                 /* R/S shadow or paired legacy obj */
    if (sr) {

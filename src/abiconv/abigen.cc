@@ -316,36 +316,34 @@ struct ABIConversion {
     * pointer-width `long` typedef (CFIndex/NSInteger) never ends in "32", so
     * CFRange/NSRange keep 8 bytes per field. Structural + name gated, never a name. */
    static bool byval_field_is_int32(const byval_field& f) {
-      if (f.canon.kind != CXType_Long && f.canon.kind != CXType_ULong) {
-         return false;
-      }
-      CXType t = f.written;
-      for (int depth = 0; depth < 8 && t.kind == CXType_Typedef; ++depth) {
-         CXCursor d = clang_getTypeDeclaration(t);
-         CXString ns = clang_getCursorSpelling(d);
-         const char* cs = clang_getCString(ns);
-         const std::string name(cs ? cs : "");
-         clang_disposeString(ns);
-         if (name.size() >= 2 && name.compare(name.size() - 2, 2, "32") == 0) {
-            return true;
-         }
-         t = clang_getTypedefDeclUnderlyingType(d);
-      }
-      return false;
+      /* Hoisted to typeconv (written_is_fixed32_long) so record_decl's
+       * by-POINTER deep-copy path applies the identical correction; this
+       * wrapper keeps the byval machinery reading naturally. */
+      return written_is_fixed32_long(f.written, f.canon.kind);
    }
 
    /* x86_64 SIZE / ALIGN of a by-value field, correcting a legacy fixed-32 typedef
     * (byval_field_is_int32) back to its true native 4-byte width; recurses for
     * nested records / arrays. Used everywhere the byval machinery computes the
     * x86_64 layout, so a fixed-32 field consumes 4 bytes, not the canonical 8. */
+   /* Element of an ARRAY field, keeping the WRITTEN typedef sugar when the
+    * as-written type is itself an array: Fixed[3][3]'s element must stay
+    * recognizable as the fixed-32 typedef `Fixed`, or the canonical `long`
+    * element would widen to 8 native bytes. */
+   static byval_field byval_array_elem(const byval_field& f) {
+      const CXType wa =
+         (f.written.kind == CXType_ConstantArray) ? f.written : f.canon;
+      const CXType we = clang_getArrayElementType(wa);
+      return {we, clang_getCanonicalType(we)};
+   }
+
    static size_t byval_field_x64_size(const byval_field& f) {
       if (byval_field_is_int32(f)) { return 4; }
       const CXType c = f.canon;
       if (c.kind == CXType_Record) { return byval_x64_sizeof(c); }
       if (c.kind == CXType_ConstantArray) {
-         const CXType el = clang_getCanonicalType(clang_getArrayElementType(c));
          return static_cast<size_t>(clang_getArraySize(c)) *
-                byval_field_x64_size({el, el});
+                byval_field_x64_size(byval_array_elem(f));
       }
       return sizeof_type(c, arch::x86_64);
    }
@@ -360,8 +358,7 @@ struct ABIConversion {
          return a;
       }
       if (c.kind == CXType_ConstantArray) {
-         const CXType el = clang_getCanonicalType(clang_getArrayElementType(c));
-         return byval_field_x64_align({el, el});
+         return byval_field_x64_align(byval_array_elem(f));
       }
       return alignof_type(c, arch::x86_64);
    }
@@ -443,10 +440,10 @@ struct ABIConversion {
          return;
       case CXType_ConstantArray: {
          const long long n = clang_getArraySize(c);
-         const CXType elem = clang_getCanonicalType(clang_getArrayElementType(c));
-         const size_t esz = sizeof_type(elem, arch::x86_64);
+         const byval_field ef = byval_array_elem(f);   /* keeps typedef sugar */
+         const size_t esz = byval_field_x64_size(ef);  /* fixed-32 corrected */
          for (long long i = 0; i < n; ++i) {
-            byval_classify_leaf({elem, elem}, off64 + i * esz, plan);
+            byval_classify_leaf(ef, off64 + i * esz, plan);
          }
          return;
       }
@@ -568,9 +565,8 @@ struct ABIConversion {
          return;
       case CXType_ConstantArray: {
          const long long n = clang_getArraySize(c);
-         const CXType elem = clang_getCanonicalType(clang_getArrayElementType(c));
+         const byval_field ef = byval_array_elem(f);   /* keeps typedef sugar */
          for (long long i = 0; i < n; ++i) {
-            byval_field ef{elem, elem};
             byval_flat_field(conv, os, ef, src, dst);
          }
          /* element loop already advanced src/dst; skip the tail advance */
