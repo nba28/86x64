@@ -661,6 +661,80 @@ namespace MachO {
                         &this->memdisp_offset);
                   }
                }
+            } else if (env.archive.header.filetype == MH_EXECUTE &&
+                       (env.archive.header.flags & MH_PIE) == 0 &&
+                       basereg != XED_REG_INVALID &&
+                       basereg != select_value(bits, XED_REG_EIP, XED_REG_RIP) &&
+                       basereg != select_value(bits, XED_REG_ESP, XED_REG_RSP) &&
+                       basereg != select_value(bits, XED_REG_EBP, XED_REG_RBP) &&
+                       indexreg != XED_REG_INVALID &&
+                       xed_decoded_inst_get_memory_displacement_width(operands, i) ==
+                       sizeof(uint32_t)) {
+               /*
+                * `[base + idx*scale + disp32]` absolute table addressing
+                * (i386 mod=10 r/m=100 + SIB with BOTH base and index live) —
+                * a 2-D array / array-of-structs access against a fixed
+                * global: `movl _tab(%eax,%ecx,4), %edx` with the row offset
+                * in base, the element index in idx*scale and the table's
+                * absolute vmaddr as disp32. The [disp32+idx*scale] arm above
+                * requires base=INVALID and the [base+disp32] arm requires
+                * index=INVALID, so this shape matched NEITHER: the raw i386
+                * disp32 shipped verbatim — no rebase, no __86x64_abs32
+                * runtime-slide entry — and the translated access
+                * dereferenced the unmapped original address (guard
+                * 89_abs_base_index_disp).
+                *
+                * Same gates as the base-only arm: only a FIXED-load-address
+                * image (non-PIE MH_EXECUTE) bakes absolute table addresses
+                * into displacements (PIC code reaches globals anchor-
+                * relative, where disp32 is a struct offset); esp/ebp bases
+                * excluded (a global table is never indexed through the
+                * frame/stack pointer; note the SIB encoding already forbids
+                * esp as INDEX); disp32 must land inside a real segment.
+                *
+                * Translation needs no new rewrite: the byte-identical
+                * default rule keeps the SIB operand (identical in x86_64),
+                * re-derives memdisp_absolute=true (base != RIP), Emit
+                * patches the disp32 to the table's M64 vmaddr, and
+                * inject_abs32_section registers the field for the runtime
+                * ASLR slide — exactly the [disp32+idx*scale] mechanism. The
+                * copy ctor's 0x67 addr32 injection preserves the i386
+                * 32-bit EA wrap for the scaled index. Indirect control
+                * transfers through this shape (call/jmp *tab(%b,%i,s)) take
+                * the CALL_NEAR_MEMv/JMP_MEMv narrowing rewrites, which now
+                * propagate memdisp_absolute from the source instruction.
+                */
+               const ssize_t disp =
+                  xed_decoded_inst_get_memory_displacement(operands, i);
+               bool disp_in_seg = false;
+               if (disp >= 0x1000 && (std::size_t) disp < 0x80000000U) {
+                  for (auto *seg : env.archive.segments()) {
+                     std::string name(seg->segment_command.segname,
+                                      strnlen(seg->segment_command.segname,
+                                              sizeof(seg->segment_command.segname)));
+                     if (name == SEG_PAGEZERO || name == SEG_LINKEDIT) continue;
+                     if (seg->contains_vmaddr((std::size_t) disp)) {
+                        disp_in_seg = true;
+                        break;
+                     }
+                  }
+               }
+               if (disp_in_seg && !memdisp) {
+                  memidx = i;
+                  memdisp_absolute = true;
+                  env.vmaddr_resolver.resolve((std::size_t) disp,
+                                              (const SectionBlob<bits> **) &this->memdisp);
+                  /* mid-blob fallback — same non-__OBJC admission as the
+                   * sibling arms: this disp32 is a DEREFERENCED table base,
+                   * never an integer constant (zerofill spans and packed
+                   * const tables resolve to containing blob + offset). */
+                  if (env.vmaddr_in_indexed_table_target((std::size_t) disp)) {
+                     env.vmaddr_resolver.resolve_containing(
+                        (std::size_t) disp,
+                        (const SectionBlob<bits> **) &this->memdisp,
+                        &this->memdisp_offset);
+                  }
+               }
             }
          }
       }
@@ -1995,6 +2069,18 @@ namespace MachO {
                      }
                      if (memdisp) {
                         env.resolve(memdisp, &mov_inst->memdisp);
+                        mov_inst->memdisp_offset = memdisp_offset;
+                        /* A memdisp captured on a REGISTER-carrying operand
+                         * ([base+disp32] / [base+idx*scale+disp32] absolute
+                         * table calls) must stay ABSOLUTE on the narrowed
+                         * load: the operand keeps its base register, so a
+                         * rip-relative patch would mis-target. Propagate the
+                         * source's flag (true for those parser arms; the
+                         * bare-[disp32] shape never carries memdisp here —
+                         * it routes through the imm->pointee path). */
+                        if (memdisp_absolute) {
+                           mov_inst->memdisp_absolute = true;
+                        }
                      }
                      /* Preserve brdisp if any (rare for indirect call but the
                       * parser may still have set it via the reloc table). */
@@ -2134,6 +2220,13 @@ namespace MachO {
                      }
                      if (memdisp) {
                         env.resolve(memdisp, &mov_inst->memdisp);
+                        mov_inst->memdisp_offset = memdisp_offset;
+                        /* Propagate ABSOLUTE for a register-carrying operand
+                         * ([base(+idx*scale)+disp32] table dispatch) — same
+                         * reasoning as CALL_NEAR_MEMv above. */
+                        if (memdisp_absolute) {
+                           mov_inst->memdisp_absolute = true;
+                        }
                      }
                   }
 
