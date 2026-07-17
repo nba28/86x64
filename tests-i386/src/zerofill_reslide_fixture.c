@@ -58,6 +58,7 @@ void _86x64_dyld_noop(void) {}
 void _86x64_import_repair(void) {}
 void _86x64_objc_index_legacy_classes(void) {}
 void _86x64_objc_register_classes(void) {}
+int  _86x64_objc_shared_claim_image(const void *mh) { (void)mh; return 1; }
 void abiconv_call_init(void) {}
 void abiconv_init_trampoline(void) {}
 unsigned x64_cb_wrap(unsigned long long r) { (void)r; return 0; }

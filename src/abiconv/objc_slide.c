@@ -63,6 +63,16 @@ extern void _86x64_objc_index_legacy_classes(const struct mach_header_64 *mh,
 extern void _86x64_objc_register_classes(const struct mach_header_64 *mh,
                                          intptr_t slide);
 
+/* Cross-copy per-image processing claim (objc_shim.c, shared objc_shared_ctrl).
+ * Returns 1 to the FIRST libabiconv copy that reaches a given mach_header, 0 to
+ * every later copy — so a second co-located copy's add-image re-scan does NOT
+ * re-walk an image another copy already processed (the multicopy re-scan race:
+ * a not-yet-ready pointer field read back NULL and dereferenced at +offset, the
+ * intermittent slide_objc `[rbx+0x88]` rbx=0 crash on Civ IV). Returns 1 when
+ * there is no shared ctrl (single-copy deploys), so the per-copy g_processed
+ * set below remains the sole guard there. */
+extern int _86x64_objc_shared_claim_image(const void *mh);
+
 /* Classic __DATA,__dyld crt-bootstrap shims (dyld_func_lookup.asm). The crt's
  * func_lookup slot is redirected to _86x64_dyld_func_lookup, which writes the
  * address of _86x64_dyld_noop into the crt's out-parameter so the bootstrap is
@@ -1931,6 +1941,19 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    if (mh->magic != MH_MAGIC_64) { return; }
    if (already_processed(mh)) { return; }
    mark_processed(mh);
+   /* Cross-copy guard: only ONE libabiconv copy ever processes a given image.
+    * A co-located second copy's own _dyld_register_func_for_add_image(slide_objc)
+    * re-delivers every already-mapped image to THIS function with an empty
+    * per-copy g_processed — re-running the slide / ObjC-register / run-inits work
+    * over metadata the first copy already processed (or is mid-processing on
+    * another thread), so a pointer field reads back NULL and gets dereferenced
+    * at +offset (the intermittent `[rbx+0x88]`, rbx=0 crash). The per-image work
+    * is once-per-IMAGE, not once-per-copy, so claiming it process-globally is
+    * exact. mark_processed above already ran, so this copy won't retry the image
+    * via its own later callback or a process_deps edge. Single-copy deploys and
+    * a failed ctrl init both return 1 here (the local g_processed stays the
+    * guard), so this is inert unless there really is >1 copy. */
+   int claimed = _86x64_objc_shared_claim_image(mh);
    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
    const uint8_t *p = (const uint8_t *)(mh64 + 1);
    const char *imgname = "?";
@@ -1940,6 +1963,16 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
          break;
       }
    }
+   /* Test signal (dyld_multicopy_reprocess_test.sh): one line per (copy,image)
+    * decision, so the harness can count how many times slide_objc actually
+    * PROCESSED each image across all copies. Env-gated, inert otherwise. */
+   if (getenv("ABICONV_XCOPY_TRACE")) {
+      const char *leaf = strrchr(imgname, '/');
+      leaf = leaf ? leaf + 1 : imgname;
+      fprintf(stderr, "[xcopy] %s %s\n", claimed ? "process" : "skip", leaf);
+      fflush(stderr);
+   }
+   if (!claimed) { return; }
 
    const struct segment_command_64 *objc_seg = NULL;
    uint64_t vmaddr_lo = ~(uint64_t)0;
