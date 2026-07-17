@@ -693,6 +693,17 @@ $(BUILD_DIR)/53_cf_format_valist.i386: $(BUILD_DIR)/53_cf_format_valist.o
 $(BUILD_DIR)/98_cf_append_format_valist.i386: $(BUILD_DIR)/98_cf_append_format_valist.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 99_cf_key_concat_replace: like 98, CF isn't in the i386 sysroot, so
+# CFStringCreateWithCString / CFStringCreateMutableCopy / CFStringAppend /
+# CFStringFind / CFStringReplace / CFStringGetCString/Length are undefined
+# dynamic_lookup imports resolved at translate time by static-interpose ->
+# libabiconv's ___CF* shims. Guards that Civ's localizer KEY-CONCAT
+# (mutable-copy + append) and TOKEN-SUBSTITUTION (find + replace) deliver
+# content through the proxy wrap/unwrap round-trip (the blank-alert probe).
+# Overrides %.i386.
+$(BUILD_DIR)/99_cf_key_concat_replace.i386: $(BUILD_DIR)/99_cf_key_concat_replace.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +
 # abi-insert + static-interpose + wrap. Bare `macho-tool transform` output
 # isn't standalone-runnable because the i386 entry semantics (high-address

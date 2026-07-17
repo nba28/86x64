@@ -1,0 +1,4 @@
+key.len=33 ok=1 "kErrInsufficientSystemVersion_err"
+find.loc=0 find.len=15
+msg.len=53 ok=1 "Civilization IV requires MacOS version 10.4 or later."
+exit_code: 0
