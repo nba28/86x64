@@ -3696,6 +3696,276 @@ static void legacy_gstate_capture_install(void) {
    done = 1;
 }
 
+/* ---- legacy private-frame-view window CHROME compat -----------------------
+ * A pre-10.x Cocoa app that wanted a custom titlebar/border look drew it by
+ * SWAPPING NSWindow's PRIVATE frame-view class: it subclassed the private
+ * `NSFrameView` (looked up dynamically as NSClassFromString(@"NSFrameView"))
+ * and overrode the frame view's chrome-draw entry points, wiring them through
+ * NSWindow private hooks like `-borderViewClass` / a startup
+ * `+hackBorderViewClass:` that method-swizzles the frame view's `-drawRect:`.
+ * When the frame view then drew, it called back into the window's
+ * `-drawWindowBorderInRect:` (paint the metal band) and `-drawWindowTitle`
+ * (draw the title text) overrides.
+ *
+ * On modern macOS the private frame-view class is `NSThemeFrame`, NSFrameView
+ * is GONE, and the titlebar is a SEPARATE layer-composited `NSTitlebarView`
+ * subtree — so the app's NSClassFromString(@"NSFrameView") returns nil, the
+ * chrome-draw swap no-ops, and the window's `-drawWindowBorderInRect:` /
+ * `-drawWindowTitle` overrides are NEVER invoked. Result: the window falls back
+ * to the stock NSThemeFrame chrome (a plain white/system titlebar) instead of
+ * the app's own custom look. (Quinn's PolishedMetalWindow brushed-metal band;
+ * the app even logs its own "ERROR: NSFrameView class does not exist!".)
+ *
+ * RESTORE the contract UNIVERSALLY, keyed on STRUCTURE not any class name:
+ * a window whose class responds to the legacy private-frame chrome selector
+ * `-drawWindowBorderInRect:` AND whose implementation of it is a LEGACY
+ * (translated-i386, reverse-bridge) method is exactly an app that expected the
+ * orphaned private-frame swap. For such a window we install a lightweight
+ * native overlay view into its `NSTitlebarView` (above the stock background,
+ * BELOW the traffic-light widgets + title so those stay visible = functionality
+ * preserved) whose -drawRect: re-invokes the window's own
+ * `-drawWindowBorderInRect:` + `-drawWindowTitle` in the full frame-view
+ * coordinate space — so the app paints its OWN authentic chrome again. A native
+ * (non-legacy) window never responds to that selector with a reverse-bridge IMP
+ * and is never touched.
+ *
+ * The install is triggered by swizzling `-[NSThemeFrame drawRect:]` (fires on
+ * every window display, gives us the frame view directly); the overlay itself
+ * is a runtime-built NSView subclass. Env kill-switch ABICONV_WINCHROME_COMPAT
+ * (set => skip). */
+
+/* forward decls used by the overlay IMP */
+static Class g_chrome_overlay_cls;          /* our runtime NSView subclass     */
+static SEL   g_sel_drawWindowBorderInRect;  /* cached                          */
+static SEL   g_sel_drawWindowTitle;
+static SEL   g_sel_window;
+static SEL   g_sel_bounds;
+/* -[NSView bounds]/-frame return a 32B CGRect (struct-return ABI on x86_64) —
+ * must go through objc_msgSend_stret with a hidden retbuf pointer, NOT a plain
+ * CGRect-returning cast of objc_msgSend. Canonical helper defined later. */
+static CGRect abiconv_view_bounds(id v);
+static CGRect abiconv_msg_rect(id v, SEL sel) {
+   CGRect r = {{0, 0}, {0, 0}};
+   if (!v) { return r; }
+   ((void (*)(CGRect *, id, SEL))objc_msgSend_stret)(&r, v, sel);
+   return r;
+}
+
+/* When set (native test guard only), the legacy-chrome gate accepts ANY window
+ * that merely RESPONDS to -drawWindowBorderInRect: (a native guard can't forge a
+ * reverse-bridge IMP). Zero in production => real gate is legacy-IMP only. */
+static int g_chrome_test_accept_responds;
+void _86x64_test_window_chrome_accept_responds(int v) { g_chrome_test_accept_responds = v; }
+
+/* Is `win` a legacy window whose private-frame chrome swap was orphaned?
+ * Structural: responds to -drawWindowBorderInRect: with a LEGACY (reverse-
+ * bridge) IMP. Never triggers on a native window (which has no such method, and
+ * if it did, its IMP would not be a reverse-bridge trampoline). */
+static int window_has_legacy_chrome(id win) {
+   if (!win) { return 0; }
+   Class wc = object_getClass(win);
+   Method m = class_getInstanceMethod(wc, g_sel_drawWindowBorderInRect);
+   if (!m) { return 0; }
+   if (method_is_legacy(m)) { return 1; }
+   return g_chrome_test_accept_responds ? 1 : 0;
+}
+
+/* find the first descendant view whose class-name contains `needle` */
+static id chrome_find_subview(id root, const char *needle) {
+   if (!root) { return nil; }
+   const char *cn = object_getClassName(root);
+   if (cn && strstr(cn, needle)) { return root; }
+   id subs = ((id(*)(id, SEL))objc_msgSend)(root, sel_registerName("subviews"));
+   if (!subs) { return nil; }
+   long n = ((long(*)(id, SEL))objc_msgSend)(subs, sel_registerName("count"));
+   for (long i = 0; i < n; ++i) {
+      id s = ((id(*)(id, SEL, long))objc_msgSend)(
+                subs, sel_registerName("objectAtIndex:"), i);
+      id r = chrome_find_subview(s, needle);
+      if (r) { return r; }
+   }
+   return nil;
+}
+
+/* -drawRect: for our overlay. self is the overlay view; it lives inside the
+ * window's NSTitlebarView. Re-invoke the window's OWN legacy chrome-draw in the
+ * full frame-view coordinate space: the app draws its band at the TOP of the
+ * window frame, so translate the CTM DOWN so that frame-top lands over our band
+ * (which sits at the top of the frame, i.e. the titlebar). */
+static void chrome_overlay_drawRect(id self, SEL _cmd, CGRect dirty) {
+   (void)_cmd; (void)dirty;
+   id win = ((id(*)(id, SEL))objc_msgSend)(self, g_sel_window);
+   if (!window_has_legacy_chrome(win)) { return; }
+
+   /* our bounds (the titlebar band, unflipped: 0,0 .. bandW,bandH) */
+   CGRect ob = abiconv_view_bounds(self);
+   /* the window frame view + its height (band sits at the top of the frame) */
+   id contentView = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("contentView"));
+   id frameView = contentView
+      ? ((id(*)(id, SEL))objc_msgSend)(contentView, sel_registerName("superview"))
+      : nil;
+   CGRect fb = frameView ? abiconv_view_bounds(frameView) : ob;
+   double bandH = ob.size.height;
+   double frameH = fb.size.height > 0 ? fb.size.height : bandH;
+
+   /* current CG context (the overlay's drawRect: focused it) */
+   id nsctx = ((id(*)(id, SEL))objc_msgSend)(
+                 (id)objc_getClass("NSGraphicsContext"),
+                 sel_registerName("currentContext"));
+   CGContextRef cg = nsctx
+      ? (CGContextRef)((void*(*)(id, SEL))objc_msgSend)(nsctx, sel_registerName("CGContext"))
+      : NULL;
+   if (cg) { CGContextSaveGState(cg); }
+   /* Map frame-view coords -> overlay coords: the app draws the band spanning
+    * frame y=[frameH-bandH .. frameH]; our overlay spans y=[0..bandH]. Shift the
+    * origin down by (frameH-bandH) so the app's top-of-frame band lands on us. */
+   if (cg && frameH > bandH) {
+      CGContextTranslateCTM(cg, 0.0, -(frameH - bandH));
+   }
+
+   /* re-invoke the app's own chrome draw in frame-view space */
+   CGRect frameRect = fb;
+   ((void(*)(id, SEL, CGRect))objc_msgSend)(win, g_sel_drawWindowBorderInRect, frameRect);
+   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
+          win, sel_registerName("respondsToSelector:"), g_sel_drawWindowTitle)) {
+      ((void(*)(id, SEL))objc_msgSend)(win, g_sel_drawWindowTitle);
+   }
+
+   if (cg) { CGContextRestoreGState(cg); }
+   if (BRIDGE_TRACE()) {
+      fprintf(stderr, "[compat] wchrome overlay draw: band=%.0fx%.0f frameH=%.0f (%s)\n",
+              ob.size.width, bandH, frameH, object_getClassName(win));
+      fflush(stderr);
+   }
+}
+static signed char chrome_overlay_isFlipped(id self, SEL _cmd) {
+   (void)self; (void)_cmd; return 0;   /* unflipped: origin bottom-left, like the frame view */
+}
+/* let clicks pass through to the traffic-lights / draggable titlebar */
+static id chrome_overlay_hitTest(id self, SEL _cmd, CGPoint p) {
+   (void)self; (void)_cmd; (void)p; return nil;
+}
+
+static Class chrome_overlay_class(void) {
+   if (g_chrome_overlay_cls) { return g_chrome_overlay_cls; }
+   Class super = objc_getClass("NSView");
+   if (!super) { return NULL; }
+   Class c = objc_allocateClassPair(super, "_86x64_ChromeOverlay", 0);
+   if (!c) {   /* another copy already made it: adopt the existing one */
+      g_chrome_overlay_cls = objc_getClass("_86x64_ChromeOverlay");
+      return g_chrome_overlay_cls;
+   }
+   class_addMethod(c, sel_registerName("drawRect:"),
+                   (IMP)chrome_overlay_drawRect, "v@:{CGRect={CGPoint=dd}{CGSize=dd}}");
+   class_addMethod(c, sel_registerName("isFlipped"),
+                   (IMP)chrome_overlay_isFlipped, "c@:");
+   class_addMethod(c, sel_registerName("hitTest:"),
+                   (IMP)chrome_overlay_hitTest, "@@:{CGPoint=dd}");
+   objc_registerClassPair(c);
+   g_chrome_overlay_cls = c;
+   return c;
+}
+
+/* Install our overlay into `win`'s NSTitlebarView (idempotent). Self-gates on
+ * the structural legacy-chrome check, so it's a no-op on any native window. */
+static void chrome_install_overlay(id win) {
+   if (!window_has_legacy_chrome(win)) { return; }
+   id contentView = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("contentView"));
+   id frameView = contentView
+      ? ((id(*)(id, SEL))objc_msgSend)(contentView, sel_registerName("superview"))
+      : nil;
+   if (!frameView) { return; }
+   id tbv = chrome_find_subview(frameView, "NSTitlebarView");
+   if (!tbv) { return; }                       /* titlebar not built yet: retry */
+
+   /* already installed? scan the titlebar's subviews for our class */
+   Class ov_cls = chrome_overlay_class();
+   if (!ov_cls) { return; }
+   id subs = ((id(*)(id, SEL))objc_msgSend)(tbv, sel_registerName("subviews"));
+   long n = subs ? ((long(*)(id, SEL))objc_msgSend)(subs, sel_registerName("count")) : 0;
+   id bg = nil;
+   for (long i = 0; i < n; ++i) {
+      id s = ((id(*)(id, SEL, long))objc_msgSend)(subs, sel_registerName("objectAtIndex:"), i);
+      if (object_getClass(s) == ov_cls) { return; }   /* already present */
+      const char *cn = object_getClassName(s);
+      if (!bg && cn && strstr(cn, "NSTitlebarBackgroundView")) { bg = s; }
+   }
+
+   CGRect tb = abiconv_view_bounds(tbv);
+   (void)abiconv_msg_rect; /* reserved helper for future non-bounds rects */
+   id ov = ((id(*)(id, SEL))objc_msgSend)((id)ov_cls, sel_registerName("alloc"));
+   ov = ((id(*)(id, SEL, CGRect))objc_msgSend)(ov, sel_registerName("initWithFrame:"), tb);
+   /* fill the band + track resize (width & height sizable) */
+   ((void(*)(id, SEL, unsigned long))objc_msgSend)(
+      ov, sel_registerName("setAutoresizingMask:"), (unsigned long)(2 /*WidthSizable*/ | 16 /*HeightSizable*/));
+   /* insert ABOVE the stock background (so our chrome hides the white system
+    * titlebar) but BELOW the widgets/title (so traffic-lights + title stay). */
+   if (bg) {
+      ((void(*)(id, SEL, id, long, id))objc_msgSend)(
+         tbv, sel_registerName("addSubview:positioned:relativeTo:"),
+         ov, (long)1 /*NSWindowAbove*/, bg);
+   } else {
+      /* no background found: put us at the very bottom so we don't cover widgets */
+      id first = (n > 0) ? ((id(*)(id, SEL, long))objc_msgSend)(subs, sel_registerName("objectAtIndex:"), 0) : nil;
+      ((void(*)(id, SEL, id, long, id))objc_msgSend)(
+         tbv, sel_registerName("addSubview:positioned:relativeTo:"),
+         ov, (long)-1 /*NSWindowBelow*/, first);
+   }
+   ((void(*)(id, SEL, signed char))objc_msgSend)(ov, sel_registerName("setNeedsDisplay:"), 1);
+   if (BRIDGE_TRACE()) {
+      fprintf(stderr, "[compat] wchrome overlay INSTALLED on %s (band %.0fx%.0f)\n",
+              object_getClassName(win), tb.size.width, tb.size.height);
+      fflush(stderr);
+   }
+}
+
+static IMP g_themeframe_orig_drawRect;
+static void themeframe_drawRect(id self, SEL _cmd, CGRect dirty) {
+   /* run the stock frame draw first (structure, traffic-lights, base title) */
+   if (g_themeframe_orig_drawRect) {
+      ((void(*)(id, SEL, CGRect))g_themeframe_orig_drawRect)(self, _cmd, dirty);
+   }
+   /* then, for an orphaned-chrome legacy window, ensure our overlay is present */
+   id win = ((id(*)(id, SEL))objc_msgSend)(self, g_sel_window);
+   if (window_has_legacy_chrome(win)) {
+      chrome_install_overlay(win);
+   }
+}
+
+static void legacy_window_chrome_install(void) {
+   static int done = 0;
+   if (done) { return; }
+   if (getenv("ABICONV_WINCHROME_COMPAT")) { done = 1; return; }
+   Class tf = objc_getClass("NSThemeFrame");
+   if (!tf) { return; }                         /* AppKit not loaded yet: retry */
+   Method m = class_getInstanceMethod(tf, sel_registerName("drawRect:"));
+   if (!m) { return; }
+   /* cache selectors */
+   g_sel_drawWindowBorderInRect = sel_registerName("drawWindowBorderInRect:");
+   g_sel_drawWindowTitle        = sel_registerName("drawWindowTitle");
+   g_sel_window                 = sel_registerName("window");
+   g_sel_bounds                 = sel_registerName("bounds");
+   /* once per PROCESS (env flag) so a second libabiconv copy doesn't capture the
+    * first copy's swizzled IMP as "original" and chain. */
+   if (getenv("ABICONV_WINCHROME_INSTALLED")) { done = 1; return; }
+   setenv("ABICONV_WINCHROME_INSTALLED", "1", 1);
+   g_themeframe_orig_drawRect = method_getImplementation(m);
+   method_setImplementation(m, (IMP)themeframe_drawRect);
+   done = 1;
+}
+
+/* test hook: drive the chrome install + overlay-fire from a native guard
+ * (tests-i386/window_chrome_test.sh). Returns the overlay Class (or NULL). */
+Class _86x64_test_window_chrome_overlay_class(void) {
+   g_sel_drawWindowBorderInRect = sel_registerName("drawWindowBorderInRect:");
+   g_sel_drawWindowTitle        = sel_registerName("drawWindowTitle");
+   g_sel_window                 = sel_registerName("window");
+   g_sel_bounds                 = sel_registerName("bounds");
+   return chrome_overlay_class();
+}
+void _86x64_test_window_chrome_install_overlay(id win) { chrome_install_overlay(win); }
+int  _86x64_test_window_has_legacy_chrome(id win) { return window_has_legacy_chrome(win); }
+
 static void appkit_compat_install(void);
 /* test hook: force the AppKit legacy-compat installs from a NATIVE harness
  * (tests-i386/snapshot_compat_test.sh) without a bridge entry — the installs
@@ -3710,6 +3980,7 @@ static void appkit_compat_install(void) {
    legacy_cachedisplay_1x_install();
    legacy_displayrect_comark_install();
    legacy_gstate_capture_install();
+   legacy_window_chrome_install();
    /* These self-guard (own env vars) and must keep retrying until THEIR
     * framework loads — NSColor/AppKit early, NSProFont/ProKit much later — so
     * run them BEFORE the `done` short-circuit (which only tracks the AppKit
