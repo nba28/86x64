@@ -3267,6 +3267,155 @@ static void legacy_snapshot_compat_install(void) {
    done = 1;
 }
 
+/* ---- legacy -[NSImage lockFocus] 1x-backing compat -------------------------
+ * Modern AppKit backs an -[NSImage lockFocus] drawing context at the current
+ * display's backingScaleFactor: on a Retina (2x) main screen a 10x10-POINT
+ * image gets a 20x20-PIXEL rep. LEGACY 10.6 lockFocus had no backing-scale
+ * concept and ALWAYS produced a 1x context (pixels == points). Every legacy
+ * consumer of the lockFocus'd content assumes points == pixels: it reads back
+ * the rep and indexes bitmapData/bytesPerRow at POINT coordinates, uploads it
+ * to glTexImage2D sizing the textured quad in points, or measures pixelsWide to
+ * lay out. A 2x rep gives them the wrong stride/extent -> garbled blits, GL
+ * texcoord mismatch, off-by-2x layout. This is the OFFSCREEN sibling of
+ * legacy_glview_1x (on-screen NSOpenGLView) and the initWithFocusedViewRect:
+ * snapshot compat (focused-view readback) — the plain lockFocus path was the
+ * one uncovered leg, and it shares their documented 1x contract.
+ *
+ * Restore the 10.6 contract for LEGACY-originated lockFocus only: swizzle
+ * -[NSImage lockFocus]/lockFocusFlipped:/unlockFocus so a lockFocus issued FROM
+ * translated i386 code draws into an explicit 1x NSBitmapImageRep-backed
+ * NSGraphicsContext instead of the device-scaled backing. The existing image
+ * content is pre-painted into the 1x rep first (legacy lockFocus draws ONTO
+ * the current content, it does not clear), and on unlockFocus the 1x rep
+ * becomes the image's sole representation so downstream readers see 1x.
+ *
+ * TRIGGER = STRUCTURE, never app/class name: the forward bridge
+ * (objc_bridge_prep) sets g_lockfocus_legacy for exactly the lockFocus send it
+ * is dispatching from i386 (receiver is an NSImage), consumed+cleared by the
+ * swizzled IMP that runs synchronously as this send's native dispatch. A
+ * lockFocus that native ProKit/AppKit issues for its OWN Retina rendering (not
+ * from a legacy send) leaves the flag 0 and runs the original device-scaled IMP
+ * untouched. Nesting is handled with a small per-thread stack. */
+static IMP g_img_lockFocus, g_img_lockFocusFlipped, g_img_unlockFocus;
+static __thread int g_lockfocus_legacy;          /* set by objc_bridge_prep */
+/* test-only setter: a __thread var can't be poked via dlsym (dlsym returns the
+ * TLV descriptor, not the per-thread slot), so the native guard drives the flag
+ * through this in-library accessor which performs the real TLS write. */
+void _86x64_test_set_lockfocus_legacy(int v) { g_lockfocus_legacy = v; }
+#define LF1X_MAX 16
+static __thread id  g_lf1x_img[LF1X_MAX];
+static __thread id  g_lf1x_rep[LF1X_MAX];
+static __thread int g_lf1x_depth;
+
+static int lf1x_begin(id self) {
+   CGSize pts = ((CGSize(*)(id, SEL))objc_msgSend)(self, sel_registerName("size"));
+   if (pts.width <= 0 || pts.height <= 0 || g_lf1x_depth >= LF1X_MAX) { return 0; }
+   long W = (long)(pts.width + 0.5), H = (long)(pts.height + 0.5);
+   Class rep_cls = objc_getClass("NSBitmapImageRep");
+   Class gc_cls  = objc_getClass("NSGraphicsContext");
+   if (!rep_cls || !gc_cls) { return 0; }
+   id rep = ((id(*)(id, SEL))objc_msgSend)((id)rep_cls, sel_registerName("alloc"));
+   rep = ((id(*)(id, SEL, void *, long, long, long, long, signed char,
+                 signed char, id, long, long))objc_msgSend)(
+      rep,
+      sel_registerName("initWithBitmapDataPlanes:pixelsWide:pixelsHigh:"
+                       "bitsPerSample:samplesPerPixel:hasAlpha:isPlanar:"
+                       "colorSpaceName:bytesPerRow:bitsPerPixel:"),
+      NULL, W, H, 8L, 4L, (signed char)1, (signed char)0,
+      (id)CFSTR("NSCalibratedRGBColorSpace"), 0L, 0L);
+   if (!rep) { return 0; }
+   ((void(*)(id, SEL, CGSize))objc_msgSend)(rep, sel_registerName("setSize:"), pts);
+   id gc = ((id(*)(id, SEL, id))objc_msgSend)(
+      (id)gc_cls, sel_registerName("graphicsContextWithBitmapImageRep:"), rep);
+   if (!gc) { return 0; }
+   ((void(*)(id, SEL))objc_msgSend)((id)gc_cls, sel_registerName("saveGraphicsState"));
+   ((void(*)(id, SEL, id))objc_msgSend)(
+      (id)gc_cls, sel_registerName("setCurrentContext:"), gc);
+   /* pre-paint existing content: legacy lockFocus draws ONTO current pixels */
+   long nreps = ((long(*)(id, SEL))objc_msgSend)(
+      ((id(*)(id, SEL))objc_msgSend)(self, sel_registerName("representations")),
+      sel_registerName("count"));
+   if (nreps > 0) {
+      ((void(*)(id, SEL, CGRect, CGRect, unsigned long, double))objc_msgSend)(
+         self, sel_registerName("drawInRect:fromRect:operation:fraction:"),
+         CGRectMake(0, 0, pts.width, pts.height), CGRectZero,
+         1UL /* NSCompositeCopy */, 1.0);
+   }
+   g_lf1x_img[g_lf1x_depth] = self;
+   g_lf1x_rep[g_lf1x_depth] = rep;
+   g_lf1x_depth++;
+   if (BRIDGE_TRACE()) {
+      fprintf(stderr, "[compat] NSImage lockFocus -> 1x %ldx%ld (%s)\n", W, H,
+              object_getClassName(self));
+      fflush(stderr);
+   }
+   return 1;
+}
+static void img_lockFocus(id self, SEL _cmd) {
+   if (g_lockfocus_legacy) { g_lockfocus_legacy = 0; if (lf1x_begin(self)) { return; } }
+   ((void(*)(id, SEL))g_img_lockFocus)(self, _cmd);
+}
+static signed char img_lockFocusFlipped(id self, SEL _cmd, signed char flipped) {
+   /* Legacy 1x path ignores the flip request's device scaling; the drawInRect:
+    * pre-paint + subsequent draws use the context's own (unflipped-by-default)
+    * coordinates, matching what a legacy 1x lockFocus produced. Only intercept
+    * when we successfully begin a 1x context; else fall through. */
+   if (g_lockfocus_legacy) {
+      g_lockfocus_legacy = 0;
+      if (lf1x_begin(self)) { return 1; }
+   }
+   return ((signed char(*)(id, SEL, signed char))g_img_lockFocusFlipped)(
+      self, _cmd, flipped);
+}
+static void img_unlockFocus(id self, SEL _cmd) {
+   if (g_lf1x_depth > 0 && g_lf1x_img[g_lf1x_depth - 1] == self) {
+      g_lf1x_depth--;
+      id rep = g_lf1x_rep[g_lf1x_depth];
+      g_lf1x_rep[g_lf1x_depth] = nil;
+      g_lf1x_img[g_lf1x_depth] = nil;
+      Class gc_cls = objc_getClass("NSGraphicsContext");
+      ((void(*)(id, SEL))objc_msgSend)((id)gc_cls,
+                                       sel_registerName("restoreGraphicsState"));
+      /* commit: our 1x rep becomes the image's sole representation */
+      id reps = ((id(*)(id, SEL))objc_msgSend)(self,
+                                               sel_registerName("representations"));
+      id copy = ((id(*)(id, SEL))objc_msgSend)(reps, sel_registerName("copy"));
+      long n = ((long(*)(id, SEL))objc_msgSend)(copy, sel_registerName("count"));
+      for (long i = 0; i < n; ++i) {
+         id r = ((id(*)(id, SEL, long))objc_msgSend)(
+            copy, sel_registerName("objectAtIndex:"), i);
+         ((void(*)(id, SEL, id))objc_msgSend)(
+            self, sel_registerName("removeRepresentation:"), r);
+      }
+      ((void(*)(id, SEL))objc_msgSend)(copy, sel_registerName("release"));
+      ((void(*)(id, SEL, id))objc_msgSend)(
+         self, sel_registerName("addRepresentation:"), rep);
+      return;
+   }
+   ((void(*)(id, SEL))g_img_unlockFocus)(self, _cmd);
+}
+static void legacy_lockfocus_1x_install(void) {
+   static int done = 0;
+   if (done) { return; }
+   if (getenv("ABICONV_LOCKFOCUS1X_COMPAT")) { done = 1; return; }
+   Class img = objc_getClass("NSImage");
+   if (!img) { return; }                       /* AppKit not loaded yet: retry */
+   Method mL = class_getInstanceMethod(img, sel_registerName("lockFocus"));
+   Method mU = class_getInstanceMethod(img, sel_registerName("unlockFocus"));
+   if (!mL || !mU) { return; }
+   setenv("ABICONV_LOCKFOCUS1X_COMPAT", "1", 1);
+   g_img_lockFocus = method_getImplementation(mL);
+   method_setImplementation(mL, (IMP)img_lockFocus);
+   g_img_unlockFocus = method_getImplementation(mU);
+   method_setImplementation(mU, (IMP)img_unlockFocus);
+   Method mLF = class_getInstanceMethod(img, sel_registerName("lockFocusFlipped:"));
+   if (mLF) {
+      g_img_lockFocusFlipped = method_getImplementation(mLF);
+      method_setImplementation(mLF, (IMP)img_lockFocusFlipped);
+   }
+   done = 1;
+}
+
 static void appkit_compat_install(void);
 /* test hook: force the AppKit legacy-compat installs from a NATIVE harness
  * (tests-i386/snapshot_compat_test.sh) without a bridge entry — the installs
@@ -3277,6 +3426,7 @@ void _86x64_test_appkit_compat_install(void) { appkit_compat_install(); }
 static void appkit_compat_install(void) {
    legacy_glview_1x_install();
    legacy_snapshot_compat_install();
+   legacy_lockfocus_1x_install();
    /* These self-guard (own env vars) and must keep retrying until THEIR
     * framework loads — NSColor/AppKit early, NSProFont/ProKit much later — so
     * run them BEFORE the `done` short-circuit (which only tracks the AppKit
@@ -4203,6 +4353,30 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
 
    id real_self = resolve_self(args32[0]);
    SEL sel = resolve_sel(args32[1]);
+
+   /* Mark a lockFocus-family send as LEGACY-originated so the swizzled
+    * -[NSImage lockFocus]/lockFocusFlipped: (legacy_lockfocus_1x_install) pins
+    * this one to a 1x backing. Set here (forward bridge = i386 origin) and
+    * consumed+cleared by the swizzled IMP that runs synchronously as this send's
+    * native dispatch, so native ProKit/AppKit lockFocus is never affected. Scope
+    * to an NSImage receiver (NSView also responds to lockFocus; that path has no
+    * swizzle and must not leave the flag set to be mis-consumed by a later
+    * NSImage send). Gate cheaply on the selector's first char before the strcmp. */
+   if (sel) {
+      const char *sn = sel_getName(sel);
+      if (sn[0] == 'l' &&
+          (!strcmp(sn, "lockFocus") || !strcmp(sn, "lockFocusFlipped:"))) {
+         Class img = objc_getClass("NSImage");
+         int is_img = 0;
+         if (img && real_self) {
+            for (Class c = object_getClass(real_self); c;
+                 c = class_getSuperclass(c)) {
+               if (c == img) { is_img = 1; break; }
+            }
+         }
+         g_lockfocus_legacy = is_img;
+      }
+   }
 
    /* Quinn GL-upload diagnostic (env ABICONV_GL_TEXLOG): log the createTexture
     * selector sends BEFORE any gating, with raw handle + resolution result. */
