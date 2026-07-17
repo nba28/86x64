@@ -3416,6 +3416,78 @@ static void legacy_lockfocus_1x_install(void) {
    done = 1;
 }
 
+/* ---- legacy -[NSView cacheDisplay] 1x-rep compat ---------------------------
+ * The VIEW-side sibling of legacy_lockfocus_1x. The offscreen view-capture
+ * idiom -[NSView bitmapImageRepForCachingDisplayInRect:] (vend a rep) +
+ * cacheDisplayInRect:toBitmapImageRep: (render into it) vends a rep sized at the
+ * display backingScaleFactor (2x on Retina: a 10-POINT view -> a 20-PIXEL rep,
+ * and cacheDisplay fills the full 2x extent). LEGACY 10.6 vended a 1x rep
+ * (pixels == points). A legacy consumer reads the rep's bitmapData/bytesPerRow
+ * at POINT coordinates or uploads to glTexImage2D sizing the quad in points ->
+ * a 2x rep gives it the wrong stride/extent (top-left-quarter blit, GL texcoord
+ * mismatch). Same "legacy offscreen backing is 1x" contract as lockFocus /
+ * initWithFocusedViewRect: / legacy_glview_1x.
+ *
+ * Restore it for LEGACY-originated captures only: swizzle
+ * -[NSView bitmapImageRepForCachingDisplayInRect:] so a call issued FROM
+ * translated i386 code returns a hand-built 1x NSBitmapImageRep (pixels ==
+ * points); the app's own cacheDisplayInRect:toBitmapImageRep: then renders into
+ * that 1x rep at 1x. Gate = the forward bridge sets g_cachedisplay_legacy for
+ * exactly the bitmapImageRepForCachingDisplayInRect: send it dispatches from
+ * i386 to an NSView, consumed+cleared by the swizzled IMP. Native AppKit/ProKit
+ * captures (flag 0) get the original device-scaled rep untouched. */
+static IMP g_view_bitmapRepForCaching;
+static __thread int g_cachedisplay_legacy;       /* set by objc_bridge_prep */
+void _86x64_test_set_cachedisplay_legacy(int v) { g_cachedisplay_legacy = v; }
+static id view_bitmapRepForCaching(id self, SEL _cmd, CGRect rect) {
+   if (!g_cachedisplay_legacy) {
+      return ((id(*)(id, SEL, CGRect))g_view_bitmapRepForCaching)(self, _cmd, rect);
+   }
+   g_cachedisplay_legacy = 0;
+   long W = (long)(rect.size.width + 0.5), H = (long)(rect.size.height + 0.5);
+   if (W <= 0 || H <= 0) {
+      return ((id(*)(id, SEL, CGRect))g_view_bitmapRepForCaching)(self, _cmd, rect);
+   }
+   Class rep_cls = objc_getClass("NSBitmapImageRep");
+   if (!rep_cls) {
+      return ((id(*)(id, SEL, CGRect))g_view_bitmapRepForCaching)(self, _cmd, rect);
+   }
+   id rep = ((id(*)(id, SEL))objc_msgSend)((id)rep_cls, sel_registerName("alloc"));
+   rep = ((id(*)(id, SEL, void *, long, long, long, long, signed char,
+                 signed char, id, long, long))objc_msgSend)(
+      rep,
+      sel_registerName("initWithBitmapDataPlanes:pixelsWide:pixelsHigh:"
+                       "bitsPerSample:samplesPerPixel:hasAlpha:isPlanar:"
+                       "colorSpaceName:bytesPerRow:bitsPerPixel:"),
+      NULL, W, H, 8L, 4L, (signed char)1, (signed char)0,
+      (id)CFSTR("NSCalibratedRGBColorSpace"), 0L, 0L);
+   if (!rep) {
+      return ((id(*)(id, SEL, CGRect))g_view_bitmapRepForCaching)(self, _cmd, rect);
+   }
+   ((void(*)(id, SEL, CGSize))objc_msgSend)(rep, sel_registerName("setSize:"),
+                                            rect.size);
+   if (BRIDGE_TRACE()) {
+      fprintf(stderr, "[compat] NSView cacheDisplay rep -> 1x %ldx%ld (%s)\n",
+              W, H, object_getClassName(self));
+      fflush(stderr);
+   }
+   return rep;
+}
+static void legacy_cachedisplay_1x_install(void) {
+   static int done = 0;
+   if (done) { return; }
+   if (getenv("ABICONV_CACHEDISPLAY1X_COMPAT")) { done = 1; return; }
+   Class view = objc_getClass("NSView");
+   if (!view) { return; }                      /* AppKit not loaded yet: retry */
+   Method m = class_getInstanceMethod(
+      view, sel_registerName("bitmapImageRepForCachingDisplayInRect:"));
+   if (!m) { return; }
+   setenv("ABICONV_CACHEDISPLAY1X_COMPAT", "1", 1);
+   g_view_bitmapRepForCaching = method_getImplementation(m);
+   method_setImplementation(m, (IMP)view_bitmapRepForCaching);
+   done = 1;
+}
+
 static void appkit_compat_install(void);
 /* test hook: force the AppKit legacy-compat installs from a NATIVE harness
  * (tests-i386/snapshot_compat_test.sh) without a bridge entry — the installs
@@ -3427,6 +3499,7 @@ static void appkit_compat_install(void) {
    legacy_glview_1x_install();
    legacy_snapshot_compat_install();
    legacy_lockfocus_1x_install();
+   legacy_cachedisplay_1x_install();
    /* These self-guard (own env vars) and must keep retrying until THEIR
     * framework loads — NSColor/AppKit early, NSProFont/ProKit much later — so
     * run them BEFORE the `done` short-circuit (which only tracks the AppKit
@@ -4375,6 +4448,20 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
             }
          }
          g_lockfocus_legacy = is_img;
+      } else if (sn[0] == 'b' &&
+                 !strcmp(sn, "bitmapImageRepForCachingDisplayInRect:")) {
+         /* VIEW-side offscreen-1x sibling: mark a legacy NSView cache-rep vend
+          * so legacy_cachedisplay_1x returns a 1x rep. Scope to an NSView
+          * receiver (only NSView defines this selector; be defensive anyway). */
+         Class view = objc_getClass("NSView");
+         int is_view = 0;
+         if (view && real_self) {
+            for (Class c = object_getClass(real_self); c;
+                 c = class_getSuperclass(c)) {
+               if (c == view) { is_view = 1; break; }
+            }
+         }
+         g_cachedisplay_legacy = is_view;
       }
    }
 

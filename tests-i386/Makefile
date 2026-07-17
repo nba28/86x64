@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -231,6 +231,18 @@ draw-clip:
 # to 1x + content preserved, native send left at 2x.
 lockfocus-1x: $(LIBABICONV)
 	@bash lockfocus_1x_test.sh $(LIBABICONV)
+
+# cachedisplay-1x: regression guard for the legacy -[NSView cacheDisplay] 1x-rep
+# compat (objc_shim.c legacy_cachedisplay_1x_install) — the VIEW-side sibling of
+# lockfocus-1x. bitmapImageRepForCachingDisplayInRect: + cacheDisplayInRect: vends
+# a device-scaled (2x Retina) rep, but legacy 10.6 vended 1x (points == pixels)
+# and legacy consumers index bitmapData / upload glTexImage2D in points. The compat
+# swizzles bitmapImageRepForCachingDisplayInRect: so a LEGACY-originated capture
+# (flagged by the forward bridge) returns a 1x rep; native captures stay 2x.
+# Self-contained native x86_64 guard (dlopen of the REAL libabiconv + test hooks;
+# no i386 sysroot). Proves the gate BOTH ways.
+cachedisplay-1x: $(LIBABICONV)
+	@bash cachedisplay_1x_test.sh $(LIBABICONV)
 
 # ae-shadow: regression guard for the Apple Event Manager native-shadow bridge
 # (ae_shim.c). Self-contained (native x86_64 cc + CoreServices, no i386 sysroot):
