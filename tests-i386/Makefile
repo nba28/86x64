@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -285,6 +285,19 @@ nopie-exec-dylib-rebase: $(MACHO_TOOL)
 # Needs the i386 sysroot + ABICONV_RUN_INITS (set by the script); SKIPs without.
 dyld-multicopy: $(MACHO_TOOL)
 	@bash dyld_multicopy_test.sh $(MACHO_TOOL)
+
+# dyld-multicopy-reprocess: regression for the CROSS-COPY slide_objc per-image
+# processing claim (objc_shim.c objc_shared_ctrl.proc_img +
+# _86x64_objc_shared_claim_image; objc_slide.c slide_objc). A second co-located
+# libabiconv copy's _dyld_register_func_for_add_image re-fires slide_objc over
+# every already-mapped image with a PRIVATE processed-set, re-walking not-yet-
+# ready metadata -> NULL-base +0x88 deref (~40% of Civ IV launches). The claim
+# makes each image processed exactly ONCE across all copies. A/B: default arm
+# asserts the re-scan skips (no re-process); ABICONV_NO_XCOPY_CLAIM=1 arm asserts
+# the re-scan re-processes (the pre-fix hazard). Needs the i386 sysroot; SKIPs
+# without.
+dyld-multicopy-reprocess: $(MACHO_TOOL)
+	@bash dyld_multicopy_reprocess_test.sh $(MACHO_TOOL)
 
 # zerofill-reslide: regression for the zerofill-section double-slide fix
 # (objc_slide.c slide_data_fnptrs skips S_ZEROFILL/S_GB_ZEROFILL/

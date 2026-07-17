@@ -190,7 +190,24 @@ struct objc_shared_ctrl {
     * received a denormal ~0 -> Quinn splash rendered fully transparent.
     * Each copy publishes its two trampolines at arena attach. */
    uint64_t        rev_imps[16];
+   /* Cross-copy set of mach_headers ANY libabiconv copy has already claimed for
+    * slide_objc processing (the slide/ObjC-register/run-inits per-image work).
+    * MUST be cross-copy: dyld runs each co-located copy's own
+    * _dyld_register_func_for_add_image(slide_objc), so a SECOND copy's
+    * registration re-fires slide_objc over every already-mapped image with its
+    * OWN (empty) per-copy processed-set and re-walks metadata the FIRST copy
+    * already processed / is mid-processing — reading a not-yet-ready pointer
+    * field back as NULL and dereferencing NULL+offset (the intermittent
+    * slide_objc `[rbx+0x88]`, rbx=0 crash; Civ IV multicopy, ~40% of launches).
+    * The per-image work is once-per-IMAGE, never once-per-copy, so a single
+    * claim across all copies is exactly correct. Open-addressed on the 64-bit
+    * header pointer; claimed via CAS under proc_img_lock. A 0 slot is free
+    * (a mapped mach_header is never NULL). Generalizes a501466's zerofill
+    * partial cure to every slide_objc pass. */
+   os_unfair_lock  proc_img_lock;
+   uint64_t        proc_img;     /* uint64_t[PROC_IMG_CAP], allocated by copy 0 */
 };
+#define PROC_IMG_CAP 16384u
 #define SUPER_HINT_SLOTS 64
 #define OBJC_CTRL_MAGIC 0x3836583634415243ULL  /* "86X64ARC" */
 #define OBJC_CTRL_ENV   "ABICONV_OBJC_CTRL"
@@ -324,6 +341,8 @@ static void arena_init(void) {
       calloc(RVAR_CAP, sizeof(struct rvar_ent));
    c->pgmemo     = (uint64_t)(uintptr_t)
       calloc(PGMEMO_CAP, sizeof(struct pgmemo_ent));
+   c->proc_img   = (uint64_t)(uintptr_t)
+      calloc(PROC_IMG_CAP, sizeof(uint64_t));
    __sync_synchronize();
    c->magic      = OBJC_CTRL_MAGIC;
 
@@ -353,6 +372,44 @@ static uint32_t hash64(uint64_t x) {
    x *= 0xff51afd7ed558ccdULL;
    x ^= x >> 33;
    return (uint32_t)x;
+}
+
+/* Cross-copy claim for slide_objc per-image processing (objc_slide.c).
+ * Returns 1 to EXACTLY ONE libabiconv copy for a given mach_header (the copy
+ * that should slide + register + run the image), 0 to every later caller — so a
+ * second co-located copy's add-image re-scan never re-walks an image another
+ * copy already claimed (the multicopy re-scan race; NULL-base +0x88 deref).
+ * Open-addressed CAS insert on the header pointer under proc_img_lock; a full
+ * table (never expected: PROC_IMG_CAP >> any process's image count) fails safe
+ * by returning 1 (process it locally, exactly the pre-fix per-copy behavior).
+ * If there is no shared ctrl (single copy, or ctrl init failed) it always
+ * returns 1 — the per-copy g_processed set in objc_slide.c is then the sole,
+ * and sufficient, guard. */
+int _86x64_objc_shared_claim_image(const void *mh);
+int _86x64_objc_shared_claim_image(const void *mh) {
+   if (!mh) { return 1; }
+   if (!g_ctrl) { arena_init(); }
+   if (!g_ctrl || !g_ctrl->proc_img) { return 1; }
+   /* Test-only escape hatch (dyld_multicopy_reprocess_test.sh): disable the
+    * cross-copy dedup so EVERY copy processes, reproducing the PRE-FIX per-copy
+    * re-scan A/B arm. Inert in production (env var never set). Memoized once. */
+   static int no_xcopy = -1;
+   if (no_xcopy < 0) { no_xcopy = getenv("ABICONV_NO_XCOPY_CLAIM") ? 1 : 0; }
+   uint64_t key = (uint64_t)(uintptr_t)mh;
+   uint64_t *tab = (uint64_t *)(uintptr_t)g_ctrl->proc_img;
+   os_unfair_lock_lock(&g_ctrl->proc_img_lock);
+   int claimed = 1;
+   uint32_t h = hash64(key) & (PROC_IMG_CAP - 1);
+   for (uint32_t probe = 0; probe < PROC_IMG_CAP; ++probe) {
+      uint32_t idx = (h + probe) & (PROC_IMG_CAP - 1);
+      if (tab[idx] == key) { claimed = 0; break; }   /* already claimed */
+      if (tab[idx] == 0)   { tab[idx] = key; break; } /* claim it (we win) */
+   }
+   os_unfair_lock_unlock(&g_ctrl->proc_img_lock);
+   /* no_xcopy models the PRE-FIX per-copy behavior for the test A/B: every copy
+    * "wins" (processes) — so the second copy re-scans, the very hazard the fix
+    * removes. The claim table is still populated so production dedup is exact. */
+   return no_xcopy ? 1 : claimed;
 }
 
 /* ---- per-thread rsp/rbp stash for the native->i386 trampolines ----
@@ -9146,6 +9203,11 @@ static void reverse_add_methods(Class target, uint32_t methodLists) {
 /* Register one legacy class. Returns 1 if registered, 0 if deferred (super not
  * ready), -1 if skipped (collision / bad). */
 static int reverse_register_one(const struct legacy_objc_class *cls) {
+   /* Defensive NULL-base guard (belt-and-suspenders for the multicopy re-scan
+    * race the cross-copy claim in slide_objc now prevents): a class def slot
+    * that a mid-mapped image handed back as 0 must be skipped, never
+    * dereferenced at cls->name / +0x88. */
+   if (!cls) { return -1; }
    if (!legacy_cstr_ok(cls->name) || !legacy_cstr_ok(cls->super_class)) {
       return -1;
    }
