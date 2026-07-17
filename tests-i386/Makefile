@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x focus-ring layerback-invariance
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -243,6 +243,28 @@ lockfocus-1x: $(LIBABICONV)
 # no i386 sysroot). Proves the gate BOTH ways.
 cachedisplay-1x: $(LIBABICONV)
 	@bash cachedisplay_1x_test.sh $(LIBABICONV)
+# focus-ring: canary guard for the legacy focus-ring contract (audit verdict:
+# no compat needed — pins WHY). (A) OS side: NSSetFocusRingStyle(NSFocusRingOnly)
+# + fill still draws headlessly, leaves the shape interior unpainted, and the
+# CG focus-ring style is EXEMPT from the current clip (verified against a live
+# clip a normal fill cannot escape) — the exact 10.6 mechanism, and the reason
+# the draw-clip compat's clip-to-bounds cannot amputate legacy exterior rings.
+# (B) bridge side: libabiconv exports the real __NSSetFocusRingStyle marshalling
+# thunk (imported by 7/9 Apps32 targets; a stale shimdb auto-stub would turn
+# the NSFocusRingOnly+fill idiom into a solid fill painted over the control).
+focus-ring: $(LIBABICONV)
+	@bash focusring_test.sh $(LIBABICONV)
+
+# layerback-invariance: canary guard pinning that forced layer-backing
+# (wantsLayer=YES on a legacy-style tree — AppKit's force-migration mechanism)
+# does NOT alter the headless draw contract: [display] on a never-shown window
+# fires identically (today: zero drawRect:, the snapshot-compat premise), and
+# cacheDisplayInRect hands subviews the identical in-draw state (arg/clip/CTM/
+# antialias/interpolation) with identical pixels. Asserts plain==layered
+# INVARIANCE, not absolute values, so only a genuine layer-vs-not divergence
+# (what would silently change translated legacy rendering) trips it.
+layerback-invariance:
+	@bash layerback_invariance_test.sh
 
 # ae-shadow: regression guard for the Apple Event Manager native-shadow bridge
 # (ae_shim.c). Self-contained (native x86_64 cc + CoreServices, no i386 sysroot):
