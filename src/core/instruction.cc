@@ -1122,8 +1122,8 @@ namespace MachO {
                      break;
                   }
                }
-               /* FIXED-LOAD image, WRITABLE file-backed __DATA target (the
-                * Civ IV pointer-immediate wall): a non-PIE MH_EXECUTE baking
+               /* FIXED-LOAD image, WRITABLE __DATA target (the Civ IV
+                * pointer-immediate wall): a non-PIE MH_EXECUTE baking
                 * `movl $&anon_static, field(%reg)` — Civ stores the interior
                 * pointer of an anonymous ZEROED static string block
                 * (0x145ea60, no symbol, no content for the vtable probe:
@@ -1134,18 +1134,37 @@ namespace MachO {
                 * immediates for the MOV/PUSH/ADD-to-REG family (a
                 * position-independent image NEVER bakes absolute data
                 * addresses; a fixed-load one genuinely does), so admit the
-                * store form under it too, with two structural narrowings
-                * against integer-ivar false positives: the value must be
-                * 4-ALIGNED (the DataParser misaligned-data-range rule) and
-                * must land in file-backed writable data, NOT a zerofill
-                * span (__bss/__common legitimately spans megabytes and
-                * aliases huge integer ranges — the section.cc (2c) lesson;
-                * vmaddr_in_writable_data also excludes fragile __OBJC). */
+                * store form under it too, narrowed against integer-ivar
+                * false positives by the value being 4-ALIGNED (the DataParser
+                * misaligned-data-range rule) and landing in writable data
+                * (vmaddr_in_writable_data also excludes fragile __OBJC).
+                *
+                * ZEROFILL targets included (the sibling gap 9510f29 deferred):
+                * a __bss/__common address is just as much a bakeable absolute
+                * pointer as a file-backed __data one, and the reg-dest twin of
+                * the SAME store — `movl $&__bss_global, %reg` (MOV_GPRv_IMMv
+                * above) — ALREADY relocates zerofill-valued immediates with no
+                * such exclusion, so refusing them here left a cross-form
+                * inconsistency: Civ shipped 5158 `movl $&zerofill, disp(%reg)`
+                * stores verbatim while their reg-load siblings relocated
+                * (guard 99_zerofill_target_imm_store). The reason 9510f29
+                * excluded zerofill — that __bss/__common spans megabytes so an
+                * OFFSET like `addl $0x124f80,%edx` (=&array[150000]) routinely
+                * ALIASES it and must NOT relocate — is a PIC-codegen artifact,
+                * and the structural back-stop for it already exists downstream:
+                * these heuristic immediates set heuristic=true and section.cc
+                * DetectPicAnchoredDisps pass (2c) CANCELS any zerofill-aliasing
+                * heuristic immediate inside a PIC-anchored region (where an
+                * absolute pointer can't legitimately appear). So the offset
+                * arithmetic is dropped by function-granularity context 2c has
+                * and the parse lacks, while genuine non-PIC absolute-pointer
+                * stores keep the relocation — exactly as for the reg-dest
+                * family. (Guards: 96_zerofill_common_interior /
+                * 99_bss_zerofill_not_filebacked stay green.) */
                if (!ptr_target && (value & 3) == 0 &&
                    env.archive.header.filetype == MH_EXECUTE &&
                    (env.archive.header.flags & MH_PIE) == 0 &&
-                   env.vmaddr_in_writable_data(value) &&
-                   !env.vmaddr_in_zerofill(value)) {
+                   env.vmaddr_in_writable_data(value)) {
                   ptr_target = true;
                }
             }
