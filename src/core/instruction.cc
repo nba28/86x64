@@ -449,6 +449,35 @@ namespace MachO {
                       env.code_alias_is_constant(imm_val)) {
                      imm_is_ptr = false;
                   }
+                  /* CMP/TEST COMPARISON-VALUE gate: in `cmp/test [abs32],imm32`
+                   * (81 /7, F7 /0-1) the immediate is a comparison value / bit
+                   * mask — a data word is essentially never compared against a
+                   * code/data ADDRESS baked as an immediate, while comparing it
+                   * against an integer that merely ALIASES a vmaddr is routine.
+                   * The code_alias_is_constant gate above is DISARMED for
+                   * locals-stripped binaries, which mis-relocated Civ IV
+                   * (Steam)'s OS-version check `cmpl $0x100308, _version`:
+                   * 0x100308 (packed 10.3.8) aliases __text, was rebased to a
+                   * `lea r11,[rip+..]; cmp r11d` -> the check compared against
+                   * ~0x101a690d -> "insufficient system version" exit. So for
+                   * CMP/TEST only, keep the pointer classification solely on
+                   * POSITIVE evidence: an nlist symbol AT the immediate's value
+                   * (func_syms — the `cmpl $_default_handler, _handler` idiom,
+                   * test 87); otherwise the imm stays a literal. MOV (stored
+                   * pointer install) and the ADD/SUB pointer-arithmetic family
+                   * keep the permissive probe. The register-compare twin
+                   * (CMP_GPRv_IMMz below) is instead gated by
+                   * imm_bounds_relocated_table: a loop-sentinel compare runs on
+                   * a REGISTER iterator; a memory-dest cmp bounds no loop. */
+                  if (imm_is_ptr && bits == Bits::M32) {
+                     const xed_iclass_enum_t iclass =
+                        xed_decoded_inst_get_iclass(&xedd);
+                     if ((iclass == XED_ICLASS_CMP ||
+                          iclass == XED_ICLASS_TEST) &&
+                         env.func_syms.count(imm_val) == 0) {
+                        imm_is_ptr = false;
+                     }
+                  }
                   imm = Immediate<bits>::Parse(img, loc + imm_idx, env, imm_is_ptr);
                   imm->heuristic = true; /* value-alias probe (see Immediate) */
                } else if (has_small_imm && dest_is_data) {

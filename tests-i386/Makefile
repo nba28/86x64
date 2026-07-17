@@ -606,6 +606,27 @@ $(BUILD_DIR)/62_pic_xsection_thunk_stripped.i386: $(BUILD_DIR)/62_pic_xsection_t
 	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
 	strip -x $@
 
+# 99_cmp_abs32_imm_notptr: STRIP local symbols (the Civ IV Steam shape:
+# locals-stripped => have_local_text_syms false => the code_alias_is_constant
+# mid-function gate is DISARMED), then ASSERT the compare constant 0x2400
+# really falls inside __TEXT,__text's vmaddr range — the alias trap the test
+# exists to spring (if section layout ever drifts, fail the BUILD loudly
+# instead of letting the guard false-pass). Guards the CMP/TEST memory-dest
+# COMPARISON-VALUE gate in instruction.cc's [abs32]+imm32 arm (Civ IV
+# `cmpl $0x100308, _version; ja` OS-version check mis-relocated to a lea
+# target -> "insufficient system version" exit). Overrides %.i386.
+$(BUILD_DIR)/99_cmp_abs32_imm_notptr.i386: $(BUILD_DIR)/99_cmp_abs32_imm_notptr.o
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
+	strip -x $@
+	@a=$$(otool -l $@ | awk '/sectname __text$$/{s=1;next} s&&$$1=="addr"{print $$2;exit}'); \
+	 z=$$(otool -l $@ | awk '/sectname __text$$/{s=1;next} s&&$$1=="size"{print $$2;exit}'); \
+	 if [ $$((a)) -le $$((0x2400)) ] && [ $$((0x2400)) -lt $$((a + z)) ]; then \
+	   echo "  99_cmp_abs32_imm_notptr: 0x2400 aliases __text [$$a, $$a+$$z) -- trap armed"; \
+	 else \
+	   echo "99_cmp_abs32_imm_notptr: ERROR: 0x2400 outside __text [$$a, $$a+$$z) -- adjust pad/constant"; \
+	   rm -f $@; exit 1; \
+	 fi
+
 # 39_xml_memget_alloc: the i386 sysroot ships no libxml2, so `_xmlMemGet` is an
 # undefined dynamic_lookup import (resolved at translate time by static-interpose
 # -> libabiconv's ___xmlMemGet shim, exactly as a real binary's libxml2 bind is).
@@ -701,6 +722,17 @@ $(BUILD_DIR)/53_cf_format_valist.i386: $(BUILD_DIR)/53_cf_format_valist.o
 # translate time by static-interpose -> libabiconv's ___CF* shims. Guards that
 # the append path DELIVERS CONTENT (the blank-alert follow-on). Overrides %.i386.
 $(BUILD_DIR)/98_cf_append_format_valist.i386: $(BUILD_DIR)/98_cf_append_format_valist.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_cf_key_concat_replace: like 98, CF isn't in the i386 sysroot, so
+# CFStringCreateWithCString / CFStringCreateMutableCopy / CFStringAppend /
+# CFStringFind / CFStringReplace / CFStringGetCString/Length are undefined
+# dynamic_lookup imports resolved at translate time by static-interpose ->
+# libabiconv's ___CF* shims. Guards that Civ's localizer KEY-CONCAT
+# (mutable-copy + append) and TOKEN-SUBSTITUTION (find + replace) deliver
+# content through the proxy wrap/unwrap round-trip (the blank-alert probe).
+# Overrides %.i386.
+$(BUILD_DIR)/99_cf_key_concat_replace.i386: $(BUILD_DIR)/99_cf_key_concat_replace.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +

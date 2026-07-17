@@ -6731,12 +6731,36 @@ static void argstr_describe(uint64_t real, char *buf, size_t n) {
     * faulting CFGetTypeID inside a diagnostic. */
    const int tagged = (real & 0x1) != 0;          /* x86_64 tagged-ptr low bit */
    if (!tagged) {
-      /* an untagged object pointer must be 8-aligned and readable; CFGetTypeID
-       * then robustly validates it IS a CF object. (Don't pre-deref the isa —
-       * a signed/obfuscated isa on newer runtimes would false-reject a real
-       * heap CFString.) A passthrough low i386 value fails the readable check
-       * and is described verbatim instead of faulting CFGetTypeID. */
+      /* An untagged object pointer must be 8-aligned and readable AND its isa
+       * must itself point to a readable, aligned class whose own isa
+       * (metaclass) is readable — the is_real_x86_object isa-chain probe. This
+       * is a DIAGNOSTIC (ABICONV_ARGSTR_TRACE): it must never itself fault the
+       * traced program. Handing CFGetTypeID/objc_msgSend a readable-but-
+       * non-object pointer (arbitrary data whose first word merely looks like
+       * an isa) derefs deep inside the runtime and SIGSEGVs — observed on a
+       * RunStandardAlert arg whose resolved value was not a real object
+       * (argstr_describe -> _CF_IS_OBJC/objc_msgSend_uncached -> KERN at 0x0).
+       * The earlier "CFGetTypeID robustly validates it IS a CF object" claim
+       * was WRONG: CFGetTypeID trusts the isa. Pre-validate the isa chain so
+       * only a provable object reaches CF. A tagged pointer (handled above by
+       * skipping this block) has no in-memory isa and is decoded safely by CF. */
       if ((real & 0x7) || !mem_readable((uintptr_t)real, 8)) {
+         snprintf(buf, n, "(raw 0x%llx, not an object)",
+                  (unsigned long long)real);
+         return;
+      }
+      uint64_t isa = *(const uint64_t *)(uintptr_t)real;
+      /* strip the non-pointer-isa bits (x86_64 ISA_MASK 0x00007ffffffffff8) so
+       * a real object with a packed/tagged isa still validates. */
+      uint64_t isa_ptr = isa & 0x00007ffffffffff8ULL;
+      if (isa_ptr < 0x1000 || !mem_readable(isa_ptr, 8)) {
+         snprintf(buf, n, "(raw 0x%llx, isa 0x%llx not a class)",
+                  (unsigned long long)real, (unsigned long long)isa);
+         return;
+      }
+      uint64_t meta = *(const uint64_t *)(uintptr_t)isa_ptr;   /* class's isa */
+      uint64_t meta_ptr = meta & 0x00007ffffffffff8ULL;
+      if (meta_ptr < 0x1000 || !mem_readable(meta_ptr, 8)) {
          snprintf(buf, n, "(raw 0x%llx, not an object)",
                   (unsigned long long)real);
          return;

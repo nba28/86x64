@@ -36,6 +36,8 @@
 
 #include <stddef.h>
 #include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <dlfcn.h>
 
 /* gestaltQuickTimeVersion. NumVersion-style: 0xVV RR SS BB (major/minor.bugfix/
@@ -80,9 +82,23 @@ int Gestalt(uint32_t selector, int32_t *response) {
       return 0;  /* noErr */
    }
    int (*real)(uint32_t, int32_t *) = resolve_real_gestalt();
-   if (real) { return real(selector, response); }
-   /* No real Gestalt available: report gestaltUndefSelectorErr (-5551), the
-    * same answer the caller would otherwise get, rather than a false success. */
-   if (response) { *response = 0; }
-   return -5551;
+   int rc;
+   int32_t val = 0;
+   if (real) {
+      rc = real(selector, response);
+      if (response) { val = *response; }
+   } else {
+      /* No real Gestalt available: report gestaltUndefSelectorErr (-5551), the
+       * same answer the caller would otherwise get, rather than a false success. */
+      if (response) { *response = 0; }
+      rc = -5551;
+   }
+   if (getenv("ABICONV_GESTALT_TRACE")) {
+      char s[5] = { (char)(selector>>24), (char)(selector>>16),
+                    (char)(selector>>8), (char)selector, 0 };
+      fprintf(stderr, "[gestalt] sel='%s'(0x%08x) resp=%p -> rc=%d val=0x%x\n",
+              s, selector, (void*)response, rc, (unsigned)val);
+      fflush(stderr);
+   }
+   return rc;
 }
