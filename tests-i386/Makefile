@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -207,6 +207,16 @@ change-deps: $(MACHO_TOOL)
 # i386 sysroot): converted double[] renders white, raw i386 float[] does not.
 cg-color:
 	@bash cg_color_test.sh
+
+# draw-clip: regression guard for the LEGACY DRAW-CLIP CONTRACT restoration in
+# objc_shim.c (_86x64_reverse_prep/_ret). Self-contained (native x86_64 cc +
+# AppKit, no i386 sysroot): reproduces the sibling-stomp structurally — a legacy
+# view whose drawRect: fills BEYOND its bounds overwrites an adjacent sibling
+# under modern AppKit's no-per-view-clip cacheDisplay path (unclipped -> sibling
+# white), while the fix's save-gstate + intersect-with-bounds + clip primitive
+# preserves the sibling (clipped -> sibling intact).
+draw-clip:
+	@bash draw_clip_test.sh
 
 # ae-shadow: regression guard for the Apple Event Manager native-shadow bridge
 # (ae_shim.c). Self-contained (native x86_64 cc + CoreServices, no i386 sysroot):

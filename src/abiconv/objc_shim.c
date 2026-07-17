@@ -5453,6 +5453,11 @@ struct reverse_plan {
     * case). Per-call (plan is stack-allocated) => reentrant. C-only slack +320. */
    uint32_t    n_out_obj;        /* +348 count of out-object params this call */
    struct { uint32_t scratch; uint64_t native_out; } out_obj[4];  /* +352.. */
+   /* Legacy draw-clip contract (see the block at the end of reverse_prep): the
+    * CGContext we CGContextSaveGState'd + clipped before invoking a legacy
+    * drawRect: / NSCell-draw IMP; reverse_ret restores it. 0 = nothing to
+    * restore. C-only, in the plan reservation slack (asm never reads past +320). */
+   uint64_t    draw_clip_ctx;
 };
 
 extern void _86x64_reverse_imp(void);        /* objc_reverse.asm */
@@ -7813,6 +7818,19 @@ static void glp_install_once(void) {
    fprintf(stderr, "[glp] NSOpenGLContext swizzles installed\n"); fflush(stderr);
 }
 
+/* -[NSView bounds] as a plain CGRect (32B on x86_64 -> struct-return ABI).
+ * Casting objc_msgSend to a CGRect-returning fn ptr emits the STRET convention
+ * (hidden retbuf ptr in rdi, self in rsi) while still calling plain objc_msgSend,
+ * which reads rdi as self -> dispatch on garbage. Route CGRect returns through
+ * objc_msgSend_stret explicitly. Generic (no app/heartbeat scaffolding). */
+static CGRect abiconv_view_bounds(id v) {
+   CGRect r = {{0, 0}, {0, 0}};
+   if (!v) { return r; }
+   ((void (*)(CGRect *, id, SEL))objc_msgSend_stret)(
+      &r, v, sel_registerName("bounds"));
+   return r;
+}
+
 void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
                          uint32_t is_stret) {
    /* objc_msgSend_stret shifts the register file by one: rdi is the hidden
@@ -7844,6 +7862,7 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
    plan->wb_active = 0;     /* no inherited-ivar frame unless we reach the sync */
    plan->has_native_super = 0;   /* set only for a value-returning native super */
    plan->n_out_obj = 0;          /* reverse out-object (out id*) copy-back list */
+   plan->draw_clip_ctx = 0;      /* no legacy draw-clip gstate to restore */
 
    /* A pending super-dispatch hint for exactly this (self,sel) overrides the
     * derived-class lookup so [super sel] runs the SUPER's legacy method, not
@@ -8054,6 +8073,7 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
    unsigned gp = gp0 + 1;     /* next GP reg index (first explicit arg) */
    unsigned xmm = 0;          /* next XMM reg index */
    size_t stk = 0;            /* native stack-args byte cursor */
+   unsigned rect_w = 0;       /* frame index of the FIRST NSRect arg (draw-clip) */
 #define REV_GP(vout) do { \
       if (gp < 6) { (vout) = regs[gp++]; } \
       else { (vout) = *(const uint64_t *)((uintptr_t)regs[6] + stk); stk += 8; } \
@@ -8102,6 +8122,10 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
          size_t isz = 0, nsz = 0; uint8_t sse[8] = {0};
          unsigned nebs = enc_classify(tb, CONV_I386, &isz, &nsz, sse);
          unsigned iwords = (unsigned)((isz + 3) / 4);
+         if (!rect_w && (!strncmp(tb, "{_NSRect=", 9) ||
+                         !strncmp(tb, "{CGRect=", 8))) {
+            rect_w = w;               /* remember for the draw-clip contract */
+         }
          if (nsz > 0 && nsz <= 16) {
             uint8_t nat[16] = {0};
             for (unsigned k = 0; k < nebs && k < 2; ++k) {
@@ -8186,6 +8210,113 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
 #undef REV_GP
 #undef REV_XMM
    plan->frame_words = w;
+
+   /* ---- LEGACY DRAW-CLIP CONTRACT ------------------------------------------
+    * Legacy apps were written against the pre-10.14 AppKit drawing contract:
+    * the dirty rect handed to -drawRect: was INTERSECTED with the view's
+    * bounds, and the context was CLIPPED to the view before the method ran, so
+    * "fill the rect I was handed" could never paint outside the view. Modern
+    * AppKit's recursive re-render (cacheDisplayInRect:, non-layer window draws)
+    * hands each subview the FULL target rect in local coords with NO per-view
+    * clip (verified natively: a windowless parent/child cacheDisplay gives the
+    * child rect=[-150 -100 400 300] and a full-area clip). A legacy view whose
+    * -drawRect: fills its whole background (via NSRectFill / CGContextFillRect)
+    * then stomps every sibling that was already painted (observed: a board view
+    * white-filling rect [-198 -264 785 702] over the already-drawn surround +
+    * sidebar -> the whole play area whited out).
+    *
+    * Restore the old contract on every reverse dispatch into a legacy DRAW
+    * method that carries an NSRect arg + a live CGContext:
+    *   -drawRect: (NSView subclass, honoring wantsDefaultClipping): intersect
+    *     the NSRect arg with [self bounds] in the already-narrowed i386 frame,
+    *     then save-gstate + clip the current context to that rect;
+    *   NSCell draw family (drawWithFrame:inView: / drawInteriorWithFrame:inView:
+    *     / highlight:withFrame:inView:): save-gstate + clip to the cellFrame arg
+    *     (legacy AppKit confined cell painting to the control's clip; cells draw
+    *     in the controlView coord space, so the rect clips directly).
+    * reverse_ret restores the gstate (plan->draw_clip_ctx).
+    *
+    * Triggers on STRUCTURE (a reverse-dispatched legacy draw method with an
+    * NSRect arg + a current bitmap/window context), never on an app/class name,
+    * so any translated legacy AppKit target benefits. ABICONV_DRAWCLIP overrides
+    * the mode for A/B bisection: 1=full (default), 0=off, 2=intersect-arg only
+    * (no clip), 3=clip only (don't rewrite the arg). ABICONV_DRAWCLIP_TRACE logs
+    * each decision. */
+   {
+      static int dcl_mode = -1;
+      if (dcl_mode < 0) {
+         const char *dm = getenv("ABICONV_DRAWCLIP");
+         dcl_mode = dm ? atoi(dm) : 1;
+      }
+      if (dcl_mode && rect_w && !object_isClass(self_) &&
+          sel && mem_readable((uintptr_t)sel, 1)) {
+         const char *dsn = sel_getName(sel);
+         int is_drawrect = dsn && !strcmp(dsn, "drawRect:");
+         int is_celldraw = dsn && (!strcmp(dsn, "drawWithFrame:inView:") ||
+                                   !strcmp(dsn, "drawInteriorWithFrame:inView:") ||
+                                   !strcmp(dsn, "highlight:withFrame:inView:"));
+         if (is_drawrect || is_celldraw) {
+            id dgc = ((id (*)(Class, SEL))objc_msgSend)(
+               objc_getClass("NSGraphicsContext"),
+               sel_registerName("currentContext"));
+            CGContextRef dcc = NULL;
+            if (dgc)
+               dcc = ((CGContextRef (*)(id, SEL))objc_msgSend)(
+                  dgc, sel_registerName("CGContext"));
+            if (dcc) {
+               float rx, ry, rw, rh;
+               memcpy(&rx, &plan->frame[rect_w + 0], 4);
+               memcpy(&ry, &plan->frame[rect_w + 1], 4);
+               memcpy(&rw, &plan->frame[rect_w + 2], 4);
+               memcpy(&rh, &plan->frame[rect_w + 3], 4);
+               CGRect clipr = CGRectMake(rx, ry, rw, rh);
+               int do_clip = 1;
+               if (is_drawrect) {
+                  /* NSView-kind gate: drawRect: on a non-view -> leave alone. */
+                  int is_view = 0;
+                  Class nsview = objc_getClass("NSView");
+                  for (Class c = object_getClass(self_); c;
+                       c = class_getSuperclass(c)) {
+                     if (c == nsview) { is_view = 1; break; }
+                  }
+                  if (is_view) {
+                     CGRect b = abiconv_view_bounds(self_);
+                     CGRect inter = CGRectIntersection(clipr, b);
+                     if (CGRectIsNull(inter)) { inter = CGRectZero; }
+                     clipr = inter;
+                     if (dcl_mode != 3) {
+                        float ox = (float)inter.origin.x, oy = (float)inter.origin.y;
+                        float ow = (float)inter.size.width, oh = (float)inter.size.height;
+                        memcpy(&plan->frame[rect_w + 0], &ox, 4);
+                        memcpy(&plan->frame[rect_w + 1], &oy, 4);
+                        memcpy(&plan->frame[rect_w + 2], &ow, 4);
+                        memcpy(&plan->frame[rect_w + 3], &oh, 4);
+                     }
+                     do_clip = ((signed char (*)(id, SEL))objc_msgSend)(
+                        self_, sel_registerName("wantsDefaultClipping")) != 0;
+                  } else {
+                     do_clip = 0;
+                  }
+               }
+               if (dcl_mode == 2) { do_clip = 0; }
+               if (do_clip) {
+                  CGContextSaveGState(dcc);
+                  CGContextClipToRect(dcc, clipr);
+                  plan->draw_clip_ctx = (uint64_t)(uintptr_t)dcc;
+               }
+               if (getenv("ABICONV_DRAWCLIP_TRACE")) {
+                  fprintf(stderr, "[dcl] %s[%s] clip=[%.1f %.1f %.1f %.1f] "
+                          "applied=%d ctx=%p mode=%d\n",
+                          class_getName(lookup), dsn,
+                          clipr.origin.x, clipr.origin.y,
+                          clipr.size.width, clipr.size.height,
+                          do_clip, (void *)dcc, dcl_mode);
+                  fflush(stderr);
+               }
+            }
+         }
+      }
+   }
 
    /* breadcrumb (zero-I/O): a valid legacy IMP is about to run on lowstack */
    {
@@ -8291,6 +8422,12 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
 
 unsigned __int128 _86x64_reverse_ret(struct reverse_plan *plan,
                                      uint32_t eax, uint32_t edx) {
+   /* Legacy draw-clip contract: pop the gstate reverse_prep pushed around the
+    * legacy drawRect:/cell-draw IMP (see the contract block in reverse_prep). */
+   if (plan->draw_clip_ctx) {
+      CGContextRestoreGState((CGContextRef)(uintptr_t)plan->draw_clip_ctx);
+      plan->draw_clip_ctx = 0;
+   }
    /* balance the breadcrumb depth (only the valid-IMP path incremented it) */
    if (plan->legacy_imp != 0) {
       __atomic_sub_fetch(&g_rev_depth, 1, __ATOMIC_SEQ_CST);
