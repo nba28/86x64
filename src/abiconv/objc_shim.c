@@ -3734,6 +3734,14 @@ static void legacy_gstate_capture_install(void) {
  * is a runtime-built NSView subclass. Env kill-switch ABICONV_WINCHROME_COMPAT
  * (set => skip). */
 
+/* low-noise env-gated trace for the window-chrome compat (independent of the
+ * OBJC_BRIDGE_TRACE firehose, which slows app startup to a crawl). */
+static int wchrome_trace(void) {
+   static int v = -1;
+   if (v < 0) { v = getenv("ABICONV_WINCHROME_TRACE") ? 1 : 0; }
+   return v;
+}
+
 /* forward decls used by the overlay IMP */
 static Class g_chrome_overlay_cls;          /* our runtime NSView subclass     */
 static SEL   g_sel_drawWindowBorderInRect;  /* cached                          */
@@ -3832,10 +3840,49 @@ static void chrome_overlay_drawRect(id self, SEL _cmd, CGRect dirty) {
    }
 
    if (cg) { CGContextRestoreGState(cg); }
-   if (BRIDGE_TRACE()) {
-      fprintf(stderr, "[compat] wchrome overlay draw: band=%.0fx%.0f frameH=%.0f (%s)\n",
-              ob.size.width, bandH, frameH, object_getClassName(win));
+   if (BRIDGE_TRACE() || wchrome_trace()) {
+      fprintf(stderr, "[compat] wchrome overlay draw: band=%.0fx%.0f frameH=%.0f cg=%p (%s)\n",
+              ob.size.width, bandH, frameH, (void*)cg, object_getClassName(win));
       fflush(stderr);
+   }
+
+   /* ABICONV_WINCHROME_PROBE: verify (headlessly — screencapture is wedged in
+    * agent sessions) WHAT the re-invoked app chrome actually painted. Once,
+    * offscreen-render THIS overlay via cacheDisplayInRect: (re-runs our drawRect:
+    * into a fresh bitmap, NOT the on-screen surface) and vertical-scan the band.
+    * This is how we established Quinn's -drawWindowBorderInRect: yields a uniformly
+    * BLACK band (=> PAINT off by default). Re-entry-guarded; inert unless set. */
+   static __thread int probe_depth;
+   if (getenv("ABICONV_WINCHROME_PROBE") && probe_depth == 0) {
+      static int probed;
+      if (!probed) {
+         probed = 1;
+         ++probe_depth;
+         id rep = ((id(*)(id, SEL, CGRect))objc_msgSend)(
+            self, sel_registerName("bitmapImageRepForCachingDisplayInRect:"), ob);
+         if (rep) {
+            ((void(*)(id, SEL, CGRect, id))objc_msgSend)(
+               self, sel_registerName("cacheDisplayInRect:toBitmapImageRep:"), ob, rep);
+            long W = ((long(*)(id, SEL))objc_msgSend)(rep, sel_registerName("pixelsWide"));
+            long H = ((long(*)(id, SEL))objc_msgSend)(rep, sel_registerName("pixelsHigh"));
+            fprintf(stderr, "[wchrome-probe] overlay rep %ldx%ld; vertical scan at x=W/2:\n", W, H);
+            long xc = W/2;
+            for (long y = 0; y < H; y += (H > 20 ? H/20 : 1)) {
+               id col = ((id(*)(id, SEL, long, long))objc_msgSend)(
+                  rep, sel_registerName("colorAtX:y:"), xc, y);
+               if (!col) { continue; }
+               double r = ((double(*)(id, SEL))objc_msgSend)(col, sel_registerName("redComponent"));
+               double g = ((double(*)(id, SEL))objc_msgSend)(col, sel_registerName("greenComponent"));
+               double b = ((double(*)(id, SEL))objc_msgSend)(col, sel_registerName("blueComponent"));
+               const char *tag = (r>0.35&&r<0.85&&g>0.35&&g<0.85&&b>0.35&&b<0.85) ? "METAL?"
+                               : (r<0.15&&g<0.15&&b<0.15) ? "black"
+                               : (r>0.85&&g>0.85&&b>0.85) ? "white" : "other";
+               fprintf(stderr, "[wchrome-probe]   y=%ld rgb=%.2f,%.2f,%.2f %s\n", y, r, g, b, tag);
+            }
+            fflush(stderr);
+         }
+         --probe_depth;
+      }
    }
 }
 static signed char chrome_overlay_isFlipped(id self, SEL _cmd) {
@@ -3870,6 +3917,31 @@ static Class chrome_overlay_class(void) {
  * the structural legacy-chrome check, so it's a no-op on any native window. */
 static void chrome_install_overlay(id win) {
    if (!window_has_legacy_chrome(win)) { return; }
+   /* PAINT is OFF BY DEFAULT. Re-invoking the app's own -drawWindowBorderInRect:
+    * is only safe when the app's chrome draw actually RENDERS under translation.
+    * For the archetype (Quinn's PolishedMetalWindow) it does NOT: the draw reads a
+    * hardcoded 2007 NSWindow private ivar (the old _borderView) for its geometry
+    * and sources the brushed metal from the classic TEXTURED-window / NSColor
+    * metal-pattern substrate that modern macOS removed — so the re-invoke paints a
+    * uniformly BLACK band, a REGRESSION vs the stock titled chrome (which already
+    * shows the title + traffic-lights = the functionality-first fallback). Until a
+    * classic textured-window / metal-pattern substrate shim exists (see todo_gaps
+    * "legacy brushed-metal window substrate"), leave the stock chrome and DON'T
+    * paint. The full structural detection + install funnel + overlay class + guard
+    * stay as landed infrastructure: any future legacy app whose re-invoked chrome
+    * DOES render correctly is served by flipping ABICONV_WINCHROME_PAINT on (then
+    * the overlay installs + repaints the band from the app's own chrome draw).
+    * The native window-chrome guard drives this path via a working synthetic draw. */
+   if (!getenv("ABICONV_WINCHROME_PAINT") && !g_chrome_test_accept_responds) {
+      if (wchrome_trace()) {
+         fprintf(stderr, "[compat] wchrome: legacy-chrome window detected (%s); "
+                 "PAINT off by default (stock titled chrome kept) — set "
+                 "ABICONV_WINCHROME_PAINT to re-invoke the app chrome draw\n",
+                 object_getClassName(win));
+         fflush(stderr);
+      }
+      return;
+   }
    id contentView = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("contentView"));
    id frameView = contentView
       ? ((id(*)(id, SEL))objc_msgSend)(contentView, sel_registerName("superview"))
@@ -3912,23 +3984,27 @@ static void chrome_install_overlay(id win) {
          ov, (long)-1 /*NSWindowBelow*/, first);
    }
    ((void(*)(id, SEL, signed char))objc_msgSend)(ov, sel_registerName("setNeedsDisplay:"), 1);
-   if (BRIDGE_TRACE()) {
+   if (BRIDGE_TRACE() || wchrome_trace()) {
       fprintf(stderr, "[compat] wchrome overlay INSTALLED on %s (band %.0fx%.0f)\n",
               object_getClassName(win), tb.size.width, tb.size.height);
       fflush(stderr);
    }
 }
 
-static IMP g_themeframe_orig_drawRect;
-static void themeframe_drawRect(id self, SEL _cmd, CGRect dirty) {
-   /* run the stock frame draw first (structure, traffic-lights, base title) */
-   if (g_themeframe_orig_drawRect) {
-      ((void(*)(id, SEL, CGRect))g_themeframe_orig_drawRect)(self, _cmd, dirty);
+/* Install trigger: swizzle -[NSWindow orderWindow:relativeTo:], the funnel every
+ * window-show path runs through (orderFront:/makeKeyAndOrderFront:/...). Modern
+ * NSThemeFrame draws through its LAYER (updateLayer), NOT -drawRect:, so a
+ * drawRect: swizzle never fires; orderWindow: does, and by then the window's
+ * NSTitlebarView subtree is built (verified). Idempotent + self-gated, so it is
+ * a no-op on every native window and only paints an orphaned-chrome legacy one. */
+static IMP g_window_orig_orderWindow;
+static void window_orderWindow(id self, SEL _cmd, long place, long relativeTo) {
+   if (g_window_orig_orderWindow) {
+      ((void(*)(id, SEL, long, long))g_window_orig_orderWindow)(self, _cmd, place, relativeTo);
    }
-   /* then, for an orphaned-chrome legacy window, ensure our overlay is present */
-   id win = ((id(*)(id, SEL))objc_msgSend)(self, g_sel_window);
-   if (window_has_legacy_chrome(win)) {
-      chrome_install_overlay(win);
+   /* place==0 (NSWindowOut) is an ORDER-OUT (hide): nothing to install. */
+   if (place != 0 && window_has_legacy_chrome(self)) {
+      chrome_install_overlay(self);
    }
 }
 
@@ -3936,9 +4012,9 @@ static void legacy_window_chrome_install(void) {
    static int done = 0;
    if (done) { return; }
    if (getenv("ABICONV_WINCHROME_COMPAT")) { done = 1; return; }
-   Class tf = objc_getClass("NSThemeFrame");
-   if (!tf) { return; }                         /* AppKit not loaded yet: retry */
-   Method m = class_getInstanceMethod(tf, sel_registerName("drawRect:"));
+   Class winc = objc_getClass("NSWindow");
+   if (!winc) { return; }                       /* AppKit not loaded yet: retry */
+   Method m = class_getInstanceMethod(winc, sel_registerName("orderWindow:relativeTo:"));
    if (!m) { return; }
    /* cache selectors */
    g_sel_drawWindowBorderInRect = sel_registerName("drawWindowBorderInRect:");
@@ -3949,8 +4025,8 @@ static void legacy_window_chrome_install(void) {
     * first copy's swizzled IMP as "original" and chain. */
    if (getenv("ABICONV_WINCHROME_INSTALLED")) { done = 1; return; }
    setenv("ABICONV_WINCHROME_INSTALLED", "1", 1);
-   g_themeframe_orig_drawRect = method_getImplementation(m);
-   method_setImplementation(m, (IMP)themeframe_drawRect);
+   g_window_orig_orderWindow = method_getImplementation(m);
+   method_setImplementation(m, (IMP)window_orderWindow);
    done = 1;
 }
 
