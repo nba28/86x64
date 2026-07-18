@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x focus-ring layerback-invariance
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw focus-ring layerback-invariance
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -252,6 +252,23 @@ lockfocus-1x: $(LIBABICONV)
 # no i386 sysroot). Proves the gate BOTH ways.
 cachedisplay-1x: $(LIBABICONV)
 	@bash cachedisplay_1x_test.sh $(LIBABICONV)
+# offscreen-redraw: FULL-PATH canary for the legacy -[NSView
+# cacheDisplayInRect:toBitmapImageRep:] RE-RENDER under translation (the
+# offscreen snapshot path feeding the legacy immediate-display overlay,
+# print/PDF export and drag images). A real classic-ObjC1 NSView subclass
+# (registered by reverse_register_image, drawRect: reverse-dispatched) draws
+# FIVE draw families — solid fill, sprite CGContextDrawImage, gloss
+# CGFunction/CGShadingCreateAxial, CGImageMask ClipToMask fill, NSRectFillList
+# (cg_geoarray_shim) — gated on getRectsBeingDrawn:count: (bp_getrects)
+# exactly like Quinn, into snapshots taken windowless / windowed /
+# layer-backed / 2x-rep / NESTED-inside-drawRect. Asserts the ACTUAL PIXELS of
+# every family in every scenario (exit 255). Born from the 2026-07-18
+# "offscreen re-render loses image+gradient draws" suspicion — which this
+# guard REFUTED headlessly (all families land); kept as the regression canary
+# pinning that whole contract. Needs the i386 sysroot + staged libobjc; SKIPs
+# without.
+offscreen-redraw: $(MACHO_TOOL)
+	@bash offscreen_redraw_test.sh $(MACHO_TOOL)
 # focus-ring: canary guard for the legacy focus-ring contract (audit verdict:
 # no compat needed — pins WHY). (A) OS side: NSSetFocusRingStyle(NSFocusRingOnly)
 # + fill still draws headlessly, leaves the shape interior unpainted, and the
