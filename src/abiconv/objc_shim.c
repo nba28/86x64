@@ -3997,6 +3997,94 @@ static void chrome_install_overlay(id win) {
  * drawRect: swizzle never fires; orderWindow: does, and by then the window's
  * NSTitlebarView subtree is built (verified). Idempotent + self-gated, so it is
  * a no-op on every native window and only paints an orphaned-chrome legacy one. */
+/* ABICONV_TITLEBAR_PROBE (diagnostic, inert unless set): after a legacy window is
+ * shown, offscreen-render its NSTitlebarView and report whether the STOCK chrome
+ * actually composited the title text + the traffic-light widgets, and the band's
+ * dominant colour. Answers "does the stock NSThemeFrame chrome show title+lights
+ * under translation, or is the band blank?" without a display/screencapture. */
+static void titlebar_probe(id win) {
+   if (!getenv("ABICONV_TITLEBAR_PROBE")) { return; }
+   static int done; if (done) { return; } done = 1;
+   id contentView = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("contentView"));
+   id frameView = contentView
+      ? ((id(*)(id, SEL))objc_msgSend)(contentView, sel_registerName("superview")) : nil;
+   id tbv = frameView ? chrome_find_subview(frameView, "NSTitlebarView") : nil;
+   if (!tbv) { fprintf(stderr, "[tbprobe] no NSTitlebarView\n"); fflush(stderr); return; }
+   /* enumerate the titlebar subtree: note widgets + the title field */
+   id subs = ((id(*)(id, SEL))objc_msgSend)(tbv, sel_registerName("subviews"));
+   long n = subs ? ((long(*)(id, SEL))objc_msgSend)(subs, sel_registerName("count")) : 0;
+   int lights = 0, titlefield = 0;
+   for (long i = 0; i < n; ++i) {
+      id s = ((id(*)(id, SEL, long))objc_msgSend)(subs, sel_registerName("objectAtIndex:"), i);
+      const char *cn = object_getClassName(s);
+      if (cn && strstr(cn, "Widget")) { lights++; }
+      if (cn && strstr(cn, "TextField")) { titlefield++; }
+   }
+   /* window title string */
+   id title = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("title"));
+   const char *tcstr = title
+      ? ((const char*(*)(id, SEL))objc_msgSend)(title, sel_registerName("UTF8String")) : "(nil)";
+   /* offscreen-render the titlebar band + sample its centre for a dominant colour */
+   CGRect tb = abiconv_view_bounds(tbv);
+   id rep = ((id(*)(id, SEL, CGRect))objc_msgSend)(
+      tbv, sel_registerName("bitmapImageRepForCachingDisplayInRect:"), tb);
+   double r = -1, g = -1, b = -1; long W = 0, H = 0;
+   if (rep) {
+      ((void(*)(id, SEL, CGRect, id))objc_msgSend)(
+         tbv, sel_registerName("cacheDisplayInRect:toBitmapImageRep:"), tb, rep);
+      W = ((long(*)(id, SEL))objc_msgSend)(rep, sel_registerName("pixelsWide"));
+      H = ((long(*)(id, SEL))objc_msgSend)(rep, sel_registerName("pixelsHigh"));
+      id col = ((id(*)(id, SEL, long, long))objc_msgSend)(
+         rep, sel_registerName("colorAtX:y:"), W/2, H/2);
+      if (col) {
+         r = ((double(*)(id, SEL))objc_msgSend)(col, sel_registerName("redComponent"));
+         g = ((double(*)(id, SEL))objc_msgSend)(col, sel_registerName("greenComponent"));
+         b = ((double(*)(id, SEL))objc_msgSend)(col, sel_registerName("blueComponent"));
+      }
+      /* rep row 0 = TOP of the band (title/traffic-light strip); bottom rows = the
+       * unified-toolbar strip. Sample both + the traffic-light x-columns. */
+      long ys[3] = { H/8, H/2, (H*7)/8 };
+      const char *yn[3] = { "top(title/lights)", "middle", "bottom(toolbar)" };
+      for (int k = 0; k < 3; ++k) {
+         id c2 = ((id(*)(id, SEL, long, long))objc_msgSend)(
+            rep, sel_registerName("colorAtX:y:"), W/2, ys[k]);
+         if (!c2) { continue; }
+         double rr = ((double(*)(id, SEL))objc_msgSend)(c2, sel_registerName("redComponent"));
+         double gg = ((double(*)(id, SEL))objc_msgSend)(c2, sel_registerName("greenComponent"));
+         double bb = ((double(*)(id, SEL))objc_msgSend)(c2, sel_registerName("blueComponent"));
+         fprintf(stderr, "[tbprobe]   y=%ld %-18s rgb=%.2f,%.2f,%.2f\n", ys[k], yn[k], rr, gg, bb);
+      }
+      /* traffic-light column at x~19pt*scale (close widget), y~top */
+      double scale = (double)W / (tb.size.width > 0 ? tb.size.width : 1);
+      long lx = (long)(19 * scale), ly = (long)(16 * scale);
+      id cl = ((id(*)(id, SEL, long, long))objc_msgSend)(
+         rep, sel_registerName("colorAtX:y:"), lx, ly);
+      if (cl) {
+         double rr = ((double(*)(id, SEL))objc_msgSend)(cl, sel_registerName("redComponent"));
+         double gg = ((double(*)(id, SEL))objc_msgSend)(cl, sel_registerName("greenComponent"));
+         double bb = ((double(*)(id, SEL))objc_msgSend)(cl, sel_registerName("blueComponent"));
+         fprintf(stderr, "[tbprobe]   close-light px(%ld,%ld) rgb=%.2f,%.2f,%.2f (red-ish if drawn)\n",
+                 lx, ly, rr, gg, bb);
+      }
+   }
+   fprintf(stderr, "[tbprobe] title='%s' widgets(lights)=%d titleField=%d "
+           "band=%ldx%ld centre_rgb=%.2f,%.2f,%.2f\n",
+           tcstr, lights, titlefield, W, H, r, g, b);
+   /* per-subview: class + opaque? + hidden? + wantsLayer? + layer bg colour, so we
+    * can pinpoint WHICH titlebar view is painting the band black under translation */
+   for (long i = 0; i < n; ++i) {
+      id s = ((id(*)(id, SEL, long))objc_msgSend)(subs, sel_registerName("objectAtIndex:"), i);
+      signed char opaque = ((signed char(*)(id, SEL))objc_msgSend)(s, sel_registerName("isOpaque"));
+      signed char hidden = ((signed char(*)(id, SEL))objc_msgSend)(s, sel_registerName("isHidden"));
+      signed char wl = ((signed char(*)(id, SEL))objc_msgSend)(s, sel_registerName("wantsLayer"));
+      CGRect sf = abiconv_msg_rect(s, sel_registerName("frame"));
+      fprintf(stderr, "[tbprobe]   [%ld] %-40s opaque=%d hidden=%d wantsLayer=%d frame=%.0f,%.0f %.0fx%.0f\n",
+              i, object_getClassName(s), opaque, hidden, wl,
+              sf.origin.x, sf.origin.y, sf.size.width, sf.size.height);
+   }
+   fflush(stderr);
+}
+
 static IMP g_window_orig_orderWindow;
 static void window_orderWindow(id self, SEL _cmd, long place, long relativeTo) {
    if (g_window_orig_orderWindow) {
@@ -4005,6 +4093,7 @@ static void window_orderWindow(id self, SEL _cmd, long place, long relativeTo) {
    /* place==0 (NSWindowOut) is an ORDER-OUT (hide): nothing to install. */
    if (place != 0 && window_has_legacy_chrome(self)) {
       chrome_install_overlay(self);
+      titlebar_probe(self);
    }
 }
 
