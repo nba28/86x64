@@ -103,22 +103,49 @@ x64_CFPreferencesCopyValue(CFStringRef key, CFStringRef applicationID, CFStringR
 	return NULL;
 }
 
+/* The PUBLIC Get{Boolean,Integer}Value entry points must FORWARD to the real CF
+ * implementation, NOT report a blanket "absent" — for the same reason the private
+ * *WithContainer* variants below do (an always-false stub silently zeroes every
+ * bool/int preference read in the process). The prior blanket stub here was a bug:
+ * the comment above claimed these "funnel through" the forwarding private variant
+ * and so "still hit the real implementation", but that only holds for a caller
+ * that reaches the PRIVATE variant directly — a translated app (or framework) that
+ * calls the PUBLIC CFPreferencesGetAppBooleanValue hits THIS interposed entry and
+ * never reaches the private forwarder, so it always got false. Civ IV's first-run
+ * gate reads CFPreferencesGetAppBooleanValue(@"AspyrEulaAccepted", current-app):
+ * the stub forced it false EVERY launch -> the EULA is never considered accepted
+ * (and the acceptance can never persist) -> Civ tries to show the EULA window and,
+ * when that fails, exit()s at first-run. Forward to the real value (with the same
+ * NULL-appID guard the *WithContainer* forwarders use); dyld skips self-
+ * interposition, so calling the public real symbol from inside this dylib would
+ * recurse — go through the private *WithContainer* variant instead, whose real CF
+ * body is what the public API tail-calls anyway. The cfprefsd XPC-livelock bypass
+ * stays on the *Copy* variants above (the AudioToolbox startup path); these
+ * scalar reads are ordinary post-startup lookups that must return genuine data. */
 static Boolean
 x64_CFPreferencesGetAppBooleanValue(CFStringRef key, CFStringRef applicationID,
                                     Boolean *keyExistsAndHasValidFormat)
 {
-	(void) key; (void) applicationID;
-	if (keyExistsAndHasValidFormat) { *keyExistsAndHasValidFormat = false; }
-	return false;
+	if (!applicationID) { applicationID = kCFPreferencesCurrentApplication; }
+	if (!applicationID) {
+		if (keyExistsAndHasValidFormat) { *keyExistsAndHasValidFormat = false; }
+		return false;
+	}
+	return _CFPreferencesGetAppBooleanValueWithContainer(
+	           key, applicationID, NULL, keyExistsAndHasValidFormat);
 }
 
 static CFIndex
 x64_CFPreferencesGetAppIntegerValue(CFStringRef key, CFStringRef applicationID,
                                     Boolean *keyExistsAndHasValidFormat)
 {
-	(void) key; (void) applicationID;
-	if (keyExistsAndHasValidFormat) { *keyExistsAndHasValidFormat = false; }
-	return 0;
+	if (!applicationID) { applicationID = kCFPreferencesCurrentApplication; }
+	if (!applicationID) {
+		if (keyExistsAndHasValidFormat) { *keyExistsAndHasValidFormat = false; }
+		return 0;
+	}
+	return _CFPreferencesGetAppIntegerValueWithContainer(
+	           key, applicationID, NULL, keyExistsAndHasValidFormat);
 }
 
 /* Private *WithContainer* variants the Get{Boolean,Integer}Value family funnels

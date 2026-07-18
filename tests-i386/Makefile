@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x focus-ring layerback-invariance
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x focus-ring layerback-invariance
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -207,6 +207,15 @@ change-deps: $(MACHO_TOOL)
 # i386 sysroot): converted double[] renders white, raw i386 float[] does not.
 cg-color:
 	@bash cg_color_test.sh
+
+# cfprefs-scalar-forward: regression guard for the CFPreferences scalar-read
+# forwarding fix (prefs_shim.c public GetApp{Boolean,Integer}Value forward to the
+# real CF impl instead of a blanket false/0 stub). Self-contained (native x86_64
+# cc + CoreFoundation, no i386 sysroot): the fixed body delivers a stored
+# bool(true)/int(7) and reports an absent key as absent; the old blanket stub
+# (negative control) returns false. Root cause of Civ IV's first-run/EULA exit.
+cfprefs-scalar-forward:
+	@bash cfprefs_scalar_forward_test.sh
 
 # draw-clip: regression guard for the LEGACY DRAW-CLIP CONTRACT restoration in
 # objc_shim.c (_86x64_reverse_prep/_ret). Self-contained (native x86_64 cc +
