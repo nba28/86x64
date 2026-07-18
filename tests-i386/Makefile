@@ -737,6 +737,17 @@ $(BUILD_DIR)/79_qd_gworld_pixels.i386: $(BUILD_DIR)/79_qd_gworld_pixels.o
 $(BUILD_DIR)/85_quinn_cell_draw.i386: $(BUILD_DIR)/85_quinn_cell_draw.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 99_cg_rect_arrays: like 85, CoreGraphics isn't in the i386 sysroot, so every
+# CG entry is an undefined dynamic_lookup import resolved at translate time by
+# static-interpose -> libabiconv's ___CG* shims. Guards the CGFloat-GEOMETRY-
+# ARRAY argument family (CGContextClipToRects / AddRects / StrokeLineSegments;
+# cg_geoarray_shim.c): i386 float-element arrays must be widened per-element
+# for the full COUNT, not raw-pointer-passed / single-element converted (the
+# abigen shape that garbled Quinn's LCD digit partial-redraw clip).
+# Overrides %.i386.
+$(BUILD_DIR)/99_cg_rect_arrays.i386: $(BUILD_DIR)/99_cg_rect_arrays.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # 97_carbon_fixed32_paramrec: Carbon/HIToolbox isn't in the i386 sysroot, so
 # GetStandardAlertDefaultParams is an undefined dynamic_lookup import resolved
 # at translate time by static-interpose -> libabiconv's legacy-pass shim.

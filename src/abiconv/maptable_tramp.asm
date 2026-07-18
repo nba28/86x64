@@ -87,6 +87,20 @@
 	MTSHIM	___CGContextSetFillColor,        _shim_CGContextSetFillColor
 	MTSHIM	___CGContextSetStrokeColor,      _shim_CGContextSetStrokeColor
 
+	;; CGFloat-GEOMETRY-ARRAY family (cg_geoarray_shim.c): functions taking a
+	;; pointer to an ARRAY of CGRect/CGPoint elements plus a count. i386
+	;; elements are 4-byte-float structs; abigen's generated shims read them
+	;; as doubles AND converted only element [0] while passing the full count
+	;; (garbage clip/path/stroke lists — Quinn's LCD-digit partial-redraw
+	;; ClipToRects). Convert the FULL count element-wise instead.
+	;; Guard: tests-i386 99_cg_rect_arrays.
+	MTSHIM	___CGContextClipToRects,         _shim_CGContextClipToRects
+	MTSHIM	___CGContextAddRects,            _shim_CGContextAddRects
+	MTSHIM	___CGContextStrokeLineSegments,  _shim_CGContextStrokeLineSegments
+	MTSHIM	___NSRectFillList,               _shim_NSRectFillList
+	MTSHIM	___NSRectFillListUsingOperation, _shim_NSRectFillListUsingOperation
+	MTSHIM	___NSRectFillListWithGrays,      _shim_NSRectFillListWithGrays
+
 	;; Carbon GetKeys override (keystate_shim.c): emulate a held key at launch
 	;; so a vendor "hold KEY to bypass" self-check (Halo's 'p') can be triggered
 	;; without a physical keypress (Finder consumes it). Default-off (env-gated);
