@@ -298,20 +298,6 @@ _CATransform3DMakeAffineTransform
 _CATransform3DGetAffineTransform
 _CATransform3DIsIdentity
 _CGPatternCreate
-# Hand-shims (MTSHIM ___<sym> in maptable_tramp.asm) that are ALSO
-# framework exports present in the broad Apps32 consider-set (Quinn/AppKit
-# imports). Listed here STATICALLY — belt-and-suspenders alongside the
-# generated abiconv_handshim.syms — so abigen NEVER dup-emits them even if a
-# partial/incremental build left the generated handshim.syms stale (the
-# ___NSCopyBits dup that regressed the color shims in the deploy tree). Same
-# pattern as the _CGContextSet{Fill,Stroke}Color* geoshims above.
-_NSCopyBits
-_CGContextClipToRects
-_CGContextAddRects
-_CGContextStrokeLineSegments
-_NSRectFillList
-_NSRectFillListUsingOperation
-_NSRectFillListWithGrays
 __dealloc
 __objc_setNilReceiver
 __setjmp
