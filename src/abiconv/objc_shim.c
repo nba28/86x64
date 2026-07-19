@@ -8681,6 +8681,48 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
 #undef REV_XMM
    plan->frame_words = w;
 
+   /* Env-gated reverse-ARG value trace: ABICONV_REV_ARG_TRACE=<substr>[,<substr>...]
+    * logs the marshalled i386 frame VALUES of every native->legacy dispatch
+    * whose selector contains one of the substrings ("*" = all). Complements
+    * ABICONV_REV_DISPATCH_TRACE (names only): prints each explicit arg word as
+    * hex + as a {short,short} pair so 16-bit cell geometry (Quinn IGRect /
+    * IGPoint) reads off directly. Diagnostic only; zero cost when unset. */
+   {
+      static const char *at_filter; static int at_init;
+      if (!at_init) { at_filter = getenv("ABICONV_REV_ARG_TRACE"); at_init = 1; }
+      if (at_filter && sel) {
+         const char *sn = sel_getName(sel);
+         int hit = (at_filter[0] == '*');
+         if (!hit) {
+            const char *p = at_filter;
+            while (*p && !hit) {
+               const char *e = strchr(p, ',');
+               size_t n = e ? (size_t)(e - p) : strlen(p);
+               char tok[64];
+               if (n > 0 && n < sizeof tok) {
+                  memcpy(tok, p, n); tok[n] = '\0';
+                  if (strstr(sn, tok)) { hit = 1; }
+               }
+               p = e ? e + 1 : p + strlen(p);
+            }
+         }
+         if (hit) {
+            char buf[512]; int off = 0;
+            off += snprintf(buf + off, sizeof buf - off, "[rarg] %s[%s]",
+                            class_getName(lookup), sn);
+            unsigned a0 = head + 2;              /* first explicit arg word */
+            for (unsigned k = a0; k < w && k < a0 + 8 &&
+                                  off < (int)sizeof buf - 40; ++k) {
+               uint32_t fv = plan->frame[k];
+               off += snprintf(buf + off, sizeof buf - off, " %08x(%d,%d)",
+                               fv, (short)(fv & 0xffff), (short)(fv >> 16));
+            }
+            fprintf(stderr, "%s\n", buf);
+            fflush(stderr);
+         }
+      }
+   }
+
    /* ---- LEGACY DRAW-CLIP CONTRACT ------------------------------------------
     * Legacy apps were written against the pre-10.14 AppKit drawing contract:
     * the dirty rect handed to -drawRect: was INTERSECTED with the view's
