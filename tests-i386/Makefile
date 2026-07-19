@@ -742,6 +742,31 @@ $(BUILD_DIR)/62_pic_xsection_thunk_stripped.i386: $(BUILD_DIR)/62_pic_xsection_t
 # COMPARISON-VALUE gate in instruction.cc's [abs32]+imm32 arm (Civ IV
 # `cmpl $0x100308, _version; ja` OS-version check mis-relocated to a lea
 # target -> "insufficient system version" exit). Overrides %.i386.
+# 99_init_priority_code_alias: STRIP local symbols (the Civ IV Steam shape:
+# locals-stripped => have_local_text_syms false => the code_alias_is_constant
+# mid-function gate is DISARMED), then ASSERT the GCC default static-init
+# priority constant 0xffff really falls inside __TEXT,__text's vmaddr range —
+# the alias trap the test springs (if layout drifts, fail the BUILD loudly).
+# Guards imm32_code_alias_is_constant (instruction.cc): the MOV_GPRv_IMMv/
+# PUSH/ADD register-imm family + the CMP_GPRv_IMMz twin must classify a
+# code-aliasing imm32 as a CONSTANT on the stripped path too (Civ IV Steam
+# "Launch in Window": all 1084 `mov $0xffff,%edx` static-init stub priorities
+# rebased to lea; the first-in-sweep dispatcher kept its literal
+# `cmp $0xffff,%edx` -> that TU's ctors skipped -> NULL std::list registry ->
+# EXC_BAD_ACCESS addr=0x8), while a prologue-target fn-pointer immediate
+# (`movl $_helper,%ecx`) still relocates. Overrides %.i386.
+$(BUILD_DIR)/99_init_priority_code_alias.i386: $(BUILD_DIR)/99_init_priority_code_alias.o
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
+	strip -x $@
+	@a=$$(otool -l $@ | awk '/sectname __text$$/{s=1;next} s&&$$1=="addr"{print $$2;exit}'); \
+	 z=$$(otool -l $@ | awk '/sectname __text$$/{s=1;next} s&&$$1=="size"{print $$2;exit}'); \
+	 if [ $$((a)) -le $$((0xffff)) ] && [ $$((0xffff)) -lt $$((a + z)) ]; then \
+	   echo "  99_init_priority_code_alias: 0xffff aliases __text [$$a, $$a+$$z) -- trap armed"; \
+	 else \
+	   echo "99_init_priority_code_alias: ERROR: 0xffff outside __text [$$a, $$a+$$z) -- adjust pad"; \
+	   rm -f $@; exit 1; \
+	 fi
+
 $(BUILD_DIR)/99_cmp_abs32_imm_notptr.i386: $(BUILD_DIR)/99_cmp_abs32_imm_notptr.o
 	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
 	strip -x $@
