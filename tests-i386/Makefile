@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw focus-ring layerback-invariance
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color focus-ring layerback-invariance
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -269,6 +269,20 @@ cachedisplay-1x: $(LIBABICONV)
 # without.
 offscreen-redraw: $(MACHO_TOOL)
 	@bash offscreen_redraw_test.sh $(MACHO_TOOL)
+# lcd-color: repro+guard for the NSColor CGFloat-arg COLOR-FACTORY marshalling
+# fix (objc_shim.c g_cgfloat_sels: the white/HSB/alpha NSColor creators). A
+# translated i386 view draws the exact -[LCDCell drawDigitElements:] colour
+# idiom — on-colour via +[NSColor colorWithCalibratedWhite:alpha:] +
+# colorWithAlphaComponent: (LIT), off-colour via colorWithCalibratedWhite:alpha:
+# (GHOST), and a redColor control — into an offscreen bitmap and reads back the
+# pixels. Unmasked, the two CGFloat args each read as an 8-byte double (2 i386
+# slots) -> fused garbage -> black/transparent colour: Quinn's lit digits went
+# DARK, the faint ghost segments collapsed to alpha~0, the light-gray labels
+# vanished. A/B: exit 4 pre-fix (only red control) -> 7 post-fix (lit light @230,
+# ghost faint @26, red intact — matches the native reference). Needs the i386
+# sysroot + staged libobjc; SKIPs without.
+lcd-color: $(MACHO_TOOL)
+	@bash lcd_color_test.sh $(MACHO_TOOL)
 # focus-ring: canary guard for the legacy focus-ring contract (audit verdict:
 # no compat needed — pins WHY). (A) OS side: NSSetFocusRingStyle(NSFocusRingOnly)
 # + fill still draws headlessly, leaves the shape interior unpainted, and the

@@ -9944,6 +9944,24 @@ static const struct { const char *name; uint32_t mask; } g_cgfloat_sels[] = {
      "stepUpCycle:stepDownCycle:", 0x4 },/* +[NSRulerView ...]: arg2 is the CGFloat factor   */
    { "colorWithCalibratedRed:green:blue:alpha:", 0xF }, /* +[NSColor ...]: 4 CGFloats        */
    { "colorWithDeviceRed:green:blue:alpha:",     0xF }, /* +[NSColor ...]: 4 CGFloats        */
+   /* NSColor WHITE/HSB/component creators — same all-CGFloat shape as the RGBA
+    * creators above, and the SAME standalone-'d' denormal~0 failure the app
+    * never declares. -[LCDCell] builds its digit ON colour (glowing light) and
+    * OFF/ghost colour via +[NSColor colorWithCalibratedWhite:alpha:] and its
+    * labels' light-gray text likewise -> unmasked, both CGFloats read as fused
+    * garbage doubles -> a black/transparent colour -> Quinn's LCD lit digits
+    * rendered DARK, the faint unlit-ghost segments collapsed to alpha~0
+    * (invisible), and the NEXT/SCORE/LINES/LEVEL/LPM labels went invisible
+    * (light text -> dark on the dark box). Guard: tests-i386 lcd-color. */
+   { "colorWithCalibratedWhite:alpha:",          0x3 }, /* +[NSColor ...]: white, alpha      */
+   { "colorWithDeviceWhite:alpha:",              0x3 }, /* +[NSColor ...]: white, alpha      */
+   { "colorWithWhite:alpha:",                    0x3 }, /* +[NSColor ...] (10.9+ generic)    */
+   { "colorWithCalibratedHue:saturation:brightness:alpha:", 0xF }, /* +[NSColor ...]: 4 CGFloats */
+   { "colorWithDeviceHue:saturation:brightness:alpha:",     0xF }, /* +[NSColor ...]: 4 CGFloats */
+   { "colorWithHue:saturation:brightness:alpha:",           0xF }, /* +[NSColor ...] (generic)  */
+   { "colorWithAlphaComponent:",                 0x1 }, /* -[NSColor ...]: single CGFloat    */
+   { "highlightWithLevel:",                      0x1 }, /* -[NSColor ...]                    */
+   { "shadowWithLevel:",                         0x1 }, /* -[NSColor ...]                    */
    { "blendedColorWithFraction:ofColor:",        0x1 }, /* -[NSColor ...]: CGFloat then obj  */
    { "scaleBy:",                 0x1 },  /* -[NSAffineTransform ...]                          */
    { "scaleXBy:yBy:",            0x3 },  /* -[NSAffineTransform ...]: 2 CGFloats              */
