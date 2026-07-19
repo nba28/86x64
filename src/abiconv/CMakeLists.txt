@@ -449,6 +449,7 @@ add_library(abiconv SHARED
   cg_function_shim.c
   cg_color_shim.c
   cg_geoarray_shim.c
+  nscopybits_shim.c
   quicktime_image.c
   imagecapture_shim.c
   carbon_fsspec_shim.c

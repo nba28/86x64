@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward cfprefs-global-locale-forward qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark focus-ring layerback-invariance
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward cfprefs-global-locale-forward qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -309,6 +309,18 @@ lcd-color: $(MACHO_TOOL)
 # Default OFF/inert. Needs the i386 sysroot + staged libobjc; SKIPs without.
 displayrect-comark: $(MACHO_TOOL)
 	@bash displayrect_comark_test.sh $(MACHO_TOOL)
+# nscopybits: guard for the legacy -[NSView gState] + NSCopyBits view pixel-blit
+# restore (objc_shim.c legacy_gstate_capture_install + nscopybits_shim.c). Modern
+# -[NSView gState] returns 0 so the pre-10.10 view-capture idiom NSCopyBits([view
+# gState],srcRect,dest) copies NOTHING -> Quinn's board REFLECTION loses the
+# settled pieces (the gradient reflects via a direct draw). The fix hands a legacy
+# gState caller a TOKEN mapped to the view + a NSCopyBits shim that renders the
+# source view's rect into the current focus context. The guard replays the idiom
+# under translation (source view draws a red piece; NSCopyBits into a bitmap dest;
+# read back) — piece + bg copied == 3. (Pre-fix: gState==0 -> nothing copied ==
+# red absent, verified natively.) Needs the i386 sysroot + staged libobjc; SKIPs.
+nscopybits: $(MACHO_TOOL)
+	@bash nscopybits_test.sh $(MACHO_TOOL)
 # focus-ring: canary guard for the legacy focus-ring contract (audit verdict:
 # no compat needed — pins WHY). (A) OS side: NSSetFocusRingStyle(NSFocusRingOnly)
 # + fill still draws headlessly, leaves the shape interior unpainted, and the
