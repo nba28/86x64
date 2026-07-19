@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark focus-ring layerback-invariance
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward cfprefs-global-locale-forward qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark focus-ring layerback-invariance
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -216,6 +216,18 @@ cg-color:
 # (negative control) returns false. Root cause of Civ IV's first-run/EULA exit.
 cfprefs-scalar-forward:
 	@bash cfprefs_scalar_forward_test.sh
+
+# cfprefs-global-locale-forward: regression guard for the CFPreferences *Copy*
+# SYSTEM-GLOBAL-locale-key forward (prefs_shim.c pref_is_system_global_key). The
+# *Copy* family blanket-NULLs to bypass the cfprefsd livelock, but that starved
+# AppleLanguages -> -[NSLocale preferredLanguages] empty -> Civ IV's Aspyr
+# localization did preferredLanguages[0] -> uncatchable Swift bounds-trap SIGILL
+# (rc=132 graphics-setup crash). The fix forwards exactly the global locale/lang
+# keys to real CF; app-domain reads keep the bypass. Self-contained (native x86_64
+# cc + CoreFoundation): global key forwards non-empty, app-domain key stays absent,
+# old blanket-NULL (negative control) starved it.
+cfprefs-global-locale-forward:
+	@bash cfprefs_global_locale_forward_test.sh
 
 # draw-clip: regression guard for the LEGACY DRAW-CLIP CONTRACT restoration in
 # objc_shim.c (_86x64_reverse_prep/_ret). Self-contained (native x86_64 cc +

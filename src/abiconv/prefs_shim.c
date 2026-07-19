@@ -64,19 +64,80 @@ extern CFIndex
 _CFPreferencesGetAppIntegerValueWithContainer(CFStringRef key, CFStringRef appID,
                                               CFURLRef container, Boolean *valid);
 
+/* ---- SYSTEM-GLOBAL LOCALE/LANGUAGE key allowlist -----------------------------
+ *
+ * The *Copy* variants below blanket-return NULL to bypass the cfprefsd XPC
+ * round-trip that livelocks in a translated process (the AudioToolbox startup
+ * path). But "absent" is WRONG for the handful of Apple SYSTEM-GLOBAL locale /
+ * language keys that a legacy app's localization code reads and then trusts to be
+ * non-empty: e.g. -[NSLocale preferredLanguages] reads AppleLanguages via
+ * CFPreferencesCopyAppValue; with the blanket NULL it returns an EMPTY array, and
+ * a caller that does preferredLanguages[0] (Aspyr's ASL localization in Civ IV)
+ * hits an UNCATCHABLE Swift bounds-trap SIGILL. These keys live in the global
+ * (.GlobalPreferences / kCFPreferencesAnyApplication) domain, are read-mostly,
+ * and do NOT trigger the startup livelock (verified: reading AppleLanguages via
+ * the real _CFPreferencesCopyAppValueWithContainer in-process returns the genuine
+ * value with no hang). So for exactly these keys we FORWARD to the real CF
+ * implementation (through the private *WithContainer* variant — dyld skips self-
+ * interposition, so a direct call from inside THIS dylib reaches the REAL CF, no
+ * recursion); every other key keeps the daemon-free "absent" bypass. GENERIC:
+ * this helps ANY translated app whose localization reads the system language/
+ * locale globals, and is keyed on the KEY (a structural property), never on an
+ * app name. NB the appID is irrelevant to the discriminator — these are read
+ * against kCFPreferencesCurrentApplication, which falls back to the global domain
+ * for keys not set app-locally. (Longer term: forward ALL *Copy* with a BLOCKLIST
+ * of just the livelocking path — see the known-gaps list.) */
+static int pref_is_system_global_key(CFStringRef key)
+{
+	if (!key) { return 0; }
+	static const char *const kGlobals[] = {
+		"AppleLanguages",              /* -> NSLocale preferredLanguages */
+		"AppleLocale",
+		"NSLanguages",
+		"AppleICUForce24HourTime",
+		"AppleICUDateFormatStrings",
+		"AppleICUNumberSymbols",
+		"AppleICUForceGregorianCalendar",
+		"AppleMeasurementUnits",
+		"AppleMetricUnits",
+		"AppleTemperatureUnit",
+		"AppleFirstWeekday",
+		"AppleTextDirection",
+		"AppleLanguagesDidMigrate",
+		"AppleLanguagesSchemaVersion",
+		"AppleKeyboardUIMode",
+		NULL,
+	};
+	char buf[64];
+	if (!CFStringGetCString(key, buf, sizeof(buf), kCFStringEncodingUTF8)) {
+		return 0;
+	}
+	for (const char *const *k = kGlobals; *k; ++k) {
+		if (!strcmp(buf, *k)) { return 1; }
+	}
+	return 0;
+}
+
 /* ---- replacements: report "absent" / succeed without the daemon ---- */
 
 static CFPropertyListRef
 x64_pref_copy_app_cc(CFStringRef key, CFStringRef appID, CFURLRef container, CFURLRef configuration)
 {
-	(void) key; (void) appID; (void) container; (void) configuration;
+	if (pref_is_system_global_key(key)) {
+		if (!appID) { appID = kCFPreferencesCurrentApplication; }
+		return _CFPreferencesCopyAppValueWithContainer(key, appID, container);
+	}
+	(void) container; (void) configuration;
 	return NULL;
 }
 
 static CFPropertyListRef
 x64_pref_copy_app_c(CFStringRef key, CFStringRef appID, CFURLRef container)
 {
-	(void) key; (void) appID; (void) container;
+	if (pref_is_system_global_key(key)) {
+		if (!appID) { appID = kCFPreferencesCurrentApplication; }
+		return _CFPreferencesCopyAppValueWithContainer(key, appID, container);
+	}
 	return NULL;
 }
 
@@ -84,14 +145,20 @@ static CFPropertyListRef
 x64_pref_copy_value_c(CFStringRef key, CFStringRef appID, CFStringRef user, CFStringRef host,
                       CFURLRef container)
 {
-	(void) key; (void) appID; (void) user; (void) host; (void) container;
+	if (pref_is_system_global_key(key)) {
+		if (!appID) { appID = kCFPreferencesCurrentApplication; }
+		return _CFPreferencesCopyValueWithContainer(key, appID, user, host, container);
+	}
 	return NULL;
 }
 
 static CFPropertyListRef
 x64_CFPreferencesCopyAppValue(CFStringRef key, CFStringRef applicationID)
 {
-	(void) key; (void) applicationID;
+	if (pref_is_system_global_key(key)) {
+		if (!applicationID) { applicationID = kCFPreferencesCurrentApplication; }
+		return _CFPreferencesCopyAppValueWithContainer(key, applicationID, NULL);
+	}
 	return NULL;
 }
 
@@ -99,7 +166,11 @@ static CFPropertyListRef
 x64_CFPreferencesCopyValue(CFStringRef key, CFStringRef applicationID, CFStringRef userName,
                            CFStringRef hostName)
 {
-	(void) key; (void) applicationID; (void) userName; (void) hostName;
+	if (pref_is_system_global_key(key)) {
+		if (!applicationID) { applicationID = kCFPreferencesCurrentApplication; }
+		return _CFPreferencesCopyValueWithContainer(key, applicationID, userName,
+		                                            hostName, NULL);
+	}
 	return NULL;
 }
 
