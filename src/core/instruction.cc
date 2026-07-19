@@ -200,6 +200,65 @@ namespace MachO {
    template <Bits bits>
    const xed_state_t& Instruction<bits>::dstate() { return dstate_<bits>; }
 
+   /* Shared constant-vs-pointer classifier for a 32-bit instruction IMMEDIATE
+    * whose value ALIASES a code (instructions-flagged) section. The
+    * classification must be a PURE FUNCTION of the value + image — never of
+    * parse ORDER or of which iform carries the immediate — or the two sides of
+    * a compare can classify DIFFERENTLY and a value test that held on i386
+    * silently fails after translation.
+    *
+    * Ground truth (Civ IV Steam, locals-stripped): every GCC __GLOBAL__I_*
+    * static-init stub passes the default init priority in edx
+    * (`mov $0xffff,%edx; mov $1,%eax; jmp __static_initialization_and_
+    * destruction_0`) and every per-TU dispatcher tests it
+    * (`cmp $0xffff,%edx; jne skip`). 0xffff aliases __text. With
+    * code_alias_is_constant DISARMED (no local text syms) the MOV heuristic
+    * relocated all 1084 stub immediates to `lea edx,[rip+..]`; the relocated
+    * value then entered relocated_ptr_imms, so imm_bounds_relocated_table let
+    * 1095/1096 dispatcher CMPs relocate too — ACCIDENTALLY consistent (ctors
+    * still ran) — but the FIRST dispatcher in sweep order parsed before any
+    * relocated base existed and kept the literal 0xffff: its TU's static
+    * ctors were silently skipped -> a never-constructed std::list registry ->
+    * NULL-deref at game launch ("Launch in Window" EXC_BAD_ACCESS addr=0x8).
+    *
+    * Rule: an imm32 aliasing an instructions-flagged section is an integer
+    * CONSTANT unless there is POSITIVE function-pointer evidence at its value:
+    *   - an nlist symbol AT the value (func_syms; global text symbols survive
+    *     `strip -x`, so this also serves locals-stripped binaries), or
+    *   - the standard i386 frame-setup prologue `55 89 e5` (push ebp;
+    *     mov ebp,esp) at the value — the same structural recovery the
+    *     stack-arg heuristic uses for stripped-binary callback ProcPtrs
+    *     (Halo CE Carbon event handlers).
+    * Symboled binaries additionally discriminate via code_alias_is_constant
+    * (mid-function = constant); stackarg_imm_is_code_constant supplies the
+    * locals-stripped arm. Data-section aliases are NOT gated here — the
+    * permissive probes keep them. */
+   template <Bits bits>
+   static bool imm32_code_alias_is_constant(const Image& img, ParseEnv<bits>& env,
+                                            uint32_t imm_val) {
+      if (!env.code_alias_is_constant(imm_val) &&
+          !env.stackarg_imm_is_code_constant(imm_val)) {
+         return false;   /* not a code-section alias (or already rescued) */
+      }
+      /* POSITIVE evidence: symbol at the value */
+      if (env.func_syms.count(imm_val) != 0) { return false; }
+      /* POSITIVE evidence: function prologue bytes at the value */
+      for (Segment<bits> *seg : env.archive.segments()) {
+         if (!seg->contains_vmaddr(imm_val)) { continue; }
+         const std::size_t fo =
+            (std::size_t) imm_val - seg->segment_command.vmaddr
+            + seg->segment_command.fileoff;
+         if (fo + 3 <= img.size() &&
+             img.template at<uint8_t>(fo)     == 0x55 &&   /* push %ebp      */
+             img.template at<uint8_t>(fo + 1) == 0x89 &&   /* mov %esp,%ebp  */
+             img.template at<uint8_t>(fo + 2) == 0xe5) {
+            return false;
+         }
+         break;
+      }
+      return true;
+   }
+
    template <Bits bits>
    bool Instruction<bits>::CanDecode(const Image& img, const Location& loc) {
       xed_decoded_inst_t xedd;
@@ -444,9 +503,14 @@ namespace MachO {
                   /* CODE-target FUNCTION-ENTRY gate (shared with DataParser,
                    * see ParseEnv::code_alias_is_constant): an imm32 that lands
                    * MID-function inside an instructions section with no symbol
-                   * at its value is an integer constant, not a pointer. */
+                   * at its value is an integer constant, not a pointer.
+                   * imm32_code_alias_is_constant extends this to the LOCALS-
+                   * STRIPPED path (`movl $0xffff, _global` must store the
+                   * integer, not a relocated address), with func_syms/prologue
+                   * positive evidence keeping genuine fn-pointer installs
+                   * (`movl $_fn, _global`) relocated. */
                   if (imm_is_ptr && bits == Bits::M32 &&
-                      env.code_alias_is_constant(imm_val)) {
+                      imm32_code_alias_is_constant(img, env, imm_val)) {
                      imm_is_ptr = false;
                   }
                   /* CMP/TEST COMPARISON-VALUE gate: in `cmp/test [abs32],imm32`
@@ -915,9 +979,16 @@ namespace MachO {
                 * crashed in _Rb_tree_decrement on the zeroed header (fault
                 * addr 0x4). A genuine code-pointer immediate (`push $_fn`
                 * callback, `mov $_fn,%reg`) targets a function ENTRY and
-                * carries a symbol -> still relocated. */
+                * carries a symbol (or prologue bytes) -> still relocated.
+                * imm32_code_alias_is_constant extends the gate to LOCALS-
+                * STRIPPED binaries (Civ IV STEAM: code_alias_is_constant is
+                * disarmed there, so the same 0xffff priority relocated again —
+                * `lea edx,[rip+..]` — and only parse-ORDER luck kept 1095/1096
+                * dispatchers consistent; the first-in-sweep dispatcher kept
+                * its literal cmp and its TU's ctors were skipped -> the
+                * "Launch in Window" NULL std::list registry crash). */
                if (imm_is_ptr && bits == Bits::M32 &&
-                   env.code_alias_is_constant(imm_val)) {
+                   imm32_code_alias_is_constant(img, env, imm_val)) {
                   imm_is_ptr = false;
                }
                /* Record a relocated base so a later loop-bounding `cmp reg,
@@ -959,8 +1030,18 @@ namespace MachO {
                 xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
                const uint32_t imm_val =
                   img.template at<uint32_t>(loc.offset + imm_idx);
+               /* imm32_code_alias_is_constant (not just code_alias_is_constant)
+                * so the compare side classifies a code-aliasing constant
+                * IDENTICALLY to the MOV/PUSH/ADD side above regardless of
+                * symbol coverage or parse order: on the locals-stripped path
+                * the mis-relocated stub MOVs used to enter relocated_ptr_imms,
+                * which made THIS gate relocate the matching dispatcher
+                * `cmp $0xffff,%edx` for every dispatcher parsed AFTER a stub —
+                * masking the MOV bug by accidental consistency — while the
+                * first-in-sweep dispatcher kept its literal and its TU's
+                * static ctors were skipped (Civ IV "Launch in Window"). */
                if (imm_val >= 0x1000 && imm_val < 0x80000000U &&
-                   !env.code_alias_is_constant(imm_val) &&
+                   !imm32_code_alias_is_constant(img, env, imm_val) &&
                    env.imm_bounds_relocated_table(imm_val)) {
                   imm_is_ptr = true;
                }
@@ -1006,55 +1087,29 @@ namespace MachO {
                img.template at<uint32_t>(loc.offset + imm_off);
             if (value >= 0x1000 && value < 0x80000000U) {
                bool in_seg = false;
-               Segment<bits> *hit_seg = nullptr;
                for (auto *seg : env.archive.segments()) {
                   std::string name(
                      seg->segment_command.segname,
                      strnlen(seg->segment_command.segname,
                              sizeof(seg->segment_command.segname)));
                   if (name == SEG_PAGEZERO || name == SEG_LINKEDIT) continue;
-                  if (seg->contains_vmaddr(value)) { in_seg = true; hit_seg = seg; break; }
+                  if (seg->contains_vmaddr(value)) { in_seg = true; break; }
                }
-               /* CODE-target FUNCTION-ENTRY gate (shared with DataParser, see
-                * ParseEnv::code_alias_is_constant): a stack-arg imm32 that
-                * lands MID-function inside an instructions section with no
-                * symbol at its value is an integer argument (e.g.
+               /* CODE-target FUNCTION-ENTRY gate (imm32_code_alias_is_constant,
+                * the shared classifier): a stack-arg imm32 that lands
+                * MID-function inside an instructions section with no symbol at
+                * its value is an integer argument (e.g.
                 * `movl $0xffff, 4(%esp)`), not a pointer. A callback-pointer
                 * arg (`movl $_fn, (%esp)`) targets a function entry and
-                * carries a symbol -> still relocated. */
+                * carries a symbol OR the `55 89 e5` frame-setup prologue
+                * (the stripped-binary ProcPtr recovery: Halo CE registers its
+                * Carbon renderer-check event handlers via
+                * `movl $handler,(%esp)` with no symbols) -> still relocated.
+                * The prologue/func_syms positive-evidence logic lives in the
+                * helper so ALL imm32 heuristic arms classify identically. */
                if (in_seg && bits == Bits::M32 &&
-                   (env.code_alias_is_constant(value) ||
-                    env.stackarg_imm_is_code_constant(value))) {
-                  /* EXCEPTION for locals-STRIPPED binaries: with no symbol at a
-                   * function entry, stackarg_imm_is_code_constant conservatively
-                   * calls EVERY code-section-aliasing stack-arg imm a constant —
-                   * which drops genuine callback ProcPtrs (Halo CE registers its
-                   * Carbon renderer-check event handlers via
-                   * `movl $handler,(%esp)`; the raw i386 __text address then
-                   * survives translation and, when Carbon later invokes the
-                   * handler, the reverse bridge jmps to the unslid/unmapped
-                   * address -> EXC_BAD_ACCESS). Recover them STRUCTURALLY: a
-                   * genuine ProcPtr targets a FUNCTION ENTRY, recognizable
-                   * without symbols by the standard i386 frame-setup prologue
-                   * `55 89 e5` (push ebp; mov ebp,esp). An integer constant that
-                   * merely aliases a mid-instruction code byte will not match a
-                   * prologue, so this keeps the constant-vs-pointer split precise
-                   * (universal: triggers on the prologue byte pattern, not an app
-                   * or symbol). Only needed on the stripped path; a symboled
-                   * binary's func_syms already discriminates. */
-                  bool is_fn_prologue = false;
-                  if (hit_seg) {
-                     const std::size_t fo =
-                        (std::size_t)value - hit_seg->segment_command.vmaddr
-                        + hit_seg->segment_command.fileoff;
-                     if (fo + 3 <= img.size()) {
-                        is_fn_prologue =
-                           img.template at<uint8_t>(fo)     == 0x55 &&
-                           img.template at<uint8_t>(fo + 1) == 0x89 &&
-                           img.template at<uint8_t>(fo + 2) == 0xe5;
-                     }
-                  }
-                  if (!is_fn_prologue) { in_seg = false; }
+                   imm32_code_alias_is_constant(img, env, value)) {
+                  in_seg = false;
                }
                if (in_seg) {
                   imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);
