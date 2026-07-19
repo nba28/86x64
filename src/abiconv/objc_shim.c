@@ -3545,6 +3545,86 @@ static void legacy_cachedisplay_1x_install(void) {
    done = 1;
 }
 
+/* ---- LEGACY immediate-displayRect compositor co-mark -------------------------
+ * A legacy i386 app's animation framework drives per-frame redraw via an
+ * IMMEDIATE synchronous -[NSView displayRect:] / displayRectIgnoringOpacity:
+ * (Quinn's ATViewAnimation -> [board displayRect:(union of the piece's old+new
+ * cell rects)] on each rotate/move frame). On 10.6 that drew straight to the
+ * window backing store the WindowServer read. On modern macOS, once the view is
+ * LAYER-BACKED (Quinn's board is, forced by the sibling NSOpenGLView), an
+ * immediate displayRect: lands in the layer backing but the WindowServer does not
+ * always recomposite that sub-rect -> stale old-piece pixels persist (the observed
+ * ROTATE TRAIL) and the new piece paints only partially (lost squares); the next
+ * frame's larger union eventually repaints over the mess.
+ *
+ * FIX: swizzle displayRect:/displayRectIgnoringOpacity: so a LEGACY-originated
+ * call on a LAYER-BACKED view runs the ORIGINAL immediate draw FIRST (keeps
+ * synchrony for any draw-then-readback caller) and THEN setNeedsDisplayInRect:
+ * the same rect, scheduling AppKit's coalesced, compositor-facing display pass so
+ * the WindowServer recomposites that sub-rect. STRUCTURAL gate: legacy-origin
+ * (the __thread flag set in objc_bridge_prep for exactly this send) + layer!=nil.
+ * Native AppKit displayRect: (flag 0) and non-layer-backed views are untouched.
+ * Env ABICONV_QUINN_DISPLAYRECT_COMARK (default OFF pending the live pixel A/B;
+ * flip default-on once the tester confirms the trail is gone). Trace under
+ * ABICONV_QUINN_DISPLAYRECT_TRACE. */
+static __thread int g_displayrect_legacy;         /* set by objc_bridge_prep */
+void _86x64_test_set_displayrect_legacy(int v) { g_displayrect_legacy = v; }
+static IMP g_view_displayRect;
+static IMP g_view_displayRectIgnoringOpacity;
+static int displayrect_comark_on(void) {
+   static int v = -1;
+   if (v < 0) { v = getenv("ABICONV_QUINN_DISPLAYRECT_COMARK") ? 1 : 0; }
+   return v;
+}
+static int displayrect_trace_on(void) {
+   static int v = -1;
+   if (v < 0) { v = getenv("ABICONV_QUINN_DISPLAYRECT_TRACE") ? 1 : 0; }
+   return v;
+}
+/* shared body: run the original IMP, then (legacy + layer-backed) co-mark. */
+static void displayrect_comark_common(id self, SEL _cmd, CGRect rect, IMP orig) {
+   int legacy = g_displayrect_legacy; g_displayrect_legacy = 0;
+   ((void(*)(id, SEL, CGRect))orig)(self, _cmd, rect);   /* original immediate draw */
+   if (!legacy) { return; }
+   id lyr = ((id(*)(id, SEL))objc_msgSend)(self, sel_registerName("layer"));
+   int layered = lyr != nil;
+   if (displayrect_trace_on()) {
+      fprintf(stderr, "[disprect] %s<%s> rect=[%.1f %.1f %.1f %.1f] layerBacked=%d comark=%d\n",
+              sel_getName(_cmd), object_getClassName(self),
+              rect.origin.x, rect.origin.y, rect.size.width, rect.size.height,
+              layered, displayrect_comark_on() && layered);
+      fflush(stderr);
+   }
+   if (displayrect_comark_on() && layered) {
+      ((void(*)(id, SEL, CGRect))objc_msgSend)(
+         self, sel_registerName("setNeedsDisplayInRect:"), rect);
+   }
+}
+static void view_displayRect(id self, SEL _cmd, CGRect rect) {
+   displayrect_comark_common(self, _cmd, rect, g_view_displayRect);
+}
+static void view_displayRectIgnoringOpacity(id self, SEL _cmd, CGRect rect) {
+   displayrect_comark_common(self, _cmd, rect, g_view_displayRectIgnoringOpacity);
+}
+static void legacy_displayrect_comark_install(void) {
+   static int done = 0;
+   if (done) { return; }
+   Class view = objc_getClass("NSView");
+   if (!view) { return; }                      /* AppKit not loaded yet: retry */
+   Method mR = class_getInstanceMethod(view, sel_registerName("displayRect:"));
+   Method mI = class_getInstanceMethod(view,
+                  sel_registerName("displayRectIgnoringOpacity:"));
+   if (!mR || !mI) { return; }
+   g_view_displayRect = method_getImplementation(mR);
+   g_view_displayRectIgnoringOpacity = method_getImplementation(mI);
+   method_setImplementation(mR, (IMP)view_displayRect);
+   method_setImplementation(mI, (IMP)view_displayRectIgnoringOpacity);
+   done = 1;
+   if (getenv("ABICONV_QUINN_DISPLAYRECT_TRACE")) {
+      fprintf(stderr, "[disprect] comark swizzle INSTALLED on NSView\n"); fflush(stderr);
+   }
+}
+
 static void appkit_compat_install(void);
 /* test hook: force the AppKit legacy-compat installs from a NATIVE harness
  * (tests-i386/snapshot_compat_test.sh) without a bridge entry — the installs
@@ -3557,6 +3637,7 @@ static void appkit_compat_install(void) {
    legacy_snapshot_compat_install();
    legacy_lockfocus_1x_install();
    legacy_cachedisplay_1x_install();
+   legacy_displayrect_comark_install();
    /* These self-guard (own env vars) and must keep retrying until THEIR
     * framework loads — NSColor/AppKit early, NSProFont/ProKit much later — so
     * run them BEFORE the `done` short-circuit (which only tracks the AppKit
@@ -4519,6 +4600,22 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
             }
          }
          g_cachedisplay_legacy = is_view;
+      }
+   }
+
+   /* LEGACY immediate-display-rect compat: mark this send legacy-originated so the
+    * swizzled -[NSView displayRect:] / displayRectIgnoringOpacity:
+    * (legacy_displayrect_comark_install) can run the ORIGINAL immediate draw and
+    * THEN schedule a coalesced compositor pass. Set here (forward bridge = i386
+    * origin) and consumed+cleared by the swizzled IMP that runs synchronously as
+    * this send's native dispatch; native AppKit displayRect: is never affected.
+    * Gate cheaply on the selector's first char before the strcmp. */
+   if (sel && sel_getName(sel)[0] == 'd') {
+      const char *sn = sel_getName(sel);
+      if (!strcmp(sn, "displayRect:") ||
+          !strcmp(sn, "displayRectIgnoringOpacity:") ||
+          !strcmp(sn, "displayRectIgnoringOpacity:inContext:")) {
+         g_displayrect_legacy = 1;
       }
    }
 
