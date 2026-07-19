@@ -3634,68 +3634,6 @@ static void legacy_displayrect_comark_install(void) {
    }
 }
 
-/* ---- legacy -[NSView gState] + NSCopyBits view-capture -----------------------
- * The pre-10.10 offscreen view-capture idiom copies a source view's pixels with
- * NSCopyBits([sourceView gState], srcRect, destPoint) into a lockFocus'd dest
- * (Quinn's -[NSView(QuinnExtensions) imageFromRect:], used to build the board
- * REFLECTION source image). On modern macOS -[NSView gState] returns 0 (the
- * window-server graphics-state IDs are gone) so NSCopyBits(0, ...) copies
- * NOTHING -> the reflected pieces are absent. We restore the contract in two
- * halves: (1) -[NSView gState] hands a LEGACY caller a non-zero TOKEN that maps
- * back to the view; (2) the NSCopyBits shim (nscopybits_shim.c) sees the token,
- * resolves the source view and renders its srcRect into the current focus
- * context at destPoint. A genuine (native) gState / non-token is passed straight
- * through. Universal: any legacy app using the gState+NSCopyBits view blit.
- *
- * Token space: [GSTATE_TOKEN_BASE, +GSTATE_TOKEN_CAP). Small ring keyed by the
- * view (a view's gState is stable for a capture); reused across captures. */
-#define GSTATE_TOKEN_BASE 0x67530000L      /* "gS.." — clearly not a real gState */
-#define GSTATE_TOKEN_CAP  256
-static id  g_gstate_view[GSTATE_TOKEN_CAP];
-static os_unfair_lock g_gstate_lock = OS_UNFAIR_LOCK_INIT;
-static __thread int g_gstate_legacy;              /* set by objc_bridge_prep */
-void _86x64_test_set_gstate_legacy(int v) { g_gstate_legacy = v; }
-/* NSCopyBits shim (nscopybits_shim.c) resolves a token -> source view here. */
-id _86x64_gstate_token_view(long tok) {
-   long i = tok - GSTATE_TOKEN_BASE;
-   if (i < 0 || i >= GSTATE_TOKEN_CAP) { return nil; }
-   os_unfair_lock_lock(&g_gstate_lock);
-   id v = g_gstate_view[i];
-   os_unfair_lock_unlock(&g_gstate_lock);
-   return v;
-}
-static long (*g_view_gState)(id, SEL);
-static long view_gState(id self, SEL _cmd) {
-   long real = g_view_gState ? g_view_gState(self, _cmd) : 0;
-   int legacy = g_gstate_legacy; g_gstate_legacy = 0;
-   if (!legacy || real != 0) { return real; }   /* native, or a usable gState */
-   /* dead gState for a legacy caller: mint/reuse a token for this view */
-   os_unfair_lock_lock(&g_gstate_lock);
-   long slot = -1, freeslot = -1;
-   for (long i = 0; i < GSTATE_TOKEN_CAP; ++i) {
-      if (g_gstate_view[i] == self) { slot = i; break; }
-      if (freeslot < 0 && g_gstate_view[i] == nil) { freeslot = i; }
-   }
-   if (slot < 0) {
-      slot = (freeslot >= 0) ? freeslot
-                             : (long)((uintptr_t)self >> 4) % GSTATE_TOKEN_CAP;
-      g_gstate_view[slot] = self;
-   }
-   os_unfair_lock_unlock(&g_gstate_lock);
-   return GSTATE_TOKEN_BASE + slot;
-}
-static void legacy_gstate_capture_install(void) {
-   static int done = 0;
-   if (done) { return; }
-   Class view = objc_getClass("NSView");
-   if (!view) { return; }                      /* AppKit not loaded yet: retry */
-   Method m = class_getInstanceMethod(view, sel_registerName("gState"));
-   if (!m) { return; }
-   g_view_gState = (long(*)(id, SEL))method_getImplementation(m);
-   method_setImplementation(m, (IMP)view_gState);
-   done = 1;
-}
-
 static void appkit_compat_install(void);
 /* test hook: force the AppKit legacy-compat installs from a NATIVE harness
  * (tests-i386/snapshot_compat_test.sh) without a bridge entry — the installs
@@ -3709,7 +3647,6 @@ static void appkit_compat_install(void) {
    legacy_lockfocus_1x_install();
    legacy_cachedisplay_1x_install();
    legacy_displayrect_comark_install();
-   legacy_gstate_capture_install();
    /* These self-guard (own env vars) and must keep retrying until THEIR
     * framework loads — NSColor/AppKit early, NSProFont/ProKit much later — so
     * run them BEFORE the `done` short-circuit (which only tracks the AppKit
@@ -4689,11 +4626,6 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
           !strcmp(sn, "displayRectIgnoringOpacity:inContext:")) {
          g_displayrect_legacy = 1;
       }
-   }
-   /* mark a legacy-origin -[NSView gState] so the swizzle hands back a capture
-    * token (dead native gState==0) for the NSCopyBits view-blit restore. */
-   if (sel && sel_getName(sel)[0] == 'g' && !strcmp(sel_getName(sel), "gState")) {
-      g_gstate_legacy = 1;
    }
 
    /* Quinn GL-upload diagnostic (env ABICONV_GL_TEXLOG): log the createTexture
