@@ -101,6 +101,14 @@
 	MTSHIM	___NSRectFillListUsingOperation, _shim_NSRectFillListUsingOperation
 	MTSHIM	___NSRectFillListWithGrays,      _shim_NSRectFillListWithGrays
 
+	;; NSCopyBits(srcGState, srcRect, destPoint): the legacy view pixel-blit
+	;; (nscopybits_shim.c). Modern -[NSView gState] returns 0 so the abigen
+	;; shim's NSCopyBits(0,...) copies nothing (Quinn board reflection loses
+	;; the settled pieces). We recognise the gState TOKEN the -[NSView gState]
+	;; swizzle hands legacy callers and render the source view's rect into the
+	;; current focus context; a real gState falls through to native NSCopyBits.
+	MTSHIM	___NSCopyBits,                   _shim_NSCopyBits
+
 	;; Carbon GetKeys override (keystate_shim.c): emulate a held key at launch
 	;; so a vendor "hold KEY to bypass" self-check (Halo's 'p') can be triggered
 	;; without a physical keypress (Finder consumes it). Default-off (env-gated);
