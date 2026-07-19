@@ -41,6 +41,15 @@ extern id objc_retain(id);   /* libobjc ARC entrypoint; not in runtime.h */
 #define LOW_REGION_BASE 0x080000000UL
 #define LOW_REGION_END  0x0F0000000UL
 
+/* env-gated (ABICONV_CALLRING) per-thread reverse-bridge call-ring diagnostic
+ * (callring_shim.c) — inert unless ABICONV_CALLRING is set. _send captures the
+ * pending send at prep; _ret completes it with the native return value at the
+ * wrap/finish return site. */
+int  _86x64_callring_enabled(void);
+void _86x64_callring_arm(void);
+void _86x64_callring_send(uint64_t self, uint64_t sel, uint32_t caller_ra);
+void _86x64_callring_ret(uint64_t ret);
+
 /* Debug-trace env flags, resolved ONCE. These gate diagnostic fprintf paths on
  * the ObjC/CFString bridge HOT PATH (i386_cfstr_to_real's reject branch, the
  * wrap/class-lookup tracers). getenv() does a LINEAR SCAN of the environment;
@@ -4646,6 +4655,14 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
       c->tid = pthread_mach_thread_np(pthread_self()); c->valid = 1;
    }
 
+   /* env-gated (ABICONV_CALLRING) call-ring: stash this send's {self, sel, i386
+    * caller RA} as pending; the matching return site (x64_objc_wrap_ret for the
+    * common object return, or objc_bridge_ret_finish for struct returns)
+    * completes it with the native return value. Inert unless the env var is set.
+    * See callring_shim.c. */
+   _86x64_callring_send((uint64_t)(uintptr_t)real_self,
+                        (uint64_t)(uintptr_t)sel, args32[-1]);
+
    if (BRIDGE_TRACE() || quinn_play_trace_enabled()) {
       const char *cls_name = "(nil)";
       if (real_self) {
@@ -5094,6 +5111,12 @@ void objc_bridge_prep_super_stret(struct objc_call_plan *plan,
 unsigned __int128 objc_bridge_ret_finish(struct objc_call_plan *plan,
                                          uint64_t vrax, uint64_t vrdx,
                                          double x0, double x1) {
+   /* env-gated (ABICONV_CALLRING) call-ring: complete this send's pending entry
+    * with the native struct/scalar return (kinds 3/5/6). Object returns (kind 1)
+    * complete in x64_objc_wrap_ret instead. Diagnostic-only; inert unless the env
+    * var is set. See callring_shim.c. */
+   _86x64_callring_ret(vrax);
+
    const int kind = plan->ret_is_obj;
    if (kind == 3) {
       /* native MEMORY struct in stret_buf -> narrow into the i386 buffer;
@@ -6624,6 +6647,14 @@ uint32_t shim_DeclineVolumeNotification(const uint32_t *a) { (void)a; return 0; 
  * mints a proxy handle exactly as before, so only our own legacy instances
  * change behavior. Tagged pointers have no association -> proxy path, unchanged. */
 uint32_t x64_objc_wrap_ret(uint64_t real) {
+   /* env-gated (ABICONV_CALLRING) call-ring: complete this send's pending entry
+    * with the native OBJECT return (kind 1 = the common id-returning path,
+    * including -[NSArray objectAtIndex:] and every array-vending API). Records
+    * the return's class + collection count so a Swift-trap SIGILL names the API
+    * that handed a translated caller an empty collection. Inert unless the env
+    * var is set. See callring_shim.c. */
+   _86x64_callring_ret(real);
+
    /* Only walk the class chain if `real` is genuinely a readable object. A
     * method whose return-type ENCODING is misclassified as object (ret_is_obj=1
     * for a plain struct-pointer matched by enc_is_objptr_struct/enc_is_cfptr, or
