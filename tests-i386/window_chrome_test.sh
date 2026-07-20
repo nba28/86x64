@@ -84,7 +84,11 @@ static NSView* findv(NSView *v, const char *sub) {
     NSToolbarItem *it = [[NSToolbarItem alloc] initWithItemIdentifier:ident];
     [it setLabel:@"Abort"];
     NSButton *b = [[NSButton alloc] initWithFrame:NSMakeRect(0,0,32,32)];
-    [b setBordered:NO];                 /* borderless icon blob (the WRONG look) */
+    /* the WRONG translated state: bordered + a bezel + no title (the failed-metal
+     * PolishedMetalButtonCell renders a black box behind the bare icon). */
+    [b setBordered:YES];
+    [b setBezelStyle:NSBezelStyleTexturedRounded];
+    [b setTitle:@""];                   /* icon-only custom button (like Quinn) */
     [b setImage:[NSImage imageWithSize:NSMakeSize(32,32) flipped:NO
                  drawingHandler:^BOOL(NSRect r){ return YES; }]];
     [it setView:b];
@@ -207,15 +211,37 @@ int main(int argc, char **argv) {
         fprintf(stderr, "legacy blank-title window: title set to '%s' (visibility=%ld) OK\n",
                 [[lw title] UTF8String], (long)[lw titleVisibility]);
 
-        /* legacy window that ALREADY has a title -> must be left untouched */
+        /* legacy window that ALREADY has a title -> preserved; and the fix must
+         * force the title-render preconditions (Titled bit + visible titlebar). */
         LegacyWin *lw2 = [[LegacyWin alloc] initWithContentRect:NSMakeRect(0,0,300,100)
             styleMask:mask backing:NSBackingStoreBuffered defer:NO];
         [lw2 setTitle:@"AppChosen"];
+        [lw2 setTitleVisibility:NSWindowTitleHidden]; /* the WRONG hidden-title state */
         title_on_show(lw2);
         if (![[lw2 title] isEqualToString:@"AppChosen"]) {
             fprintf(stderr, "legacy pre-titled window clobbered to '%s'\n",
                     [[lw2 title] UTF8String]); return 1; }
-        fprintf(stderr, "legacy pre-titled window: title preserved OK\n");
+        if ([lw2 titleVisibility] != NSWindowTitleVisible) {
+            fprintf(stderr, "legacy title still hidden (=%ld)\n", (long)[lw2 titleVisibility]); return 1; }
+        if (!([lw2 styleMask] & NSWindowStyleMaskTitled)) {
+            fprintf(stderr, "legacy window styleMask lost Titled bit\n"); return 1; }
+        fprintf(stderr, "legacy pre-titled window: title preserved + titlebar forced "
+                "visible/Titled OK\n");
+
+        /* legacy TEXTURED/metal window created WITHOUT the Titled bit but with a
+         * title string (Quinn's PolishedMetalWindow case) -> fix must ADD Titled
+         * so the stock chrome lays out + shows the title. */
+        LegacyWin *lw3 = [[LegacyWin alloc] initWithContentRect:NSMakeRect(0,0,300,100)
+            styleMask:(NSWindowStyleMaskClosable|NSWindowStyleMaskResizable)
+            backing:NSBackingStoreBuffered defer:NO];
+        [lw3 setTitle:@"Quinn"];
+        title_on_show(lw3);
+        if (!([lw3 styleMask] & NSWindowStyleMaskTitled)) {
+            fprintf(stderr, "textured legacy window did NOT gain Titled bit\n"); return 1; }
+        if (![[lw3 title] isEqualToString:@"Quinn"]) {
+            fprintf(stderr, "textured legacy window title lost\n"); return 1; }
+        fprintf(stderr, "legacy textured window: Titled bit added, title '%s' shows OK\n",
+                [[lw3 title] UTF8String]);
 
         /* ===== generic TOOLBAR styling ================================== */
         TbDelegate *dlg = [TbDelegate new];
@@ -232,20 +258,29 @@ int main(int argc, char **argv) {
         if ([lw.toolbar sizeMode] != NSToolbarSizeModeRegular) {
             fprintf(stderr, "toolbar sizeMode not Regular (=%ld)\n",
                     (long)[lw.toolbar sizeMode]); return 1; }
-        /* the custom item's button must now be bezeled (bordered) */
+        /* the custom item's button must now be FLAT/borderless (no bezel, no
+         * black bg) with the item's label surfaced as the button title beneath
+         * the icon (imagePosition=NSImageAbove). NOT bezeled. */
         int styled = 0, items_n = 0;
         for (NSToolbarItem *it in [lw.toolbar items]) {
             items_n++;
             NSView *v = [it view];
             if ([v isKindOfClass:[NSButton class]]) {
                 NSButton *b = (NSButton *)v;
-                if ([b isBordered] && [b bezelStyle] == NSBezelStyleTexturedRounded) styled++;
+                BOOL flat  = ![b isBordered];
+                BOOL labelled = [[b title] isEqualToString:[it label]] &&
+                                [[it label] length] > 0;
+                BOOL iconAbove = ([b imagePosition] == NSImageAbove);
+                if (flat && labelled && iconAbove) styled++;
+                fprintf(stderr, "    item '%s': bordered=%d bezel=%ld title='%s' imgPos=%ld\n",
+                        [[it label] UTF8String], [b isBordered], (long)[b bezelStyle],
+                        [[b title] UTF8String], (long)[b imagePosition]);
             }
         }
         if (items_n == 0 || styled != items_n) {
-            fprintf(stderr, "toolbar item buttons not bezeled (%d/%d)\n", styled, items_n); return 1; }
+            fprintf(stderr, "toolbar item buttons not flat+labeled (%d/%d)\n", styled, items_n); return 1; }
         fprintf(stderr, "toolbar: legacy window toolbar -> IconAndLabel/Regular, "
-                "%d/%d item buttons bezeled OK\n", styled, items_n);
+                "%d/%d item buttons FLAT+labeled OK\n", styled, items_n);
 
         /* native window's toolbar must be left ALONE */
         NSToolbar *ntb = [[NSToolbar alloc] initWithIdentifier:@"native"];
@@ -256,8 +291,9 @@ int main(int argc, char **argv) {
             fprintf(stderr, "native toolbar wrongly restyled\n"); return 1; }
         fprintf(stderr, "native window toolbar: left untouched (IconOnly) OK\n");
 
-        fprintf(stderr, "window-chrome+title+toolbar OK: legacy window got title + "
-                "IconAndLabel/Regular bezeled toolbar; native windows untouched\n");
+        fprintf(stderr, "window-chrome+title+toolbar OK: legacy window got a visible "
+                "title (Titled+visible) + IconAndLabel/Regular FLAT (borderless) "
+                "labeled toolbar items; native windows untouched\n");
         return 0;
     }
 }

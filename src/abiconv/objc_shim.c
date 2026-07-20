@@ -4212,6 +4212,33 @@ static id app_display_name(void) {
 static void window_title_on_show(id win) {
    if (wintitle_compat_off()) { return; }
    if (!(window_is_legacy(win) || window_has_legacy_chrome(win))) { return; }
+
+   /* A legacy metal/textured window (old NSTexturedBackgroundWindowMask, bit 8)
+    * that painted its OWN title via the now-orphaned -drawWindowTitle can come up
+    * with the stock NSThemeFrame NOT laying out a title field: the title string is
+    * set (from the nib) but no title text renders. Force the modern preconditions
+    * for the stock title to draw + auto-center:
+    *   (1) styleMask must include NSWindowStyleMaskTitled (bit 0);
+    *   (2) titlebar must NOT be transparent (else the title field is hidden);
+    *   (3) titleVisibility = Visible (0).
+    * All are idempotent no-ops on a window that already satisfies them, and we
+    * never clear a bit the app set — we only ADD Titled + turn transparency OFF +
+    * make the title visible. */
+   SEL sm_get = sel_registerName("styleMask");
+   SEL sm_set = sel_registerName("setStyleMask:");
+   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(win, sel_registerName("respondsToSelector:"), sm_set)) {
+      unsigned long mask = ((unsigned long(*)(id, SEL))objc_msgSend)(win, sm_get);
+      unsigned long want = mask | 1UL /*NSWindowStyleMaskTitled*/;
+      if (want != mask) {
+         ((void(*)(id, SEL, unsigned long))objc_msgSend)(win, sm_set, want);
+      }
+   }
+   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
+          win, sel_registerName("respondsToSelector:"),
+          sel_registerName("setTitlebarAppearsTransparent:"))) {
+      ((void(*)(id, SEL, signed char))objc_msgSend)(
+         win, sel_registerName("setTitlebarAppearsTransparent:"), 0);
+   }
    /* ensure the modern titlebar shows the title (0 == NSWindowTitleVisible) */
    if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
           win, sel_registerName("respondsToSelector:"),
@@ -4219,9 +4246,25 @@ static void window_title_on_show(id win) {
       ((void(*)(id, SEL, long))objc_msgSend)(
          win, sel_registerName("setTitleVisibility:"), 0);
    }
+
    id cur = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("title"));
-   if (!nsstring_blank(cur)) { return; }           /* app already set a title */
-   /* prefer the window's represented filename's last component if present */
+   if (!nsstring_blank(cur)) {
+      /* Title string is already present (e.g. Quinn's nib title "Quinn"): the
+       * fix above (Titled + non-transparent + visible) makes the stock chrome
+       * render it. RE-ASSERT setTitle: with the same value to force a titlebar
+       * relayout now that the style is corrected (cheap, no visible change). */
+      ((void(*)(id, SEL, id))objc_msgSend)(win, sel_registerName("setTitle:"), cur);
+      if (wchrome_trace()) {
+         const char *cc = ((const char*(*)(id, SEL))objc_msgSend)(cur, sel_registerName("UTF8String"));
+         fprintf(stderr, "[compat] wintitle: legacy window (%s) already titled '%s' "
+                 "-> forced Titled+opaque+visible titlebar\n",
+                 object_getClassName(win), cc ? cc : "?");
+         fflush(stderr);
+      }
+      return;
+   }
+   /* No title yet: derive one. Prefer the window's represented filename's last
+    * component if present, else the app/process name. */
    id name = nil;
    id repf = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("representedFilename"));
    if (!nsstring_blank(repf)) {
@@ -4241,40 +4284,101 @@ static void window_title_on_show(id win) {
 
 /* ---- generic TOOLBAR-BUTTON styling --------------------------------------
  * A legacy Cocoa app's NSToolbar, built by translated code with an NSToolbar
- * delegate handing back NSToolbarItems (each -setImage: + -setLabel:), rendered
- * on 10.5/10.6 as bezeled icon-AND-label buttons spread across a unified metal
- * toolbar. On modern macOS the translated toolbar comes up in a DEGRADED state:
- * the items show as borderless icon-only blobs clustered to one side (no bezel,
- * no text label), because the toolbar's displayMode/sizeMode land at the modern
- * icon-only defaults and the item content-views (if any) aren't styled.
+ * delegate handing back NSToolbarItems (each with a custom PolishedMetalButton
+ * view + a -setLabel:), rendered on 10.5/10.6 as FLAT icon-and-label items on a
+ * brushed-metal unified toolbar — a bare icon with a text label beneath it, NO
+ * per-button background/bezel. On modern macOS the translated toolbar comes up
+ * DEGRADED: the custom PolishedMetalButtonCell's metal-pattern bezel draw fails
+ * (removed textured-window substrate) and paints a BLACK box behind the icon,
+ * the toolbar's displayMode/sizeMode land at the modern icon-only defaults, and
+ * the custom-view items carry no visible label.
  *
  * Restore the classic look UNIVERSALLY, keyed on the toolbar being attached to a
  * LEGACY-origin window (structural, NO class name): force the toolbar's
  * displayMode = IconAndLabel (1) and sizeMode = Regular (1), and for any custom
- * item whose view is an NSButton, give it a bezel (regular/round-rect) so it
- * reads as a genuine toolbar button. Native toolbars on native windows are never
- * touched. Env kill-switch ABICONV_TOOLBAR_COMPAT (set => skip). */
+ * item whose view is an NSButton, make it BORDERLESS/flat (kill the failed-metal
+ * black background) and surface the item's label beneath the icon. The target is
+ * a flat icon-on-metal with text label — NOT a bezeled button. Native toolbars
+ * on native windows are never touched. Env kill-switch ABICONV_TOOLBAR_COMPAT. */
 static int toolbar_compat_off(void) {
    static int v = -1;
    if (v < 0) { v = getenv("ABICONV_TOOLBAR_COMPAT") ? 1 : 0; }
    return v;
 }
-/* Style one toolbar item's custom view (if it is a button) as a bezeled button. */
+/* A custom-VIEW toolbar item (Quinn's PolishedMetalButton) rendered on 10.5/10.6
+ * as a FLAT icon on the brushed-metal toolbar with a text label beneath — no
+ * per-button background. Under translation the custom PolishedMetalButtonCell's
+ * metal-pattern bezel draw fails (same removed textured-window substrate family
+ * as the titlebar band) and paints a BLACK background behind the icon. The
+ * genuine look is BORDERLESS/flat, so: strip the bezel (setBordered:NO,
+ * bezelStyle=0), clear any opaque backing-layer colour, and — since AppKit does
+ * NOT auto-draw the icon+label layout for a custom-VIEW item — surface the
+ * item's own label AS the button title (icon ABOVE, label BELOW) so the classic
+ * "flat icon with text beneath" reads on the metal toolbar. Only touches a
+ * genuine label the app set; never adds a bezel. */
 static void toolbar_style_item_view(id item) {
    id view = ((id(*)(id, SEL))objc_msgSend)(item, sel_registerName("view"));
    if (!view) { return; }
    Class btn = objc_getClass("NSButton");
-   if (btn && ((signed char(*)(id, SEL, Class))objc_msgSend)(
-                 view, sel_registerName("isKindOfClass:"), btn)) {
-      /* NSTexturedRoundedBezelStyle (11) = classic toolbar-button look;
-       * bordered so it isn't a borderless icon blob. */
+   if (!(btn && ((signed char(*)(id, SEL, Class))objc_msgSend)(
+                   view, sel_registerName("isKindOfClass:"), btn))) {
+      return;
+   }
+   /* BORDERLESS / flat: no bezel, no button background (the icon sits on metal). */
+   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
+          view, sel_registerName("respondsToSelector:"), sel_registerName("setBordered:"))) {
+      ((void(*)(id, SEL, signed char))objc_msgSend)(view, sel_registerName("setBordered:"), 0);
+   }
+   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
+          view, sel_registerName("respondsToSelector:"), sel_registerName("setBezelStyle:"))) {
+      /* 0 == no/none: with setBordered:NO this yields a flat icon button */
+      ((void(*)(id, SEL, long))objc_msgSend)(view, sel_registerName("setBezelStyle:"), 0);
+   }
+   /* NSMomentaryChangeButton == 5: no pressed-state bezel fill either */
+   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
+          view, sel_registerName("respondsToSelector:"), sel_registerName("setButtonType:"))) {
+      ((void(*)(id, SEL, unsigned long))objc_msgSend)(view, sel_registerName("setButtonType:"), 5UL);
+   }
+   /* clear any opaque backing-layer background (the BLACK box behind the icon that
+    * the failed metal-cell draw left): make the button + its layer non-opaque and
+    * clear the layer's backgroundColor if it has one. */
+   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
+          view, sel_registerName("respondsToSelector:"), sel_registerName("setDrawsBackground:"))) {
+      ((void(*)(id, SEL, signed char))objc_msgSend)(view, sel_registerName("setDrawsBackground:"), 0);
+   }
+   id layer = ((id(*)(id, SEL))objc_msgSend)(view, sel_registerName("layer"));
+   if (layer && ((signed char(*)(id, SEL, SEL))objc_msgSend)(
+                   layer, sel_registerName("respondsToSelector:"), sel_registerName("setBackgroundColor:"))) {
+      ((void(*)(id, SEL, void*))objc_msgSend)(layer, sel_registerName("setBackgroundColor:"), NULL);
+   }
+   /* also clear the CELL's bezel/background if it exposes them */
+   id cell = ((id(*)(id, SEL))objc_msgSend)(view, sel_registerName("cell"));
+   if (cell) {
       if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
-             view, sel_registerName("respondsToSelector:"), sel_registerName("setBordered:"))) {
-         ((void(*)(id, SEL, signed char))objc_msgSend)(view, sel_registerName("setBordered:"), 1);
+             cell, sel_registerName("respondsToSelector:"), sel_registerName("setBordered:"))) {
+         ((void(*)(id, SEL, signed char))objc_msgSend)(cell, sel_registerName("setBordered:"), 0);
       }
+   }
+
+   /* surface the item's label beneath the icon (custom-view items lose it). */
+   id lbl = ((id(*)(id, SEL))objc_msgSend)(item, sel_registerName("label"));
+   id cur_title = ((id(*)(id, SEL))objc_msgSend)(view, sel_registerName("title"));
+   if (!nsstring_blank(lbl) && nsstring_blank(cur_title)) {
+      ((void(*)(id, SEL, id))objc_msgSend)(view, sel_registerName("setTitle:"), lbl);
+      /* NSImageAbove == 5: icon on top, title beneath = the classic toolbar look */
       if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
-             view, sel_registerName("respondsToSelector:"), sel_registerName("setBezelStyle:"))) {
-         ((void(*)(id, SEL, long))objc_msgSend)(view, sel_registerName("setBezelStyle:"), 11);
+             view, sel_registerName("respondsToSelector:"), sel_registerName("setImagePosition:"))) {
+         ((void(*)(id, SEL, unsigned long))objc_msgSend)(
+            view, sel_registerName("setImagePosition:"), 5UL);
+      }
+      Class fc = objc_getClass("NSFont");
+      if (fc) {
+         id f = ((id(*)(id, SEL, double))objc_msgSend)(
+            (id)fc, sel_registerName("systemFontOfSize:"), 10.0);
+         if (f && ((signed char(*)(id, SEL, SEL))objc_msgSend)(
+                     view, sel_registerName("respondsToSelector:"), sel_registerName("setFont:"))) {
+            ((void(*)(id, SEL, id))objc_msgSend)(view, sel_registerName("setFont:"), f);
+         }
       }
    }
 }
@@ -4324,6 +4428,76 @@ void _86x64_test_window_title_on_show(id win) { window_title_on_show(win); }
 void _86x64_test_toolbar_style_on_show(id win) { toolbar_style_on_show(win); }
 int  _86x64_test_window_is_legacy(id win)      { return window_is_legacy(win); }
 
+/* ---- ABICONV_WINCHROME_DIAG (env-gated, default OFF) ----------------------
+ * A pixel-oracle diagnostic: when a window is shown, dump to stderr its class
+ * chain, styleMask, title, titleVisibility, isVisible, and — for its toolbar —
+ * displayMode/sizeMode + each item's identifier/label/view-class. Runs AFTER the
+ * title + toolbar fixes so the log shows the POST-fix state (which is what the tester
+ * sees). Called for legacy windows only; inert unless ABICONV_WINCHROME_DIAG. */
+static const char *nsstr_c(id s) {
+   if (!s) { return "(nil)"; }
+   const char *c = ((const char*(*)(id, SEL))objc_msgSend)(s, sel_registerName("UTF8String"));
+   return c ? c : "(nil)";
+}
+static void winchrome_diag(id win) {
+   if (!getenv("ABICONV_WINCHROME_DIAG")) { return; }
+   if (!(window_is_legacy(win) || window_has_legacy_chrome(win))) { return; }
+   /* class chain (real, KVO-stripped) */
+   fprintf(stderr, "[wcdiag] === window %p ===\n", (void*)win);
+   fprintf(stderr, "[wcdiag] class chain:");
+   for (Class c = object_getClass(win); c; c = class_getSuperclass(c)) {
+      fprintf(stderr, " %s", class_getName(c));
+      if (c == objc_getClass("NSWindow")) { break; }
+   }
+   fprintf(stderr, "\n");
+   unsigned long mask = ((unsigned long(*)(id, SEL))objc_msgSend)(win, sel_registerName("styleMask"));
+   long tvis = ((long(*)(id, SEL))objc_msgSend)(win, sel_registerName("titleVisibility"));
+   signed char vis = ((signed char(*)(id, SEL))objc_msgSend)(win, sel_registerName("isVisible"));
+   signed char ttrans = 0;
+   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(win, sel_registerName("respondsToSelector:"),
+          sel_registerName("titlebarAppearsTransparent"))) {
+      ttrans = ((signed char(*)(id, SEL))objc_msgSend)(win, sel_registerName("titlebarAppearsTransparent"));
+   }
+   id title = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("title"));
+   fprintf(stderr, "[wcdiag] styleMask=0x%lx (Titled=%d Textured=%d UnifiedToolbar=%d FullSizeContent=%d) "
+           "title='%s' titleVisibility=%ld titlebarTransparent=%d isVisible=%d\n",
+           mask, (int)(mask & 1), (int)((mask >> 8) & 1), (int)((mask >> 12) & 1),
+           (int)((mask >> 15) & 1), nsstr_c(title), tvis, ttrans, vis);
+   /* toolbar breakdown */
+   id tb = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("toolbar"));
+   if (!tb) { fprintf(stderr, "[wcdiag] toolbar: (none)\n"); fflush(stderr); return; }
+   long dm = ((long(*)(id, SEL))objc_msgSend)(tb, sel_registerName("displayMode"));
+   long sm = ((long(*)(id, SEL))objc_msgSend)(tb, sel_registerName("sizeMode"));
+   signed char tbvis = ((signed char(*)(id, SEL))objc_msgSend)(tb, sel_registerName("isVisible"));
+   id ident = ((id(*)(id, SEL))objc_msgSend)(tb, sel_registerName("identifier"));
+   fprintf(stderr, "[wcdiag] toolbar '%s' displayMode=%ld sizeMode=%ld isVisible=%d\n",
+           nsstr_c(ident), dm, sm, tbvis);
+   id items = ((id(*)(id, SEL))objc_msgSend)(tb, sel_registerName("items"));
+   long n = items ? ((long(*)(id, SEL))objc_msgSend)(items, sel_registerName("count")) : 0;
+   for (long i = 0; i < n; ++i) {
+      id it = ((id(*)(id, SEL, long))objc_msgSend)(items, sel_registerName("objectAtIndex:"), i);
+      id iid = ((id(*)(id, SEL))objc_msgSend)(it, sel_registerName("itemIdentifier"));
+      id lbl = ((id(*)(id, SEL))objc_msgSend)(it, sel_registerName("label"));
+      id img = ((id(*)(id, SEL))objc_msgSend)(it, sel_registerName("image"));
+      id view = ((id(*)(id, SEL))objc_msgSend)(it, sel_registerName("view"));
+      const char *vcls = view ? object_getClassName(view) : "(nil)";
+      const char *btitle = "";
+      int bordered = -1; long bezel = -1, imgpos = -1;
+      if (view && objc_getClass("NSButton") &&
+          ((signed char(*)(id, SEL, Class))objc_msgSend)(view, sel_registerName("isKindOfClass:"),
+             objc_getClass("NSButton"))) {
+         btitle = nsstr_c(((id(*)(id, SEL))objc_msgSend)(view, sel_registerName("title")));
+         bordered = (int)((signed char(*)(id, SEL))objc_msgSend)(view, sel_registerName("isBordered"));
+         bezel = ((long(*)(id, SEL))objc_msgSend)(view, sel_registerName("bezelStyle"));
+         imgpos = ((long(*)(id, SEL))objc_msgSend)(view, sel_registerName("imagePosition"));
+      }
+      fprintf(stderr, "[wcdiag]   item[%ld] id='%s' label='%s' hasImage=%d view=%s "
+              "btnTitle='%s' bordered=%d bezel=%ld imgPos=%ld\n",
+              i, nsstr_c(iid), nsstr_c(lbl), img ? 1 : 0, vcls, btitle, bordered, bezel, imgpos);
+   }
+   fflush(stderr);
+}
+
 static IMP g_window_orig_orderWindow;
 static void window_orderWindow(id self, SEL _cmd, long place, long relativeTo) {
    if (g_window_orig_orderWindow) {
@@ -4334,6 +4508,7 @@ static void window_orderWindow(id self, SEL _cmd, long place, long relativeTo) {
       /* generic (every legacy Cocoa window): title-on-show + toolbar styling */
       window_title_on_show(self);
       toolbar_style_on_show(self);
+      winchrome_diag(self);   /* env-gated pixel-oracle dump (post-fix state) */
       /* archetype-only (frame-view chrome swap): the brushed-metal overlay */
       if (window_has_legacy_chrome(self)) {
          chrome_install_overlay(self);
