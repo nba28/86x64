@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward cfprefs-global-locale-forward qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -228,6 +228,21 @@ cfprefs-scalar-forward:
 # old blanket-NULL (negative control) starved it.
 cfprefs-global-locale-forward:
 	@bash cfprefs_global_locale_forward_test.sh
+
+# cfxml-infoptr-layout: regression guard for the CFXMLNodeCreate additionalInfoPtr
+# struct-relayout shim (cfxml_shim.c). CFXMLNodeCreate's `const void*
+# additionalInfoPtr` is a DISCRIMINATED UNION selected by xmlType (CFXMLElementInfo*
+# etc.) whose pointer/CFIndex-bearing layout differs i386(12B, 4-byte fields) vs
+# x86_64(24B, 8-byte fields); abigen forwards the i386 record verbatim (opaque void*
+# pointee) so native CF reads fused-handle garbage 0x08000100_00000008 ->
+# EXC_BAD_ACCESS (Civ IV Steam "Launch in Window" startup XML parse). Self-contained
+# (native x86_64 cc + CoreFoundation): the relayout body (copied from cfxml_shim.c)
+# rebuilds the native record and real CFXMLNodeCreate round-trips the attributes
+# dict/order array/isEmpty/tag out via CFXMLNodeGetInfoPtr; the negative control
+# asserts the i386/x86_64 layout divergence (12!=24, off 4!=8, the fused garbage
+# pointer) the fix repairs.
+cfxml-infoptr-layout:
+	@bash cfxml_infoptr_layout_test.sh
 
 # draw-clip: regression guard for the LEGACY DRAW-CLIP CONTRACT restoration in
 # objc_shim.c (_86x64_reverse_prep/_ret). Self-contained (native x86_64 cc +

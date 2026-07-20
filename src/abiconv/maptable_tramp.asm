@@ -109,6 +109,20 @@
 	;; current focus context; a real gState falls through to native NSCopyBits.
 	MTSHIM	___NSCopyBits,                   _shim_NSCopyBits
 
+	;; CFXMLNodeCreate(alloc, xmlType, dataString, const void *additionalInfoPtr,
+	;; version): additionalInfoPtr is a DISCRIMINATED UNION selected by xmlType
+	;; (CFXMLElementInfo*/CFXMLDocumentInfo*/... — CFXMLNode.h). Those info structs
+	;; carry pointer + CFIndex fields, so their LAYOUT DIFFERS i386(4B) vs x86_64
+	;; (8B): abigen forwards the i386 record VERBATIM (opaque void* pointee), so
+	;; native CF reads a 12-byte i386 CFXMLElementInfo as a 24-byte x86_64 one ->
+	;; fused handle 0x08000100_00000008 -> EXC_BAD_ACCESS in CFXMLNodeCreate (Civ
+	;; IV Steam startup XML/mod-config parse). cfxml_shim.c relayouts the info per
+	;; xmlType (and resolves each pointer field handle->real). GetInfoPtr does the
+	;; mirror (native record -> i386 record in a low-4GB buffer).
+	;; Guard: tests-i386 cfxml_infoptr_layout.
+	MTSHIM	___CFXMLNodeCreate,              _shim_CFXMLNodeCreate
+	MTSHIM	___CFXMLNodeGetInfoPtr,          _shim_CFXMLNodeGetInfoPtr
+
 	;; Carbon GetKeys override (keystate_shim.c): emulate a held key at launch
 	;; so a vendor "hold KEY to bypass" self-check (Halo's 'p') can be triggered
 	;; without a physical keypress (Finder consumes it). Default-off (env-gated);
