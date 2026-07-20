@@ -68,6 +68,32 @@ static NSView* findv(NSView *v, const char *sub) {
     return nil;
 }
 
+/* A plain legacy-standing-in window subclass (no chrome override) — a stand-in
+ * for a generic legacy Cocoa window like Quinn's toolbar window. The native
+ * guard flips accept_subclass(1) so window_is_legacy() treats any non-NS*
+ * subclass as legacy (it can't forge a reverse-bridge IMP). */
+@interface LegacyWin : NSWindow @end
+@implementation LegacyWin @end
+
+/* An NSToolbar delegate that vends ONE custom-view item (borderless icon button)
+ * — mimics a legacy app whose toolbar items come up as bare icon blobs. */
+@interface TbDelegate : NSObject <NSToolbarDelegate> @end
+@implementation TbDelegate
+- (NSToolbarItem *)toolbar:(NSToolbar *)tb itemForItemIdentifier:(NSToolbarItemIdentifier)ident
+    willBeInsertedIntoToolbar:(BOOL)flag {
+    NSToolbarItem *it = [[NSToolbarItem alloc] initWithItemIdentifier:ident];
+    [it setLabel:@"Abort"];
+    NSButton *b = [[NSButton alloc] initWithFrame:NSMakeRect(0,0,32,32)];
+    [b setBordered:NO];                 /* borderless icon blob (the WRONG look) */
+    [b setImage:[NSImage imageWithSize:NSMakeSize(32,32) flipped:NO
+                 drawingHandler:^BOOL(NSRect r){ return YES; }]];
+    [it setView:b];
+    return it;
+}
+- (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)tb { return @[@"abort"]; }
+- (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)tb { return @[@"abort"]; }
+@end
+
 int main(int argc, char **argv) {
     @autoreleasepool {
         void *h = dlopen(argv[1], RTLD_LAZY);
@@ -77,7 +103,12 @@ int main(int argc, char **argv) {
         void (*inst_ov)(id)         = dlsym(h, "_86x64_test_window_chrome_install_overlay");
         int  (*has_chrome)(id)      = dlsym(h, "_86x64_test_window_has_legacy_chrome");
         void (*accept_responds)(int)= dlsym(h, "_86x64_test_window_chrome_accept_responds");
-        if (!install || !ovcls || !inst_ov || !has_chrome || !accept_responds) {
+        void (*title_on_show)(id)   = dlsym(h, "_86x64_test_window_title_on_show");
+        void (*toolbar_style)(id)   = dlsym(h, "_86x64_test_toolbar_style_on_show");
+        int  (*win_is_legacy)(id)   = dlsym(h, "_86x64_test_window_is_legacy");
+        void (*accept_subclass)(int)= dlsym(h, "_86x64_test_window_accept_subclass");
+        if (!install || !ovcls || !inst_ov || !has_chrome || !accept_responds ||
+            !title_on_show || !toolbar_style || !win_is_legacy || !accept_subclass) {
             fprintf(stderr, "missing test hooks\n"); return 2;
         }
 
@@ -150,6 +181,83 @@ int main(int argc, char **argv) {
         fprintf(stderr, "window-chrome OK: orphaned-chrome window's own "
                 "drawWindowBorderInRect: re-materialized the titlebar band "
                 "(%d/%d samples metal), native window untouched\n", metal, total);
+
+        /* ===== generic TITLE-on-show ==================================== */
+        accept_subclass(1); /* native guard can't forge a reverse-bridge IMP */
+
+        /* native window with blank title must NOT get one (gate must be 0) */
+        NSWindow *nt = [[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,300,100)
+            styleMask:mask backing:NSBackingStoreBuffered defer:NO];
+        [nt setTitle:@""];
+        if (win_is_legacy(nt)) { fprintf(stderr, "native win falsely legacy\n"); return 1; }
+        title_on_show(nt);
+        if ([[nt title] length] != 0) {
+            fprintf(stderr, "native blank-title window wrongly retitled to '%s'\n",
+                    [[nt title] UTF8String]); return 1; }
+        fprintf(stderr, "native blank-title window: gate=0, title left empty OK\n");
+
+        /* legacy window with blank title -> gets the app/process name */
+        LegacyWin *lw = [[LegacyWin alloc] initWithContentRect:NSMakeRect(0,0,300,100)
+            styleMask:mask backing:NSBackingStoreBuffered defer:NO];
+        [lw setTitle:@""];
+        if (!win_is_legacy(lw)) { fprintf(stderr, "legacy win NOT flagged\n"); return 1; }
+        title_on_show(lw);
+        if ([[lw title] length] == 0) {
+            fprintf(stderr, "legacy blank-title window NOT retitled\n"); return 1; }
+        fprintf(stderr, "legacy blank-title window: title set to '%s' (visibility=%ld) OK\n",
+                [[lw title] UTF8String], (long)[lw titleVisibility]);
+
+        /* legacy window that ALREADY has a title -> must be left untouched */
+        LegacyWin *lw2 = [[LegacyWin alloc] initWithContentRect:NSMakeRect(0,0,300,100)
+            styleMask:mask backing:NSBackingStoreBuffered defer:NO];
+        [lw2 setTitle:@"AppChosen"];
+        title_on_show(lw2);
+        if (![[lw2 title] isEqualToString:@"AppChosen"]) {
+            fprintf(stderr, "legacy pre-titled window clobbered to '%s'\n",
+                    [[lw2 title] UTF8String]); return 1; }
+        fprintf(stderr, "legacy pre-titled window: title preserved OK\n");
+
+        /* ===== generic TOOLBAR styling ================================== */
+        TbDelegate *dlg = [TbDelegate new];
+        NSToolbar *tbar = [[NSToolbar alloc] initWithIdentifier:@"QuinnMainToolbar"];
+        [tbar setDelegate:dlg];
+        [tbar setDisplayMode:NSToolbarDisplayModeIconOnly]; /* the WRONG modern default */
+        [lw setToolbar:tbar];
+        /* force items to materialize */
+        (void)[tbar items];
+        toolbar_style(lw);
+        if ([lw.toolbar displayMode] != NSToolbarDisplayModeIconAndLabel) {
+            fprintf(stderr, "toolbar displayMode not IconAndLabel (=%ld)\n",
+                    (long)[lw.toolbar displayMode]); return 1; }
+        if ([lw.toolbar sizeMode] != NSToolbarSizeModeRegular) {
+            fprintf(stderr, "toolbar sizeMode not Regular (=%ld)\n",
+                    (long)[lw.toolbar sizeMode]); return 1; }
+        /* the custom item's button must now be bezeled (bordered) */
+        int styled = 0, items_n = 0;
+        for (NSToolbarItem *it in [lw.toolbar items]) {
+            items_n++;
+            NSView *v = [it view];
+            if ([v isKindOfClass:[NSButton class]]) {
+                NSButton *b = (NSButton *)v;
+                if ([b isBordered] && [b bezelStyle] == NSBezelStyleTexturedRounded) styled++;
+            }
+        }
+        if (items_n == 0 || styled != items_n) {
+            fprintf(stderr, "toolbar item buttons not bezeled (%d/%d)\n", styled, items_n); return 1; }
+        fprintf(stderr, "toolbar: legacy window toolbar -> IconAndLabel/Regular, "
+                "%d/%d item buttons bezeled OK\n", styled, items_n);
+
+        /* native window's toolbar must be left ALONE */
+        NSToolbar *ntb = [[NSToolbar alloc] initWithIdentifier:@"native"];
+        [ntb setDisplayMode:NSToolbarDisplayModeIconOnly];
+        [nt setToolbar:ntb];
+        toolbar_style(nt);
+        if ([nt.toolbar displayMode] != NSToolbarDisplayModeIconOnly) {
+            fprintf(stderr, "native toolbar wrongly restyled\n"); return 1; }
+        fprintf(stderr, "native window toolbar: left untouched (IconOnly) OK\n");
+
+        fprintf(stderr, "window-chrome+title+toolbar OK: legacy window got title + "
+                "IconAndLabel/Regular bezeled toolbar; native windows untouched\n");
         return 0;
     }
 }

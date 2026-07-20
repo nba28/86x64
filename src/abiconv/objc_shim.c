@@ -3778,6 +3778,63 @@ static int window_has_legacy_chrome(id win) {
    return g_chrome_test_accept_responds ? 1 : 0;
 }
 
+/* Does CLASS `c` (own method list only, not inherited) define ANY instance
+ * method whose IMP is a LEGACY reverse-bridge trampoline? True exactly for a
+ * class that was reverse-registered from a translated i386 image. */
+static int class_has_own_legacy_imp(Class c) {
+   if (!c) { return 0; }
+   unsigned n = 0;
+   Method *ml = class_copyMethodList(c, &n);
+   int legacy = 0;
+   for (unsigned i = 0; i < n && !legacy; ++i) {
+      if (method_is_legacy(ml[i])) { legacy = 1; }
+   }
+   if (ml) { free(ml); }
+   return legacy;
+}
+
+/* When set (native test guard only), the legacy-window gate accepts any window
+ * whose class name is NOT a stock AppKit class (a native guard can't forge a
+ * reverse-bridge IMP but subclasses NSWindow to stand in for a legacy one). */
+static int g_win_test_accept_subclass;
+void _86x64_test_window_accept_subclass(int v) { g_win_test_accept_subclass = v; }
+
+/* Is `win` a LEGACY-ORIGIN window (translated i386 app)? Structural, keyed on NO
+ * class name: TRUE if the window's class — or any class up to (not including)
+ * NSWindow — carries a reverse-bridge (translated-i386) IMP, i.e. it is a
+ * subclass materialized from the app's own translated code. A stock native
+ * NSWindow / NSPanel has no such IMP anywhere in its chain and is never touched.
+ * This is a SUPERSET of window_has_legacy_chrome (which only catches windows
+ * that also override the private -drawWindowBorderInRect:). Used to gate the
+ * generic title-on-show + toolbar-styling fixes, which apply to EVERY legacy
+ * Cocoa window, not just the brushed-metal frame-swap archetype. */
+/* strip the dynamic KVO subclass (isa-swizzled when the object is observed / has
+ * a bound toolbar/delegate): NSKVONotifying_<Real> -> <Real>. Generic, no app
+ * name. Returns the real class the app actually authored. */
+static Class class_strip_kvo(Class c) {
+   if (!c) { return c; }
+   const char *cn = class_getName(c);
+   if (cn && strncmp(cn, "NSKVONotifying_", 15) == 0) {
+      Class sup = class_getSuperclass(c);
+      if (sup) { return sup; }
+   }
+   return c;
+}
+static int window_is_legacy(id win) {
+   if (!win) { return 0; }
+   Class stop = objc_getClass("NSWindow");
+   Class start = class_strip_kvo(object_getClass(win));
+   for (Class c = start; c && c != stop; c = class_getSuperclass(c)) {
+      if (class_has_own_legacy_imp(c)) { return 1; }
+   }
+   if (g_win_test_accept_subclass) {
+      /* the class is a non-stock subclass of NSWindow/NSPanel */
+      const char *cn = start ? class_getName(start) : "";
+      if (cn && strncmp(cn, "NS", 2) != 0) { return 1; }
+   }
+   return 0;
+}
+
 /* find the first descendant view whose class-name contains `needle` */
 static id chrome_find_subview(id root, const char *needle) {
    if (!root) { return nil; }
@@ -4085,22 +4142,215 @@ static void titlebar_probe(id win) {
    fflush(stderr);
 }
 
+/* ---- generic window-TITLE-on-show (Cocoa) --------------------------------
+ * A pre-10.x Cocoa app that relied on the private-frame-view swap to draw its
+ * OWN title (via -drawWindowTitle, orphaned on modern macOS — see the chrome
+ * compat above) can come up with an EMPTY NSWindow.title: the app never called
+ * -setTitle: because it painted the title itself. On modern macOS that path is
+ * dead, so the stock NSThemeFrame titlebar has nothing to show and renders
+ * blank (Quinn's window has no title text at all).
+ *
+ * Restore the contract UNIVERSALLY: when a LEGACY-origin window is shown with an
+ * empty/whitespace title, fill NSWindow.title with the best available name —
+ * the window's represented-URL/filename last path component if set, else the
+ * running app's localized name (NSRunningApplication) / NSBundle display name /
+ * process name — and force titleVisibility=visible so the modern titlebar shows
+ * (and auto-centers) it. Never overwrites a title the app DID set; never touches
+ * a native window. Env kill-switch ABICONV_WINTITLE_COMPAT (set => skip). */
+static int wintitle_compat_off(void) {
+   static int v = -1;
+   if (v < 0) { v = getenv("ABICONV_WINTITLE_COMPAT") ? 1 : 0; }
+   return v;
+}
+/* returns 1 if `s` is nil or all-whitespace */
+static int nsstring_blank(id s) {
+   if (!s) { return 1; }
+   const char *c = ((const char*(*)(id, SEL))objc_msgSend)(s, sel_registerName("UTF8String"));
+   if (!c) { return 1; }
+   for (; *c; ++c) { if (*c != ' ' && *c != '\t' && *c != '\n' && *c != '\r') { return 0; } }
+   return 1;
+}
+/* best-effort app display name -> autoreleased NSString (or nil) */
+static id app_display_name(void) {
+   /* NSRunningApplication.currentApplication.localizedName */
+   Class rac = objc_getClass("NSRunningApplication");
+   if (rac) {
+      id ra = ((id(*)(id, SEL))objc_msgSend)((id)rac, sel_registerName("currentApplication"));
+      if (ra) {
+         id nm = ((id(*)(id, SEL))objc_msgSend)(ra, sel_registerName("localizedName"));
+         if (!nsstring_blank(nm)) { return nm; }
+      }
+   }
+   /* NSBundle.mainBundle CFBundleName / CFBundleDisplayName */
+   Class bc = objc_getClass("NSBundle");
+   if (bc) {
+      id mb = ((id(*)(id, SEL))objc_msgSend)((id)bc, sel_registerName("mainBundle"));
+      if (mb) {
+         const char *keys[2] = { "CFBundleDisplayName", "CFBundleName" };
+         for (int k = 0; k < 2; ++k) {
+            id key = ((id(*)(id, SEL, const char*))objc_msgSend)(
+               (id)objc_getClass("NSString"),
+               sel_registerName("stringWithUTF8String:"), keys[k]);
+            id v = ((id(*)(id, SEL, id))objc_msgSend)(
+               mb, sel_registerName("objectForInfoDictionaryKey:"), key);
+            if (!nsstring_blank(v)) { return v; }
+         }
+      }
+   }
+   /* NSProcessInfo.processName */
+   Class pic = objc_getClass("NSProcessInfo");
+   if (pic) {
+      id pi = ((id(*)(id, SEL))objc_msgSend)((id)pic, sel_registerName("processInfo"));
+      if (pi) {
+         id nm = ((id(*)(id, SEL))objc_msgSend)(pi, sel_registerName("processName"));
+         if (!nsstring_blank(nm)) { return nm; }
+      }
+   }
+   return nil;
+}
+/* Apply the generic title fix to a legacy window whose title is blank. */
+static void window_title_on_show(id win) {
+   if (wintitle_compat_off()) { return; }
+   if (!(window_is_legacy(win) || window_has_legacy_chrome(win))) { return; }
+   /* ensure the modern titlebar shows the title (0 == NSWindowTitleVisible) */
+   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
+          win, sel_registerName("respondsToSelector:"),
+          sel_registerName("setTitleVisibility:"))) {
+      ((void(*)(id, SEL, long))objc_msgSend)(
+         win, sel_registerName("setTitleVisibility:"), 0);
+   }
+   id cur = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("title"));
+   if (!nsstring_blank(cur)) { return; }           /* app already set a title */
+   /* prefer the window's represented filename's last component if present */
+   id name = nil;
+   id repf = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("representedFilename"));
+   if (!nsstring_blank(repf)) {
+      name = ((id(*)(id, SEL))objc_msgSend)(repf, sel_registerName("lastPathComponent"));
+      if (nsstring_blank(name)) { name = nil; }
+   }
+   if (!name) { name = app_display_name(); }
+   if (nsstring_blank(name)) { return; }
+   ((void(*)(id, SEL, id))objc_msgSend)(win, sel_registerName("setTitle:"), name);
+   if (wchrome_trace()) {
+      const char *nc = ((const char*(*)(id, SEL))objc_msgSend)(name, sel_registerName("UTF8String"));
+      fprintf(stderr, "[compat] wintitle: legacy window (%s) had blank title -> set '%s'\n",
+              object_getClassName(win), nc ? nc : "?");
+      fflush(stderr);
+   }
+}
+
+/* ---- generic TOOLBAR-BUTTON styling --------------------------------------
+ * A legacy Cocoa app's NSToolbar, built by translated code with an NSToolbar
+ * delegate handing back NSToolbarItems (each -setImage: + -setLabel:), rendered
+ * on 10.5/10.6 as bezeled icon-AND-label buttons spread across a unified metal
+ * toolbar. On modern macOS the translated toolbar comes up in a DEGRADED state:
+ * the items show as borderless icon-only blobs clustered to one side (no bezel,
+ * no text label), because the toolbar's displayMode/sizeMode land at the modern
+ * icon-only defaults and the item content-views (if any) aren't styled.
+ *
+ * Restore the classic look UNIVERSALLY, keyed on the toolbar being attached to a
+ * LEGACY-origin window (structural, NO class name): force the toolbar's
+ * displayMode = IconAndLabel (1) and sizeMode = Regular (1), and for any custom
+ * item whose view is an NSButton, give it a bezel (regular/round-rect) so it
+ * reads as a genuine toolbar button. Native toolbars on native windows are never
+ * touched. Env kill-switch ABICONV_TOOLBAR_COMPAT (set => skip). */
+static int toolbar_compat_off(void) {
+   static int v = -1;
+   if (v < 0) { v = getenv("ABICONV_TOOLBAR_COMPAT") ? 1 : 0; }
+   return v;
+}
+/* Style one toolbar item's custom view (if it is a button) as a bezeled button. */
+static void toolbar_style_item_view(id item) {
+   id view = ((id(*)(id, SEL))objc_msgSend)(item, sel_registerName("view"));
+   if (!view) { return; }
+   Class btn = objc_getClass("NSButton");
+   if (btn && ((signed char(*)(id, SEL, Class))objc_msgSend)(
+                 view, sel_registerName("isKindOfClass:"), btn)) {
+      /* NSTexturedRoundedBezelStyle (11) = classic toolbar-button look;
+       * bordered so it isn't a borderless icon blob. */
+      if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
+             view, sel_registerName("respondsToSelector:"), sel_registerName("setBordered:"))) {
+         ((void(*)(id, SEL, signed char))objc_msgSend)(view, sel_registerName("setBordered:"), 1);
+      }
+      if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
+             view, sel_registerName("respondsToSelector:"), sel_registerName("setBezelStyle:"))) {
+         ((void(*)(id, SEL, long))objc_msgSend)(view, sel_registerName("setBezelStyle:"), 11);
+      }
+   }
+}
+/* Apply classic display/size mode + item styling to a legacy window's toolbar. */
+static void toolbar_style_on_show(id win) {
+   if (toolbar_compat_off()) { return; }
+   if (!(window_is_legacy(win) || window_has_legacy_chrome(win))) { return; }
+   id tb = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("toolbar"));
+   if (!tb) {
+      if (wchrome_trace()) {
+         fprintf(stderr, "[compat] toolbar: legacy window (%s) has NO toolbar\n",
+                 object_getClassName(win)); fflush(stderr);
+      }
+      return;
+   }
+   /* NSToolbarDisplayModeIconAndLabel == 1 ; NSToolbarSizeModeRegular == 1 */
+   long dm = ((long(*)(id, SEL))objc_msgSend)(tb, sel_registerName("displayMode"));
+   long sm = ((long(*)(id, SEL))objc_msgSend)(tb, sel_registerName("sizeMode"));
+   /* only force IconAndLabel if the app left it at Default(0)/IconOnly(2) — do
+    * not override an app that explicitly chose LabelOnly(3). */
+   if (dm == 0 /*Default*/ || dm == 2 /*IconOnly*/) {
+      ((void(*)(id, SEL, long))objc_msgSend)(tb, sel_registerName("setDisplayMode:"), 1);
+   }
+   if (sm == 0 /*Default*/) {
+      ((void(*)(id, SEL, long))objc_msgSend)(tb, sel_registerName("setSizeMode:"), 1 /*Regular*/);
+   }
+   /* style each item's custom view (borderless icon blob -> bezeled button) */
+   id items = ((id(*)(id, SEL))objc_msgSend)(tb, sel_registerName("items"));
+   long n = items ? ((long(*)(id, SEL))objc_msgSend)(items, sel_registerName("count")) : 0;
+   for (long i = 0; i < n; ++i) {
+      id it = ((id(*)(id, SEL, long))objc_msgSend)(items, sel_registerName("objectAtIndex:"), i);
+      toolbar_style_item_view(it);
+   }
+   if (wchrome_trace()) {
+      fprintf(stderr, "[compat] toolbar: legacy window (%s) toolbar styled "
+              "(displayMode %ld->%ld sizeMode %ld->%ld, %ld items)\n",
+              object_getClassName(win), dm,
+              ((long(*)(id, SEL))objc_msgSend)(tb, sel_registerName("displayMode")),
+              sm,
+              ((long(*)(id, SEL))objc_msgSend)(tb, sel_registerName("sizeMode")), n);
+      fflush(stderr);
+   }
+}
+
+/* test hooks for window_chrome_test.sh (title + toolbar styling) */
+void _86x64_test_window_title_on_show(id win) { window_title_on_show(win); }
+void _86x64_test_toolbar_style_on_show(id win) { toolbar_style_on_show(win); }
+int  _86x64_test_window_is_legacy(id win)      { return window_is_legacy(win); }
+
 static IMP g_window_orig_orderWindow;
 static void window_orderWindow(id self, SEL _cmd, long place, long relativeTo) {
    if (g_window_orig_orderWindow) {
       ((void(*)(id, SEL, long, long))g_window_orig_orderWindow)(self, _cmd, place, relativeTo);
    }
    /* place==0 (NSWindowOut) is an ORDER-OUT (hide): nothing to install. */
-   if (place != 0 && window_has_legacy_chrome(self)) {
-      chrome_install_overlay(self);
-      titlebar_probe(self);
+   if (place != 0) {
+      /* generic (every legacy Cocoa window): title-on-show + toolbar styling */
+      window_title_on_show(self);
+      toolbar_style_on_show(self);
+      /* archetype-only (frame-view chrome swap): the brushed-metal overlay */
+      if (window_has_legacy_chrome(self)) {
+         chrome_install_overlay(self);
+         titlebar_probe(self);
+      }
    }
 }
 
 static void legacy_window_chrome_install(void) {
    static int done = 0;
    if (done) { return; }
-   if (getenv("ABICONV_WINCHROME_COMPAT")) { done = 1; return; }
+   /* This swizzle drives THREE generic on-show fixes (title, toolbar styling,
+    * chrome overlay), each with its OWN kill-switch. Only skip installing the
+    * swizzle entirely if ALL THREE are disabled. (ABICONV_WINCHROME_COMPAT kills
+    * just the chrome overlay; it must NOT also disable title/toolbar.) */
+   if (getenv("ABICONV_WINCHROME_COMPAT") &&
+       wintitle_compat_off() && toolbar_compat_off()) { done = 1; return; }
    Class winc = objc_getClass("NSWindow");
    if (!winc) { return; }                       /* AppKit not loaded yet: retry */
    Method m = class_getInstanceMethod(winc, sel_registerName("orderWindow:relativeTo:"));
