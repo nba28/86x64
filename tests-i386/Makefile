@@ -809,6 +809,34 @@ $(BUILD_DIR)/99_init_priority_code_alias.i386: $(BUILD_DIR)/99_init_priority_cod
 	   rm -f $@; exit 1; \
 	 fi
 
+# 99_code_alias_imm_falsereloc: STRIP local symbols (Civ IV Steam shape — locals-
+# stripped => imm32_code_alias_is_constant's symboled discriminator disarmed, only
+# the 55-89-e5 prologue-byte evidence remains). ASSERT the integer 0x1f90 falls
+# inside __text AND that the prologue bytes 55 89 e5 sit exactly at it (the alias
+# trap the test springs). Guards against 31de727's over-relocation: an integer
+# CONSTANT aliasing a prologue-byte __text address must NOT be relocated when
+# stored into a field (the Civ boost-registry rc=139 deterministic-crash root).
+# Overrides %.i386.
+$(BUILD_DIR)/99_code_alias_imm_falsereloc.i386: $(BUILD_DIR)/99_code_alias_imm_falsereloc.o
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
+	strip -x $@
+	@a=$$(otool -l $@ | awk '/sectname __text$$/{s=1;next} s&&$$1=="addr"{print $$2;exit}'); \
+	 z=$$(otool -l $@ | awk '/sectname __text$$/{s=1;next} s&&$$1=="size"{print $$2;exit}'); \
+	 o=$$(otool -l $@ | awk '/sectname __text$$/{s=1;next} s&&$$1=="offset"{print $$2;exit}'); \
+	 if [ $$((a)) -le $$((0x1f90)) ] && [ $$((0x1f90)) -lt $$((a + z)) ]; then \
+	   fo=$$((o + 0x1f90 - a)); \
+	   b=$$(xxd -s $$fo -l 3 -p $@); \
+	   if [ "$$b" = "5589e5" ]; then \
+	     echo "  99_code_alias_imm_falsereloc: 0x1f90 aliases __text w/ 55 89 e5 -- trap armed"; \
+	   else \
+	     echo "99_code_alias_imm_falsereloc: ERROR: bytes at 0x1f90 = $$b, not 55 89 e5 -- adjust pad"; \
+	     rm -f $@; exit 1; \
+	   fi; \
+	 else \
+	   echo "99_code_alias_imm_falsereloc: ERROR: 0x1f90 outside __text [$$a, $$a+$$z) -- adjust pad"; \
+	   rm -f $@; exit 1; \
+	 fi
+
 $(BUILD_DIR)/99_cmp_abs32_imm_notptr.i386: $(BUILD_DIR)/99_cmp_abs32_imm_notptr.o
 	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
 	strip -x $@
