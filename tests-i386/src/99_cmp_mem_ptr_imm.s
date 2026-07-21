@@ -65,6 +65,16 @@ _main:
 	cmpl	$_bss_blk, 0x10(%ebx)       ## 81 7b 10 imm32 — must MATCH
 	jne	Lbad_d
 
+	## ---- case (g): CODE-pointer identity compare (func_syms evidence) ----
+	## `movl $_handler_fn, field` relocates via the const-section genbase
+	## arm (+ code-alias positive evidence); the compare sibling must admit
+	## the same func_syms-symboled code target (mirrors the abs32-dest CMP
+	## arm's func_syms admit, test 87) or the handler-identity test
+	## (`field == &default_handler`) is always-false.
+	movl	$_handler_fn, 0x14(%ebx)
+	cmpl	$_handler_fn, 0x14(%ebx)    ## 81 7b 14 imm32, code target
+	jne	Lbad_g
+
 	## ---- mismatch control: a DIFFERENT pointer must still differ ----
 	cmpl	$_blk, 0x8(%ebx)            ## field holds _blk+8, imm is _blk
 	je	Lbad_e
@@ -102,6 +112,19 @@ Lbad_f:
 	pushl	$7
 	calll	_exit
 	ud2
+Lbad_g:
+	pushl	$8
+	calll	_exit
+	ud2
+
+	## symboled function target for case (g) — never called, just compared
+	.globl _handler_fn
+	.p2align 4, 0x90
+_handler_fn:
+	pushl	%ebp
+	movl	%esp, %ebp
+	popl	%ebp
+	ret
 
 	.section __DATA,__data
 	.globl _obj

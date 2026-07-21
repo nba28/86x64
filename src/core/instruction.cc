@@ -1278,6 +1278,39 @@ namespace MachO {
                    env.vmaddr_in_writable_data(value)) {
                   ptr_target = true;
                }
+               /* CODE-target FUNCTION-ENTRY admit — the stack-arg arm's
+                * ProcPtr policy extended to FIELD stores: `movl $_handler,
+                * disp(%reg)` installing a callback into a struct field
+                * (obj->cb = &handler, the C manual-dispatch idiom) shipped
+                * its raw i386 code address verbatim — none of the probes
+                * above admit an instructions-section target — so the first
+                * indirect call through the field jumped to the stale i386
+                * vmaddr (SIGSEGV; guard 99_cmp_mem_ptr_imm case g + the
+                * fnptr-call round trip in 99_fnptr_field_call). Admit iff
+                * the value lands in an instructions section AND carries
+                * positive function-entry evidence via the shared classifier
+                * (func_syms nlist OR `55 89 e5` prologue — the
+                * stripped-binary Halo ProcPtr recovery); an integer merely
+                * aliasing __text stays literal, identically to the
+                * stack-arg arm. */
+               if (!ptr_target && bits == Bits::M32) {
+                  bool in_code = false;
+                  for (auto *seg : env.archive.segments()) {
+                     if (!seg->contains_vmaddr(value)) continue;
+                     for (auto *sect : seg->sections) {
+                        if (!sect->contains_vmaddr(value)) continue;
+                        in_code = (sect->sect.flags &
+                                   (S_ATTR_PURE_INSTRUCTIONS |
+                                    S_ATTR_SOME_INSTRUCTIONS)) != 0;
+                        break;
+                     }
+                     break;
+                  }
+                  if (in_code &&
+                      !imm32_code_alias_is_constant(img, env, value)) {
+                     ptr_target = true;
+                  }
+               }
             }
             if (ptr_target) {
                imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);
@@ -1344,10 +1377,38 @@ namespace MachO {
             const std::size_t imm_off = instbuf.size() - sizeof(uint32_t);
             const uint32_t value =
                img.template at<uint32_t>(loc.offset + imm_off);
-            if (value >= 0x1000 && value < 0x80000000U && (value & 3) == 0
-                && env.archive.header.filetype == MH_EXECUTE
-                && (env.archive.header.flags & MH_PIE) == 0
-                && env.vmaddr_in_writable_data(value)) {
+            bool cap = false;
+            if (value >= 0x1000 && value < 0x80000000U) {
+               /* data-target: the strict 9510f29 store discriminator */
+               cap = (value & 3) == 0
+                  && env.archive.header.filetype == MH_EXECUTE
+                  && (env.archive.header.flags & MH_PIE) == 0
+                  && env.vmaddr_in_writable_data(value);
+               /* CODE-target identity compare, CMP only: `cmpl $_handler,
+                * field(%reg)` must classify like the genbase MOV arm's
+                * function-entry admit (obj->cb == &handler idiom) — same
+                * instructions-section + positive-evidence classifier
+                * (func_syms / prologue). ADD/SUB on code addresses stay
+                * literal (function-pointer arithmetic through fields is
+                * not a real idiom; a code-aliasing int summand is). */
+               if (!cap && (instbuf.at(1) & 0x38) == 0x38) {
+                  bool in_code = false;
+                  for (auto *seg : env.archive.segments()) {
+                     if (!seg->contains_vmaddr(value)) continue;
+                     for (auto *sect : seg->sections) {
+                        if (!sect->contains_vmaddr(value)) continue;
+                        in_code = (sect->sect.flags &
+                                   (S_ATTR_PURE_INSTRUCTIONS |
+                                    S_ATTR_SOME_INSTRUCTIONS)) != 0;
+                        break;
+                     }
+                     break;
+                  }
+                  cap = in_code &&
+                     !imm32_code_alias_is_constant(img, env, value);
+               }
+            }
+            if (cap) {
                imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);
                imm->heuristic = true; /* value-alias probe (see Immediate) */
             }
