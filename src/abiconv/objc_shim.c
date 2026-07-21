@@ -4213,25 +4213,39 @@ static void window_title_on_show(id win) {
    if (wintitle_compat_off()) { return; }
    if (!(window_is_legacy(win) || window_has_legacy_chrome(win))) { return; }
 
-   /* A legacy metal/textured window (old NSTexturedBackgroundWindowMask, bit 8)
-    * that painted its OWN title via the now-orphaned -drawWindowTitle can come up
-    * with the stock NSThemeFrame NOT laying out a title field: the title string is
-    * set (from the nib) but no title text renders. Force the modern preconditions
-    * for the stock title to draw + auto-center:
-    *   (1) styleMask must include NSWindowStyleMaskTitled (bit 0);
-    *   (2) titlebar must NOT be transparent (else the title field is hidden);
-    *   (3) titleVisibility = Visible (0).
-    * All are idempotent no-ops on a window that already satisfies them, and we
-    * never clear a bit the app set — we only ADD Titled + turn transparency OFF +
-    * make the title visible. */
+   /* Ground truth (live Quinn diag): the title 'Quinn' is already SET and
+    * titleVisibility is already Visible — but it does NOT render because the
+    * window's styleMask has NSWindowStyleMaskUnifiedTitleAndToolbar (0x1000): the
+    * title and the toolbar SHARE ONE row, and with a toolbar present the toolbar
+    * fills that row so the title has nowhere to draw. The genuine 10.5/10.6 look
+    * is TWO rows: the title centered ABOVE the toolbar.
+    *
+    * FIX: give the window the classic two-row (expanded) layout:
+    *   (1) styleMask += Titled (bit 0), and CLEAR the unified bit (0x1000) so the
+    *       title gets its own row above the toolbar;
+    *   (2) toolbarStyle = NSWindowToolbarStyleExpanded (2) on macOS 11+ — the
+    *       modern API for "title row above a separate toolbar row" (the reliable
+    *       lever; clearing the unified bit alone can be ignored once a toolbar is
+    *       attached, so we set both);
+    *   (3) titlebar NOT transparent; titleVisibility = Visible (0).
+    * We only ADD Titled + CLEAR the unified bit + set an expanded style; we never
+    * clear an unrelated app bit. Idempotent on a window already in this state. */
    SEL sm_get = sel_registerName("styleMask");
    SEL sm_set = sel_registerName("setStyleMask:");
    if (((signed char(*)(id, SEL, SEL))objc_msgSend)(win, sel_registerName("respondsToSelector:"), sm_set)) {
       unsigned long mask = ((unsigned long(*)(id, SEL))objc_msgSend)(win, sm_get);
-      unsigned long want = mask | 1UL /*NSWindowStyleMaskTitled*/;
+      unsigned long want = (mask | 1UL /*Titled*/) & ~0x1000UL /*clear UnifiedTitleAndToolbar*/;
       if (want != mask) {
          ((void(*)(id, SEL, unsigned long))objc_msgSend)(win, sm_set, want);
       }
+   }
+   /* NSWindowToolbarStyleExpanded == 1 (Automatic=0, Expanded=1): title row above
+    * a separate toolbar row = the classic two-row look. */
+   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
+          win, sel_registerName("respondsToSelector:"),
+          sel_registerName("setToolbarStyle:"))) {
+      ((void(*)(id, SEL, long))objc_msgSend)(
+         win, sel_registerName("setToolbarStyle:"), 1);
    }
    if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
           win, sel_registerName("respondsToSelector:"),
@@ -4249,15 +4263,14 @@ static void window_title_on_show(id win) {
 
    id cur = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("title"));
    if (!nsstring_blank(cur)) {
-      /* Title string is already present (e.g. Quinn's nib title "Quinn"): the
-       * fix above (Titled + non-transparent + visible) makes the stock chrome
-       * render it. RE-ASSERT setTitle: with the same value to force a titlebar
-       * relayout now that the style is corrected (cheap, no visible change). */
+      /* Title string already present (Quinn's nib title "Quinn"): the expanded /
+       * de-unified two-row layout above now gives it a row to render in. RE-ASSERT
+       * setTitle: with the same value to force a titlebar relayout (cheap). */
       ((void(*)(id, SEL, id))objc_msgSend)(win, sel_registerName("setTitle:"), cur);
       if (wchrome_trace()) {
          const char *cc = ((const char*(*)(id, SEL))objc_msgSend)(cur, sel_registerName("UTF8String"));
          fprintf(stderr, "[compat] wintitle: legacy window (%s) already titled '%s' "
-                 "-> forced Titled+opaque+visible titlebar\n",
+                 "-> two-row (expanded/de-unified) titlebar so the title shows\n",
                  object_getClassName(win), cc ? cc : "?");
          fflush(stderr);
       }
@@ -4283,102 +4296,62 @@ static void window_title_on_show(id win) {
 }
 
 /* ---- generic TOOLBAR-BUTTON styling --------------------------------------
- * A legacy Cocoa app's NSToolbar, built by translated code with an NSToolbar
- * delegate handing back NSToolbarItems (each with a custom PolishedMetalButton
- * view + a -setLabel:), rendered on 10.5/10.6 as FLAT icon-and-label items on a
- * brushed-metal unified toolbar — a bare icon with a text label beneath it, NO
- * per-button background/bezel. On modern macOS the translated toolbar comes up
- * DEGRADED: the custom PolishedMetalButtonCell's metal-pattern bezel draw fails
- * (removed textured-window substrate) and paints a BLACK box behind the icon,
- * the toolbar's displayMode/sizeMode land at the modern icon-only defaults, and
- * the custom-view items carry no visible label.
+ * Ground truth (live Quinn diag): the toolbar items are STANDARD image
+ * NSToolbarItems (view=nil), NOT custom-view buttons — QuinnPlayOrAbort,
+ * QuinnPauseOrContinue, QuinnConnect ('Connect'), QuinnTournament, QuinnHighscores,
+ * QuinnHelp, with NSToolbarFlexibleSpaceItems between the groups. displayMode is
+ * already IconAndLabel (=1, the app set it) and sizeMode Regular (=1).
+ *
+ * On 10.5/10.6 a standard toolbar item on a brushed-metal toolbar rendered as a
+ * FLAT icon with a text label beneath — no per-item background/bezel. On modern
+ * macOS the SAME standard items render with the default modern gray bordered
+ * pill background (NSToolbarItem gained a bordered look; 10.15+ exposes
+ * -setBordered:). So the fix is NOT about custom views (there are none) — it is
+ * to set each standard non-space item BORDERLESS via the standard NSToolbarItem
+ * API: -[NSToolbarItem setBordered:NO] => flat icon on metal, exactly the
+ * genuine look. The item's own label already renders under IconAndLabel once the
+ * toolbar isn't the unified title row (fixed in window_title_on_show).
  *
  * Restore the classic look UNIVERSALLY, keyed on the toolbar being attached to a
- * LEGACY-origin window (structural, NO class name): force the toolbar's
- * displayMode = IconAndLabel (1) and sizeMode = Regular (1), and for any custom
- * item whose view is an NSButton, make it BORDERLESS/flat (kill the failed-metal
- * black background) and surface the item's label beneath the icon. The target is
- * a flat icon-on-metal with text label — NOT a bezeled button. Native toolbars
- * on native windows are never touched. Env kill-switch ABICONV_TOOLBAR_COMPAT. */
+ * LEGACY-origin window (structural, NO class name): keep displayMode=IconAndLabel
+ * + sizeMode=Regular, and set every non-space item borderless. Space items
+ * (NSToolbar{Flexible,}SpaceItem — identifier starts with "NSToolbar") are left
+ * alone so the app's grouping is preserved. Native toolbars on native windows are
+ * never touched. Env kill-switch ABICONV_TOOLBAR_COMPAT. */
 static int toolbar_compat_off(void) {
    static int v = -1;
    if (v < 0) { v = getenv("ABICONV_TOOLBAR_COMPAT") ? 1 : 0; }
    return v;
 }
-/* A custom-VIEW toolbar item (Quinn's PolishedMetalButton) rendered on 10.5/10.6
- * as a FLAT icon on the brushed-metal toolbar with a text label beneath — no
- * per-button background. Under translation the custom PolishedMetalButtonCell's
- * metal-pattern bezel draw fails (same removed textured-window substrate family
- * as the titlebar band) and paints a BLACK background behind the icon. The
- * genuine look is BORDERLESS/flat, so: strip the bezel (setBordered:NO,
- * bezelStyle=0), clear any opaque backing-layer colour, and — since AppKit does
- * NOT auto-draw the icon+label layout for a custom-VIEW item — surface the
- * item's own label AS the button title (icon ABOVE, label BELOW) so the classic
- * "flat icon with text beneath" reads on the metal toolbar. Only touches a
- * genuine label the app set; never adds a bezel. */
-static void toolbar_style_item_view(id item) {
+/* Flatten one STANDARD toolbar item (setBordered:NO) so it's a flat icon on the
+ * metal toolbar. No-op on a space item (grouping preserved) and on an item that
+ * doesn't respond to -setBordered: (older SDK). If the item DOES carry a custom
+ * view button (defensive — Quinn's are standard, but other apps may differ),
+ * also flatten that button so it isn't a bordered blob. */
+static void toolbar_style_item(id item) {
+   /* skip the standard space/flexible-space items: identifier starts "NSToolbar" */
+   id iid = ((id(*)(id, SEL))objc_msgSend)(item, sel_registerName("itemIdentifier"));
+   if (iid) {
+      const char *ic = ((const char*(*)(id, SEL))objc_msgSend)(iid, sel_registerName("UTF8String"));
+      if (ic && strncmp(ic, "NSToolbar", 9) == 0) { return; }   /* space/flex-space */
+   }
+   /* STANDARD path: NSToolbarItem.setBordered: (macOS 10.15+) => flat icon */
+   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
+          item, sel_registerName("respondsToSelector:"), sel_registerName("setBordered:"))) {
+      ((void(*)(id, SEL, signed char))objc_msgSend)(item, sel_registerName("setBordered:"), 0);
+   }
+   /* Defensive custom-view path: if this item HAS a button view, flatten it too. */
    id view = ((id(*)(id, SEL))objc_msgSend)(item, sel_registerName("view"));
-   if (!view) { return; }
    Class btn = objc_getClass("NSButton");
-   if (!(btn && ((signed char(*)(id, SEL, Class))objc_msgSend)(
-                   view, sel_registerName("isKindOfClass:"), btn))) {
-      return;
-   }
-   /* BORDERLESS / flat: no bezel, no button background (the icon sits on metal). */
-   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
-          view, sel_registerName("respondsToSelector:"), sel_registerName("setBordered:"))) {
-      ((void(*)(id, SEL, signed char))objc_msgSend)(view, sel_registerName("setBordered:"), 0);
-   }
-   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
-          view, sel_registerName("respondsToSelector:"), sel_registerName("setBezelStyle:"))) {
-      /* 0 == no/none: with setBordered:NO this yields a flat icon button */
-      ((void(*)(id, SEL, long))objc_msgSend)(view, sel_registerName("setBezelStyle:"), 0);
-   }
-   /* NSMomentaryChangeButton == 5: no pressed-state bezel fill either */
-   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
-          view, sel_registerName("respondsToSelector:"), sel_registerName("setButtonType:"))) {
-      ((void(*)(id, SEL, unsigned long))objc_msgSend)(view, sel_registerName("setButtonType:"), 5UL);
-   }
-   /* clear any opaque backing-layer background (the BLACK box behind the icon that
-    * the failed metal-cell draw left): make the button + its layer non-opaque and
-    * clear the layer's backgroundColor if it has one. */
-   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
-          view, sel_registerName("respondsToSelector:"), sel_registerName("setDrawsBackground:"))) {
-      ((void(*)(id, SEL, signed char))objc_msgSend)(view, sel_registerName("setDrawsBackground:"), 0);
-   }
-   id layer = ((id(*)(id, SEL))objc_msgSend)(view, sel_registerName("layer"));
-   if (layer && ((signed char(*)(id, SEL, SEL))objc_msgSend)(
-                   layer, sel_registerName("respondsToSelector:"), sel_registerName("setBackgroundColor:"))) {
-      ((void(*)(id, SEL, void*))objc_msgSend)(layer, sel_registerName("setBackgroundColor:"), NULL);
-   }
-   /* also clear the CELL's bezel/background if it exposes them */
-   id cell = ((id(*)(id, SEL))objc_msgSend)(view, sel_registerName("cell"));
-   if (cell) {
+   if (view && btn && ((signed char(*)(id, SEL, Class))objc_msgSend)(
+                          view, sel_registerName("isKindOfClass:"), btn)) {
       if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
-             cell, sel_registerName("respondsToSelector:"), sel_registerName("setBordered:"))) {
-         ((void(*)(id, SEL, signed char))objc_msgSend)(cell, sel_registerName("setBordered:"), 0);
+             view, sel_registerName("respondsToSelector:"), sel_registerName("setBordered:"))) {
+         ((void(*)(id, SEL, signed char))objc_msgSend)(view, sel_registerName("setBordered:"), 0);
       }
-   }
-
-   /* surface the item's label beneath the icon (custom-view items lose it). */
-   id lbl = ((id(*)(id, SEL))objc_msgSend)(item, sel_registerName("label"));
-   id cur_title = ((id(*)(id, SEL))objc_msgSend)(view, sel_registerName("title"));
-   if (!nsstring_blank(lbl) && nsstring_blank(cur_title)) {
-      ((void(*)(id, SEL, id))objc_msgSend)(view, sel_registerName("setTitle:"), lbl);
-      /* NSImageAbove == 5: icon on top, title beneath = the classic toolbar look */
       if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
-             view, sel_registerName("respondsToSelector:"), sel_registerName("setImagePosition:"))) {
-         ((void(*)(id, SEL, unsigned long))objc_msgSend)(
-            view, sel_registerName("setImagePosition:"), 5UL);
-      }
-      Class fc = objc_getClass("NSFont");
-      if (fc) {
-         id f = ((id(*)(id, SEL, double))objc_msgSend)(
-            (id)fc, sel_registerName("systemFontOfSize:"), 10.0);
-         if (f && ((signed char(*)(id, SEL, SEL))objc_msgSend)(
-                     view, sel_registerName("respondsToSelector:"), sel_registerName("setFont:"))) {
-            ((void(*)(id, SEL, id))objc_msgSend)(view, sel_registerName("setFont:"), f);
-         }
+             view, sel_registerName("respondsToSelector:"), sel_registerName("setBezelStyle:"))) {
+         ((void(*)(id, SEL, long))objc_msgSend)(view, sel_registerName("setBezelStyle:"), 0);
       }
    }
 }
@@ -4405,12 +4378,12 @@ static void toolbar_style_on_show(id win) {
    if (sm == 0 /*Default*/) {
       ((void(*)(id, SEL, long))objc_msgSend)(tb, sel_registerName("setSizeMode:"), 1 /*Regular*/);
    }
-   /* style each item's custom view (borderless icon blob -> bezeled button) */
+   /* flatten each standard item (setBordered:NO) -> flat icon on metal */
    id items = ((id(*)(id, SEL))objc_msgSend)(tb, sel_registerName("items"));
    long n = items ? ((long(*)(id, SEL))objc_msgSend)(items, sel_registerName("count")) : 0;
    for (long i = 0; i < n; ++i) {
       id it = ((id(*)(id, SEL, long))objc_msgSend)(items, sel_registerName("objectAtIndex:"), i);
-      toolbar_style_item_view(it);
+      toolbar_style_item(it);
    }
    if (wchrome_trace()) {
       fprintf(stderr, "[compat] toolbar: legacy window (%s) toolbar styled "
@@ -4459,10 +4432,15 @@ static void winchrome_diag(id win) {
       ttrans = ((signed char(*)(id, SEL))objc_msgSend)(win, sel_registerName("titlebarAppearsTransparent"));
    }
    id title = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("title"));
+   long tbstyle = -1;
+   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(win, sel_registerName("respondsToSelector:"),
+          sel_registerName("toolbarStyle"))) {
+      tbstyle = ((long(*)(id, SEL))objc_msgSend)(win, sel_registerName("toolbarStyle"));
+   }
    fprintf(stderr, "[wcdiag] styleMask=0x%lx (Titled=%d Textured=%d UnifiedToolbar=%d FullSizeContent=%d) "
-           "title='%s' titleVisibility=%ld titlebarTransparent=%d isVisible=%d\n",
+           "title='%s' titleVisibility=%ld titlebarTransparent=%d toolbarStyle=%ld isVisible=%d\n",
            mask, (int)(mask & 1), (int)((mask >> 8) & 1), (int)((mask >> 12) & 1),
-           (int)((mask >> 15) & 1), nsstr_c(title), tvis, ttrans, vis);
+           (int)((mask >> 15) & 1), nsstr_c(title), tvis, ttrans, tbstyle, vis);
    /* toolbar breakdown */
    id tb = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("toolbar"));
    if (!tb) { fprintf(stderr, "[wcdiag] toolbar: (none)\n"); fflush(stderr); return; }
@@ -4481,6 +4459,12 @@ static void winchrome_diag(id win) {
       id img = ((id(*)(id, SEL))objc_msgSend)(it, sel_registerName("image"));
       id view = ((id(*)(id, SEL))objc_msgSend)(it, sel_registerName("view"));
       const char *vcls = view ? object_getClassName(view) : "(nil)";
+      /* the STANDARD NSToolbarItem.isBordered (10.15+) — the property v3 flips */
+      int itembordered = -1;
+      if (((signed char(*)(id, SEL, SEL))objc_msgSend)(it, sel_registerName("respondsToSelector:"),
+             sel_registerName("isBordered"))) {
+         itembordered = (int)((signed char(*)(id, SEL))objc_msgSend)(it, sel_registerName("isBordered"));
+      }
       const char *btitle = "";
       int bordered = -1; long bezel = -1, imgpos = -1;
       if (view && objc_getClass("NSButton") &&
@@ -4491,9 +4475,9 @@ static void winchrome_diag(id win) {
          bezel = ((long(*)(id, SEL))objc_msgSend)(view, sel_registerName("bezelStyle"));
          imgpos = ((long(*)(id, SEL))objc_msgSend)(view, sel_registerName("imagePosition"));
       }
-      fprintf(stderr, "[wcdiag]   item[%ld] id='%s' label='%s' hasImage=%d view=%s "
-              "btnTitle='%s' bordered=%d bezel=%ld imgPos=%ld\n",
-              i, nsstr_c(iid), nsstr_c(lbl), img ? 1 : 0, vcls, btitle, bordered, bezel, imgpos);
+      fprintf(stderr, "[wcdiag]   item[%ld] id='%s' label='%s' hasImage=%d itemBordered=%d view=%s "
+              "btnTitle='%s' viewBordered=%d bezel=%ld imgPos=%ld\n",
+              i, nsstr_c(iid), nsstr_c(lbl), img ? 1 : 0, itembordered, vcls, btitle, bordered, bezel, imgpos);
    }
    fflush(stderr);
 }

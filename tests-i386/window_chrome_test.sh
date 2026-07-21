@@ -75,27 +75,26 @@ static NSView* findv(NSView *v, const char *sub) {
 @interface LegacyWin : NSWindow @end
 @implementation LegacyWin @end
 
-/* An NSToolbar delegate that vends ONE custom-view item (borderless icon button)
- * — mimics a legacy app whose toolbar items come up as bare icon blobs. */
+/* An NSToolbar delegate that vends STANDARD image items (view=nil, image+label)
+ * — matches the LIVE Quinn diag (QuinnConnect/Tournament/Highscores/Help etc are
+ * standard NSToolbarItems, NOT custom-view). Modern macOS renders these with a
+ * default bordered pill; the fix sets each item's isBordered=NO -> flat on metal.
+ * Also includes a flexible-space item, which must be left alone. */
 @interface TbDelegate : NSObject <NSToolbarDelegate> @end
 @implementation TbDelegate
 - (NSToolbarItem *)toolbar:(NSToolbar *)tb itemForItemIdentifier:(NSToolbarItemIdentifier)ident
     willBeInsertedIntoToolbar:(BOOL)flag {
     NSToolbarItem *it = [[NSToolbarItem alloc] initWithItemIdentifier:ident];
-    [it setLabel:@"Abort"];
-    NSButton *b = [[NSButton alloc] initWithFrame:NSMakeRect(0,0,32,32)];
-    /* the WRONG translated state: bordered + a bezel + no title (the failed-metal
-     * PolishedMetalButtonCell renders a black box behind the bare icon). */
-    [b setBordered:YES];
-    [b setBezelStyle:NSBezelStyleTexturedRounded];
-    [b setTitle:@""];                   /* icon-only custom button (like Quinn) */
-    [b setImage:[NSImage imageWithSize:NSMakeSize(32,32) flipped:NO
+    [it setLabel:ident];
+    [it setImage:[NSImage imageWithSize:NSMakeSize(32,32) flipped:NO
                  drawingHandler:^BOOL(NSRect r){ return YES; }]];
-    [it setView:b];
+    if (@available(macOS 10.15, *)) { [it setBordered:YES]; } /* the WRONG modern default */
     return it;
 }
-- (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)tb { return @[@"abort"]; }
-- (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)tb { return @[@"abort"]; }
+- (NSArray<NSToolbarItemIdentifier> *)toolbarDefaultItemIdentifiers:(NSToolbar *)tb {
+    return @[@"Connect", NSToolbarFlexibleSpaceItemIdentifier, @"Help"]; }
+- (NSArray<NSToolbarItemIdentifier> *)toolbarAllowedItemIdentifiers:(NSToolbar *)tb {
+    return @[@"Connect", NSToolbarFlexibleSpaceItemIdentifier, @"Help"]; }
 @end
 
 int main(int argc, char **argv) {
@@ -228,20 +227,31 @@ int main(int argc, char **argv) {
         fprintf(stderr, "legacy pre-titled window: title preserved + titlebar forced "
                 "visible/Titled OK\n");
 
-        /* legacy TEXTURED/metal window created WITHOUT the Titled bit but with a
-         * title string (Quinn's PolishedMetalWindow case) -> fix must ADD Titled
-         * so the stock chrome lays out + shows the title. */
+        /* legacy UNIFIED-title+toolbar window with a title 'Quinn' (the EXACT live
+         * Quinn case: styleMask 0x100f = Titled|UnifiedTitleAndToolbar, title set,
+         * titleVisibility Visible — yet the title doesn't render because the
+         * unified row is filled by the toolbar). The fix must give it the two-row
+         * layout: CLEAR the unified bit + set toolbarStyle=Expanded, title kept. */
         LegacyWin *lw3 = [[LegacyWin alloc] initWithContentRect:NSMakeRect(0,0,300,100)
-            styleMask:(NSWindowStyleMaskClosable|NSWindowStyleMaskResizable)
+            styleMask:(NSWindowStyleMaskTitled|NSWindowStyleMaskClosable|
+                       NSWindowStyleMaskResizable|NSWindowStyleMaskUnifiedTitleAndToolbar)
             backing:NSBackingStoreBuffered defer:NO];
         [lw3 setTitle:@"Quinn"];
         title_on_show(lw3);
         if (!([lw3 styleMask] & NSWindowStyleMaskTitled)) {
-            fprintf(stderr, "textured legacy window did NOT gain Titled bit\n"); return 1; }
+            fprintf(stderr, "unified legacy window lost Titled bit\n"); return 1; }
+        if ([lw3 styleMask] & NSWindowStyleMaskUnifiedTitleAndToolbar) {
+            fprintf(stderr, "unified bit NOT cleared (styleMask=0x%lx)\n",
+                    (unsigned long)[lw3 styleMask]); return 1; }
+        if (@available(macOS 11.0, *)) {
+            if ([lw3 toolbarStyle] != NSWindowToolbarStyleExpanded) {
+                fprintf(stderr, "toolbarStyle not Expanded (=%ld)\n",
+                        (long)[lw3 toolbarStyle]); return 1; }
+        }
         if (![[lw3 title] isEqualToString:@"Quinn"]) {
-            fprintf(stderr, "textured legacy window title lost\n"); return 1; }
-        fprintf(stderr, "legacy textured window: Titled bit added, title '%s' shows OK\n",
-                [[lw3 title] UTF8String]);
+            fprintf(stderr, "unified legacy window title lost\n"); return 1; }
+        fprintf(stderr, "legacy unified window: unified bit cleared + toolbarStyle "
+                "Expanded, title '%s' gets its own row OK\n", [[lw3 title] UTF8String]);
 
         /* ===== generic TOOLBAR styling ================================== */
         TbDelegate *dlg = [TbDelegate new];
@@ -258,29 +268,28 @@ int main(int argc, char **argv) {
         if ([lw.toolbar sizeMode] != NSToolbarSizeModeRegular) {
             fprintf(stderr, "toolbar sizeMode not Regular (=%ld)\n",
                     (long)[lw.toolbar sizeMode]); return 1; }
-        /* the custom item's button must now be FLAT/borderless (no bezel, no
-         * black bg) with the item's label surfaced as the button title beneath
-         * the icon (imagePosition=NSImageAbove). NOT bezeled. */
-        int styled = 0, items_n = 0;
+        /* each STANDARD non-space item must now be FLAT (isBordered=NO); the
+         * flexible-space item must be left alone. Matches the live Quinn diag
+         * (items are standard image items, view=nil). */
+        int flat_std = 0, std_items = 0;
         for (NSToolbarItem *it in [lw.toolbar items]) {
-            items_n++;
-            NSView *v = [it view];
-            if ([v isKindOfClass:[NSButton class]]) {
-                NSButton *b = (NSButton *)v;
-                BOOL flat  = ![b isBordered];
-                BOOL labelled = [[b title] isEqualToString:[it label]] &&
-                                [[it label] length] > 0;
-                BOOL iconAbove = ([b imagePosition] == NSImageAbove);
-                if (flat && labelled && iconAbove) styled++;
-                fprintf(stderr, "    item '%s': bordered=%d bezel=%ld title='%s' imgPos=%ld\n",
-                        [[it label] UTF8String], [b isBordered], (long)[b bezelStyle],
-                        [[b title] UTF8String], (long)[b imagePosition]);
-            }
+            NSString *iid = [it itemIdentifier];
+            BOOL isSpace = [iid hasPrefix:@"NSToolbar"];
+            int b = -1;
+            if (@available(macOS 10.15, *)) { b = [it isBordered]; }
+            fprintf(stderr, "    item '%s' id='%s' isBordered=%d view=%s\n",
+                    [[it label] UTF8String], [iid UTF8String], b,
+                    [it view] ? object_getClassName([it view]) : "(nil)");
+            if (isSpace) continue;        /* space items untouched */
+            std_items++;
+            if (@available(macOS 10.15, *)) { if (![it isBordered]) flat_std++; }
+            else { flat_std++; } /* pre-10.15 SDK has no bordered concept -> flat */
         }
-        if (items_n == 0 || styled != items_n) {
-            fprintf(stderr, "toolbar item buttons not flat+labeled (%d/%d)\n", styled, items_n); return 1; }
+        if (std_items == 0 || flat_std != std_items) {
+            fprintf(stderr, "standard toolbar items not flat (%d/%d)\n", flat_std, std_items); return 1; }
         fprintf(stderr, "toolbar: legacy window toolbar -> IconAndLabel/Regular, "
-                "%d/%d item buttons FLAT+labeled OK\n", styled, items_n);
+                "%d/%d standard items FLAT (isBordered=NO), space items preserved OK\n",
+                flat_std, std_items);
 
         /* native window's toolbar must be left ALONE */
         NSToolbar *ntb = [[NSToolbar alloc] initWithIdentifier:@"native"];
