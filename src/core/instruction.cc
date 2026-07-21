@@ -1061,10 +1061,26 @@ namespace MachO {
                 * `cmp $0xffff,%edx` for every dispatcher parsed AFTER a stub —
                 * masking the MOV bug by accidental consistency — while the
                 * first-in-sweep dispatcher kept its literal and its TU's
-                * static ctors were skipped (Civ IV "Launch in Window"). */
+                * static ctors were skipped (Civ IV "Launch in Window").
+                *
+                * Second admit alongside imm_bounds_relocated_table: the
+                * 9510f29 store discriminator (4-aligned + writable data;
+                * fixed_load_addr already gates this arm) — the reg-dest
+                * IDENTITY compare `movl field(%reg),%eax; cmpl $&sentinel,
+                * %eax` must classify like the store/mem-cmp family AS A PURE
+                * FUNCTION OF VALUE+IMAGE, not of parse order. Relying on
+                * relocated_ptr_imms alone left the compare literal whenever
+                * it parsed BEFORE any relocated base in its segment (the
+                * exact accidental-consistency trap 695d60f closed on the
+                * code-alias side; guard 99_cmp_reg_ptr_imm_order). In real
+                * images the bounds table admits nearly every data-aliasing
+                * value anyway once one store relocated below it — this makes
+                * the behavior deterministic, not broader. */
                if (imm_val >= 0x1000 && imm_val < 0x80000000U &&
                    !imm32_code_alias_is_constant(img, env, imm_val) &&
-                   env.imm_bounds_relocated_table(imm_val)) {
+                   (env.imm_bounds_relocated_table(imm_val) ||
+                    ((imm_val & 3) == 0 &&
+                     env.vmaddr_in_writable_data(imm_val)))) {
                   imm_is_ptr = true;
                }
             }
@@ -1297,10 +1313,23 @@ namespace MachO {
        * DetectPicAnchoredDisps (2c) zerofill-alias back-stop. abs32 dests
        * (mod=00 r/m=101, SIB no-base) are owned by the absolute-[disp32]
        * arm above, whose CMP gate mirrors this discriminator.
-       * (Guard 99_cmp_mem_ptr_imm.) */
+       * (Guard 99_cmp_mem_ptr_imm.)
+       *
+       * ADD (81 /0) and SUB (81 /5) mem-dest join CMP under the same
+       * strict discriminator (guard 99_alu_mem_ptr_imm): `addl $&base,
+       * field` / `subl $&base, field` are the in-place offset<->pointer
+       * conversions whose REG-dest twins (ADD_GPRv_IMMz — permissive
+       * any-segment probe) already relocate; leaving the mem form raw
+       * mixes a relocated pointer with a raw i386 base address and the
+       * arithmetic is off by the whole translation delta. AND/OR/XOR/TEST
+       * stay deliberately uncaptured: a mask/bit-op against a pointer
+       * VALUE is meaningless, so a data-aliasing imm there is always an
+       * integer. */
       if (imm == nullptr && this->memdisp == nullptr && bits == Bits::M32
           && instbuf.size() >= 6 && instbuf.at(0) == 0x81
-          && (instbuf.at(1) & 0x38) == 0x38       /* 81 /7 = CMP r/m32, imm32 */
+          && ((instbuf.at(1) & 0x38) == 0x38      /* 81 /7 = CMP r/m32, imm32 */
+              || (instbuf.at(1) & 0x38) == 0x00   /* 81 /0 = ADD */
+              || (instbuf.at(1) & 0x38) == 0x28)  /* 81 /5 = SUB */
           && (instbuf.at(1) >> 6) != 3) {         /* memory destination */
          const uint8_t mod = instbuf.at(1) >> 6;
          const uint8_t rm  = instbuf.at(1) & 0x07;
