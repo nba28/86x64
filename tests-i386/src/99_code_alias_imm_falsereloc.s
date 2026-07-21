@@ -71,12 +71,23 @@ Lbad_b:
 	ud2
 
 	## The prologue-byte marker MUST land at vmaddr 0x1f90 (asserted by the build
-	## rule). 0x40 of padding after _main's short body places it there; if the
-	## body length drifts the build rule fails and prints the actual address.
+	## rule via __text section geometry — symbol-independent). 0x40 of padding
+	## after _main's short body places it there; if the body length drifts the
+	## build rule fails and prints the actual address.
+	##
+	## _marker is LOCAL (no .globl) so `strip -x` removes its nlist — matching
+	## Civ's ACTUAL shape: the boost hash constant aliases a coincidental
+	## `55 89 e5` run MID-FUNCTION with NO symbol (an anonymous prologue run
+	## inside a stripped ~16MB __text), which is precisely why the ONLY positive
+	## evidence available is the prologue bytes and why prologue-only evidence
+	## MUST be insufficient for a field-store integer. A GLOBAL marker here would
+	## carry a func_syms nlist and be structurally IDENTICAL to a genuine
+	## `.globl` callback install (99_fnptr_field_call's _handler_fn), which MUST
+	## relocate — no translator can distinguish those two, so the integer alias
+	## must be unsymboled to be a valid negative case.
 	.p2align 4
 _pad:
 	.space 0x40
-	.globl _marker
 _marker:
 	.byte 0x55, 0x89, 0xe5, 0x90, 0x90    ## push ebp; mov esp,ebp; nop nop
 

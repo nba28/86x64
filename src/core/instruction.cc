@@ -259,6 +259,44 @@ namespace MachO {
       return true;
    }
 
+   /* A code-target imm32 stored into a general-base FIELD (`movl $imm32,
+    * disp(%reg)`) or compared against one is a fn-ptr callback install
+    * (obj->cb = &handler) ONLY on SYMBOL evidence — a func_syms nlist at the
+    * value (a real, symboled function ENTRY). The `55 89 e5` prologue-byte
+    * heuristic imm32_code_alias_is_constant also accepts is DELIBERATELY NOT
+    * used here: unlike the stack-arg ProcPtr arm (`movl $handler,(%esp)` —
+    * an ABI-shaped argument to a known registration call, where Halo's
+    * locals-stripped renderer handlers legitimately carry no symbol), a
+    * field store is overwhelmingly an INTEGER (a hash multiplier/mask/index/
+    * enum/size), and in a large __text such an integer routinely aliases a
+    * coincidental `55 89 e5` run. Relocating it corrupts the constant — the
+    * Civ IV boost type-registry rc=139 crash flipped ~15-20% -> ~100%
+    * deterministic exactly this way (guard 99_code_alias_imm_falsereloc).
+    * A genuine callback-into-field target is a defined function and thus
+    * symboled even in a locals-stripped image (globals survive `strip -x`);
+    * requiring the nlist keeps 99_fnptr_field_call's .globl handler admitted
+    * while rejecting the prologue-only integer alias. */
+   template <Bits bits>
+   static bool field_store_code_target_is_fnptr(const Image& img,
+                                                ParseEnv<bits>& env,
+                                                uint32_t value) {
+      if (value < 0x1000 || value >= 0x80000000U) { return false; }
+      bool in_code = false;
+      for (Segment<bits> *seg : env.archive.segments()) {
+         if (!seg->contains_vmaddr(value)) continue;
+         for (Section<bits> *sect : seg->sections) {
+            if (!sect->contains_vmaddr(value)) continue;
+            in_code = (sect->sect.flags &
+                       (S_ATTR_PURE_INSTRUCTIONS |
+                        S_ATTR_SOME_INSTRUCTIONS)) != 0;
+            break;
+         }
+         break;
+      }
+      if (!in_code) { return false; }
+      return env.func_syms.count(value) != 0;   /* symbol-only evidence */
+   }
+
    template <Bits bits>
    bool Instruction<bits>::CanDecode(const Image& img, const Location& loc) {
       xed_decoded_inst_t xedd;
@@ -1278,38 +1316,22 @@ namespace MachO {
                    env.vmaddr_in_writable_data(value)) {
                   ptr_target = true;
                }
-               /* CODE-target FUNCTION-ENTRY admit — the stack-arg arm's
-                * ProcPtr policy extended to FIELD stores: `movl $_handler,
-                * disp(%reg)` installing a callback into a struct field
-                * (obj->cb = &handler, the C manual-dispatch idiom) shipped
-                * its raw i386 code address verbatim — none of the probes
-                * above admit an instructions-section target — so the first
-                * indirect call through the field jumped to the stale i386
-                * vmaddr (SIGSEGV; guard 99_cmp_mem_ptr_imm case g + the
-                * fnptr-call round trip in 99_fnptr_field_call). Admit iff
-                * the value lands in an instructions section AND carries
-                * positive function-entry evidence via the shared classifier
-                * (func_syms nlist OR `55 89 e5` prologue — the
-                * stripped-binary Halo ProcPtr recovery); an integer merely
-                * aliasing __text stays literal, identically to the
-                * stack-arg arm. */
-               if (!ptr_target && bits == Bits::M32) {
-                  bool in_code = false;
-                  for (auto *seg : env.archive.segments()) {
-                     if (!seg->contains_vmaddr(value)) continue;
-                     for (auto *sect : seg->sections) {
-                        if (!sect->contains_vmaddr(value)) continue;
-                        in_code = (sect->sect.flags &
-                                   (S_ATTR_PURE_INSTRUCTIONS |
-                                    S_ATTR_SOME_INSTRUCTIONS)) != 0;
-                        break;
-                     }
-                     break;
-                  }
-                  if (in_code &&
-                      !imm32_code_alias_is_constant(img, env, value)) {
-                     ptr_target = true;
-                  }
+               /* CODE-target FUNCTION-ENTRY admit — a callback installed
+                * into a struct field (`movl $_handler, disp(%reg)`,
+                * obj->cb = &handler) shipped its raw i386 code address
+                * verbatim (none of the probes above admit an
+                * instructions-section target) so the first indirect call
+                * through the field jumped to the stale i386 vmaddr (SIGSEGV;
+                * guard 99_fnptr_field_call). Admit ONLY on SYMBOL evidence
+                * (func_syms nlist at a real function entry) — NOT the
+                * prologue-byte heuristic, which mis-relocates an integer
+                * constant aliasing a coincidental `55 89 e5` run (the Civ
+                * boost-registry rc=139 deterministic crash; guard
+                * 99_code_alias_imm_falsereloc). See
+                * field_store_code_target_is_fnptr. */
+               if (!ptr_target && bits == Bits::M32 &&
+                   field_store_code_target_is_fnptr(img, env, value)) {
+                  ptr_target = true;
                }
             }
             if (ptr_target) {
@@ -1385,27 +1407,17 @@ namespace MachO {
                   && (env.archive.header.flags & MH_PIE) == 0
                   && env.vmaddr_in_writable_data(value);
                /* CODE-target identity compare, CMP only: `cmpl $_handler,
-                * field(%reg)` must classify like the genbase MOV arm's
-                * function-entry admit (obj->cb == &handler idiom) — same
-                * instructions-section + positive-evidence classifier
-                * (func_syms / prologue). ADD/SUB on code addresses stay
-                * literal (function-pointer arithmetic through fields is
-                * not a real idiom; a code-aliasing int summand is). */
+                * field(%reg)` (obj->cb == &handler idiom) classifies like
+                * the genbase MOV field-store arm — SYMBOL-only evidence
+                * (field_store_code_target_is_fnptr, func_syms nlist), NOT
+                * the prologue heuristic, so an integer-constant compare
+                * aliasing a `55 89 e5` run stays literal (the same
+                * over-relocation as the store; guard
+                * 99_code_alias_imm_falsereloc). ADD/SUB on code addresses
+                * stay literal (fn-ptr arithmetic through fields is not a
+                * real idiom; a code-aliasing int summand is). */
                if (!cap && (instbuf.at(1) & 0x38) == 0x38) {
-                  bool in_code = false;
-                  for (auto *seg : env.archive.segments()) {
-                     if (!seg->contains_vmaddr(value)) continue;
-                     for (auto *sect : seg->sections) {
-                        if (!sect->contains_vmaddr(value)) continue;
-                        in_code = (sect->sect.flags &
-                                   (S_ATTR_PURE_INSTRUCTIONS |
-                                    S_ATTR_SOME_INSTRUCTIONS)) != 0;
-                        break;
-                     }
-                     break;
-                  }
-                  cap = in_code &&
-                     !imm32_code_alias_is_constant(img, env, value);
+                  cap = field_store_code_target_is_fnptr(img, env, value);
                }
             }
             if (cap) {
