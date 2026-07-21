@@ -4208,6 +4208,85 @@ static id app_display_name(void) {
    }
    return nil;
 }
+/* Guarantee a VISIBLE title label for a legacy window whose stock titlebar won't
+ * render the title (legacy metal/toolbar window: the toolbar occupies the
+ * titlebar row so the stock title has nowhere to draw). Install a titlebar
+ * ACCESSORY view controller (NSTitlebarAccessoryViewController) whose view is a
+ * centered NSTextField showing `title`. The accessory renders in the titlebar
+ * band regardless of the stock title layout. Idempotent (tagged so a re-show
+ * doesn't stack duplicates); app-agnostic; no-op if the accessory API or the
+ * window's addTitlebarAccessoryViewController: is unavailable. */
+#define ABICONV_TITLE_ACCESSORY_TAG 0x51544c42 /* 'QTLB' */
+static void install_titlebar_label(id win, id title) {
+   if (nsstring_blank(title)) { return; }
+   SEL sel_add = sel_registerName("addTitlebarAccessoryViewController:");
+   SEL sel_getlist = sel_registerName("titlebarAccessoryViewControllers");
+   if (!((signed char(*)(id, SEL, SEL))objc_msgSend)(
+          win, sel_registerName("respondsToSelector:"), sel_add)) {
+      return;                      /* pre-10.10 AppKit: no accessory API */
+   }
+   Class avc_cls = objc_getClass("NSTitlebarAccessoryViewController");
+   if (!avc_cls) { return; }
+
+   /* already installed? scan existing accessories for our tagged text field */
+   id list = ((id(*)(id, SEL))objc_msgSend)(win, sel_getlist);
+   long ln = list ? ((long(*)(id, SEL))objc_msgSend)(list, sel_registerName("count")) : 0;
+   for (long i = 0; i < ln; ++i) {
+      id avc = ((id(*)(id, SEL, long))objc_msgSend)(list, sel_registerName("objectAtIndex:"), i);
+      id v = ((id(*)(id, SEL))objc_msgSend)(avc, sel_registerName("view"));
+      if (v && ((long(*)(id, SEL))objc_msgSend)(v, sel_registerName("tag")) == ABICONV_TITLE_ACCESSORY_TAG) {
+         /* update the existing label's text (title may have changed) + return */
+         ((void(*)(id, SEL, id))objc_msgSend)(v, sel_registerName("setStringValue:"), title);
+         return;
+      }
+   }
+
+   /* build a non-editable, borderless, transparent centered label */
+   Class tfc = objc_getClass("NSTextField");
+   if (!tfc) { return; }
+   id label = ((id(*)(id, SEL))objc_msgSend)((id)tfc, sel_registerName("alloc"));
+   /* frame ~ 240x22; the accessory centers itself in the titlebar band */
+   CGRect lf = {{0, 0}, {240, 22}};
+   label = ((id(*)(id, SEL, CGRect))objc_msgSend)(label, sel_registerName("initWithFrame:"), lf);
+   ((void(*)(id, SEL, id))objc_msgSend)(label, sel_registerName("setStringValue:"), title);
+   ((void(*)(id, SEL, signed char))objc_msgSend)(label, sel_registerName("setEditable:"), 0);
+   ((void(*)(id, SEL, signed char))objc_msgSend)(label, sel_registerName("setSelectable:"), 0);
+   ((void(*)(id, SEL, signed char))objc_msgSend)(label, sel_registerName("setBordered:"), 0);
+   ((void(*)(id, SEL, signed char))objc_msgSend)(label, sel_registerName("setBezeled:"), 0);
+   ((void(*)(id, SEL, signed char))objc_msgSend)(label, sel_registerName("setDrawsBackground:"), 0);
+   /* NSTextAlignmentCenter == 2 */
+   ((void(*)(id, SEL, long))objc_msgSend)(label, sel_registerName("setAlignment:"), 2);
+   /* label control font ~13pt (the standard title look) */
+   Class fc = objc_getClass("NSFont");
+   if (fc) {
+      id f = ((id(*)(id, SEL, double))objc_msgSend)(
+         (id)fc, sel_registerName("systemFontOfSize:"), 13.0);
+      if (f) { ((void(*)(id, SEL, id))objc_msgSend)(label, sel_registerName("setFont:"), f); }
+   }
+   /* tag it so we can find/update/dedupe it later */
+   ((void(*)(id, SEL, long))objc_msgSend)(label, sel_registerName("setTag:"), ABICONV_TITLE_ACCESSORY_TAG);
+
+   /* wrap in an accessory VC; layoutAttribute = NSLayoutAttributeBottom (10) so it
+    * sits in the toolbar/title band; centered via the label's own alignment. */
+   id avc = ((id(*)(id, SEL))objc_msgSend)((id)avc_cls, sel_registerName("alloc"));
+   avc = ((id(*)(id, SEL))objc_msgSend)(avc, sel_registerName("init"));
+   ((void(*)(id, SEL, id))objc_msgSend)(avc, sel_registerName("setView:"), label);
+   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(
+          avc, sel_registerName("respondsToSelector:"), sel_registerName("setLayoutAttribute:"))) {
+      /* A titlebar accessory REQUIRES Left/Right/Top/Bottom (NSLayoutAttribute:
+       * Left=1 Right=2 Top=3 Bottom=4). Use Bottom(4) so the label sits in the
+       * lower titlebar band (with a toolbar present); the label's own centered
+       * alignment + 240pt width centers the text. */
+      ((void(*)(id, SEL, long))objc_msgSend)(avc, sel_registerName("setLayoutAttribute:"), 4);
+   }
+   ((void(*)(id, SEL, id))objc_msgSend)(win, sel_add, avc);
+   if (wchrome_trace()) {
+      const char *tc = ((const char*(*)(id, SEL))objc_msgSend)(title, sel_registerName("UTF8String"));
+      fprintf(stderr, "[compat] wintitle: installed titlebar-label accessory '%s'\n", tc ? tc : "?");
+      fflush(stderr);
+   }
+}
+
 /* Apply the generic title fix to a legacy window whose title is blank. */
 static void window_title_on_show(id win) {
    if (wintitle_compat_off()) { return; }
@@ -4261,38 +4340,44 @@ static void window_title_on_show(id win) {
          win, sel_registerName("setTitleVisibility:"), 0);
    }
 
+   /* Determine the final title string: keep the app's own if present (Quinn's nib
+    * title "Quinn"), else derive one (represented filename's last component, else
+    * the app/process name). */
    id cur = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("title"));
-   if (!nsstring_blank(cur)) {
-      /* Title string already present (Quinn's nib title "Quinn"): the expanded /
-       * de-unified two-row layout above now gives it a row to render in. RE-ASSERT
-       * setTitle: with the same value to force a titlebar relayout (cheap). */
-      ((void(*)(id, SEL, id))objc_msgSend)(win, sel_registerName("setTitle:"), cur);
-      if (wchrome_trace()) {
-         const char *cc = ((const char*(*)(id, SEL))objc_msgSend)(cur, sel_registerName("UTF8String"));
-         fprintf(stderr, "[compat] wintitle: legacy window (%s) already titled '%s' "
-                 "-> two-row (expanded/de-unified) titlebar so the title shows\n",
-                 object_getClassName(win), cc ? cc : "?");
-         fflush(stderr);
+   id name = cur;
+   if (nsstring_blank(name)) {
+      name = nil;
+      id repf = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("representedFilename"));
+      if (!nsstring_blank(repf)) {
+         name = ((id(*)(id, SEL))objc_msgSend)(repf, sel_registerName("lastPathComponent"));
+         if (nsstring_blank(name)) { name = nil; }
       }
-      return;
+      if (!name) { name = app_display_name(); }
+      if (nsstring_blank(name)) { return; }
+      ((void(*)(id, SEL, id))objc_msgSend)(win, sel_registerName("setTitle:"), name);
+   } else {
+      /* re-assert setTitle: with the same value to force a titlebar relayout now
+       * that the style is corrected (cheap). */
+      ((void(*)(id, SEL, id))objc_msgSend)(win, sel_registerName("setTitle:"), name);
    }
-   /* No title yet: derive one. Prefer the window's represented filename's last
-    * component if present, else the app/process name. */
-   id name = nil;
-   id repf = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("representedFilename"));
-   if (!nsstring_blank(repf)) {
-      name = ((id(*)(id, SEL))objc_msgSend)(repf, sel_registerName("lastPathComponent"));
-      if (nsstring_blank(name)) { name = nil; }
-   }
-   if (!name) { name = app_display_name(); }
-   if (nsstring_blank(name)) { return; }
-   ((void(*)(id, SEL, id))objc_msgSend)(win, sel_registerName("setTitle:"), name);
    if (wchrome_trace()) {
       const char *nc = ((const char*(*)(id, SEL))objc_msgSend)(name, sel_registerName("UTF8String"));
-      fprintf(stderr, "[compat] wintitle: legacy window (%s) had blank title -> set '%s'\n",
-              object_getClassName(win), nc ? nc : "?");
+      fprintf(stderr, "[compat] wintitle: legacy window (%s) title '%s' set/visible; "
+              "installing titlebar label fallback\n", object_getClassName(win), nc ? nc : "?");
       fflush(stderr);
    }
+   /* FALLBACK (the actual visible-title guarantee): on the LIVE Quinn diag the
+    * title is correctly set + Visible + toolbarStyle=Expanded + unified bit
+    * cleared, yet the legacy PolishedMetalWindow does NOT materialize a two-row
+    * title row above the toolbar (the toolbar occupies the titlebar row → the
+    * stock title has nowhere to draw → blank). AppKit's own title label can't be
+    * forced to render there for this window class. So GUARANTEE a non-blank
+    * visible title app-agnostically by installing a titlebar ACCESSORY view
+    * controller carrying a centered NSTextField label with the title string — it
+    * renders in the titlebar band regardless of the stock title layout. This is
+    * generic (any legacy window), idempotent (install once), and independent of
+    * whether the two-row layout materialized. */
+   install_titlebar_label(win, name);
 }
 
 /* ---- generic TOOLBAR-BUTTON styling --------------------------------------
@@ -4400,6 +4485,20 @@ static void toolbar_style_on_show(id win) {
 void _86x64_test_window_title_on_show(id win) { window_title_on_show(win); }
 void _86x64_test_toolbar_style_on_show(id win) { toolbar_style_on_show(win); }
 int  _86x64_test_window_is_legacy(id win)      { return window_is_legacy(win); }
+/* returns the tagged titlebar-label accessory's string value (or nil) so the
+ * guard can assert a NON-BLANK rendered title label was installed. */
+id _86x64_test_titlebar_label_text(id win) {
+   id list = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("titlebarAccessoryViewControllers"));
+   long ln = list ? ((long(*)(id, SEL))objc_msgSend)(list, sel_registerName("count")) : 0;
+   for (long i = 0; i < ln; ++i) {
+      id avc = ((id(*)(id, SEL, long))objc_msgSend)(list, sel_registerName("objectAtIndex:"), i);
+      id v = ((id(*)(id, SEL))objc_msgSend)(avc, sel_registerName("view"));
+      if (v && ((long(*)(id, SEL))objc_msgSend)(v, sel_registerName("tag")) == ABICONV_TITLE_ACCESSORY_TAG) {
+         return ((id(*)(id, SEL))objc_msgSend)(v, sel_registerName("stringValue"));
+      }
+   }
+   return nil;
+}
 
 /* ---- ABICONV_WINCHROME_DIAG (env-gated, default OFF) ----------------------
  * A pixel-oracle diagnostic: when a window is shown, dump to stderr its class
@@ -4441,6 +4540,11 @@ static void winchrome_diag(id win) {
            "title='%s' titleVisibility=%ld titlebarTransparent=%d toolbarStyle=%ld isVisible=%d\n",
            mask, (int)(mask & 1), (int)((mask >> 8) & 1), (int)((mask >> 12) & 1),
            (int)((mask >> 15) & 1), nsstr_c(title), tvis, ttrans, tbstyle, vis);
+   /* titlebar-label accessory (our fallback visible-title guarantee) */
+   {
+      id acc = _86x64_test_titlebar_label_text(win);
+      fprintf(stderr, "[wcdiag] titlebarLabelAccessory='%s'\n", nsstr_c(acc));
+   }
    /* toolbar breakdown */
    id tb = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("toolbar"));
    if (!tb) { fprintf(stderr, "[wcdiag] toolbar: (none)\n"); fflush(stderr); return; }

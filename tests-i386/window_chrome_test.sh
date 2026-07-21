@@ -110,8 +110,10 @@ int main(int argc, char **argv) {
         void (*toolbar_style)(id)   = dlsym(h, "_86x64_test_toolbar_style_on_show");
         int  (*win_is_legacy)(id)   = dlsym(h, "_86x64_test_window_is_legacy");
         void (*accept_subclass)(int)= dlsym(h, "_86x64_test_window_accept_subclass");
+        NSString* (*label_text)(id) = dlsym(h, "_86x64_test_titlebar_label_text");
         if (!install || !ovcls || !inst_ov || !has_chrome || !accept_responds ||
-            !title_on_show || !toolbar_style || !win_is_legacy || !accept_subclass) {
+            !title_on_show || !toolbar_style || !win_is_legacy || !accept_subclass ||
+            !label_text) {
             fprintf(stderr, "missing test hooks\n"); return 2;
         }
 
@@ -250,8 +252,26 @@ int main(int argc, char **argv) {
         }
         if (![[lw3 title] isEqualToString:@"Quinn"]) {
             fprintf(stderr, "unified legacy window title lost\n"); return 1; }
+        /* FALLBACK visible-title guarantee: a titlebar-label accessory carrying the
+         * title must be installed (the actual "non-blank title somewhere" win). */
+        NSString *acc = label_text(lw3);
+        if (![acc isEqualToString:@"Quinn"]) {
+            fprintf(stderr, "titlebar-label accessory missing/blank (='%s')\n",
+                    acc ? [acc UTF8String] : "(nil)"); return 1; }
         fprintf(stderr, "legacy unified window: unified bit cleared + toolbarStyle "
-                "Expanded, title '%s' gets its own row OK\n", [[lw3 title] UTF8String]);
+                "Expanded + titlebar-label accessory '%s' installed OK\n", [acc UTF8String]);
+
+        /* idempotent: a second title_on_show must NOT stack a duplicate accessory */
+        NSUInteger accBefore = [[lw3 titlebarAccessoryViewControllers] count];
+        title_on_show(lw3);
+        if ([[lw3 titlebarAccessoryViewControllers] count] != accBefore) {
+            fprintf(stderr, "titlebar-label accessory duplicated on re-show\n"); return 1; }
+        fprintf(stderr, "legacy unified window: re-show does not duplicate the accessory OK\n");
+
+        /* a NATIVE window must NOT get the titlebar-label accessory */
+        if (label_text(nt) != nil) {
+            fprintf(stderr, "native window wrongly got a titlebar-label accessory\n"); return 1; }
+        fprintf(stderr, "native window: no titlebar-label accessory (untouched) OK\n");
 
         /* ===== generic TOOLBAR styling ================================== */
         TbDelegate *dlg = [TbDelegate new];
