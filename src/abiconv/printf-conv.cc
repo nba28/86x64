@@ -1,5 +1,6 @@
 #include <cassert>
 #include <cstdint>
+#include <cstdio>
 #include <cstdlib>
 #include <stdexcept>
 #include <list>
@@ -114,6 +115,13 @@ namespace {
          }
       }
 
+      if (getenv("ABICONV_PRINTF_DIAG")) {
+         fprintf(stderr, "[printf-diag] unrecognized conversion specifier "
+                 "0x%02x '%c' at format tail \"%.24s\"\n",
+                 (unsigned char)*format,
+                 (*format >= 0x20 && *format < 0x7f) ? *format : '?', format);
+         fflush(stderr);
+      }
       throw std::invalid_argument("invalid conversion specifier");
    }
 
@@ -140,12 +148,16 @@ namespace {
 
    /* One parsed conversion directive. `pos` is the 1-based positional argument
     * index from a `%N$...` specifier (0 = non-positional). `consumes` is false
-    * for `%%`. */
+    * for `%%`. `star_args` counts the `*` field-width / `.*` precision specifiers
+    * (0, 1, or 2): each `*` consumes an EXTRA leading int argument (the width or
+    * precision value), which must be converted i386->x86_64 BEFORE the main
+    * argument. `printf("%*.*f", w, p, x)` = 3 consumed args. */
    struct printf_directive {
       unsigned pos;
       printf_type type;
       std::optional<printf_modifier> mod;
       bool consumes;
+      unsigned star_args;
    };
 
    /* Parse ONE directive (the char after '%'), advancing `format` past it.
@@ -156,7 +168,7 @@ namespace {
     * `%1$.2g` double arg was never converted -> native read garbage, e.g. Civ
     * IV's "requires at least 1.2e-265 MB" disk-space alert). */
    printf_directive printf_parse_directive(const char *& format) {
-      printf_directive d{0, printf_type::ESCAPE, std::nullopt, false};
+      printf_directive d{0, printf_type::ESCAPE, std::nullopt, false, 0};
 
       /* positional argument prefix: <digits>'$' */
       if (isdigit((unsigned char)*format)) {
@@ -166,26 +178,46 @@ namespace {
          if (*q == '$') { d.pos = n; format = q + 1; }
       }
 
-      /* parse flags */
-      switch (*format) {
-      case '#':
-      case '0':
-      case '-':
-      case ' ':
-      case '+':
-      case '\'':
-         ++format;
+      /* parse flags (there may be several, e.g. "%-+08.3f") */
+      for (;;) {
+         switch (*format) {
+         case '#': case '0': case '-': case ' ': case '+': case '\'':
+            ++format;
+            continue;
+         }
          break;
       }
 
-      /* parse minimum field width */
-      while (isdigit((unsigned char)*format)) {
+      /* parse minimum field width: either a literal digit string OR a '*' that
+       * takes the width from an int argument (`printf("%*d", w, x)`). The '*'
+       * consumes one EXTRA int arg the driver must convert before the main one.
+       * A `%*N$d` positional-star form also exists (rare); consume its `N$`. */
+      if (*format == '*') {
          ++format;
+         if (isdigit((unsigned char)*format)) {
+            const char *q = format;
+            while (isdigit((unsigned char)*q)) { ++q; }
+            if (*q == '$') { format = q + 1; }
+         }
+         ++d.star_args;
+      } else {
+         while (isdigit((unsigned char)*format)) { ++format; }
       }
 
-      /* parse precision */
+      /* parse precision: '.' then either digits, a '*' (int arg), or empty (== .0) */
       if (*format == '.') {
-         while (isdigit(*++format)) {}
+         ++format;
+         if (*format == '*') {
+            ++format;
+            if (isdigit((unsigned char)*format)) {
+               const char *q = format;
+               while (isdigit((unsigned char)*q)) { ++q; }
+               if (*q == '$') { format = q + 1; }
+            }
+            ++d.star_args;
+         } else {
+            while (isdigit((unsigned char)*format)) { ++format; }
+         }
       }
 
       /* parse length modifier */
@@ -337,6 +369,14 @@ extern "C" unsigned printf_conversion_f(const void *args32, void *args64, reg_wi
 
    if (!positional) {
       for (const printf_directive &d : specs) {
+         /* `*` width/precision each take an int arg that PRECEDES the main
+          * argument in the i386 stream: `printf("%*.*f", w, p, x)` pushes
+          * w, p, x. Convert those ints first (i386 4-byte -> x86_64), then
+          * the main conversion. */
+         for (unsigned s = 0; s < d.star_args; ++s) {
+            printf_do_convert(printf_type::SIGNED, std::nullopt,
+                              args32, args64, argtypes, arg_count);
+         }
          printf_do_convert(d.type, d.mod, args32, args64, argtypes, arg_count);
       }
    } else {
@@ -348,6 +388,11 @@ extern "C" unsigned printf_conversion_f(const void *args32, void *args64, reg_wi
       for (unsigned i = 1; i <= maxp; ++i) {
          auto it = slot.find(i);
          if (it != slot.end()) {
+            /* A positional star form (`%1$*2$d`) references its width/precision
+             * by their own positional slots, so the star ints are already
+             * accounted for as separate slots — do NOT double-consume here.
+             * (Mixed positional+star is vanishingly rare; the common star use
+             * `%*.*f` is non-positional and handled above.) */
             printf_do_convert(it->second.type, it->second.mod,
                               args32, args64, argtypes, arg_count);
          } else {
@@ -502,6 +547,13 @@ namespace {
       }
       if (!positional) {
          for (const printf_directive &d : specs) {
+            /* `*` width/`.*` precision each take an int arg PRECEDING the main
+             * one in the i386 stream (`"%*.*f", w, p, x`): convert those ints
+             * first, then the main conversion. (Same as printf_conversion_f.) */
+            for (unsigned s = 0; s < d.star_args; ++s) {
+               printf_do_convert(printf_type::SIGNED, std::nullopt,
+                                 a32, a64, at, arg_count);
+            }
             printf_do_convert(d.type, d.mod, a32, a64, at, arg_count);
          }
       } else {
@@ -513,6 +565,9 @@ namespace {
          for (unsigned i = 1; i <= maxp; ++i) {
             auto it = slot.find(i);
             if (it != slot.end()) {
+               /* positional-star (`%1$*2$d`) references star ints by their own
+                * slots, already counted — do not double-consume (see the sibling
+                * comment in printf_conversion_f). */
                printf_do_convert(it->second.type, it->second.mod, a32, a64, at, arg_count);
             } else {
                convert_arg<ptr32_t, ptr64_t>(a32, a64, at, arg_count);
