@@ -1155,8 +1155,26 @@ namespace MachO {
       if (imm == nullptr && instbuf.size() >= 6 && instbuf.at(0) == 0xc7
           && (instbuf.at(1) & 0x38) == 0          /* 0xc7 /0 = MOV r/m32, imm32 */
           && (instbuf.at(1) >> 6) != 3) {         /* memory destination */
+         const uint8_t mod = instbuf.at(1) >> 6;
          const uint8_t rm = instbuf.at(1) & 0x07;
-         if (rm != 0x04 && rm != 0x05               /* esp/ebp handled above */
+         /* rm==4 = SIB byte follows. A SIB with a REAL register base
+          * (`movl $&data, disp(%ebx,%esi,s)` — array-of-structs field
+          * install) is just as much a genbase store as the plain-ModR/M
+          * shapes and used to fall through BOTH arms (the stack arm keys
+          * the exact esp-no-index encodings, this arm excluded rm==4
+          * wholesale) -> the pointer imm shipped raw (guard
+          * 99_sib_ptr_imm_store). Admit it under the SAME policy gates;
+          * the no-base [disp32+idx*scale] shape (mod==0, SIB base==101)
+          * stays excluded — that displacement is owned by the
+          * absolute-table machinery. The MR rewrite prepends 0x67 for
+          * scaled-index dests to keep the i386 EA wrap. */
+         bool sib_reg_base = false;
+         if (rm == 0x04 && instbuf.size() >= 7) {   /* modrm+sib+imm32 min */
+            const uint8_t sib_base = instbuf.at(2) & 0x07;
+            sib_reg_base = !(mod == 0 && sib_base == 0x05);
+         }
+         if ((rm != 0x04 && rm != 0x05               /* esp/ebp handled above */
+              ? true : sib_reg_base)
              && xed_operand_values_has_immediate(operands)
              && xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
             const std::size_t imm_off = instbuf.size() - sizeof(uint32_t);
@@ -1747,8 +1765,39 @@ namespace MachO {
                      /* op [mem], r11d : REX.R + mr_op + modrm(reg=r11) + sib/disp.
                       * Reuse the original /n ModR/M + any SIB/disp bytes
                       * (everything after the ModR/M except the trailing imm32);
-                      * swap the reg field to r11 (low 3 = 011) and add REX.R. */
+                      * swap the reg field to r11 (low 3 = 011) and add REX.R.
+                      *
+                      * i386 EA-wrap fidelity for SCALED-INDEX dests: the copied
+                      * ModR/M widens the addressing regs to 64-bit, so a
+                      * `disp(base,index,scale)` operand loses the i386 mod-2^32
+                      * wrap a negative/sentinel index relies on (the
+                      * 55_sib_index_neg_wrap pathology, e.g. index=-4 at scale
+                      * 4 -> +0x3fffffff0 instead of -0x10 -> >4GB fault).
+                      * Mirror the M64 copy-ctor addr32 policy EXACTLY: prepend
+                      * 0x67 (legal before REX) iff the operand has a real
+                      * index and neither base nor index is the widened
+                      * esp/ebp (truncating the 64-bit stack pointer would
+                      * corrupt stack access; base-only operands stay
+                      * unprefixed for the same native->4GB-pointer reason
+                      * documented at the copy ctor). Read the regs from the
+                      * ORIGINAL i386 decode. */
                      std::vector<uint8_t> mb;
+                     {
+                        const xed_operand_values_t *mrops =
+                           xed_decoded_inst_operands_const(&xedd);
+                        const xed_reg_enum_t mr_base =
+                           xed_decoded_inst_get_base_reg(mrops, 0);
+                        const xed_reg_enum_t mr_index =
+                           xed_decoded_inst_get_index_reg(mrops, 0);
+                        auto mr_wide = [](xed_reg_enum_t r) {
+                           return r == XED_REG_ESP || r == XED_REG_EBP ||
+                                  r == XED_REG_RSP || r == XED_REG_RBP;
+                        };
+                        if (mr_index != XED_REG_INVALID &&
+                            !mr_wide(mr_base) && !mr_wide(mr_index)) {
+                           mb.push_back(0x67);                    /* addr32 */
+                        }
+                     }
                      mb.push_back(0x44);                                /* REX.R */
                      mb.push_back(mr_op);                               /* op r/m32,r32 */
                      mb.push_back((uint8_t)((instbuf.at(1) & 0xC7) | (0x3 << 3)));
