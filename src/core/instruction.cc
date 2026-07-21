@@ -514,32 +514,54 @@ namespace MachO {
                      imm_is_ptr = false;
                   }
                   /* CMP/TEST COMPARISON-VALUE gate: in `cmp/test [abs32],imm32`
-                   * (81 /7, F7 /0-1) the immediate is a comparison value / bit
-                   * mask — a data word is essentially never compared against a
-                   * code/data ADDRESS baked as an immediate, while comparing it
-                   * against an integer that merely ALIASES a vmaddr is routine.
-                   * The code_alias_is_constant gate above is DISARMED for
+                   * (81 /7, F7 /0-1) the immediate is usually a comparison
+                   * value / bit mask, and comparing a data word against an
+                   * integer that merely ALIASES a vmaddr is routine. The
+                   * code_alias_is_constant gate above is DISARMED for
                    * locals-stripped binaries, which mis-relocated Civ IV
                    * (Steam)'s OS-version check `cmpl $0x100308, _version`:
                    * 0x100308 (packed 10.3.8) aliases __text, was rebased to a
                    * `lea r11,[rip+..]; cmp r11d` -> the check compared against
                    * ~0x101a690d -> "insufficient system version" exit. So for
-                   * CMP/TEST only, keep the pointer classification solely on
-                   * POSITIVE evidence: an nlist symbol AT the immediate's value
-                   * (func_syms — the `cmpl $_default_handler, _handler` idiom,
-                   * test 87); otherwise the imm stays a literal. MOV (stored
-                   * pointer install) and the ADD/SUB pointer-arithmetic family
-                   * keep the permissive probe. The register-compare twin
-                   * (CMP_GPRv_IMMz below) is instead gated by
+                   * CMP/TEST, keep the pointer classification on POSITIVE
+                   * evidence only:
+                   *  - an nlist symbol AT the immediate's value (func_syms —
+                   *    the `cmpl $_default_handler, _handler` idiom, test 87);
+                   *  - for CMP only, the EXACT 9510f29 store discriminator
+                   *    (fixed-load non-PIE MH_EXECUTE + 4-aligned + writable
+                   *    data): a pointer-IDENTITY test `cmpl $&sentinel, mem`
+                   *    against a field the 9510f29/07e7ef0 family relocates on
+                   *    the STORE side must classify IDENTICALLY to the store,
+                   *    or the identity test goes ALWAYS-FALSE in the
+                   *    translated binary (Civ IV shipped 22/22 __data-target +
+                   *    17/18 zerofill compare sites raw against relocated
+                   *    stores — silent COW/free-the-sentinel inversion, no
+                   *    crash). A __TEXT/__const-aliasing integer ($0x100308,
+                   *    $0x1000000) still stays literal: vmaddr_in_writable_data
+                   *    admits neither (guards 99_cmp_abs32_imm_notptr /
+                   *    99_cmp_mem_ptr_imm).
+                   * Otherwise the imm stays a literal. MOV (stored pointer
+                   * install) and the ADD/SUB pointer-arithmetic family keep
+                   * the permissive probe; TEST (a bit mask against a pointer
+                   * is meaningless) keeps func_syms-only. The register-compare
+                   * twin (CMP_GPRv_IMMz below) is instead gated by
                    * imm_bounds_relocated_table: a loop-sentinel compare runs on
                    * a REGISTER iterator; a memory-dest cmp bounds no loop. */
                   if (imm_is_ptr && bits == Bits::M32) {
                      const xed_iclass_enum_t iclass =
                         xed_decoded_inst_get_iclass(&xedd);
-                     if ((iclass == XED_ICLASS_CMP ||
-                          iclass == XED_ICLASS_TEST) &&
-                         env.func_syms.count(imm_val) == 0) {
-                        imm_is_ptr = false;
+                     if (iclass == XED_ICLASS_CMP ||
+                         iclass == XED_ICLASS_TEST) {
+                        const bool cmp_data_identity =
+                           iclass == XED_ICLASS_CMP &&
+                           env.archive.header.filetype == MH_EXECUTE &&
+                           (env.archive.header.flags & MH_PIE) == 0 &&
+                           (imm_val & 3) == 0 &&
+                           env.vmaddr_in_writable_data(imm_val);
+                        if (env.func_syms.count(imm_val) == 0 &&
+                            !cmp_data_identity) {
+                           imm_is_ptr = false;
+                        }
                      }
                   }
                   imm = Immediate<bits>::Parse(img, loc + imm_idx, env, imm_is_ptr);
@@ -1224,6 +1246,61 @@ namespace MachO {
                }
             }
             if (ptr_target) {
+               imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);
+               imm->heuristic = true; /* value-alias probe (see Immediate) */
+            }
+         }
+      }
+
+      /* `cmp [reg+disp], imm32` (81 /7) — mem-dest pointer-IDENTITY COMPARE
+       * against a baked absolute data address: the COMPARE sibling of the
+       * 9510f29/07e7ef0 pointer-imm STORES above. A fixed-load i386 image
+       * that stores `movl $&sentinel, field(%reg)` tests it later with
+       * `cmpl $&sentinel, field(%reg)` (Civ IV live: `cmpl $0x145ea6c,
+       * -0x54(%rbp)` at 0x114cf20b, `cmpl $0x1460468,0xc(%rbx)` x13; census
+       * 22/22 __data-target + 17/18 zerofill compare sites shipped raw).
+       * Relocating the store but not the compare turns every such identity
+       * test ALWAYS-FALSE in the translated binary — a SILENT corruption
+       * class (copy-on-write / free-the-sentinel decisions invert), not a
+       * crash. Capture the imm under the EXACT 9510f29 discriminator so
+       * store and compare classify IDENTICALLY as a pure function of
+       * value+image: fixed-load non-PIE MH_EXECUTE + imm32 4-aligned +
+       * vmaddr_in_writable_data (zerofill included per 07e7ef0; __OBJC
+       * excluded by the predicate). Deliberately NOT the looser
+       * const-section/vtable probes the MOV arm also carries: live integer
+       * compares ($0x1000000, $0xff0000) alias __TEXT,__const and must stay
+       * literal (guard 99_cmp_abs32_imm_notptr covers the __text-aliasing
+       * side). CMP only — a TEST mask against a pointer is meaningless, and
+       * ADD/SUB/AND/OR mem-imm arithmetic on data-aliasing values is
+       * routinely plain integer math. The CMP_MEMv_IMMz transform
+       * (lea r11,[rip+disp]; cmp [mem], r11d — 39 /r, same operand order)
+       * already existed from the 87_alu_absdest family; this is purely the
+       * missing parse capture. heuristic=true keeps the section.cc
+       * DetectPicAnchoredDisps (2c) zerofill-alias back-stop. abs32 dests
+       * (mod=00 r/m=101, SIB no-base) are owned by the absolute-[disp32]
+       * arm above, whose CMP gate mirrors this discriminator.
+       * (Guard 99_cmp_mem_ptr_imm.) */
+      if (imm == nullptr && this->memdisp == nullptr && bits == Bits::M32
+          && instbuf.size() >= 6 && instbuf.at(0) == 0x81
+          && (instbuf.at(1) & 0x38) == 0x38       /* 81 /7 = CMP r/m32, imm32 */
+          && (instbuf.at(1) >> 6) != 3) {         /* memory destination */
+         const uint8_t mod = instbuf.at(1) >> 6;
+         const uint8_t rm  = instbuf.at(1) & 0x07;
+         bool reg_base = !(mod == 0 && rm == 5);  /* not bare [disp32] */
+         if (mod == 0 && rm == 4 && instbuf.size() >= 3 &&
+             (instbuf.at(2) & 0x07) == 5) {
+            reg_base = false;                     /* SIB no-base [disp32+idx] */
+         }
+         if (reg_base
+             && xed_operand_values_has_immediate(operands)
+             && xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
+            const std::size_t imm_off = instbuf.size() - sizeof(uint32_t);
+            const uint32_t value =
+               img.template at<uint32_t>(loc.offset + imm_off);
+            if (value >= 0x1000 && value < 0x80000000U && (value & 3) == 0
+                && env.archive.header.filetype == MH_EXECUTE
+                && (env.archive.header.flags & MH_PIE) == 0
+                && env.vmaddr_in_writable_data(value)) {
                imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);
                imm->heuristic = true; /* value-alias probe (see Immediate) */
             }
