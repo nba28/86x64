@@ -680,6 +680,16 @@ _x64_exc_longjmp:
 	MTSHIM	___LockPixels,         _shim_LockPixels
 	MTSHIM	___UnlockPixels,       _shim_UnlockPixels
 
+	;; GetCTable/DisposeCTable — classic 'clut' color-table loader. Native
+	;; QuickDraw is gone so the abigen ___GetCTable returned NULL, and Civ IV's
+	;; HBITMAP_Mac paletted-bitmap path deref'd the NULL handle (NULL-deref at
+	;; 0x0 building an indexed bitmap's color table). qd_gworld.c returns a real
+	;; correctly-sized ColorTable Handle (the same QDColorTable the indexed-
+	;; GWorld path consumes). ___GetCTable is abigen-generated (forwards to the
+	;; dead native) so it's excluded via the handshim ignore set (this MTSHIM).
+	;; (___DisposeCTable already MTSHIM'd below near the qd_shim.c block)
+	MTSHIM	___GetCTable,          _shim_GetCTable
+
 ;; ---------------------------------------------------------------------
 ;; QuickDraw drawing substrate — CG-backed (qd_gworld.c). CopyBits/CopyMask
 ;; image blits, rect/rgn fills, pen/line, PICT-less draw, offscreen buffer

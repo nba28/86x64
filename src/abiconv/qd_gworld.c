@@ -1180,3 +1180,57 @@ uint32_t shim_DMNewDisplayModeList(uint32_t *a)
 uint32_t shim_DMGetIndexedDisplayModeFromList(uint32_t *a) { (void)a; return (uint32_t)qdParamErr; }
 /* OSErr DMDisposeList(DMListType list) */
 uint32_t shim_DMDisposeList(uint32_t *a) { if (a[0]) cm_dispose_handle(a[0]); return 0; }
+
+/* ---- GetCTable / DisposeCTable — classic QuickDraw color-table loader -------
+ *
+ * `CTabHandle GetCTable(short ctID)` loaded a 'clut' resource (the standard
+ * system color table for a pixel depth). Native QuickDraw is gone on modern
+ * macOS, so the abigen `___GetCTable` forwarded to the dead native impl and
+ * returned NULL — Civ IV's HBITMAP_Mac paletted-bitmap path (RTTI 11HBITMAP_Mac,
+ * the depth-8/4 arms after the biBitCount jump table) then dereferenced the NULL
+ * handle (`movl (%CTab),%reg`; NULL-deref at 0x0) building an indexed bitmap's
+ * color table. Callers OVERWRITE the returned table's entries with their own
+ * palette (Civ's loop writes ctTable[i].rgb for every index), so the CONTENTS
+ * only need to be a valid default; what matters is a real, correctly-SIZED
+ * ColorTable handle.
+ *
+ * ctID convention (classic Inside Macintosh): the standard tables are
+ * `32 + depth` (grayscale) and `64 + depth` (color); ctID's low bits carry the
+ * pixel depth (1/2/4/8). We size the table to 2^depth entries (capped 256),
+ * seed a default ramp, and return a low-4GB Handle (cm_new_handle) whose block
+ * layout is the classic ColorTable (QDColorTable here) the indexed-GWorld path
+ * (line ~803) already consumes — so the produced table round-trips through our
+ * own PixMap indexing too. Generic: any classic caller of GetCTable is served.
+ */
+uint32_t shim_GetCTable(uint32_t *a)
+{
+   int16_t ctID = (int16_t)(uint16_t)a[0];
+   int depth = ctID & 0x7f;                 /* 32+d / 64+d both carry d in low 7 */
+   if (depth <= 0 || depth > 8) { depth = 8; }
+   int n = 1 << depth;                       /* 2,4,16,256 entries */
+   if (n < 1)   { n = 1; }
+   if (n > 256) { n = 256; }
+
+   /* ColorTable header (8B) + n ColorSpec (8B each). */
+   uint32_t sz = (uint32_t)(sizeof(QDColorTable) - sizeof(QDColorSpec)
+                            + (size_t)n * sizeof(QDColorSpec));
+   uint32_t h = cm_new_handle(sz, 1);
+   if (!h) { return 0; }
+   QDColorTable *ct = (QDColorTable *)cm_handle_block(h);
+   if (!ct) { return 0; }
+
+   ct->ctSeed  = 0;
+   ct->ctFlags = 0;                          /* pixmap (device) table */
+   ct->ctSize  = (int16_t)(n - 1);           /* classic: #entries - 1 */
+   /* Seed a default gray ramp so a caller that does NOT overwrite still gets a
+    * usable table (indexed 0..n-1); i has value==i, rgb = i scaled to 16-bit. */
+   for (int i = 0; i < n; i++) {
+      uint16_t g = (uint16_t)((n > 1) ? (i * 0xffff) / (n - 1) : 0);
+      ct->ctTable[i].value    = (int16_t)i;
+      ct->ctTable[i].rgb.red   = g;
+      ct->ctTable[i].rgb.green = g;
+      ct->ctTable[i].rgb.blue  = g;
+   }
+   return h;
+}
+/* DisposeCTable is hand-shimmed in qd_shim.c (frees the cm handle). */

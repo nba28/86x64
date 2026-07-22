@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -207,6 +207,16 @@ change-deps: $(MACHO_TOOL)
 # i386 sysroot): converted double[] renders white, raw i386 float[] does not.
 cg-color:
 	@bash cg_color_test.sh
+
+# getctable: regression guard for the GetCTable color-table shim (qd_gworld.c).
+# Native QuickDraw GetCTable is gone -> abigen ___GetCTable returned NULL -> Civ
+# IV's HBITMAP_Mac paletted-bitmap path deref'd the NULL CTabHandle (NULL-deref
+# at 0x0). The fix returns a real correctly-sized ColorTable handle. Self-
+# contained (native x86_64 cc): the shim's table construction delivers a non-NULL
+# table with ctSize=n-1 + room for n ColorSpec entries + a default gray ramp; the
+# old blanket-NULL (negative control) reproduces the deref bug.
+getctable:
+	@bash getctable_test.sh
 
 # cfprefs-scalar-forward: regression guard for the CFPreferences scalar-read
 # forwarding fix (prefs_shim.c public GetApp{Boolean,Integer}Value forward to the
