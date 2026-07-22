@@ -2473,12 +2473,25 @@ namespace MachO {
                    * adjacent 4-byte table entries into one bogus 64-bit
                    * address. We split this into:
                    *
-                   *     mov  eax, [disp32 + idx*4]   ; 32-bit load, zero-ext
-                   *     jmpq rax                     ; 64-bit indirect jmp
+                   *     mov  r11d, [disp32 + idx*4]  ; 32-bit load, zero-ext
+                   *     jmpq r11                     ; 64-bit indirect jmp
                    *
-                   * Using rax as scratch overwrites the index (if it was
-                   * also rax), but the original `jmpq *mem` doesn't preserve
-                   * regs across the jump either.
+                   * ★The scratch MUST be r11d (codegen's standard scratch,
+                   * OUTSIDE the i386 register file), NOT eax. An i386
+                   * `jmp *mem` writes NO general register — every register
+                   * (crucially the switch INDEX register) is live-in at the
+                   * case handlers, and GCC's canonical switch KEEPS the
+                   * scrutinee in the index reg for the handlers to consume
+                   * (Civ IV HBITMAP_Mac: `movzwl %dx,%eax; jmp
+                   * *tbl(,%eax,4)` on biBitCount, then case-8's handler does
+                   * `movl %eax,-0x3c(%ebp)` storing %eax as bits-per-pixel).
+                   * Loading the target into eax clobbered the index with the
+                   * table entry's ASLR-slid ADDRESS -> case 8 stored a
+                   * ~3-4GB "bpp" -> operator new[]/memset abort (983 one-step
+                   * dispatches in Civ.dylib alone, 848 index==eax). r11 is
+                   * dead across the jump in BOTH ABIs (caller-saved, no i386
+                   * mapping), so it's a safe scratch and preserves every
+                   * i386 reg. Guard 99_jmptbl_index_live.
                    *
                    * Triggers for EVERY register-relative form: jump tables
                    * `[disp32 + idx*scale]`, function pointers in struct
@@ -2524,9 +2537,9 @@ namespace MachO {
                       * root cause as the CALL_NEAR_MEMv case: the anchor base
                       * is dead in M64, so reach the resolved blob rip-relative
                       * instead of keeping the anchor + a rip-relative disp.
-                      *   no live index : mov eax, [rip+slot]     (drop anchor)
+                      *   no live index : mov r11d, [rip+slot]    (drop anchor)
                       *   live index    : lea r11,[rip+base];
-                      *                   mov eax,[r11 + idx*s]   (keep index) */
+                      *                   mov r11d,[r11 + idx*s]  (keep index) */
                      const xed_reg_enum_t idxreg =
                         xed_decoded_inst_get_index_reg(operands, 0);
                      opcode_t rip_buf;
@@ -2534,8 +2547,9 @@ namespace MachO {
                         rip_buf.push_back(mov_buf[j]); /* legacy prefixes (0x66) */
                      }
                      if (idxreg == XED_REG_INVALID) {
+                        rip_buf.push_back(0x44);       /* REX.R -> reg=r11d */
                         rip_buf.push_back(0x8B);       /* mov r32, r/m32 */
-                        rip_buf.push_back(0x05);       /* mod=00 reg=eax rm=101 */
+                        rip_buf.push_back(0x1D);       /* mod=00 reg=r11 rm=101 */
                         rip_buf.insert(rip_buf.end(), 4, (uint8_t)0x00);
                         mov_inst = new Instruction<Bits::M64>(rip_buf);
                         mov_inst->memidx = 0;
@@ -2551,9 +2565,15 @@ namespace MachO {
                         pre_lea->memidx = 0;
                         env.resolve(memdisp, &pre_lea->memdisp);
                         pre_lea->memdisp_offset = memdisp_offset;
-                        rip_buf.push_back(0x41);       /* REX.B -> r11 base */
+                        /* REX.R (dest r11d) + REX.B (base r11): the load reads
+                         * [r11+idx*s] and writes r11d — the read completes
+                         * before the write within the single insn, so reusing
+                         * r11 as both base and dest is safe, and the i386
+                         * index reg is preserved (r11 is outside the i386
+                         * register file). */
+                        rip_buf.push_back(0x45);       /* REX.R|REX.B */
                         rip_buf.push_back(0x8B);
-                        rip_buf.push_back(0x04);       /* mod=00 reg=eax rm=100 (SIB) */
+                        rip_buf.push_back(0x04);       /* mod=00 reg=r11 rm=100 (SIB) */
                         rip_buf.push_back((uint8_t)((scale_f << 6) |
                                                     (idx_f << 3) | 0x03)); /* base=r11 */
                         mov_inst = new Instruction<Bits::M64>(rip_buf);
@@ -2561,7 +2581,11 @@ namespace MachO {
                      }
                   } else {
                      mov_buf[op_idx] = 0x8B;             /* mov r32, r/m32 */
-                     mov_buf[op_idx + 1] = modrm & 0xC7; /* reg -> eax */
+                     mov_buf[op_idx + 1] = modrm & 0xC7; /* reg -> r11 (011) */
+                     mov_buf[op_idx + 1] |= (0x3 << 3);  /* reg field = 011  */
+                     mov_buf.insert(mov_buf.begin() + op_idx, 0x44); /* REX.R */
+                     /* op_idx now points at REX.R; the opcode/ModR/M shifted
+                      * one byte right, so the SIB read below is at op_idx+3. */
                      mov_inst = new Instruction<Bits::M64>(mov_buf);
                      mov_inst->memidx = 0;
                      /* SIB no-base form (mod=00 rm=100, SIB base=101) is an
@@ -2570,7 +2594,7 @@ namespace MachO {
                       * matching CALL_NEAR_MEMv. Other forms keep their
                       * register-relative disp untouched. */
                      if ((modrm & 0xC7) == 0x04) {
-                        const uint8_t sib = mov_buf.at(op_idx + 2);
+                        const uint8_t sib = mov_buf.at(op_idx + 3);
                         if ((sib & 0x07) == 0x05) {
                            mov_inst->memdisp_absolute = true;
                         }
@@ -2588,10 +2612,12 @@ namespace MachO {
                   }
 
                   auto jmp_inst = new Instruction<Bits::M64>(
-                     opcode::jmp_r64(XED_REG_RAX));
+                     opcode::jmp_r64(XED_REG_R11));
                   /* trap a `jmp [mem]` (switch dispatch / tail-call fn-ptr)
-                   * through a NULL slot (env-gated). */
-                  auto trap = null_trap(XED_REG_RAX);
+                   * through a NULL slot (env-gated). r11 = the scratch the
+                   * mov above loaded the target into (see the head comment:
+                   * eax would clobber the live switch-index reg). */
+                  auto trap = null_trap(XED_REG_R11);
                   if (trap.empty()) {
                      if (pre_lea) { return {pre_lea, mov_inst, jmp_inst}; }
                      return {mov_inst, jmp_inst};
