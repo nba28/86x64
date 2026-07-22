@@ -27,6 +27,9 @@ Usage:
 """
 import argparse, json, os, subprocess, sys, glob
 
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _i386_closure import expand_target
+
 def framework_stub_binaries(sdk):
     """Every <FW>.framework/<FW> Mach-O stub under the SDK (incl. sub-frameworks)."""
     bins = []
@@ -138,11 +141,19 @@ def main():
     ap.add_argument("--report")
     ap.add_argument("--target", action="append", default=[],
                     help="a target i386 binary whose imports define the 'useful' "
-                         "symbol set. Repeatable. When given, the consider set is "
+                         "symbol set. Repeatable. Each target is expanded to its "
+                         "full CO-TRANSLATED dependency closure (_i386_closure.py: "
+                         "bundle/pool frameworks + @loader_path siblings), so apps "
+                         "whose code lives in companion binaries (iWork SF*.framework) "
+                         "contribute their whole legacy import surface, not just the "
+                         "main exe's. When given, the consider set is "
                          "restricted to (union of target imports) ∩ (legacy framework "
                          "exports) -- only symbols some target actually calls. Missing "
                          "target files are skipped with a warning. Omit to consider the "
                          "whole legacy framework surface (large).")
+    ap.add_argument("--source", action="append", default=[], metavar="DIR",
+                    help="extra source pool for closure dep resolution "
+                         "(repeatable, searched before the defaults)")
     a = ap.parse_args()
 
     bins = framework_stub_binaries(a.sdk)
@@ -161,20 +172,33 @@ def main():
     # and they only bloat the consider set. Real symbols always start with '_'.
     legacy = {s for s in legacy if s.startswith("_")}
 
-    # 'only useful symbols': restrict to what our targets actually import.
+    # 'only useful symbols': restrict to what our targets actually import —
+    # each target expanded to its co-translated dependency closure (main exe +
+    # every binary m64 vendors+translates alongside it; the closure walk itself
+    # is over the i386 translate-input slice).
     if a.target:
         wanted = set()
+        seen_bins = set()
+        n_closure = 0
         for t in a.target:
             t = os.path.expanduser(t)
             if not os.path.exists(t):
                 print("  warning: target not found, skipping: %s" % t, file=sys.stderr)
                 continue
-            for arch in arches:
-                wanted |= nm_undefined_imports(t, arch)
+            bins, _skipped = expand_target(t, "i386", a.source or None)
+            for b in bins:
+                rb = os.path.realpath(str(b))
+                if rb in seen_bins:
+                    continue
+                seen_bins.add(rb)
+                n_closure += 1
+                for arch in arches:
+                    wanted |= nm_undefined_imports(rb, arch)
         before = len(legacy)
         legacy &= wanted
-        print("targets             : %d  (%d imports -> %d legacy-framework symbols, "
-              "from %d framework exports)" % (len(a.target), len(wanted), len(legacy), before))
+        print("targets             : %d  (%d closure binaries, %d imports -> %d "
+              "legacy-framework symbols, from %d framework exports)"
+              % (len(a.target), n_closure, len(wanted), len(legacy), before))
 
     if a.exclude_asm:
         already_shim = set()

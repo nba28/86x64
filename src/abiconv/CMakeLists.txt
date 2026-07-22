@@ -175,6 +175,17 @@ set(ABICONV_MODERN_TARGETS
     "$ENV{HOME}/projects/translations/Apps32/Quinn.app/Contents/MacOS/Quinn"
     "$ENV{HOME}/Library/Application Support/Steam/steamapps/common/Portal 2/bin/osx32/engine.dylib"
     CACHE STRING "i386 ORIGINAL app executables (Apps32) whose imports drive the universal modern shim set")
+# Extra source pools for the import-closure dep resolution (_i386_closure.py
+# --source; searched before _vendor_deps' DEFAULT_SOURCES). Normally empty —
+# the default pools cover the curated i386 originals. Useful when verifying
+# against a scratch pool without touching the shared framework library.
+set(ABICONV_CLOSURE_SOURCES "" CACHE STRING
+    "extra source pool dirs (semicolon list) for import-closure dep resolution")
+set(ABICONV_CLOSURE_SOURCE_ARGS "")
+foreach(s IN LISTS ABICONV_CLOSURE_SOURCES)
+  list(APPEND ABICONV_CLOSURE_SOURCE_ARGS --source "${s}")
+endforeach()
+
 set(ABICONV_MODERN_TARGET_ARGS "")
 set(ABICONV_MODERN_TARGET_DEPS "")
 foreach(t IN LISTS ABICONV_MODERN_TARGETS)
@@ -187,12 +198,15 @@ endforeach()
 add_custom_command(OUTPUT abiconv_import.syms includes_auto.h abiconv_handshim.syms
   COMMAND python3 ${CMAKE_SOURCE_DIR}/src/86x64/abigen_modern_manifest.py
           ${ABICONV_MODERN_TARGET_ARGS}
+          ${ABICONV_CLOSURE_SOURCE_ARGS}
           --arch i386
           --exclude-asm ${CMAKE_CURRENT_SOURCE_DIR}/maptable_tramp.asm
           --out-syms abiconv_import.syms
           --out-includes includes_auto.h
           --out-ignore abiconv_handshim.syms
   DEPENDS ${CMAKE_SOURCE_DIR}/src/86x64/abigen_modern_manifest.py
+          ${CMAKE_SOURCE_DIR}/src/86x64/_i386_closure.py
+          ${CMAKE_SOURCE_DIR}/src/86x64/_vendor_deps.py
           ${CMAKE_CURRENT_SOURCE_DIR}/maptable_tramp.asm
           ${ABICONV_MODERN_TARGET_DEPS}
   )
@@ -327,9 +341,12 @@ if(EXISTS ${ABICONV_LEGACY_SDK})
             --exclude-asm ${CMAKE_CURRENT_BINARY_DIR}/abiconv.asm
             --exclude-asm ${CMAKE_CURRENT_SOURCE_DIR}/maptable_tramp.asm
             ${ABICONV_LEGACY_TARGET_ARGS}
+            ${ABICONV_CLOSURE_SOURCE_ARGS}
             -o abiconv_legacy.syms
     DEPENDS abiconv.asm ${CMAKE_CURRENT_SOURCE_DIR}/maptable_tramp.asm
             ${CMAKE_SOURCE_DIR}/src/86x64/shimdb_legacy_considerset.py
+            ${CMAKE_SOURCE_DIR}/src/86x64/_i386_closure.py
+            ${CMAKE_SOURCE_DIR}/src/86x64/_vendor_deps.py
             ${ABICONV_LEGACY_TARGET_DEPS}
     )
   add_custom_command(OUTPUT abiconv_legacy.asm

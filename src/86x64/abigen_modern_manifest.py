@@ -36,12 +36,25 @@ Outputs:
   --out-includes FILE  a C header #including each discovered framework's umbrella
   --report FILE        JSON: per-leaf import counts, unmapped leaves
 
+Each --target is expanded to its full CO-TRANSLATED closure (_i386_closure.py):
+the main executable PLUS every dependency m64 vendors+translates alongside it
+(bundle-embedded frameworks, source-pool originals for dead absolute install
+paths, @loader_path siblings). Apps whose code lives in companion binaries
+(iWork '09: thin main exe + 15 SF*.framework classic dylibs; Source engine:
+engine.dylib + siblings) otherwise contribute only the main exe's imports —
+SFTabular's 31 AddressBook kAB* data-constant imports were invisible, got no
+shadow, and the translated 4-byte load truncated the native 64-bit address.
+
 Usage:
   abigen_modern_manifest.py --target <i386 bin> [--target ...]
+      [--source <pool dir> ...]
       [--exclude-asm abiconv.asm ...] --out-syms abiconv.syms
       --out-includes includes_auto.h [--report report.json]
 """
 import argparse, json, os, re, subprocess, sys
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+from _i386_closure import expand_target
 
 # Framework install_name leaf  ->  umbrella header abigen should parse. A generic,
 # stable Apple convention (not per-target / per-symbol curation): an umbrella
@@ -66,6 +79,13 @@ UMBRELLA = {
     "IOKit":                 ["<IOKit/IOKitLib.h>"],
     "AudioToolbox":          ["<AudioToolbox/AudioToolbox.h>"],
     "Carbon":                ["<Carbon/Carbon.h>"],   # present-native Carbon Events etc.
+    # AddressBook: still present-native (deprecated). Its kAB*Property/kAB*Label
+    # NSString-const data surface is what legacy contact-aware code reads
+    # (iWork SFTabular's static init copies 31 of them); the header decl gives
+    # abigen the ObjC-object type -> low-4GB data shadows. ABAddressBookC.h
+    # declares the C API (ABGetSharedAddressBook/ABCopyRecordForUniqueId/...).
+    "AddressBook":           ["<AddressBook/AddressBook.h>",
+                              "<AddressBook/ABAddressBookC.h>"],
     # libSystem umbrella: mach + the C library. mach/mach.h transitively declares
     # the unbridged-native time family (mach_timebase_info/mach_absolute_time/host_*).
     "libSystem":             ["<mach/mach.h>", "<mach/mach_time.h>",
@@ -128,7 +148,11 @@ def asm_emitted_shims(asmpath):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--target", action="append", default=[],
-                    help="i386 target binary whose imports drive the set (repeatable)")
+                    help="i386 target binary whose imports drive the set (repeatable; "
+                         "expanded to its full co-translated dependency closure)")
+    ap.add_argument("--source", action="append", default=[], metavar="DIR",
+                    help="extra source pool for closure dep resolution "
+                         "(repeatable, searched before the defaults)")
     ap.add_argument("--arch", default="i386")
     ap.add_argument("--exclude-asm", action="append", default=[],
                     help="libabiconv .asm whose already-emitted shims to exclude")
@@ -146,17 +170,32 @@ def main():
     ap.add_argument("--report")
     a = ap.parse_args()
 
-    # 1. aggregate imports per source-framework leaf across all targets
+    # 1. aggregate imports per source-framework leaf across all targets,
+    #    each target expanded to its co-translated dependency CLOSURE (main
+    #    exe + every binary m64 would vendor+translate alongside it).
     per_leaf = {}        # leaf -> set(_sym)
     n_targets = 0
+    n_closure = 0
+    seen_bins = set()    # realpath dedup across targets (shared SF frameworks)
+    skipped_deps = []
     for t in a.target:
         t = os.path.expanduser(t)
         if not os.path.exists(t):
             print("  warning: target not found, skipping: %s" % t, file=sys.stderr)
             continue
         n_targets += 1
-        for leaf, syms in nm_imports_with_framework(t, a.arch).items():
-            per_leaf.setdefault(leaf, set()).update(syms)
+        bins, skipped = expand_target(t, a.arch, a.source or None)
+        skipped_deps += [s for s in skipped if s not in skipped_deps]
+        for b in bins:
+            rb = os.path.realpath(str(b))
+            if rb in seen_bins:
+                continue
+            seen_bins.add(rb)
+            n_closure += 1
+            for leaf, syms in nm_imports_with_framework(rb, a.arch).items():
+                per_leaf.setdefault(leaf, set()).update(syms)
+    for dep, why in skipped_deps:
+        print("  closure: skipped dep %s (%s)" % (dep, why), file=sys.stderr)
 
     # 2. consider set = union(all imports) − already-shimmed. abigen self-filters
     #    to the subset it can parse a present-native prototype for.
@@ -202,7 +241,7 @@ def main():
         f.write("/* Umbrella headers for the frameworks the targets import. */\n")
         f.writelines(lines if lines else ["/* (no umbrella-mapped frameworks) */\n"])
 
-    print("targets            : %d" % n_targets)
+    print("targets            : %d  (%d closure binaries)" % (n_targets, n_closure))
     print("mapped leaves      : %d  (%s)" % (len(mapped), ", ".join(mapped)))
     if unmapped:
         print("UNMAPPED leaves    : %s"
@@ -214,6 +253,8 @@ def main():
 
     if a.report:
         json.dump({"n_targets": n_targets,
+                   "n_closure_binaries": n_closure,
+                   "closure_skipped_deps": ["%s (%s)" % s for s in skipped_deps],
                    "mapped": mapped,
                    "unmapped": {k: v for k, v in unmapped},
                    "per_leaf_counts": {k: len(v) for k, v in per_leaf.items()},

@@ -83,9 +83,12 @@ def is_macho(p):
             m = f.read(4)
     except OSError:
         return False
-    return m in (b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf',
+    return m in (b'\xcf\xfa\xed\xfe', b'\xfe\xed\xfa\xcf',   # MH_MAGIC_64 LE/BE
+                 b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xce',   # MH_MAGIC 32-bit LE/BE
+                                                             # (thin i386 dylibs —
+                                                             # Source engine siblings)
                  b'\xfa\xed\xfe\xcf', b'\xcf\xed\xfa\xfe',
-                 b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca')
+                 b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca')   # FAT_MAGIC/CIGAM
 
 
 def deps_of(binary):

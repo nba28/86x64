@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -557,6 +557,25 @@ inplace-symlink-guard:
 # already-in-bundle leaves alone. Pure Python-module unit test; no sysroot.
 vendor-dead-system:
 	@bash vendor_dead_system_test.sh
+
+# closure-considerset: guard for the CO-TRANSLATED-CLOSURE import discovery
+# (_i386_closure.py + abigen_modern_manifest.py). The consider set used to see
+# only each target MAIN EXE's imports — apps whose code lives in companion
+# binaries (iWork thin exe + SF*.framework pool dylibs, Source-engine
+# @loader_path siblings) contributed nothing, so e.g. SFTabular's AddressBook
+# kAB* data constants got no shadow -> truncated native address -> crash.
+# Also pins _vendor_deps.is_macho's THIN 32-bit Mach-O magics and the
+# AddressBook umbrella mapping. Hermetic x86_64 fixtures; no sysroot.
+closure-considerset:
+	@bash closure_considerset_test.sh
+
+# closure-data-shadow: END-TO-END i386 guard for the same fix — builds an i386
+# program reading AddressBook's kABTitleProperty exactly like SFTabular's
+# static init, translates it, runs it, expects the real value ("Title") via
+# libabiconv's ___kABTitleProperty low-4GB shadow. Needs the objc sysroot +
+# the 10.6 SDK i386 AddressBook link stub (auto-staged).
+closure-data-shadow:
+	@bash closure_data_shadow_test.sh
 
 # ObjC test group. Kept separate from the default `all` so the core
 # (asm/C) suite stays green while ObjC support is still landing. Builds each
