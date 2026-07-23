@@ -507,6 +507,13 @@ add_library(abiconv SHARED
   # a real ModalDialog event pump — so an app's "prompt until valid input" modal
   # loop works (Halo's "Enter Your Halo Product Key" CD-key gate). Needs AppKit.
   carbon_dialog_shim.m
+  # REAL clickable+movable StandardAlert/Alert family on AppKit NSAlert. The
+  # Appearance-Manager standard-alert APIs (CreateStandardAlert/RunStandardAlert/
+  # StandardAlert/GetStandardAlertDefaultParams) were unshimmed -> bound to live
+  # 64-bit HIToolbox, which in a pure-Carbon translated process (never foreground,
+  # starved event pump) drew a DEAD alert (unclickable, immovable). Route them
+  # through the same real -runModal NSAlert as carbon_dialog_shim.m. Needs AppKit.
+  carbon_standardalert_shim.m
   # Restore the user's system keyboard input source when a translated app exits
   # (Halo forces US in-game and leaves it there; snapshot at load, re-select at
   # exit). Non-invasive: does not suppress the app's in-run layout forcing.
