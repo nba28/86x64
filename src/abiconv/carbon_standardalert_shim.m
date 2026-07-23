@@ -70,29 +70,31 @@ enum { kAlertStopAlert = 0, kAlertNoteAlert = 1, kAlertCautionAlert = 2, kAlertP
 enum { kAlertStdAlertOKButton = 1, kAlertStdAlertCancelButton = 2,
        kAlertStdAlertOtherButton = 3, kAlertStdAlertHelpButton = 4 };
 #define kStdCFStringAlertVersionOne 1
+#define kStdCFStringAlertVersionTwo 2   /* not in AppKit/CF headers this TU imports */
 /* kAlertDefaultOKText / CancelText / OtherText = (CFStringRef)-1: "use the
  * standard localized button title". In an i386 slot that is 0xffffffff. */
 #define CF_MINUS_ONE 0xffffffffu
 
-/* AlertStdCFStringAlertParamRec — i386 layout (verified offsets):
+/* AlertStdCFStringAlertParamRec — i386 layout, #pragma pack(2) (verified offsets;
+ * the CFStringRef/pointer fields are 2-byte aligned, not natural 4/8):
  *   0  UInt32      version
  *   4  Boolean     movable
  *   5  Boolean     helpButton
- *   8  CFStringRef defaultText
- *   12 CFStringRef cancelText
- *   16 CFStringRef otherText
- *   20 SInt16      defaultButton
- *   22 SInt16      cancelButton
- *   24 UInt16      position
- *   28 OptionBits  flags
- *   32 IconRef     icon        (VersionTwo)
- *   size 36
+ *   6  CFStringRef defaultText
+ *   10 CFStringRef cancelText
+ *   14 CFStringRef otherText
+ *   18 SInt16      defaultButton
+ *   20 SInt16      cancelButton
+ *   22 UInt16      position
+ *   24 OptionBits  flags
+ *   28 IconRef     icon        (VersionTwo)
+ *   size 32
  */
 enum {
     PARM_version = 0, PARM_movable = 4, PARM_helpButton = 5,
-    PARM_defaultText = 8, PARM_cancelText = 12, PARM_otherText = 16,
-    PARM_defaultButton = 20, PARM_cancelButton = 22, PARM_position = 24,
-    PARM_flags = 28, PARM_icon = 32, PARM_size = 36,
+    PARM_defaultText = 6, PARM_cancelText = 10, PARM_otherText = 14,
+    PARM_defaultButton = 18, PARM_cancelButton = 20, PARM_position = 22,
+    PARM_flags = 24, PARM_icon = 28, PARM_size = 32,
 };
 
 /* Our opaque "standard alert" state. CreateStandardAlert builds it; RunStandard-
@@ -316,7 +318,10 @@ uint32_t shim_GetStandardAlertDefaultParams(uint32_t *a) {
     uint8_t *parm = (uint8_t *)PTR(0);
     uint32_t version = a[1];
     if (!parm) return -50 /*paramErr*/;
-    memset(parm, 0, PARM_size);
+    /* VersionOne is 28 bytes (through flags); icon is a VersionTwo field the
+     * caller's buffer keeps verbatim. Only clear the version-appropriate span. */
+    size_t fill = (version >= kStdCFStringAlertVersionTwo) ? PARM_size : PARM_icon;
+    memset(parm, 0, fill);
     *(uint32_t *)(parm + PARM_version) = version ? version : kStdCFStringAlertVersionOne;
     parm[PARM_movable] = 1;
     parm[PARM_helpButton] = 0;
