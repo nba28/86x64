@@ -1,0 +1,6 @@
+tolower(x)=120
+toupper(x)=88
+__tolower(X)=120
+__toupper(x)=88
+__maskrune_lower=1
+exit_code: 99

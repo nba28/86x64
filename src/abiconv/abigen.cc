@@ -100,6 +100,70 @@ struct ABIConversion {
       return t;
    }
 
+   /* True for conversions whose inner forward is a `call <native_target>` by
+    * NAME (FunctionConversion). Only those can be captured by a sibling shim
+    * definition; SyscallConversion forwards via `syscall`. */
+   virtual bool calls_native() const { return false; }
+
+   /* SHIM-CAPTURE (double-wrap) protection — the Civ IV tolower-family root
+    * cause. Every shim is EXPORTED as override_prefix+S = "__"+S, and every
+    * consider-set symbol S starts with "_", so the universe of shim names is
+    * exactly the names with >= 3 leading underscores. When a shim's inner
+    * native_target() itself has >= 3 leading underscores (libc's internal
+    * underscore twins: ___tolower/___toupper/___maskrune/___error/...), the
+    * name can collide with a DEFINED sibling shim in the final link — from
+    * THIS abigen pass, the OTHER abigen pass (modern vs legacy: neither sees
+    * the other's shim names, and the tolower capture was exactly cross-pass),
+    * or a hand-written "__"-prefixed .asm shim. ld resolves the inner call to
+    * that in-image definition instead of the real native function; the sibling
+    * shim then re-runs its i386 arg marshalling on a NATIVE 8-byte call frame
+    * ([rbp+0xc] = high half of the return address = 0), so e.g. tolower
+    * returns 0 for every char.
+    *
+    * For this structural class the inner call is routed through a data slot
+    * (`call qword [rel <slot>]`) statically initialized `dq <target>` — i.e.
+    * bound at link time to the SAME definition the direct call would have
+    * used, so pre-repair behavior is exactly the old behavior. At load,
+    * nslot_repair.c walks the slot table and re-points only slots whose
+    * current value structurally fingerprints as a marshalling shim (the
+    * `cmp qword [rel __dyld_stub_binder_flag], 0` prologue) at the real
+    * native definition (libSystem/CoreFoundation/dlsym, never a libabiconv
+    * image). Intentional native impls in libabiconv (e.g. file_shim.c's
+    * __srget, which generated shims inner-call ON PURPOSE) don't fingerprint
+    * as shims and are left untouched. UNIVERSAL: triggers on the structural
+    * ">= 3 leading underscores" name class, not on any symbol list, so it is
+    * immune to consider-set growth (the 6369a4a closure expansion) and needs
+    * no cross-pass name plumbing. */
+   bool needs_native_slot() const {
+      if (!calls_native()) { return false; }
+      const std::string t = native_target();
+      return t.size() >= 3 && t.compare(0, 3, "___") == 0;
+   }
+
+   std::string native_slot_label() const {
+      return "__abicnslot" + native_target();
+   }
+
+   /* Emit the slot backing needs_native_slot() call routing, once per distinct
+    * target per output file (dedup via `emitted`; label is file-local so the
+    * two abigen passes never collide at link — each file repairs its own).
+    * Called only after the shim body was successfully flushed, so a discarded
+    * shim never leaves a dangling slot reference, and vice versa NASM resolves
+    * the body's forward reference to this label in its second pass. Appends
+    * the (name, slot) pair to `order` for the emit_native_slot_table footer. */
+   void emit_native_slot(std::ostream& os, Symbols& emitted,
+                         std::vector<std::string>& order) const {
+      if (!needs_native_slot()) { return; }
+      const std::string t = native_target();
+      if (!emitted.insert(t).second) { return; }
+      order.push_back(t);
+      os << "\tsection .data" << std::endl;
+      os << "\talign 8" << std::endl;
+      os << native_slot_label() << ":" << std::endl;
+      os << "\tdq\t" << t << std::endl;
+      os << "\tsection .text" << std::endl;
+   }
+
    static CXType handle_type(CXType type) {
       return clang_getCanonicalType(type);
    }
@@ -826,7 +890,8 @@ struct ABIConversion {
    }
 
    void emit(std::ostream& final_os, Symbols& symbols, const Symbols& ignore_structs,
-             const Symbols& reserved_names) {
+             const Symbols& reserved_names,
+             Symbols& emitted_slots, std::vector<std::string>& slot_order) {
       const bool variadic = clang_isFunctionTypeVariadic(function_type);
       const std::string& override_prefix = "__";
 
@@ -839,18 +904,23 @@ struct ABIConversion {
          return;
       }
 
-      /* Shim-name collision guard. The shim for symbol S is named
-       * override_prefix+S (e.g. _tolower -> ___tolower). If this symbol's own
-       * linker name equals some OTHER bridged symbol's shim name, emitting it
-       * would (a) clash with that shim's label and (b) make this shim's
-       * `extern <sym>` reference its own colliding shim instead of the real
-       * function. This happens for libc's internal double-underscore twins
-       * (e.g. __tolower's name ___tolower == tolower's shim name). Skip this
-       * one; the public twin (tolower) is bridged instead. */
+      /* Shim-name collision note. The shim for symbol S is named
+       * override_prefix+S (e.g. _tolower -> ___tolower). When this symbol's
+       * own linker name equals some OTHER bridged symbol's shim name (libc's
+       * internal underscore twins: __tolower's name ___tolower == tolower's
+       * shim name), this shim's inner `call <sym>` would bind to that sibling
+       * shim instead of the real function (the double-wrap). We used to SKIP
+       * the twin here — WRONG for an IMPORTED twin: the app's redirected
+       * import ("__"+twin) was then left with no definition (or, worse, the
+       * twin fell through to the OTHER abigen pass, which emitted it with the
+       * capture intact — the Civ IV tolower()==0 "XML Load Error" root cause).
+       * Emitting is safe: shim naming is injective (no label clash is
+       * possible), and the inner call of every capturable target is routed
+       * through a load-time-repaired native slot (see needs_native_slot). */
       if (reserved_names.find(sym) != reserved_names.end()) {
-         std::cerr << "abigen: skipping " << sym
-                   << ": linker name collides with another symbol's shim" << std::endl;
-         return;
+         std::cerr << "abigen: note: " << sym
+                   << " collides with another symbol's shim name; "
+                   << "emitting with a capture-proof native slot" << std::endl;
       }
 
       /* Build the trampoline into a local buffer first. The conversion
@@ -894,11 +964,13 @@ struct ABIConversion {
             }
             symbols.erase(sym);
             final_os << body;
+            emit_native_slot(final_os, emitted_slots, slot_order);
             return;
          }
       }
       symbols.erase(sym);
       final_os << os.str();
+      emit_native_slot(final_os, emitted_slots, slot_order);
    }
 
    void emit_body(std::ostream& os, const Symbols& ignore_structs,
@@ -1441,8 +1513,16 @@ struct FunctionConversion: ABIConversion {
    FunctionConversion(Args&&... args):
       ABIConversion(args..., {&rdi, &rsi, &rdx, &rcx, &r8, &r9}) {}
 
+   virtual bool calls_native() const override { return true; }
+
    virtual void emit_call(std::ostream& os) const override {
-      emit_inst(os, "call", native_target());
+      if (needs_native_slot()) {
+         /* capture-proof indirect call through the load-time-repaired slot;
+          * see needs_native_slot() */
+         emit_inst(os, "call", "qword [rel " + native_slot_label() + "]");
+      } else {
+         emit_inst(os, "call", native_target());
+      }
    }
 };
 
@@ -1463,7 +1543,11 @@ struct ABIGenerator {
    Symbols ignore_structs;
    Symbols collision_names; /* shim names (override_prefix+sym) reserved across
                              * the whole consider set; a symbol whose own linker
-                             * name is in here is skipped to avoid label clashes */
+                             * name is in here gets a note (its inner call is
+                             * capture-proofed via a native slot; see
+                             * needs_native_slot) */
+   Symbols emitted_slots;   /* native-slot dedup: targets with a slot emitted */
+   std::vector<std::string> slot_order; /* slot emission order for the footer */
    enum class ABI {FUNCTION, SYSCALL} abi;
    bool force_all;
    /* Secondary (legacy) pass: this .asm is assembled into libabiconv ALONGSIDE
@@ -1512,6 +1596,35 @@ struct ABIGenerator {
       for (const std::string& s : symbols) {
          collision_names.insert(override_prefix + s);
       }
+   }
+
+   /* Footer: the runtime repair table for the capture-proof native slots
+    * (see ABIConversion::needs_native_slot). One {name, slot} pair per
+    * distinct slot-routed target. The table symbol is FIXED per pass
+    * (__abiconv_nslot_tab0 = primary/modern, __abiconv_nslot_tab1 =
+    * secondary/legacy) so nslot_repair.c can reference both directly; it
+    * carries weak zero definitions that the strong tables here override, so
+    * a link missing either .asm (e.g. no 10.6 SDK -> no legacy pass) still
+    * works. Always emitted (possibly with count 0) for determinism. */
+   void emit_native_slot_table() {
+      const std::string tab = secondary_pass ? "__abiconv_nslot_tab1"
+                                             : "__abiconv_nslot_tab0";
+      os << "\tsection .data" << std::endl;
+      for (size_t i = 0; i < slot_order.size(); ++i) {
+         os << "__abicnslotname" << i << ":" << std::endl;
+         os << "\tdb\t'" << slot_order[i] << "', 0" << std::endl;
+      }
+      os << "\talign 8" << std::endl;
+      os << "\tglobal " << tab << std::endl;
+      os << tab << ":" << std::endl;
+      for (size_t i = 0; i < slot_order.size(); ++i) {
+         os << "\tdq\t__abicnslotname" << i
+            << ", __abicnslot" << slot_order[i] << std::endl;
+      }
+      os << "\tglobal " << tab << "_n" << std::endl;
+      os << tab << "_n:" << std::endl;
+      os << "\tdq\t" << slot_order.size() << std::endl;
+      os << "\tsection .text" << std::endl;
    }
 
    ~ABIGenerator() {
@@ -1618,7 +1731,8 @@ struct ABIGenerator {
 
       try {
          std::unique_ptr<ABIConversion> conv(make_conv(c));
-         conv->emit(os, symbols, ignore_structs, collision_names);
+         conv->emit(os, symbols, ignore_structs, collision_names,
+                    emitted_slots, slot_order);
       } catch (const std::exception& e) {
          std::cerr << "abigen: skipping function: " << e.what() << std::endl;
       }
@@ -1634,7 +1748,8 @@ struct ABIGenerator {
       }
       try {
          std::unique_ptr<ABIConversion> conv(make_conv(clang_getCursorType(p), sym));
-         conv->emit(os, symbols, ignore_structs, collision_names);
+         conv->emit(os, symbols, ignore_structs, collision_names,
+                    emitted_slots, slot_order);
       } catch (const std::exception& e) {
          std::cerr << "abigen: skipping " << sym << ": " << e.what() << std::endl;
       }
@@ -1999,6 +2114,9 @@ int main(int argc, char *argv[]) {
 
    /* emit the callback-signature descriptors registered by convert_fnptr */
    cb_sig_emit(os);
+
+   /* emit the capture-proof native-slot repair table (see needs_native_slot) */
+   abigen.emit_native_slot_table();
 
    return 0;
 }
