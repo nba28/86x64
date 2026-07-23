@@ -286,22 +286,78 @@ static void arena_attach(struct objc_shared_ctrl *c) {
    rev_imp_publish(c);
 }
 
+/* rc=139 fix: the ONE shared ctrl is published through a FIXED low-4GB
+ * rendezvous word + an atomic compare-exchange, replacing the old setenv/getenv
+ * publish. That env publish was a getenv-before-setenv TOCTOU: two co-located
+ * libabiconv copies whose arena_inits raced each "won first" -> two ctrls ->
+ * two proc_img claim tables -> the SAME image's (Civ.dylib) static initializers
+ * ran TWICE -> FConsole's intrusive-list registry NULL-spliced at +0x88 (the
+ * residual ~1/5 rc=139 startup crash). All copies share one address space, so a
+ * fixed address needs no discovery channel, and mach_vm_allocate(FIXED) + a CAS
+ * are globally atomic -> exactly one copy creates, every other adopts. */
+#define ARENA_RENDEZVOUS_ADDR      LOW_REGION_BASE   /* one dedicated low-4GB page */
+#define ARENA_RENDEZVOUS_CREATING  1ULL              /* sentinel: a creator is in flight */
+
+/* Map (once, kernel-atomically across the copies) the fixed rendezvous page and
+ * return its 8-byte atomic word (= the shared ctrl pointer, 0 until published).
+ * Exactly one copy's FIXED allocate maps the fresh zeroed page; the rest get an
+ * error because the range is already taken — either way the page is present at
+ * the fixed address afterward. The arena scan below tolerates this page being
+ * occupied (it simply picks the next free slot). */
+static uint64_t *arena_rendezvous_word(void) {
+   static uint64_t *slot;                 /* per-copy memo */
+   if (slot) { return slot; }
+   mach_vm_address_t r = ARENA_RENDEZVOUS_ADDR;
+   (void)mach_vm_allocate(mach_task_self(), &r, 0x1000, VM_FLAGS_FIXED);
+   slot = (uint64_t *)(uintptr_t)ARENA_RENDEZVOUS_ADDR;
+   return slot;
+}
+
 static void arena_init(void) {
    if (g_ctrl) { return; }
 
-   /* Adopt an existing process-wide arena published by an earlier copy. */
-   const char *e = getenv(OBJC_CTRL_ENV);
-   if (e && *e) {
-      struct objc_shared_ctrl *c =
-         (struct objc_shared_ctrl *)(uintptr_t)strtoull(e, NULL, 16);
-      /* The address is published only after magic is set, but spin briefly in
-       * case of a startup race with the creating copy. */
-      volatile uint64_t *magicp = &c->magic;
-      for (int i = 0; i < 1000000 && *magicp != OBJC_CTRL_MAGIC; ++i) { }
-      if (*magicp == OBJC_CTRL_MAGIC) { arena_attach(c); return; }
+   /* Test-only pre-fix demonstrator: with ABICONV_ARENA_PUBLISH_GAP set we skip
+    * the rendezvous entirely so every copy creates its own ctrl (>=2 `[arena]
+    * create` lines), reproducing the OLD race for the tests-i386 guard. Never
+    * set in production. */
+   const int gap = getenv("ABICONV_ARENA_PUBLISH_GAP") != NULL;
+   uint64_t *slot = gap ? NULL : arena_rendezvous_word();
+
+   if (slot) {
+      for (;;) {
+         uint64_t cur = __atomic_load_n(slot, __ATOMIC_ACQUIRE);
+         if (cur == 0) {
+            /* Try to claim creation rights atomically. */
+            uint64_t expect = 0;
+            if (__atomic_compare_exchange_n(slot, &expect,
+                                            ARENA_RENDEZVOUS_CREATING, false,
+                                            __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+               break;                      /* we won -> create below */
+            }
+            continue;                      /* another copy claimed; re-read */
+         }
+         if (cur == ARENA_RENDEZVOUS_CREATING) {
+            /* A sibling is mid-create; wait for it to publish the real ctrl. */
+            for (int i = 0; i < 1000000 &&
+                 __atomic_load_n(slot, __ATOMIC_ACQUIRE) == ARENA_RENDEZVOUS_CREATING;
+                 ++i) { }
+            continue;
+         }
+         /* A real ctrl pointer is published: adopt it (spin briefly for magic,
+          * which the creator sets just before the release store below). */
+         struct objc_shared_ctrl *c = (struct objc_shared_ctrl *)(uintptr_t)cur;
+         volatile uint64_t *magicp = &c->magic;
+         for (int i = 0; i < 1000000 && *magicp != OBJC_CTRL_MAGIC; ++i) { }
+         if (getenv("ABICONV_ARENA_TRACE")) {
+            fprintf(stderr, "[arena] attach 0x%llx\n",
+                    (unsigned long long)(uintptr_t)c); fflush(stderr);
+         }
+         arena_attach(c);
+         return;
+      }
    }
 
-   /* We are the first: create the arena in the low-4GB window. */
+   /* ---- We hold creation rights (or gap mode): build the ONE arena. ---- */
    const size_t bytes = (size_t)ARENA_SLOTS * sizeof(uint64_t);
    const size_t len   = (bytes + 0xFFF) & ~(size_t)0xFFF;
    void *region = NULL;
@@ -355,10 +411,17 @@ static void arena_init(void) {
    __sync_synchronize();
    c->magic      = OBJC_CTRL_MAGIC;
 
-   char buf[32];
-   snprintf(buf, sizeof buf, "0x%llx", (unsigned long long)(uintptr_t)c);
-   setenv(OBJC_CTRL_ENV, buf, 1);
-
+   /* Publish the real ctrl, releasing any spinning adopters (this release store
+    * pairs with their acquire load of the rendezvous word). In gap mode
+    * (slot==NULL) we deliberately DON'T publish, so a second copy also creates —
+    * the pre-fix >=2-ctrl behavior the tests-i386 guard's PRE-FIX arm asserts. */
+   if (slot) {
+      __atomic_store_n(slot, (uint64_t)(uintptr_t)c, __ATOMIC_RELEASE);
+   }
+   if (getenv("ABICONV_ARENA_TRACE")) {
+      fprintf(stderr, "[arena] create 0x%llx\n",
+              (unsigned long long)(uintptr_t)c); fflush(stderr);
+   }
    arena_attach(c);
 }
 

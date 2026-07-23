@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -464,6 +464,17 @@ dyld-multicopy: $(MACHO_TOOL)
 # without.
 dyld-multicopy-reprocess: $(MACHO_TOOL)
 	@bash dyld_multicopy_reprocess_test.sh $(MACHO_TOOL)
+
+# arena-publish-toctou: regression for the arena_init shared-ctrl PUBLISH TOCTOU
+# (objc_shim.c arena_init setenv/getenv -> the residual rc=139 Civ IV ~1/5 startup
+# crash after the proc_img CLAIM fix). Two libabiconv copies whose arena_init
+# publish/adopt races build TWO ctrls -> two proc_img tables -> the same image's
+# static inits run twice -> Civ's same-image FConsole intrusive-list registry
+# NULL-splices at +0x88/+0x8c. Fix = fixed low-4GB rendezvous word + atomic CAS
+# publish (one ctrl always). A/B via ABICONV_ARENA_TRACE `[arena] create` counting;
+# SKIPs until the trace hook is in libabiconv. Needs the i386 sysroot.
+arena-publish-toctou: $(MACHO_TOOL)
+	@bash arena_publish_toctou_test.sh $(MACHO_TOOL)
 
 # zerofill-reslide: regression for the zerofill-section double-slide fix
 # (objc_slide.c slide_data_fnptrs skips S_ZEROFILL/S_GB_ZEROFILL/
