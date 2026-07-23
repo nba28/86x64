@@ -438,6 +438,11 @@ add_library(abiconv SHARED
   $<TARGET_OBJECTS:custom_conv_dprintf>
   printf-conv.cc
   prefs_shim.c
+  # nslot_repair.c: load-time repair of abigen's capture-proof native-call
+  # slots — a shim's inner `call native_target` must NEVER land in another
+  # marshalling shim (the cross-pass ___tolower double-wrap = Civ IV's
+  # tolower()==0 "XML Load Error" root cause). See the file header.
+  nslot_repair.c
   file_shim.c
   malloc_shim.c
   mmap_shim.c
