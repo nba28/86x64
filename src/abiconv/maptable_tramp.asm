@@ -999,6 +999,14 @@ _x64_exc_longjmp:
 	MTSHIM	___SetPortDialogPort,                       _shim_SetPortDialogPort
 	MTSHIM	___SizeDialogItem,                          _shim_SizeDialogItem
 	MTSHIM	___StopAlert,                               _shim_StopAlert
+	; --- StandardAlert/Alert family -> real clickable+movable NSAlert (carbon_standardalert_shim.m) ---
+	; Unshimmed they bound to LIVE 64-bit HIToolbox, which drew a DEAD alert
+	; (unclickable/immovable) in a pure-Carbon translated process. Route through
+	; a real -runModal NSAlert instead (Civ IV "XML Load Error" + universal).
+	MTSHIM	___CreateStandardAlert,                     _shim_CreateStandardAlert
+	MTSHIM	___RunStandardAlert,                        _shim_RunStandardAlert
+	MTSHIM	___StandardAlert,                           _shim_StandardAlert
+	MTSHIM	___GetStandardAlertDefaultParams,           _shim_GetStandardAlertDefaultParams
 	; --- Classic TextEdit/List/Drag/Theme: graceful dead-surface (carbon_classic_ui_shim.c) ---
 	MTSHIM	___AddDragItemFlavor,                       _shim_AddDragItemFlavor
 	MTSHIM	___CountDragItemFlavors,                    _shim_CountDragItemFlavors
@@ -1081,7 +1089,10 @@ _x64_exc_longjmp:
 	MTSHIM	___SetUpControlBackground,           _shim_SetUpControlBackground
 	MTSHIM	___TestControl,                      _shim_TestControl
 	MTSHIM	___TrackControl,                     _shim_TrackControl
-	MTSHIM	___Alert,                            _shim_Alert
+	; ___Alert: was a qt_hitoolbox_shim.c no-op (returned 0 = NO modal, breaking
+	; any app that branches on the button hit). Route to a REAL 'ALRT'-resource
+	; NSAlert modal (carbon_standardalert_shim.m -> the same run_alert as StopAlert).
+	MTSHIM	___Alert,                            _shim_AlertReal
 	MTSHIM	___DialogCopy,                       _shim_DialogCopy
 	MTSHIM	___DialogCut,                        _shim_DialogCut
 	MTSHIM	___DialogDelete,                     _shim_DialogDelete
