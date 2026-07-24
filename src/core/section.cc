@@ -375,6 +375,21 @@ namespace MachO {
                if (exec && in_objc_symbols) {
                   break;   /* objc_symtab count word aliasing __text -> constant */
                }
+               /* CSTRING-INTERIOR ALIAS gate (M32). A __data word whose value
+                * lands in the INTERIOR of a __cstring (not at a string start)
+                * is an integer/byte-table constant that merely aliases the
+                * cstring vmaddr range, never a genuine `char *` (which targets
+                * a string START). Unlike the func-entry and classic-reloc gates
+                * this needs no symbols or reloc table, so it is the ONLY
+                * discriminator left for a locals-stripped, reloc-less
+                * fixed-address exec (Civ IV STEAM: the byte-classification word
+                * 0x01000100 = "00 01 00 01" aliased a __cstring interior and was
+                * falsely rebased to a translated __text address, corrupting
+                * GCompactDeclInfoNodeArray's table -> NULL name deref crash). */
+               if (bits == Bits::M32 && exec &&
+                   env.cstring_interior_alias(img, value)) {
+                  break;   /* mid-cstring alias -> constant */
+               }
                /* CODE-target FUNCTION-ENTRY gate (M32, symboled binaries).
                 * A genuine pointer into an INSTRUCTIONS section baked into
                 * __DATA/__OBJC data is a function entry: a fn-pointer table

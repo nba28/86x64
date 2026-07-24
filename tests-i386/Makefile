@@ -877,6 +877,33 @@ $(BUILD_DIR)/99_code_alias_imm_falsereloc.i386: $(BUILD_DIR)/99_code_alias_imm_f
 	   rm -f $@; exit 1; \
 	 fi
 
+# 99_cstring_interior_alias: STRIP local symbols (Civ IV Steam shape — locals-
+# stripped => have_local_text_syms false => code_alias_is_constant and the
+# classic-reloc gate are both disarmed, so the DataParser cstring-INTERIOR gate
+# is the sole discriminator). ASSERT that _probe's value (_cstr+8) really lands
+# in __TEXT,__cstring AND is a mid-string INTERIOR (the byte before it is NOT a
+# NUL and it is not the section start) — the alias trap the test springs (fail
+# the BUILD loudly if the string/section layout ever drifts). Overrides %.i386.
+$(BUILD_DIR)/99_cstring_interior_alias.i386: $(BUILD_DIR)/99_cstring_interior_alias.o
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
+	strip -x $@
+	@a=$$(otool -l $@ | awk '/sectname __cstring$$/{s=1;next} s&&$$1=="addr"{print $$2;exit}'); \
+	 z=$$(otool -l $@ | awk '/sectname __cstring$$/{s=1;next} s&&$$1=="size"{print $$2;exit}'); \
+	 o=$$(otool -l $@ | awk '/sectname __cstring$$/{s=1;next} s&&$$1=="offset"{print $$2;exit}'); \
+	 v=$$(( a + 8 )); \
+	 if [ $$((a)) -lt $$((v)) ] && [ $$((v)) -lt $$((a + z)) ]; then \
+	   pb=$$(xxd -s $$(( o + v - 1 - a )) -l 1 -p $@); \
+	   if [ "$$pb" != "00" ]; then \
+	     echo "  99_cstring_interior_alias: _cstr+8 aliases __cstring INTERIOR (prev byte=$$pb) -- trap armed"; \
+	   else \
+	     echo "99_cstring_interior_alias: ERROR: _cstr+8 preceded by NUL (a string START, not interior) -- adjust string"; \
+	     rm -f $@; exit 1; \
+	   fi; \
+	 else \
+	   echo "99_cstring_interior_alias: ERROR: _cstr+8 outside __cstring [$$a, $$a+$$z) -- adjust string"; \
+	   rm -f $@; exit 1; \
+	 fi
+
 $(BUILD_DIR)/99_cmp_abs32_imm_notptr.i386: $(BUILD_DIR)/99_cmp_abs32_imm_notptr.o
 	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
 	strip -x $@

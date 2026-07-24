@@ -292,6 +292,32 @@ namespace MachO {
       return false;
    }
 
+   template <Bits bits>
+   bool ParseEnv<bits>::cstring_interior_alias(const Image& img,
+                                               std::size_t vmaddr) const {
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(vmaddr)) { continue; }
+            /* Only S_CSTRING_LITERALS sections carry the NUL-delimited string
+             * invariant this test relies on. Any other target (instructions,
+             * __const, ObjC metadata, data) is left to the existing gates. */
+            if ((sec->sect.flags & SECTION_TYPE) != S_CSTRING_LITERALS) {
+               return false;
+            }
+            /* A pointer to the section's first string is a valid START. */
+            if (vmaddr == sec->sect.addr) { return false; }
+            /* String starts are exactly the bytes following a NUL terminator;
+             * everything else is a mid-string INTERIOR position. */
+            const std::size_t off = sec->sect.offset + (vmaddr - sec->sect.addr);
+            if (img.at<uint8_t>(off - 1) == 0) { return false; }  /* start */
+            return true;                                          /* interior */
+         }
+         return false;   /* in segment but between/outside sections */
+      }
+      return false;
+   }
+
    template class ParseEnv<Bits::M32>;
    template class ParseEnv<Bits::M64>;
 

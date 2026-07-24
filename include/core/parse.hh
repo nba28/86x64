@@ -268,6 +268,25 @@ namespace MachO {
        * "insufficient CPU" renderer nag. Regression: 74_stripped_stackarg_const.) */
       bool stackarg_imm_is_code_constant(std::size_t vmaddr) const;
 
+      /* CSTRING-INTERIOR ALIAS gate (see section.cc DataParser). True iff
+       * `vmaddr` lands in the INTERIOR of an S_CSTRING_LITERALS section — i.e.
+       * inside a NUL-terminated C string but NOT at a string START (the section
+       * base, or the byte immediately after a NUL terminator). A genuine baked
+       * `char *` data pointer always targets a string START (deduplicated string
+       * literals are referenced at their first byte); a value landing mid-string
+       * is an integer/byte-table CONSTANT that merely aliases the cstring vmaddr
+       * range. Reloc-less, locals-stripped fixed-address execs disarm every
+       * other discriminator (code_alias_is_constant / classic-reloc gate), so
+       * without this test such a constant is falsely rebased. (Civ IV STEAM:
+       * GCompactDeclInfoNodeArray's byte-classification table `00 01 00 01…` =
+       * the word 0x01000100 aliases a __cstring interior "…eWidgetType, int
+       * iData1, i…"; rebasing it to a translated __text address corrupted the
+       * table so table[c&0xf] returned a wild index -> node[8+idx*4] read a NULL
+       * name pointer -> SIGSEGV in Find/LowerBoundSearch via x64_cb_dispatch.)
+       * Needs the image to read the preceding byte; returns false for any
+       * non-cstring target so callers gate only this exact false-positive. */
+      bool cstring_interior_alias(const Image& img, std::size_t vmaddr) const;
+
 
       ParseEnv(Archive<bits>& archive):
          archive(archive),
