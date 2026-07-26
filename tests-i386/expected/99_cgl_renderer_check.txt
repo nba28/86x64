@@ -1,0 +1,9 @@
+mask_stable=1
+queryinfo_err=0
+info_nonnull=1
+nrend_positive=1
+rcount_err=0
+handle_roundtrip=1
+prop_errs=0
+destroy_err=0
+exit_code: 0

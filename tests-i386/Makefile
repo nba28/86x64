@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -710,6 +710,42 @@ sysroot-objc: sysroot
 # exception-unwinding tests need the real libstdc++.) The dylib's install_name is
 # /usr/lib/libstdc++.6.dylib, so stage the versioned file plus the .6 and bare
 # symlinks ld resolves -lstdc++ through.
+# Stage the i386 OpenGL + ApplicationServices frameworks from the SL DVD so
+# 99_cgl_renderer_check can link. Both are UMBRELLAS: ld refuses to link a
+# sub-framework directly and follows every LC_REEXPORT_DYLIB by its INSTALL NAME
+# under -syslibroot, so the reexported children have to be staged at their real
+# Versions/A paths too (and the framework binary itself duplicated there, since
+# the install name points at Versions/A). Missing children are tolerated — ld
+# only needs the ones on the reexport chain. Run once after `make sysroot`.
+sysroot-gl: sysroot
+	@set -e; SR="$(I386_SYSROOT)/System/Library/Frameworks"; \
+	 stage() { \
+	   mkdir -p "$$2"; \
+	   lipo -thin i386 "$$1" -output "$$2/$$3" 2>/dev/null || return 0; \
+	 }; \
+	 for fw in OpenGL ApplicationServices CoreFoundation; do \
+	   src="$(SL_DVD)/System/Library/Frameworks/$$fw.framework/Versions/A/$$fw"; \
+	   stage "$$src" "$$SR/$$fw.framework" "$$fw"; \
+	   stage "$$src" "$$SR/$$fw.framework/Versions/A" "$$fw"; \
+	 done; \
+	 for f in "$(SL_DVD)"/System/Library/Frameworks/OpenGL.framework/Versions/A/Libraries/*.dylib; do \
+	   [ -f "$$f" ] || continue; \
+	   stage "$$f" "$$SR/OpenGL.framework/Versions/A/Libraries" "$$(basename "$$f")"; \
+	 done; \
+	 for f in ImageIO CoreText ATS ColorSync HIServices LangAnalysis PrintCore QD \
+	          SpeechSynthesis CoreGraphics; do \
+	   stage "$(SL_DVD)/System/Library/Frameworks/ApplicationServices.framework/Versions/A/Frameworks/$$f.framework/Versions/A/$$f" \
+	         "$$SR/ApplicationServices.framework/Versions/A/Frameworks/$$f.framework/Versions/A" "$$f"; \
+	 done; \
+	 stage "$(SL_DVD)/System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices" \
+	       "$$SR/CoreServices.framework/Versions/A" "CoreServices"; \
+	 for f in CarbonCore OSServices AE LaunchServices DictionaryServices SearchKit \
+	          Metadata CFNetwork; do \
+	   stage "$(SL_DVD)/System/Library/Frameworks/CoreServices.framework/Versions/A/Frameworks/$$f.framework/Versions/A/$$f" \
+	         "$$SR/CoreServices.framework/Versions/A/Frameworks/$$f.framework/Versions/A" "$$f"; \
+	 done
+	@echo "gl sysroot ready (OpenGL + ApplicationServices i386 umbrellas)"
+
 sysroot-cpp: sysroot
 	@lipo -thin i386 "$(SL_DVD)/usr/lib/libstdc++.6.0.9.dylib" \
 	    -output "$(I386_SYSROOT)/usr/lib/libstdc++.6.0.9.dylib" 2>/dev/null || true
@@ -795,6 +831,23 @@ $(BUILD_DIR)/35_pthread_cond_handshake.o: $(SRC_DIR)/35_pthread_cond_handshake.c
 # enters _main via jmp, so tests must end with `call _exit` not `ret`.
 $(BUILD_DIR)/%.i386: $(BUILD_DIR)/%.o
 	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
+
+# 99_cstr_pagezero_arg: links the SL-era i386 CoreFoundation staged by
+# `make sysroot-objc` (the clamp under test is on CFStringCreateWithCString's
+# `const char *cStr`). SKIPs via the missing expected/ file if unstaged.
+$(BUILD_DIR)/99_cstr_pagezero_arg.i386: $(BUILD_DIR)/99_cstr_pagezero_arg.o
+	$(LD) $(LDFLAGS_I386) -e _main -framework CoreFoundation -o $@ $<
+
+# 99_cgl_renderer_check: needs the i386 OpenGL + ApplicationServices/CoreGraphics
+# frameworks staged by `make sysroot-gl`. SKIPs (no expected/) when they are
+# absent, which is also why the link is guarded rather than unconditional.
+$(BUILD_DIR)/99_cgl_renderer_check.i386: $(BUILD_DIR)/99_cgl_renderer_check.o
+	@if [ -f "$(I386_SYSROOT)/System/Library/Frameworks/OpenGL.framework/OpenGL" ]; then \
+	  $(LD) $(LDFLAGS_I386) -e _main -framework OpenGL -framework ApplicationServices -o $@ $<; \
+	else \
+	  echo "SKIP 99_cgl_renderer_check (no i386 OpenGL in sysroot; run 'make sysroot-gl')"; \
+	  $(LD) $(LDFLAGS_I386) -e _main -o $@ $< 2>/dev/null || true; \
+	fi
 
 # 36_stripped_func_pad: STRIP local symbols (keep only the .globl _main) so the
 # translator sees an empty func_syms, exercising the no-symbol padding-resync

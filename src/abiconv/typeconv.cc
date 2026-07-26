@@ -911,6 +911,56 @@ void conversion::convert_objc_sel(std::ostream& os, const Location& src,
    }
 }
 
+/* A `const char *` ARGUMENT (i386 -> x86_64). The mirror of objc_shim.c's
+ * x64_cstr_ret_low, which fixes the RETURN direction of the same type.
+ *
+ * A translated i386 image's __PAGEZERO spans [0, 0x1000) and is UNMAPPED by
+ * construction, so a C-string argument whose value lands in that range is
+ * STRUCTURALLY incapable of addressing a valid string: no i386 pointer the
+ * image could legitimately produce lives there. Passing it through anyway hands
+ * a guaranteed-bad pointer to a native framework, which derefs it and takes the
+ * whole process down INSIDE system code, where neither a backtrace nor a
+ * recovery is available to the app (Halo CE's Carbon nag dialog:
+ * CFStringCreateWithCString(NULL, 0x3c, kCFStringEncodingASCII) -> SIGSEGV in
+ * CoreFoundation; 0x3c was a stale 60Hz refresh-rate constant left in a reused
+ * stack slot by Halo's own FormatMessageA emulation, which never stores through
+ * lpBuffer under FORMAT_MESSAGE_ALLOCATE_BUFFER).
+ *
+ * Clamp it to a static empty string instead: `const` means the callee may only
+ * READ through the pointer, so an empty string is always safe and always has
+ * defined semantics (empty CFString, zero-length compare, nothing printed),
+ * whereas NULL is not — CFStringCreateWithCString(alloc, NULL, enc) faults just
+ * as hard (measured). A genuine NULL still passes through UNTOUCHED, since NULL
+ * is a legitimate documented argument for much of this surface.
+ *
+ * Kept inline (no bridge call, no register save/restore) so the fast path costs
+ * a compare and a branch; the cold path bumps x64_cstr_pagezero_hits, which
+ * libabiconv reports at teardown so a clamp caused by a TRANSLATOR defect still
+ * surfaces rather than being silently swallowed.
+ *
+ * Universal: triggers on the type (`const char *`) plus a structural property of
+ * the value (inside the image's unmapped page zero), never on a function or app
+ * name. Non-const `char *` is deliberately NOT clamped — such an argument is
+ * usually an OUT buffer the callee writes through, and a read-only substitute
+ * would turn a read fault into a write fault. */
+void conversion::convert_const_cstr_ptr(std::ostream& os, const Location& src,
+                                        const Location& dst) {
+   os << "\t; const char* arg: clamp a page-zero (never-mappable) pointer"
+      << std::endl;
+   os << "\textern _x64_cstr_pagezero_str" << std::endl;
+   os << "\textern _x64_cstr_pagezero_hits" << std::endl;
+   const std::string ok_lbl = label();
+   emit_inst(os, "mov", "r14d", src.op(reg_width::D));
+   emit_inst(os, "test", "r14d", "r14d");
+   emit_inst(os, "jz", ok_lbl);                 /* genuine NULL passes through */
+   emit_inst(os, "cmp", "r14d", "0x1000");
+   emit_inst(os, "jae", ok_lbl);
+   emit_inst(os, "inc", "qword [rel _x64_cstr_pagezero_hits]");
+   emit_inst(os, "lea", "r14", "[rel _x64_cstr_pagezero_str]");
+   os << ok_lbl << ":" << std::endl;
+   emit_inst(os, "mov", dst.op(reg_width::Q), "r14");
+}
+
 /* A pointer whose pointee is a fixed-width scalar has IDENTICAL element layout
  * in i386 and x86_64, so the pointer needs no deep copy — it can be passed
  * straight through (the i386 pointer is always low-4GB, hence a valid native
@@ -1040,6 +1090,18 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
     * exactly the pre-existing behavior. */
    if (cb_is_cf_record_ptr(pointee_canon)) {
       convert_cf_ptr(os, src_, dst_);
+      return;
+   }
+
+   /* `const char *` argument going IN: still a straight pass-through, but with
+    * the page-zero clamp (see convert_const_cstr_ptr). Must precede the generic
+    * scalar pass-through below, which would forward the raw value. */
+   if (from_arch == arch::i386 && to_arch == arch::x86_64 &&
+       (pointee_canon.kind == CXType_Char_S || pointee_canon.kind == CXType_Char_U ||
+        pointee_canon.kind == CXType_SChar  || pointee_canon.kind == CXType_UChar) &&
+       (clang_isConstQualifiedType(pointee_canon) ||
+        clang_isConstQualifiedType(pointee))) {
+      convert_const_cstr_ptr(os, src_, dst_);
       return;
    }
 
