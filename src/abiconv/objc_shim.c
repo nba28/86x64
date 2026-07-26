@@ -83,8 +83,13 @@ static int g_argstr_trace_cache = -1;
  * for e.g. a NULL CFAllocatorRef and is therefore opt-in and noisy. */
 static int g_callsite_trace_cache = -1;
 static int g_callsite_nil_cache   = -1;
+static int g_callsite_all_cache   = -1;
 #define CALLSITE_TRACE()     obj_trace_flag("ABICONV_CALLSITE_TRACE", &g_callsite_trace_cache)
 #define CALLSITE_NIL_TRACE() obj_trace_flag("ABICONV_CALLSITE_NIL",   &g_callsite_nil_cache)
+/* Firehose: EVERY bridged object/CF arg with its call site. Use when the bad
+ * value never reaches the selective traces above — then the LAST line before the
+ * crash names the call that died, regardless of what the value looked like. */
+#define CALLSITE_ALL_TRACE() obj_trace_flag("ABICONV_CALLSITE_ALL", &g_callsite_all_cache)
 
 /*
  * Proxy arena: a flat low-4GB array of 64-bit reals. A "handle" is the
@@ -7788,8 +7793,10 @@ uint64_t _86x64_unwrap_obj_arg(uint32_t a) {
     * at [rbp+0xc]); dladdr then names the translated image and offset, which is
     * directly disassemblable because the translated __TEXT mirrors the i386
     * layout. */
-   if (__builtin_expect(r < 0x1000, 0)) {
-      const int want = r ? CALLSITE_TRACE() : CALLSITE_NIL_TRACE();
+   if (__builtin_expect(r < 0x1000 || CALLSITE_ALL_TRACE(), 0)) {
+      const int want = (r >= 0x1000) ? 1
+                     : r            ? (CALLSITE_TRACE() || CALLSITE_ALL_TRACE())
+                                    : (CALLSITE_NIL_TRACE() || CALLSITE_ALL_TRACE());
       if (want) {
          void *fp = __builtin_frame_address(1);
          uint32_t ret = fp ? *(const uint32_t *)((uintptr_t)fp + 8) : 0;

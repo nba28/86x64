@@ -17,8 +17,11 @@
 #
 #   ABICONV_CALLSITE_TRACE=1  non-nil SUB-PAGE args (never legitimate; low noise)
 #   ABICONV_CALLSITE_NIL=1    also nil args (legitimate for allocators => noisy)
+#   ABICONV_CALLSITE_ALL=1    EVERY bridged object/CF arg (firehose). Use when the
+#                             bad value never shows up in the selective traces:
+#                             the LAST line before the crash names the dying call.
 #
-# Usage:  bash halo_cfstr_capture.sh [logfile] [--nil]
+# Usage:  bash halo_cfstr_capture.sh [logfile] [--nil|--all]
 # Then:   drive Halo to the failing UI (Graphics Settings -> OK).
 # Output: [callsite] arg=0x… -> 0x…  i386ret=0x…  Halo.dylib+0xOFFSET
 # Decode: disassemble at 0x10000000+OFFSET (the translated __TEXT vmaddr; the
@@ -30,6 +33,7 @@ APP="${HALO_APP:-$HOME/projects/translations/Apps64/Halo.app}"
 BIN="$APP/Contents/MacOS/Halo"
 LOG="${1:-/tmp/halo_callsite.log}"
 [ "${2:-}" = "--nil" ] && export ABICONV_CALLSITE_NIL=1
+[ "${2:-}" = "--all" ] && export ABICONV_CALLSITE_ALL=1
 
 pkill -9 -x Halo 2>/dev/null; sleep 1     # Halo is a singleton
 
@@ -40,7 +44,12 @@ rc=$?
 
 echo
 echo "exit rc=$rc"
-echo "--- [callsite] hits (the bad args and who passed them) ---"
-grep '\[callsite\]' "$LOG" | sort | uniq -c | sort -rn | head -20 || echo "(none)"
+if [ "${ABICONV_CALLSITE_ALL:-}" = "1" ]; then
+  echo "--- LAST 12 [callsite] lines (the last one is the call that died) ---"
+  grep '\[callsite\]' "$LOG" | tail -12 || echo "(none)"
+else
+  echo "--- [callsite] hits (the bad args and who passed them) ---"
+  grep '\[callsite\]' "$LOG" | sort | uniq -c | sort -rn | head -20 || echo "(none)"
+fi
 echo "--- last control-data traffic before the end ---"
 grep '\[ctrl\]' "$LOG" | tail -10 || echo "(none)"
