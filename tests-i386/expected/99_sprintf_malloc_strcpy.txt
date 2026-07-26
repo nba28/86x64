@@ -1,0 +1,7 @@
+nonnull=1
+subpage=0
+msg=Win32 error #1300
+len=17
+match=1
+fmt_s=Msg-ok
+exit_code: 0

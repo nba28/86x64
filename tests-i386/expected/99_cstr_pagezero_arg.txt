@@ -1,0 +1,11 @@
+abiconv: clamped 2 page-zero `const char *` argument(s) to "" (an unmapped i386 pointer reached a native callee; app bug unless the translator produced it)
+valid_nonnull=1
+valid_len=5
+survived_pagezero=1
+pagezero_nonnull=1
+pagezero_len=0
+survived_edge=1
+edge_len=0
+unclamped_len=3
+null_query=C
+exit_code: 0

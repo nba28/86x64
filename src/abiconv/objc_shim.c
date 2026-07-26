@@ -1139,6 +1139,40 @@ const char *x64_cstr_ret_low(const char *p) {
    return low;
 }
 
+/* The ARG-direction counterpart of x64_cstr_ret_low, for `const char *`
+ * parameters. The generated shims clamp INLINE (typeconv.cc
+ * convert_const_cstr_ptr) — a value inside the translated image's unmapped
+ * __PAGEZERO ([1, 0x1000)) can never address a valid string, so it is replaced
+ * by this empty string rather than handed to a native framework that would
+ * deref it and abort the process from inside system code.
+ *
+ * The substitute is `const` so a callee that violates its own signature and
+ * writes through it faults HERE (in our data) instead of corrupting something
+ * live. It is a full PAGE of zeros rather than a single NUL because the same
+ * clamp covers the `const UInt8 *` byte-buffer spellings (CFStringCreateWithBytes
+ * and friends), where a separate length argument tells the callee how much to
+ * read: a one-byte substitute would be over-read straight off the end. A page
+ * bounds any plausible over-read inside our own zeros, and costs 4KB of
+ * read-only data.
+ *
+ * The counter is bumped inline and reported at teardown: a clamp caused by an
+ * APP bug is expected and harmless, but one caused by a TRANSLATOR defect must
+ * not be swallowed silently, and this line in the log is the only trace it would
+ * otherwise leave. Not atomic — an exact count is not the point. */
+const char x64_cstr_pagezero_str[4096] = "";
+unsigned long long x64_cstr_pagezero_hits = 0;
+
+__attribute__((destructor))
+static void x64_cstr_pagezero_report(void) {
+   if (x64_cstr_pagezero_hits) {
+      fprintf(stderr,
+              "abiconv: clamped %llu page-zero `const char *` argument(s) to "
+              "\"\" (an unmapped i386 pointer reached a native callee; app bug "
+              "unless the translator produced it)\n",
+              x64_cstr_pagezero_hits);
+   }
+}
+
 /* Per-method arg unwrap loop: iterates from method-arg index `arg_start`
  * (==2 for self+cmd already-placed methods) up through `cap_regs`,
  * pulling 4-byte slots out of args32 and writing 8-byte slots into plan.

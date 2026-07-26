@@ -130,6 +130,7 @@ public:
    void convert_fnptr(std::ostream& os, CXType pointee, const Location& src, const Location& dst);
    void convert_objc_ptr(std::ostream& os, const Location& src, const Location& dst);
    void convert_cf_ptr(std::ostream& os, const Location& src, const Location& dst);
+   void convert_const_cstr_ptr(std::ostream& os, const Location& src, const Location& dst);
    void convert_objc_sel(std::ostream& os, const Location& src, const Location& dst);
    void emit_runtime_bridge_call(std::ostream& os, const char *callee,
                                  const std::string& rsi_operand,
