@@ -800,7 +800,23 @@ int sd_ctrl_get_cfstring(void *ctrl, const void **out) {
     struct sd_entry *e = sd_find(ctrl);
     if (!e || e->kind != SD_EDIT) return 0;
     struct edit *ed = (struct edit *)e->rec;
-    if (out) *out = CFStringCreateWithCString(NULL, ed->text, kCFStringEncodingUTF8);
+    if (out) {
+        // CFStringCreateWithCString returns NULL for ANY byte sequence that is
+        // not valid in the requested encoding, and ed->text takes RAW bytes from
+        // SetControlData(kControlEditTextTextTag) — nothing validates them as
+        // UTF-8. Real Carbon returns a valid (possibly empty) CFStringRef
+        // whenever it reports success, so a nil must never escape here: the
+        // caller has no reason to nil-check a noErr result and will hand it
+        // straight to CFStringGetCString/CFStringGetLength. Halo's Graphics
+        // Settings "OK" harvest did exactly that and took native
+        // CoreFoundation down (__CF_IS_OBJC on a nil CFStringRef, SIGSEGV).
+        // MacRoman is a total decoding — every byte maps — so it is a complete
+        // fallback, with an empty string as the final backstop.
+        CFStringRef s = CFStringCreateWithCString(NULL, ed->text, kCFStringEncodingUTF8);
+        if (!s) s = CFStringCreateWithCString(NULL, ed->text, kCFStringEncodingMacRoman);
+        if (!s) s = CFStringCreateWithCString(NULL, "", kCFStringEncodingUTF8);
+        *out = s;
+    }
     return 1;
 }
 

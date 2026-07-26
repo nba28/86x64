@@ -212,6 +212,11 @@ uint32_t shim_GetControlData(uint32_t *a) {
     if (is_ours) {   // our edit field
         if (tag == 'cfst' && data) {
             const void *cf = NULL;
+            // INVARIANT (sd_ctrl_get_cfstring): a success return always yields a
+            // real, +1-owned CFStringRef, never nil — a noErr GetControlData
+            // must not hand back a nil the caller will deref. Halo's Graphics
+            // Settings "OK" harvest passed exactly such a nil to
+            // CFStringGetCString and took native CoreFoundation down.
             sd_ctrl_get_cfstring(c, &cf);
             *(uint32_t *)data = cf ? x64_objc_wrap((uint64_t)(uintptr_t)cf) : 0;
             if (actual) *actual = 4;
