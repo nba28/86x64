@@ -25,6 +25,12 @@ LOG="${1:-/tmp/halo_cfstr_capture.log}"
 CMDS="$(mktemp -t halocap).lldb"
 
 cat > "$CMDS" <<'EOF'
+# ABICONV_CTRL_TRACE shows every Get/SetControlData with ours=0/1, so the same
+# run tells us whether the nil came out of our control-data shim (ours=1), out of
+# the native fallback leaving the caller's buffer untouched (ours=0), or from
+# somewhere else entirely.
+settings set target.env-vars ABICONV_CTRL_TRACE=1
+
 # nil CFStringRef reaching CFStringGetCString(theString, buf, size, encoding)
 breakpoint set -n CFStringGetCString -c '$rdi == 0'
 breakpoint command add 1
