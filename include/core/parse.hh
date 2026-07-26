@@ -287,6 +287,41 @@ namespace MachO {
        * non-cstring target so callers gate only this exact false-positive. */
       bool cstring_interior_alias(const Image& img, std::size_t vmaddr) const;
 
+      /* CODE-INTERIOR ALIAS gate (see section.cc DataParser). True iff `vmaddr`
+       * lands STRICTLY INSIDE a decoded instruction of an
+       * S_ATTR_(PURE|SOME)_INSTRUCTIONS section — i.e. the section has already
+       * been parsed into blobs, but NO blob starts exactly at `vmaddr`.
+       *
+       * A genuine pointer into code ALWAYS targets an instruction BOUNDARY: a
+       * function entry (fn-ptr table / vtable / ObjC1 IMP), or at worst a
+       * basic-block head (switch table). Nothing can target the middle of an
+       * instruction — it is not a valid execution address. So a data word whose
+       * value lands mid-instruction is an integer/string CONSTANT that merely
+       * aliases the code vmaddr range, and rebasing it corrupts it.
+       *
+       * This is the discriminator of LAST RESORT and the only one that arms for
+       * a locals-stripped, reloc-less, fixed-address i386 exec, where
+       * code_alias_is_constant (needs func_syms), the classic-reloc gate (needs
+       * a local reloc table) and cstring_interior_alias (cstring targets only)
+       * are ALL disarmed. Unlike those it needs no symbols, no relocs and no
+       * string invariant — only the instruction decode macho-tool already
+       * performs. (Civ IV STEAM: the 4-byte __DATA,__data string constant
+       * " ._" = 0x005F2E20 — the strtok delimiter set of the engine's
+       * hierarchical name-registry lookup — aliased a MID-INSTRUCTION i386
+       * __text address and was falsely rebased to a translated __text address
+       * 0x10A9546D, whose bytes are "mT\xa9\x10". strtok then split the path
+       * "Game" on 'm' into "Ga"/"e"; "Ga" is not a child of the root node, so
+       * the walk kept a NULL node and the next component dereferenced it at
+       * +0x88 -> SIGSEGV during the translated static initializers.)
+       *
+       * SELF-DISARMING: returns false when the target section holds no parsed
+       * blobs yet (parse order put __DATA before that code section), so an
+       * unparsed section can never be mistaken for "all interior". Returns
+       * false for any non-instructions target — callers keep their own gates
+       * for __cstring / __TEXT,__const / data. Env kill-switch
+       * M64_NO_CODE_INTERIOR_GATE=1 disarms it (A/B regression harness). */
+      bool code_interior_alias(std::size_t vmaddr) const;
+
 
       ParseEnv(Archive<bits>& archive):
          archive(archive),

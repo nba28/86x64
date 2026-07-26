@@ -7,6 +7,7 @@
 #include "section_blob.hh"
 #include "archive.hh"
 #include "segment.hh"
+#include "instruction.hh"
 
 namespace MachO {
 
@@ -312,6 +313,54 @@ namespace MachO {
             const std::size_t off = sec->sect.offset + (vmaddr - sec->sect.addr);
             if (img.at<uint8_t>(off - 1) == 0) { return false; }  /* start */
             return true;                                          /* interior */
+         }
+         return false;   /* in segment but between/outside sections */
+      }
+      return false;
+   }
+
+   template <Bits bits>
+   bool ParseEnv<bits>::code_interior_alias(std::size_t vmaddr) const {
+      static const bool disabled =
+         std::getenv("M64_NO_CODE_INTERIOR_GATE") != nullptr;
+      if (disabled) { return false; }
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(vmaddr)) { continue; }
+            /* SECTION-granular, like code_alias_is_constant: only sections that
+             * actually hold decoded instructions carry the boundary invariant.
+             * __TEXT's DATA sections (__cstring/__const/literals) and every data
+             * section keep the callers' permissive treatment. */
+            if ((sec->sect.flags &
+                 (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) == 0) {
+               return false;
+            }
+            /* SELF-DISARM: the gate is only meaningful once this section has
+             * been parsed into blobs. Sections are parsed in load-command order
+             * (__TEXT before __DATA in every real image), but never assume it —
+             * an empty blob range would otherwise declare every address
+             * "interior" and reject genuine code pointers wholesale. */
+            const std::size_t lo = sec->sect.addr;
+            const std::size_t hi = lo + sec->sect.size;
+            const auto& found = vmaddr_resolver.found;
+            auto it = found.lower_bound(lo);
+            if (it == found.end() || it->first >= hi) { return false; }
+            /* Every SectionBlob registers its own start vmaddr (SectionBlob
+             * ctor). Two ways to be a non-boundary:
+             *   - no blob starts here  -> strictly inside a decoded instruction
+             *   - a blob starts here but it is NOT an Instruction -> the linear
+             *     sweep could not decode these bytes (or they are inter-function
+             *     padding re-synced by the func_syms boundary rule) and emitted
+             *     raw DataBlobs. Undecodable bytes are not a legal branch target
+             *     either, and Immediate's exact-key resolve DOES attach to such a
+             *     DataBlob — which is precisely how Civ IV's " ._" got rebased
+             *     (its i386 address 0x5F2E20 sits 8 bytes into the 11-byte span
+             *     starting at the instruction 0x5F2E18, on a DataBlob).
+             * Only a real decoded Instruction is a genuine code target. */
+            auto hit = found.find(vmaddr);
+            if (hit == found.end()) { return true; }
+            return dynamic_cast<const Instruction<bits> *>(hit->second) == nullptr;
          }
          return false;   /* in segment but between/outside sections */
       }

@@ -424,6 +424,30 @@ namespace MachO {
                    env.code_alias_is_constant(value)) {
                   break;   /* mid-function code alias -> constant */
                }
+               /* CODE-INTERIOR ALIAS gate (M32). The gate above needs local
+                * text symbols; the classic-reloc gate below needs a local
+                * reloc table; cstring_interior_alias only covers __cstring
+                * targets. A locals-stripped, reloc-less fixed-address exec
+                * disarms all three, and then ANY 4-byte constant landing in
+                * __text is falsely rebased. But a genuine code pointer always
+                * targets an instruction BOUNDARY (function entry, or a
+                * basic-block head for a switch table) — never the middle of an
+                * instruction. So a value that lands strictly INSIDE a decoded
+                * instruction is a constant, whatever it aliases. Symbol-free,
+                * reloc-free and exact; see ParseEnv::code_interior_alias.
+                * (Civ IV STEAM: the __DATA,__data 4-byte string constant
+                * " ._" = 0x005F2E20 — the strtok delimiter of the engine's
+                * name-registry path lookup — aliased a mid-instruction __text
+                * address and was rebased to 0x10A9546D = "mT\xa9\x10"; strtok
+                * then split the path "Game" on 'm' and the failed lookup
+                * dereferenced a NULL node at +0x88 during static init.)
+                * Applies to __TEXT,__const too (is_text_const_sect is NOT
+                * excluded): its switch tables target basic-block heads, which
+                * ARE boundaries, so they pass this gate — unlike the
+                * func-entry gate, which is why that one excludes them. */
+               if (exec && bits == Bits::M32 && env.code_interior_alias(value)) {
+                  break;   /* mid-INSTRUCTION alias -> constant */
+               }
                /* CLASSIC-RELOC AUTHORITATIVE GATE (M32 classic images). A
                 * slidable classic image's genuine absolute internal pointers
                 * ALL carry LC_DYSYMTAB local relocations — dyld could not
