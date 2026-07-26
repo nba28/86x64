@@ -832,22 +832,22 @@ $(BUILD_DIR)/35_pthread_cond_handshake.o: $(SRC_DIR)/35_pthread_cond_handshake.c
 $(BUILD_DIR)/%.i386: $(BUILD_DIR)/%.o
 	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
 
-# 99_cstr_pagezero_arg: links the SL-era i386 CoreFoundation staged by
-# `make sysroot-objc` (the clamp under test is on CFStringCreateWithCString's
-# `const char *cStr`). SKIPs via the missing expected/ file if unstaged.
+# 99_cstr_pagezero_arg / 99_cgl_renderer_check are the only tests in the MAIN
+# suite that link a framework, so unlike the opt-in `objc`/`cpp` suites they
+# cannot assume their sysroot prerequisite was staged first — a bare
+# `make sysroot && make run-only` (the state after every reboot, since the
+# sysroot lives in /tmp) must not go red on a link error. Each stages its own
+# dependency on demand; the staging targets are idempotent and only run when the
+# framework is genuinely missing, so a warm sysroot costs nothing.
 $(BUILD_DIR)/99_cstr_pagezero_arg.i386: $(BUILD_DIR)/99_cstr_pagezero_arg.o
+	@[ -f "$(I386_SYSROOT)/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" ] \
+	  || $(MAKE) --no-print-directory sysroot-objc
 	$(LD) $(LDFLAGS_I386) -e _main -framework CoreFoundation -o $@ $<
 
-# 99_cgl_renderer_check: needs the i386 OpenGL + ApplicationServices/CoreGraphics
-# frameworks staged by `make sysroot-gl`. SKIPs (no expected/) when they are
-# absent, which is also why the link is guarded rather than unconditional.
 $(BUILD_DIR)/99_cgl_renderer_check.i386: $(BUILD_DIR)/99_cgl_renderer_check.o
-	@if [ -f "$(I386_SYSROOT)/System/Library/Frameworks/OpenGL.framework/OpenGL" ]; then \
-	  $(LD) $(LDFLAGS_I386) -e _main -framework OpenGL -framework ApplicationServices -o $@ $<; \
-	else \
-	  echo "SKIP 99_cgl_renderer_check (no i386 OpenGL in sysroot; run 'make sysroot-gl')"; \
-	  $(LD) $(LDFLAGS_I386) -e _main -o $@ $< 2>/dev/null || true; \
-	fi
+	@[ -f "$(I386_SYSROOT)/System/Library/Frameworks/OpenGL.framework/OpenGL" ] \
+	  || $(MAKE) --no-print-directory sysroot-gl
+	$(LD) $(LDFLAGS_I386) -e _main -framework OpenGL -framework ApplicationServices -o $@ $<
 
 # 36_stripped_func_pad: STRIP local symbols (keep only the .globl _main) so the
 # translator sees an empty func_syms, exercising the no-symbol padding-resync
