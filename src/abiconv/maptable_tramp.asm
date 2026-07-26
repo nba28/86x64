@@ -933,6 +933,15 @@ _x64_exc_longjmp:
 	MTSHIM	___CreateWindowFromNib,               _shim_CreateWindowFromNib
 	MTSHIM	___DisposeNibReference,               _shim_DisposeNibReference
 	MTSHIM	___SetMenuBarFromNib,                 _shim_SetMenuBarFromNib
+	; --- 64-bit Window Manager compositing contract (carbon_window_shim.c) ---
+	;     PROGRAMMATIC counterpart of the nib fix above: 64-bit HIToolbox's
+	;     NewWindowCommon rejects any window without kWindowCompositingAttribute
+	;     (bit 19) with -5601, so every 32-bit-era CreateNewWindow call fails and
+	;     the app sees a NULL WindowRef. The shim ORs the bit in and forwards to
+	;     the real native window. CreateNewWindow is the ONLY programmatic
+	;     creation entry that still exists on 64-bit, so this one line covers the
+	;     whole family. MTSHIM presence removes it from the abigen legacy pass.
+	MTSHIM	___CreateNewWindow,                   _shim_CreateNewWindow
 	; ==== Reclassified abigen-DANGLING classic Carbon (removed on 64-bit) ====
 	; abigen forwarded these to now-removed natives (call _X -> dangling abort). Real
 	; bridges where a modern equivalent survives, else signature-correct graceful.
