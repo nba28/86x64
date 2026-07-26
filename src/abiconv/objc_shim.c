@@ -73,6 +73,18 @@ static int g_argstr_trace_cache = -1;
  * CreateStandardAlert actually pass, and does it round-trip non-empty" without
  * drowning in Halo/Civ's millions of non-CFString unwrap probes. */
 #define ARGSTR_TRACE() obj_trace_flag("ABICONV_ARGSTR_TRACE", &g_argstr_trace_cache)
+/* Name the TRANSLATED CALL SITE behind an object/CF arg that a native framework
+ * will certainly fault on. Neither of the obvious channels can do this: the
+ * crashlog unwinder keeps only the frames ABOVE our shim (it cannot walk the
+ * i386 frame below it), and ARGSTR_TRACE's caller= is _86x64_unwrap_obj_arg's
+ * own return address — the same value on every line. See the recovery trick at
+ * _86x64_unwrap_obj_arg. CALLSITE reports a non-nil SUB-PAGE result, which is
+ * never legitimate; CALLSITE_NIL additionally reports nil, which IS legitimate
+ * for e.g. a NULL CFAllocatorRef and is therefore opt-in and noisy. */
+static int g_callsite_trace_cache = -1;
+static int g_callsite_nil_cache   = -1;
+#define CALLSITE_TRACE()     obj_trace_flag("ABICONV_CALLSITE_TRACE", &g_callsite_trace_cache)
+#define CALLSITE_NIL_TRACE() obj_trace_flag("ABICONV_CALLSITE_NIL",   &g_callsite_nil_cache)
 
 /*
  * Proxy arena: a flat low-4GB array of 64-bit reals. A "handle" is the
@@ -7766,7 +7778,36 @@ id _86x64_shadow_real(uint32_t s) { return shadow_real(s); }
  * shadows, paired/raw legacy objects, real x86 objects, else passthrough).
  * Used by C-API object bridges (e.g. NSMapTable/NSHashTable) so a legacy
  * object's SHADOW is never handed to native code as the object itself. */
-uint64_t _86x64_unwrap_obj_arg(uint32_t a) { return unwrap_obj_arg(a); }
+uint64_t _86x64_unwrap_obj_arg(uint32_t a) {
+   uint64_t r = unwrap_obj_arg(a);
+   /* Call-site recovery (see CALLSITE_TRACE). This is structural, not a guess
+    * about layout: an abigen `.l1` shim does `push rbp; mov rsp,rbp` and
+    * thereafter only scratches rsp, and THIS function builds a normal frame, so
+    * __builtin_frame_address(1) IS the shim's rbp. In that frame the i386
+    * caller's 4-byte return address sits at [rbp+8] (the i386 cdecl args start
+    * at [rbp+0xc]); dladdr then names the translated image and offset, which is
+    * directly disassemblable because the translated __TEXT mirrors the i386
+    * layout. */
+   if (__builtin_expect(r < 0x1000, 0)) {
+      const int want = r ? CALLSITE_TRACE() : CALLSITE_NIL_TRACE();
+      if (want) {
+         void *fp = __builtin_frame_address(1);
+         uint32_t ret = fp ? *(const uint32_t *)((uintptr_t)fp + 8) : 0;
+         Dl_info di;
+         if (ret && dladdr((void *)(uintptr_t)ret, &di) && di.dli_fname) {
+            const char *b = strrchr(di.dli_fname, '/');
+            fprintf(stderr, "[callsite] arg=0x%08x -> 0x%llx  i386ret=0x%08x  %s+0x%lx\n",
+                    a, (unsigned long long)r, ret, b ? b + 1 : di.dli_fname,
+                    (unsigned long)((uintptr_t)ret - (uintptr_t)di.dli_fbase));
+         } else {
+            fprintf(stderr, "[callsite] arg=0x%08x -> 0x%llx  i386ret=0x%08x (unresolved)\n",
+                    a, (unsigned long long)r, ret);
+         }
+         fflush(stderr);
+      }
+   }
+   return r;
+}
 
 /* ---------------------------------------------------------------------------
  * objc_setProperty / objc_getProperty — the modern-runtime @synthesize'd
