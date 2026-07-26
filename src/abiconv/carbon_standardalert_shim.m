@@ -189,7 +189,16 @@ static void read_param(StdAlert *s, const uint8_t *parm) {
     if (s->defaultButton < 0) s->defaultButton = 0;
 }
 
-/* Build+run the NSAlert on the main thread; returns the classic 1/2/3 item #. */
+/* carbon_classic_alert.c — the AUTHENTIC classic Carbon alert (real Carbon
+ * window + self-drawn classic HIViews). Returns the classic item 1/2/3, or 0 if
+ * the classic alert could not be materialized/driven on this OS. */
+extern int carbon_classic_alert_run(int alertType, const char *message, const char *informative,
+                                    const char *okText, const char *cancelText, const char *otherText,
+                                    int defaultButton, int cancelButton);
+
+/* Build+run the AppKit NSAlert on the main thread; returns the classic 1/2/3
+ * item #. This is now only the FALLBACK for when the classic Carbon alert
+ * cannot be materialized — see run_alert_modal(). */
 static NSInteger run_ns_alert(StdAlert *s) {
     __block NSInteger hit = kAlertStdAlertOKButton;
     void (^work)(void) = ^{
@@ -238,6 +247,42 @@ static NSInteger run_ns_alert(StdAlert *s) {
     return hit;
 }
 
+/* THE modal entry point. AUTHENTIC-FIRST: try the classic self-drawn Carbon
+ * alert (carbon_classic_alert.c); only if that cannot be materialized or driven
+ * on this OS (it returns 0) fall back to the AppKit modal, so we never regress
+ * to a dead or missing alert. Both paths return the same classic item numbers,
+ * so the app's "which button did the user pick" logic runs unchanged either way.
+ *
+ * Why classic-first: the NATIVE HIToolbox standard alert is not an option — it
+ * is measurably inert on modern macOS (no click, no Return, not even an AX
+ * press dismisses it) AND it renders with modern chrome, so it is neither
+ * functional nor authentic. See carbon_classic_alert.c's header for the
+ * measurements. */
+static NSInteger run_alert_modal(StdAlert *s) {
+    /* Carbon window/HIView calls are MAIN-THREAD ONLY, and RunStandardAlert can
+     * legitimately be called from any thread — hop to the main queue exactly as
+     * the AppKit path below does. */
+    __block int item = 0;
+    void (^classic)(void) = ^{
+        item = carbon_classic_alert_run(
+            s->alertType,
+            s->error[0] ? s->error : "Alert",
+            s->explanation[0] ? s->explanation : NULL,
+            s->defaultText[0] ? s->defaultText : NULL,
+            s->hasCancel ? (s->cancelText[0] ? s->cancelText : "Cancel") : NULL,
+            s->hasOther  ? (s->otherText[0]  ? s->otherText  : "Don't Save") : NULL,
+            s->defaultButton, s->cancelButton);
+    };
+    if ([NSThread isMainThread]) classic();
+    else dispatch_sync(dispatch_get_main_queue(), classic);
+    if (item >= 1 && item <= 3) {
+        SA("classic Carbon alert -> item %d\n", item);
+        return (NSInteger)item;
+    }
+    SA("classic Carbon alert unavailable -> AppKit fallback\n");
+    return run_ns_alert(s);
+}
+
 /* ============================ MTSHIM entry points ====================== */
 
 /* OSStatus CreateStandardAlert(AlertType alertType, CFStringRef error,
@@ -269,7 +314,7 @@ uint32_t shim_RunStandardAlert(uint32_t *a) {
     int16_t *outItemHit = (int16_t *)PTR(2);
     StdAlert *s = sa_from(a[0]);
     if (!s) { if (outItemHit) *outItemHit = kAlertStdAlertOKButton; return -50 /*paramErr*/; }
-    NSInteger hit = run_ns_alert(s);
+    NSInteger hit = run_alert_modal(s);
     if (outItemHit) *outItemHit = (int16_t)hit;
     SA("RunStandardAlert -> item %ld\n", (long)hit);
     s->magic = 0;
@@ -303,7 +348,7 @@ uint32_t shim_StandardAlert(uint32_t *a) {
      * default: OK + (Cancel if the app clearly wants a two-button prompt). The
      * common StandardAlert use is a single-OK acknowledgement. */
     s.defaultButton = kAlertStdAlertOKButton;
-    NSInteger hit = run_ns_alert(&s);
+    NSInteger hit = run_alert_modal(&s);
     if (outItemHit) *outItemHit = (int16_t)hit;
     SA("StandardAlert type=%d error='%s' -> item %ld\n", s.alertType, s.error, (long)hit);
     return 0;

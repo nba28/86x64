@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -566,6 +566,19 @@ jt-weak-import: $(MACHO_TOOL)
 # window/rect, nested control classes, controlID/command/bounds, XML unescape.
 carbon-nib:
 	@bash carbon_nib_parse_test.sh
+
+# classic-alert: regression guard for the AUTHENTIC classic Carbon alert
+# (carbon_classic_alert.c). The native HIToolbox standard alert is measurably
+# INERT on modern macOS (no click / Return / AXPress dismisses it) and draws
+# modern chrome, so the alert is re-materialized on the real classic substrate:
+# a real Carbon movable-modal window with self-drawn classic HIViews. Proves,
+# with a REAL synthetic click through the session event tap, that clicking OK
+# returns classic item 1 and clicking Cancel returns item 2, that the window is
+# the classic 420pt-wide alert WITH a title bar (movable), and that the
+# M64_NO_CLASSIC_ALERT kill switch makes the path decline so the caller falls
+# back. Native x86_64; SKIPs without a window server / Accessibility rights.
+classic-alert:
+	@bash carbon_classic_alert_test.sh
 
 # carbon-dangling: regression guard that the reclassified "dangling abigen" classic
 # Carbon symbols (carbon_control_shim/carbon_dialog_shim/carbon_classic_ui_shim/

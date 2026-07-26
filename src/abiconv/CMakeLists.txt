@@ -518,6 +518,15 @@ add_library(abiconv SHARED
   # starved event pump) drew a DEAD alert (unclickable, immovable). Route them
   # through the same real -runModal NSAlert as carbon_dialog_shim.m. Needs AppKit.
   carbon_standardalert_shim.m
+  # The AUTHENTIC classic Carbon alert the standard-alert family now runs FIRST:
+  # a real Carbon window (CreateNewWindow, movable modal) whose contents are
+  # SELF-DRAWN classic HIViews (com.apple.hiview + kEventControlDraw/HitTest/
+  # Track through CoreGraphics + CoreText, Lucida Grande) — the same live
+  # substrate as the EULA scroll box / settings controls. Measured: the NATIVE
+  # HIToolbox standard alert is inert on modern macOS (no click, no Return, not
+  # even an AX press dismisses it) AND draws modern chrome, so it is neither
+  # functional nor authentic. Falls back to the AppKit modal if it can't run.
+  carbon_classic_alert.c
   # Restore the user's system keyboard input source when a translated app exits
   # (Halo forces US in-game and leaves it there; snapshot at load, re-select at
   # exit). Non-invasive: does not suppress the app's in-run layout forcing.
