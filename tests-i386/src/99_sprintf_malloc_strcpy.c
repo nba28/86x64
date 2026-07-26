@@ -28,8 +28,8 @@
  */
 /* Halo is a 2006 binary: it calls PLAIN _sprintf/_strcpy with no fortify and no
  * stack guard. A modern clang would substitute ___sprintf_chk/___strcpy_chk and
- * reference ___stack_chk_guard, exercising the wrong shims entirely (and, as
- * first written, this test died before main at rip=0x1). Match the target. */
+ * reference ___stack_chk_guard, exercising the wrong shims entirely. Match the
+ * target so the shims under test are the ones Halo actually reaches. */
 #undef _FORTIFY_SOURCE
 #define _FORTIFY_SOURCE 0
 
@@ -44,8 +44,8 @@
 /* Launder a pointer so the compiler cannot know the buffer's size. Without this
  * a modern clang emits the _FORTIFY_SOURCE variants ___sprintf_chk/___strcpy_chk
  * and a stack-protector guard -- symbols Halo's 2006 binary never references, so
- * the test would exercise the wrong shims entirely (and, as first written, it
- * died before main with rip=0x1). Halo calls plain _sprintf/_strcpy. */
+ * the test would exercise the wrong shims entirely. Halo calls plain
+ * _sprintf/_strcpy. */
 __attribute__((noinline))
 static char *opaque(char *p) { __asm__ volatile("" : "+r"(p)); return p; }
 
@@ -88,27 +88,30 @@ int main(void)
     sprintf(opaque(buf2), "Msg%s", "-ok");
     printf("fmt_s=%s\n", buf2);
 
-    return 0;
+    /* The pipeline's wrapper enters the entry symbol with a KERNEL-style frame
+     * (argc at [esp], no return address) and `jmp`s to it, replacing the crt0
+     * start these tests are linked without (-e _main). A `return` from main
+     * therefore pops argc as a return address; every test in this suite ends
+     * with exit() for that reason. Getting this wrong looks exactly like a
+     * pre-main launch failure -- stdout is block-buffered onto a pipe, so the
+     * whole run is discarded and only the post-main fault survives, as
+     * EXC_BAD_ACCESS rip=0x1 one frame under dyld`start. It is not. */
+    exit(0);
 }
 
 /* ---------------------------------------------------------------------------
- * STATUS 2026-07-26: NOT YET A VALID REPRO -- deliberately has no
- * expected/99_sprintf_malloc_strcpy.txt, so the suite SKIPs it rather than
- * going red on a result that proves nothing.
+ * RESULT 2026-07-26: this composite is CLEAN -- it does NOT reproduce Halo's
+ * 0x3c pointer. sprintf into an i386 stack buffer, inline-strlen sizing, the
+ * bridged malloc, strcpy back, and the heap pointer carried out through a
+ * caller-supplied out-parameter all round-trip exactly (nonnull=1, subpage=0,
+ * bytes and length correct, and the %s conversion intact).
  *
- * The translated binary dies BEFORE main: EXC_BAD_ACCESS at rip=0x1, one frame
- * under dyld`start (crashlog 99_sprintf_malloc_strcpy.x86_64-2026-07-26-173746).
- * That is a launch failure of THIS fixture, not Halo's CFStringCreateWithCString
- * fault, so nothing about the sprintf/malloc/strcpy chain has been demonstrated
- * either way.
+ * That is a real result, so the test stays as a GUARD: it pins the C-library
+ * shim composite Halo's renderer-check message builder rides on, and it is now
+ * the negative control that keeps the search for the 0x3c pointer pointed
+ * upstream (at the translated call sequence around Halo.dylib +0x39683e and
+ * its caller) rather than at sprintf/malloc/strcpy.
  *
- * Already ruled out: _FORTIFY_SOURCE and the stack protector. As first written
- * the object imported ___sprintf_chk/___strcpy_chk/___stack_chk_guard -- symbols
- * Halo's 2006 binary never references. After #define _FORTIFY_SOURCE 0 plus
- * no_stack_protector the imports are exactly _sprintf/_strcpy/_malloc/_strlen/
- * _printf/_free/_strcmp, matching Halo, and the pre-main crash is UNCHANGED.
- *
- * Next: bisect the import set (78_printf_fp_vararg and 08_printf_4args launch
- * fine, so printf alone is not it -- suspect _malloc/_free/_strcmp) and check
- * whether rip=0x1 is an unbound __jt_tramp slot or a bad init trampoline.
+ * The earlier "dies before main at rip=0x1" reading was an artifact of the
+ * missing exit() -- see the comment at the end of main.
  * ------------------------------------------------------------------------- */
