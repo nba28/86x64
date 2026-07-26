@@ -75,6 +75,20 @@ void carbon_ensure_window_host(void) {
  * Create/RunStandardAlert, not ___Alert. */
 uint32_t shim_StopAlert(uint32_t *a) { (void)a; return 1; }
 
+/* The shim now tries the AUTHENTIC classic Carbon alert FIRST
+ * (carbon_classic_alert.c) and only falls back to this AppKit NSAlert when the
+ * classic path declines. THIS guard is the one that covers the FALLBACK leg, so
+ * stub the classic path to decline (return 0) — carbon_classic_alert_test.sh is
+ * the guard for the classic path itself. Keeping both means a regression in
+ * either leg is caught: the classic alert must work, AND the fallback must still
+ * be clickable/movable and return the classic item numbers if it is ever used. */
+int carbon_classic_alert_run(int t, const char *m, const char *i,
+                             const char *ok, const char *c, const char *o,
+                             int d, int cb) {
+    (void)t; (void)m; (void)i; (void)ok; (void)c; (void)o; (void)d; (void)cb;
+    return 0;
+}
+
 /* Pull in the REAL shim under test. */
 #include "SHIM_PATH"
 
