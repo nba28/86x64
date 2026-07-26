@@ -4783,6 +4783,9 @@ static void appkit_compat_install(void) {
  *   args32[2..] = explicit args
  */
 void x64_refresh_data_shadows(void);
+/* Populate THIS copy's data-shadow table if its constructor never ran (see the
+ * long comment at x64_populate_data_shadows). Idempotent and near-free. */
+static void x64_ensure_data_shadows(void);
 
 /* Forward objc_msgSend breadcrumb ring (dump fn defined later): records each
  * translated->native send with the i386 caller's return address (args32[-1] =
@@ -5636,6 +5639,7 @@ static void quinn_play_trace(const char *dir, const char *cls, SEL sel) {
 void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
    appkit_compat_install();
+   x64_ensure_data_shadows();   /* this COPY's table, if its ctor never ran */
    x64_refresh_data_shadows();
 
    if (BRIDGE_TRACE()) {
@@ -6821,16 +6825,55 @@ static const char *g_ps_name[X64_MAX_PENDING_SHADOWS];
 static int         g_ps_n;
 static volatile int g_ps_remaining;
 
-__attribute__((constructor))
-static void x64_init_data_shadows(void) {
-   const uint64_t n = x64_data_shadows_count;
+/* The table below used to be populated ONLY from a constructor. That is unsafe
+ * for a libabiconv COPY: a bundle carries several co-located copies (MacOS/ and
+ * one inside each bundled framework), dyld maps them all, but the initializers of
+ * a given copy may never run — and a translated image binds its data-shadow
+ * symbols to whichever copy dyld picked. When that copy is the uninitialized
+ * one, EVERY ObjC/CF data constant reads nil. Civ IV: its bind for
+ * kCFPreferencesCurrentApplication landed on MacOS/libabiconv.dylib (whose ctor
+ * never ran) while the QuickTime.framework copy was the one that populated, so
+ * CFPreferencesGetAppBooleanValue(@"ASLShowFPS", nil, ...) reached native
+ * CoreFoundation, which dereferences the nil identifier -> deterministic
+ * SIGSEGV before the launcher (the long-standing "rc=139 startup" crash).
+ *
+ * The proxy arena immediately above never had this problem because it has
+ * always been LAZY (arena_init() on first use). Give the shadow table the same
+ * treatment: an idempotent populate re-driven from the forward bridge, so
+ * whichever copy actually executes bridge code populates its own table.
+ * Triggers on the structural fact that this copy's table is unpopulated, never
+ * on app identity, so it is a no-op wherever the constructor already ran.
+ *
+ * A dlsym miss (the defining framework is not loaded yet at populate time) no
+ * longer silently pins the shadow to nil forever: it marks the pass PARTIAL and
+ * a later pass re-runs once the dyld image count changes (i.e. new frameworks
+ * arrived), which is the only cheap, structural "something might resolve now"
+ * signal available. */
+static os_unfair_lock  g_shadow_pop_lock = OS_UNFAIR_LOCK_INIT;
+static volatile int      g_shadows_done;    /* a full pass has completed */
+static volatile int      g_shadows_partial; /* >=1 dlsym miss: retry on new images */
+static volatile uint32_t g_shadows_imgs;    /* _dyld_image_count() at last pass */
+
+/* Populate ONE data-shadow table — ours, or that of a sibling libabiconv copy.
+ * `track_pending` records object globals that are still nil at populate time
+ * (NSApp) for later lazy refresh; only meaningful for our OWN table, since the
+ * pending arrays are per-copy state. Returns 1 if any dlsym missed. */
+static int x64_fill_shadow_table(void **tbl, uint64_t n, int track_pending,
+                                 intptr_t delta) {
+   int partial = 0;
+   if (track_pending) { g_ps_n = 0; }   /* this pass rebuilds the pending list */
    for (uint64_t i = 0; i < n; ++i) {
-      uint64_t *shadow = (uint64_t *)x64_data_shadows[3 * i];
-      const char *name = (const char *)x64_data_shadows[3 * i + 1];
-      const uint64_t info = (uint64_t)x64_data_shadows[3 * i + 2];
+      /* `tbl` is ALWAYS our own (fully fixed-up) table; for a sibling copy we
+       * merely shift the destination by the image delta. Never read the
+       * sibling's own table: when this runs from a constructor the sibling may
+       * not have been rebased yet, so its entries would still hold raw file
+       * values and we would scribble through wild pointers. */
+      uint64_t *shadow = (uint64_t *)((uintptr_t)tbl[3 * i] + delta);
+      const char *name = (const char *)tbl[3 * i + 1];   /* our copy's string */
+      const uint64_t info = (uint64_t)tbl[3 * i + 2];
       if (!shadow || !name) { continue; }
       void *addr = dlsym(RTLD_DEFAULT, name);   /* &realvar */
-      if (!addr) { continue; }
+      if (!addr) { partial = 1; continue; }     /* framework not loaded YET */
       if (info != 0) {
          /* SCALAR data constant: the i386 code derefs &shadow ONCE to read the
           * value, so the shadow must hold a low-4GB COPY of the value bytes
@@ -6849,7 +6892,7 @@ static void x64_init_data_shadows(void) {
           * Pinning it now would leave the i386 single-deref reading nil; record
           * it for lazy refresh from the forward bridge. */
          *shadow = 0;
-         if (g_ps_n < X64_MAX_PENDING_SHADOWS) {
+         if (track_pending && g_ps_n < X64_MAX_PENDING_SHADOWS) {
             g_ps_shadow[g_ps_n] = shadow;
             g_ps_addr[g_ps_n]   = addr;
             g_ps_name[g_ps_n]   = name;
@@ -6857,13 +6900,111 @@ static void x64_init_data_shadows(void) {
          }
       }
    }
-   g_ps_remaining = g_ps_n;
+   return partial;
+}
+
+/* Fill the shadow table of every OTHER libabiconv copy mapped in this process.
+ *
+ * This is what actually cures the multi-copy case, and it does NOT depend on the
+ * other copy ever executing any of our code: a copy whose initializers dyld
+ * never ran would otherwise keep an all-nil table for the life of the process,
+ * and it is precisely that copy a translated image may have bound its
+ * data-shadow symbols to. Both copies ARE in dyld's image list even when only
+ * one is initialized, so we can reach the other's table directly.
+ *
+ * Sibling identity is established structurally, never by bundle layout: an image
+ * counts as a sibling only if its LC_UUID equals ours, i.e. it is byte-identical
+ * to us. That makes the table reachable by pure arithmetic — same build means
+ * our table sits at the same offset from the mach header — so we never call
+ * dlopen/dlsym here. That matters: this runs from a static constructor, and
+ * calling back into dyld's loader from an initializer risks deadlocking against
+ * the very lock that is running us. Filling is idempotent — x64_objc_wrap dedups
+ * through the process-shared arena, so a sibling's shadow gets the SAME handle
+ * ours did, and the sibling's unwrap resolves it. */
+static const uint8_t *x64_image_uuid(const struct mach_header_64 *h) {
+   if (!h || h->magic != MH_MAGIC_64) { return NULL; }
+   const struct load_command *lc = (const struct load_command *)(h + 1);
+   for (uint32_t i = 0; i < h->ncmds; ++i) {
+      if (lc->cmd == LC_UUID) { return ((const struct uuid_command *)lc)->uuid; }
+      if (lc->cmdsize < sizeof *lc) { break; }
+      lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
+   }
+   return NULL;
+}
+
+static void x64_populate_sibling_tables(int *partial_io) {
+   Dl_info self_info;
+   if (!dladdr((void *)&g_shadows_done, &self_info) || !self_info.dli_fbase) { return; }
+   const struct mach_header_64 *self_hdr =
+      (const struct mach_header_64 *)self_info.dli_fbase;
+   const uint8_t *self_uuid = x64_image_uuid(self_hdr);
+   if (!self_uuid) { return; }
+   /* our table symbols as offsets from our own mach header */
+   const uintptr_t cnt_off = (uintptr_t)&x64_data_shadows_count - (uintptr_t)self_hdr;
+   const int verbose = getenv("ABICONV_OBJC_SLIDE_VERBOSE") != NULL;
+   for (uint32_t i = 0, n = _dyld_image_count(); i < n; ++i) {
+      const struct mach_header_64 *hdr =
+         (const struct mach_header_64 *)_dyld_get_image_header(i);
+      if (!hdr || hdr == self_hdr) { continue; }
+      const uint8_t *u = x64_image_uuid(hdr);
+      if (!u || memcmp(u, self_uuid, 16) != 0) { continue; }   /* not our build */
+      /* Canary: the sibling's count word sits at the same offset and is a plain
+       * constant needing no fixup, so reading it proves its __DATA is mapped and
+       * really is our build before we write a single shadow. */
+      const uint64_t *cnt = (const uint64_t *)((uintptr_t)hdr + cnt_off);
+      if (*cnt != x64_data_shadows_count) { continue; }
+      const intptr_t delta = (intptr_t)((uintptr_t)hdr - (uintptr_t)self_hdr);
+      if (x64_fill_shadow_table(x64_data_shadows, x64_data_shadows_count, 0, delta)) {
+         if (partial_io) { *partial_io = 1; }
+      }
+      if (verbose) {
+         const char *path = _dyld_get_image_name(i);
+         fprintf(stderr, "objc_shim: filled %llu data-constant shadows in "
+                         "sibling copy %s\n",
+                 (unsigned long long)x64_data_shadows_count,
+                 path ? path : "(unnamed)");
+         fflush(stderr);
+      }
+   }
+}
+
+static void x64_populate_data_shadows(void) {
+   const uint64_t n = x64_data_shadows_count;
+   /* Serialize: the bridge drives this from any thread, and a pass rebuilds the
+    * pending list from scratch. Re-running is otherwise harmless — x64_objc_wrap
+    * dedups through the shared map, so a re-wrap yields the SAME handle the
+    * translated code already holds. */
+   os_unfair_lock_lock(&g_shadow_pop_lock);
+   g_shadows_imgs = _dyld_image_count();
+   int partial = x64_fill_shadow_table(x64_data_shadows, n, 1, 0);
+   x64_populate_sibling_tables(&partial);
+   g_ps_remaining    = g_ps_n;
+   g_shadows_partial = partial;
+   g_shadows_done    = 1;
+   os_unfair_lock_unlock(&g_shadow_pop_lock);
    if (getenv("ABICONV_OBJC_SLIDE_VERBOSE")) {
-      fprintf(stderr, "objc_shim: populated %llu data-constant shadows\n",
-              (unsigned long long)n);
+      fprintf(stderr, "objc_shim: populated %llu data-constant shadows%s "
+                      "(copy @%p)\n",
+              (unsigned long long)n, partial ? " [PARTIAL: retry on new images]" : "",
+              (void *)&g_shadows_done);
       fflush(stderr);
    }
 }
+
+/* Idempotent entry point. Cheap in the common case: one load of g_shadows_done.
+ * A copy whose constructor never ran populates here on its first bridge call;
+ * a copy that populated while some framework was still unloaded re-runs only
+ * when the dyld image count has actually changed. */
+static void x64_ensure_data_shadows(void) {
+   if (__builtin_expect(!g_shadows_done, 0)) { x64_populate_data_shadows(); return; }
+   if (__builtin_expect(g_shadows_partial, 0) &&
+       _dyld_image_count() != g_shadows_imgs) {
+      x64_populate_data_shadows();
+   }
+}
+
+__attribute__((constructor))
+static void x64_init_data_shadows(void) { x64_populate_data_shadows(); }
 
 /* Look up a VALUE-copy data-shadow (scalar/small-record, info != 0) by symbol
  * name WITHOUT the leading underscore. Returns &shadow (a low-4GB slot) and its
@@ -8320,6 +8461,16 @@ static uint64_t unwrap_obj_arg_core(uint32_t a) {
        * -> CFStringCreateCopy faulted (Civ IV CreateStandardAlert title). */
       return ~0ULL;
    }
+   /* Attach THIS copy to the shared proxy arena before any handle test below.
+    * x64_objc_wrap has always called arena_init(); unwrap never did, and simply
+    * READ g_arena_base/g_arena_end. In a copy whose initializers dyld never ran
+    * those are still 0, so every VALID handle falls through the range check and
+    * is handed to native code raw — Civ IV: an arena handle arrived at
+    * _CFRuntimeCreateInstance as the CFAllocatorRef, and CF wrote through it
+    * into the read-only shared cache (SIGBUS). arena_init() is a single load
+    * once attached, and it rendezvouses onto the existing arena rather than
+    * creating a second one, so this cannot fork the handle space. */
+   arena_init();
    const int utrace = BRIDGE_TRACE();
    id sr = shadow_real(a);                 /* R/S shadow or paired legacy obj */
    if (sr) {
