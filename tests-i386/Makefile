@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -495,6 +495,17 @@ zerofill-reslide: $(MACHO_TOOL)
 # c7 04 24 <i386 addr>). Needs the i386 sysroot; SKIPs without.
 stripped-stackarg-procptr: $(MACHO_TOOL)
 	@bash stripped_stackarg_procptr_test.sh $(MACHO_TOOL)
+
+# code-interior-alias: regression for the CODE-INTERIOR ALIAS gate (core
+# section.cc DataParser + ParseEnv::code_interior_alias; Civ IV STEAM static-init
+# SIGSEGV). A locals-stripped, reloc-less, fixed-address i386 exec disarms every
+# other pointer-detection discriminator, so a 4-byte __DATA constant aliasing a
+# NON-instruction byte of __text is falsely rebased — Civ's strtok delimiter
+# " ._" became "mT\xa9\x10", splitting the registry path "Game" on 'm' and
+# NULL-dereferencing the failed lookup at +0x88. Asserts BOTH directions via the
+# M64_NO_CODE_INTERIOR_GATE kill-switch. Needs the i386 sysroot; SKIPs without.
+code-interior-alias: $(MACHO_TOOL)
+	@bash code_interior_alias_test.sh $(MACHO_TOOL)
 
 # sub-framework: guard for LC_SUB_FRAMEWORK (0x12) support in the core load-command
 # parser (lc.cc). Umbrella sub-frameworks (iMovie's Helium/HeliumRender) carry it;
