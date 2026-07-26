@@ -486,6 +486,10 @@ add_library(abiconv SHARED
   # carbon_nib_shim.c: REAL IBCarbon nib window/control materialization (fixes the
   # -5601 non-compositing window failure + dropped IBCarbonEditText UserPane gap).
   carbon_nib_shim.c
+  # carbon_window_shim.c: the PROGRAMMATIC half of the same -5601 rule — 64-bit
+  # HIToolbox has no non-compositing window model, so every 32-bit-era
+  # CreateNewWindow call must have kWindowCompositingAttribute forced on.
+  carbon_window_shim.c
   # Reclassified abigen-DANGLING classic Carbon (removed on 64-bit macOS): abigen
   # forwarded these to now-removed natives (dangling `call _X` -> abort if reached).
   # Real HIView bridges where a modern equivalent survives, else signature-correct

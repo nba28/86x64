@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -361,6 +361,22 @@ nscopybits: $(MACHO_TOOL)
 # test hooks; no i386 sysroot). Proves the gate BOTH ways + non-white band pixels.
 window-chrome: $(LIBABICONV)
 	@bash window_chrome_test.sh $(LIBABICONV)
+
+# carbon-window-compositing: A/B guard for the 64-bit Window Manager COMPOSITING
+# contract (carbon_window_shim.c). HIToolbox's NewWindowCommon opens with
+# `btl $0x13,%r14d / jae` on the attributes and returns -5601
+# (errUnsupportedWindowAttributesForClass) for EVERY class when
+# kWindowCompositingAttribute (bit 19) is absent — the non-compositing window
+# model was deleted in 64-bit. Practically all 32-bit-era Carbon code omits that
+# bit, so its windows come back NULL (Halo CE's fullscreen kPlainWindowClass +
+# kWindowNoConstrainAttribute and windowed kDocumentWindowClass + 0x82000009
+# render windows -> the app's error path -> an alert instead of a window). The
+# ON side is the main-suite fixture 99_carbon_window_compositing (real window +
+# content-bounds round-trip); this target adds the OFF side by re-running that
+# translated binary under M64_NO_CARBON_COMPOSITING=1 and asserting -5601 + NULL.
+# Reuses the main suite's binary; SKIPs when it has not been built.
+carbon-window-compositing: $(BUILD_DIR)/99_carbon_window_compositing.x86_64
+	@bash carbon_window_compositing_test.sh
 # focus-ring: canary guard for the legacy focus-ring contract (audit verdict:
 # no compat needed — pins WHY). (A) OS side: NSSetFocusRingStyle(NSFocusRingOnly)
 # + fill still draws headlessly, leaves the shape interior unpainted, and the
@@ -1042,6 +1058,18 @@ $(BUILD_DIR)/99_cg_rect_arrays.i386: $(BUILD_DIR)/99_cg_rect_arrays.o
 # (CFStringRef)-1 kAlertDefaultOKText sentinel round-trip through
 # x64_objc_wrap / unwrap_obj_arg. Overrides %.i386.
 $(BUILD_DIR)/97_carbon_fixed32_paramrec.i386: $(BUILD_DIR)/97_carbon_fixed32_paramrec.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_carbon_window_compositing: Carbon/HIToolbox isn't in the i386 sysroot, so
+# CreateNewWindow / GetWindowBounds / DisposeWindow are undefined dynamic_lookup
+# imports resolved at translate time by static-interpose -> libabiconv's
+# ___CreateNewWindow (the hand shim, carbon_window_shim.c) and the abigen legacy
+# bridges for the other two. Guards the 64-bit Window Manager COMPOSITING
+# contract: NewWindowCommon rejects any window without kWindowCompositingAttribute
+# (bit 19) with -5601 errUnsupportedWindowAttributesForClass, so every 32-bit-era
+# CreateNewWindow (Halo CE's fullscreen + windowed render window) came back NULL
+# and the app took its error path. Overrides %.i386.
+$(BUILD_DIR)/99_carbon_window_compositing.i386: $(BUILD_DIR)/99_carbon_window_compositing.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 95_crypto_cdkey_verify: like 39/49/79/85, the i386 sysroot's openssl headers

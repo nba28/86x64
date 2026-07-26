@@ -1,0 +1,9 @@
+fullscreen_status=0
+fullscreen_window=1
+fullscreen_bounds_match=1
+windowed_status=0
+windowed_window=1
+windowed_bounds_match=1
+degrade_status=0
+degrade_window=1
+exit_code: 0
