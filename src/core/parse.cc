@@ -367,6 +367,55 @@ namespace MachO {
       return false;
    }
 
+   template <Bits bits>
+   bool ParseEnv<bits>::code_target_has_entry_evidence(const Image& img,
+                                                       std::size_t vmaddr) const {
+      /* An nlist AT the address. Globals survive `strip -x`, and a genuine
+       * DATA-resident code pointer (C++ vtable slot, fn-ptr table entry, ObjC1
+       * IMP) targets a DEFINED function, so this hits for the overwhelming
+       * majority of real pointers even in a stripped image. */
+      if (func_syms.count(vmaddr) != 0) { return true; }
+      /* The standard i386 frame-setup prologue, for the static functions a
+       * locals-strip left unsymboled. */
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         const std::size_t fo = vmaddr - seg->segment_command.vmaddr
+                              + seg->segment_command.fileoff;
+         if (fo + 3 <= img.size() &&
+             img.template at<uint8_t>(fo)     == 0x55 &&   /* push %ebp     */
+             img.template at<uint8_t>(fo + 1) == 0x89 &&   /* mov %esp,%ebp */
+             img.template at<uint8_t>(fo + 2) == 0xe5) {
+            return true;
+         }
+         break;
+      }
+      return false;
+   }
+
+   template <Bits bits>
+   bool ParseEnv<bits>::code_alias_lacks_entry_evidence(const Image& img,
+                                                        std::size_t vmaddr) const {
+      static const bool disabled =
+         std::getenv("M64_NO_CODE_ENTRY_GATE") != nullptr;
+      if (disabled) { return false; }
+      /* Exact complement of code_alias_is_constant: that gate owns the
+       * locals-symboled case, this one the locals-stripped case. */
+      if (have_local_text_syms) { return false; }
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(vmaddr)) { continue; }
+            if ((sec->sect.flags &
+                 (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) == 0) {
+               return false;   /* not an instructions section */
+            }
+            return !code_target_has_entry_evidence(img, vmaddr);
+         }
+         return false;   /* in segment but between/outside sections */
+      }
+      return false;
+   }
+
    template class ParseEnv<Bits::M32>;
    template class ParseEnv<Bits::M64>;
 

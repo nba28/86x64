@@ -322,6 +322,45 @@ namespace MachO {
        * M64_NO_CODE_INTERIOR_GATE=1 disarms it (A/B regression harness). */
       bool code_interior_alias(std::size_t vmaddr) const;
 
+      /* POSITIVE function-ENTRY evidence at `vmaddr`, without needing local
+       * symbols. True iff either
+       *   - an nlist symbol sits exactly AT `vmaddr` (func_syms; GLOBAL text
+       *     symbols survive `strip -x`, so this still works for a locals-
+       *     stripped image), or
+       *   - the standard i386 frame-setup prologue `55 89 e5` (push %ebp;
+       *     mov %esp,%ebp) is at `vmaddr`.
+       * This is the same positive-evidence test instruction.cc applies to
+       * code-aliasing imm32s (imm32_code_alias_is_constant), lifted here so the
+       * __DATA pointer-detection path shares ONE definition of "this address is
+       * a function entry" instead of duplicating it. */
+      bool code_target_has_entry_evidence(const Image& img,
+                                          std::size_t vmaddr) const;
+
+      /* CODE-ENTRY gate for __DATA pointer detection (see section.cc
+       * DataParser). True iff `vmaddr` lands in an
+       * S_ATTR_(PURE|SOME)_INSTRUCTIONS section but carries NO function-entry
+       * evidence — i.e. it is a mid-function address that a data word merely
+       * ALIASES, not a genuine code pointer.
+       *
+       * Armed ONLY for locals-STRIPPED images (!have_local_text_syms). When
+       * locals survive, code_alias_is_constant already discriminates with the
+       * stronger "must have an nlist" rule and this adds nothing; the two are
+       * exact complements, so symboled binaries see no behavior change.
+       *
+       * WHY this and not the instruction-BOUNDARY test: a genuine pointer into
+       * code targets a function ENTRY, but being an instruction boundary is far
+       * weaker than being an entry — Civ IV's " ._" = 0x005F2E20 IS a valid
+       * boundary (`sub $0x18,%esp`, 3 bytes into the function that starts at
+       * 0x5F2E1D with `55 89 e5`), so code_interior_alias cannot see it. The
+       * entry test does: no nlist, no prologue -> constant.
+       *
+       * NOT applied to __TEXT,__const: switch jump tables legitimately target
+       * mid-function BASIC-BLOCK heads, which have neither symbol nor prologue
+       * (same exclusion code_alias_is_constant makes). Env kill-switch
+       * M64_NO_CODE_ENTRY_GATE=1 disarms it (A/B regression harness). */
+      bool code_alias_lacks_entry_evidence(const Image& img,
+                                           std::size_t vmaddr) const;
+
 
       ParseEnv(Archive<bits>& archive):
          archive(archive),
