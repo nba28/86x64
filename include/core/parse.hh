@@ -328,7 +328,15 @@ namespace MachO {
        *     symbols survive `strip -x`, so this still works for a locals-
        *     stripped image), or
        *   - the standard i386 frame-setup prologue `55 89 e5` (push %ebp;
-       *     mov %esp,%ebp) is at `vmaddr`.
+       *     mov %esp,%ebp) is at `vmaddr`, or
+       *   - an i386 C++ ABI ADJUSTOR THUNK entry is at `vmaddr`:
+       *     `add|sub $imm, disp8(%esp)` (83/81 44|6c 24 ..) immediately
+       *     followed by a `jmp` (E9/EB). One is emitted per multiple-
+       *     inheritance / covariant-return override and STORED IN A VTABLE, yet
+       *     it is a local symbol (stripped) with no frame setup — so without
+       *     this shape a locals-stripped C++ image loses thousands of genuine
+       *     vtable slots to the ENTRY gate. Kill-switch for A/B:
+       *     M64_NO_THUNK_ENTRY_EVIDENCE=1.
        * This is the same positive-evidence test instruction.cc applies to
        * code-aliasing imm32s (imm32_code_alias_is_constant), lifted here so the
        * __DATA pointer-detection path shares ONE definition of "this address is

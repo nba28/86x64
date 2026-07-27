@@ -375,17 +375,46 @@ namespace MachO {
        * IMP) targets a DEFINED function, so this hits for the overwhelming
        * majority of real pointers even in a stripped image. */
       if (func_syms.count(vmaddr) != 0) { return true; }
-      /* The standard i386 frame-setup prologue, for the static functions a
-       * locals-strip left unsymboled. */
+      /* Entry SHAPES, for the functions a locals-strip left unsymboled. */
       for (Segment<bits> *seg : archive.segments()) {
          if (!seg->contains_vmaddr(vmaddr)) { continue; }
          const std::size_t fo = vmaddr - seg->segment_command.vmaddr
                               + seg->segment_command.fileoff;
+         /* (a) the standard i386 frame-setup prologue. */
          if (fo + 3 <= img.size() &&
              img.template at<uint8_t>(fo)     == 0x55 &&   /* push %ebp     */
              img.template at<uint8_t>(fo + 1) == 0x89 &&   /* mov %esp,%ebp */
              img.template at<uint8_t>(fo + 2) == 0xe5) {
             return true;
+         }
+         /* (b) an i386 C++ ABI ADJUSTOR THUNK entry: adjust the `this` pointer
+          * in place on the stack, then tail-`jmp` to the real override —
+          *    83 /0|/5 44|6c 24 <disp8> <imm8>          add|sub $imm8, disp8(%esp)
+          *    81 /0|/5 44|6c 24 <disp8> <imm32>         add|sub $imm32,disp8(%esp)
+          * immediately followed by E9 rel32 / EB rel8.
+          * (SIB 0x24 = base %esp, no index; disp8 is 4 for a normal `this`,
+          * 8 when a hidden struct-return pointer precedes it — both occur.)
+          *
+          * These ARE function entries: GCC emits one per multiple-inheritance
+          * or covariant-return override and stores it in the VTABLE. But a
+          * thunk is a compiler-generated LOCAL symbol (gone after `strip -x`)
+          * and it has no frame setup, so without this shape a locals-stripped
+          * C++ image would have thousands of genuine vtable slots demoted to
+          * "constants" and left holding i386 addresses. MEASURED on Civ IV:
+          * 7883 of the 9196 words the ENTRY gate demoted were thunk targets. */
+         static const bool no_thunk =
+            std::getenv("M64_NO_THUNK_ENTRY_EVIDENCE") != nullptr;
+         if (!no_thunk && fo + 12 <= img.size()) {
+            const uint8_t op    = img.template at<uint8_t>(fo);
+            const uint8_t modrm = img.template at<uint8_t>(fo + 1);
+            const uint8_t sib   = img.template at<uint8_t>(fo + 2);
+            if ((op == 0x83 || op == 0x81) &&
+                (modrm == 0x44 || modrm == 0x6c) &&   /* /0 add, /5 sub, [esp+d8] */
+                sib == 0x24) {
+               const std::size_t jmp_off = fo + (op == 0x83 ? 5 : 8);
+               const uint8_t jmp = img.template at<uint8_t>(jmp_off);
+               if (jmp == 0xe9 || jmp == 0xeb) { return true; }
+            }
          }
          break;
       }
