@@ -523,6 +523,7 @@ static CCWStatus btn_track(void *call, CCWEventRef ev, void *ud) {
     (void)call; (void)ev;
     ccw_button *b = (ccw_button *)ud;
     if (!b) return ccwEventNotHandled;
+    CCW_LOG("track enter '%s' (item %d)\n", b->title, b->item);
     if (b->disabled) return 0;
     int inside = 1, was = -1;
     for (;;) {
@@ -589,13 +590,13 @@ void ccw_edit_set_focus(ccw_edit *e, int on) {
             ccw_edit *o = g_fields[i];
             if (o && o != e && o->win == e->win && o->focused) {
                 o->focused = 0; o->caretOn = 0;
-                if (ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(o->view, 1);
+                if (o->view && ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(o->view, 1);
             }
         }
     }
     e->focused = on ? 1 : 0;
     e->caretOn = e->focused;
-    if (ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
+    if (e->view && ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
 }
 int ccw_focus_next(CCWWindowRef win, int backwards) {
     int idx[CCW_FOCUS_MAX], n = 0, cur = -1;
@@ -720,18 +721,18 @@ static CCWStatus edit_track(void *call, CCWEventRef ev, void *ud) {
     ccw_mouse_in_content(e->win, &lx, &ly);
     int idx = eindex_at(e, lx - e->frame.origin.x);
     e->caret = e->selAnchor = idx;
-    if (ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
+    if (e->view && ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
     while (mouse_is_down()) {
         ccw_mouse_in_content(e->win, &lx, &ly);
         int j = eindex_at(e, lx - e->frame.origin.x);
         if (j != e->caret) {
             e->caret = j;
-            if (ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
+            if (e->view && ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
         }
         usleep(15000);
     }
     e->caretOn = 1;
-    if (ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
+    if (e->view && ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
     return 0;
 }
 
@@ -769,13 +770,13 @@ void ccw_edit_set_text(ccw_edit *e, const char *utf8) {
     strncpy(e->text, utf8 ? utf8 : "", sizeof e->text - 1);
     e->text[sizeof e->text - 1] = 0;
     e->caret = e->selAnchor = elen(e);
-    if (ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
+    if (e->view && ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
 }
 
 void ccw_edit_select_all(ccw_edit *e) {
     if (!e) return;
     e->selAnchor = 0; e->caret = elen(e);
-    if (ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
+    if (e->view && ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
 }
 
 static void edelete_range(ccw_edit *e, int lo, int hi) {
@@ -833,7 +834,7 @@ int ccw_edit_key(ccw_edit *e, unsigned char ch, uint32_t modifiers) {
         break;
     }
     e->caretOn = 1;
-    if (ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
+    if (e->view && ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(e->view, 1);
     return 1;
 }
 
