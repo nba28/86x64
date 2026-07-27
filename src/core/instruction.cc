@@ -240,23 +240,11 @@ namespace MachO {
           !env.stackarg_imm_is_code_constant(imm_val)) {
          return false;   /* not a code-section alias (or already rescued) */
       }
-      /* POSITIVE evidence: symbol at the value */
-      if (env.func_syms.count(imm_val) != 0) { return false; }
-      /* POSITIVE evidence: function prologue bytes at the value */
-      for (Segment<bits> *seg : env.archive.segments()) {
-         if (!seg->contains_vmaddr(imm_val)) { continue; }
-         const std::size_t fo =
-            (std::size_t) imm_val - seg->segment_command.vmaddr
-            + seg->segment_command.fileoff;
-         if (fo + 3 <= img.size() &&
-             img.template at<uint8_t>(fo)     == 0x55 &&   /* push %ebp      */
-             img.template at<uint8_t>(fo + 1) == 0x89 &&   /* mov %esp,%ebp  */
-             img.template at<uint8_t>(fo + 2) == 0xe5) {
-            return false;
-         }
-         break;
-      }
-      return true;
+      /* POSITIVE evidence: an nlist at the value, or the `55 89 e5` frame-setup
+       * prologue there. Shared with the __DATA pointer-detection path so both
+       * use ONE definition of "this address is a function entry"
+       * (ParseEnv::code_target_has_entry_evidence). */
+      return !env.code_target_has_entry_evidence(img, (std::size_t) imm_val);
    }
 
    /* A code-target imm32 stored into a general-base FIELD (`movl $imm32,

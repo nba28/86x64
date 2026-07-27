@@ -343,6 +343,24 @@ namespace MachO {
             strncmp(cs.segname, SEG_TEXT, sizeof(cs.segname)) == 0;
       }
 
+      /* Debug probe: M64_DBG_DATAPTR=<hex> traces every gate decision for
+       * __data words holding that exact value. Inert unless set. */
+      static const char *dbgenv = std::getenv("M64_DBG_DATAPTR");
+      static const uint32_t dbgval =
+         dbgenv ? (uint32_t)strtoul(dbgenv, nullptr, 0) : 0u;
+      const bool dbg = (dbgenv != nullptr && value == dbgval);
+      if (dbg) {
+         fprintf(stderr, "[dbgptr] value=%#x at vmaddr=%#zx sect=%.16s,%.16s "
+                 "bits=%s locals=%d classicrelocs=%d objcsym=%d textconst=%d\n",
+                 value, (std::size_t)loc.vmaddr,
+                 env.current_section ? env.current_section->sect.segname : "?",
+                 env.current_section ? env.current_section->sect.sectname : "?",
+                 bits == Bits::M32 ? "M32" : "M64",
+                 (int)env.have_local_text_syms,
+                 (int)env.have_classic_local_relocs,
+                 (int)in_objc_symbols, (int)is_text_const_sect);
+      }
+
       bool is_pointer = false;
       /* Reject obvious non-pointers up-front so we don't waste resolver
        * traffic on integer constants or float bit patterns. */
@@ -445,8 +463,39 @@ namespace MachO {
                 * excluded): its switch tables target basic-block heads, which
                 * ARE boundaries, so they pass this gate — unlike the
                 * func-entry gate, which is why that one excludes them. */
+               if (dbg) {
+                  fprintf(stderr, "[dbgptr]   in seg %.16s exec=%d "
+                          "cstring_interior=%d code_alias_const=%d "
+                          "code_interior=%d lacks_entry=%d\n",
+                          seg->segment_command.segname, (int)exec,
+                          (int)env.cstring_interior_alias(img, value),
+                          (int)env.code_alias_is_constant(value),
+                          (int)env.code_interior_alias(value),
+                          (int)env.code_alias_lacks_entry_evidence(img, value));
+               }
                if (exec && bits == Bits::M32 && env.code_interior_alias(value)) {
                   break;   /* mid-INSTRUCTION alias -> constant */
+               }
+               /* CODE-ENTRY gate (M32, locals-STRIPPED images). The boundary
+                * gate above only catches values that are not instruction
+                * starts at all. A data constant can easily alias a perfectly
+                * valid instruction boundary that is nonetheless MID-FUNCTION,
+                * and then nothing above it fires: code_alias_is_constant needs
+                * local text symbols, the classic-reloc gate needs a local
+                * reloc table, cstring_interior_alias only covers __cstring.
+                * A genuine DATA-resident code pointer targets a function
+                * ENTRY, so demand positive entry evidence — an nlist at the
+                * value (globals survive `strip -x`) or the `55 89 e5`
+                * frame-setup prologue. This is the same positive-evidence rule
+                * instruction.cc already applies to code-aliasing imm32s.
+                * (Civ IV STEAM: " ._" = 0x005F2E20 is `sub $0x18,%esp`, 3
+                * bytes into the function entered at 0x5F2E1D — a real
+                * boundary, no symbol, no prologue -> constant.)
+                * __TEXT,__const excluded: its switch jump tables target
+                * basic-block heads, which have neither symbol nor prologue. */
+               if (exec && bits == Bits::M32 && !is_text_const_sect &&
+                   env.code_alias_lacks_entry_evidence(img, value)) {
+                  break;   /* mid-function alias, no entry evidence -> constant */
                }
                /* CLASSIC-RELOC AUTHORITATIVE GATE (M32 classic images). A
                 * slidable classic image's genuine absolute internal pointers
@@ -476,6 +525,9 @@ namespace MachO {
                break;
             }
          }
+      }
+      if (dbg) {
+         fprintf(stderr, "[dbgptr]   => is_pointer=%d\n", (int)is_pointer);
       }
       return Immediate<bits>::Parse(img, loc, env, is_pointer);
    }

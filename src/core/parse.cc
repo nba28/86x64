@@ -367,6 +367,84 @@ namespace MachO {
       return false;
    }
 
+   template <Bits bits>
+   bool ParseEnv<bits>::code_target_has_entry_evidence(const Image& img,
+                                                       std::size_t vmaddr) const {
+      /* An nlist AT the address. Globals survive `strip -x`, and a genuine
+       * DATA-resident code pointer (C++ vtable slot, fn-ptr table entry, ObjC1
+       * IMP) targets a DEFINED function, so this hits for the overwhelming
+       * majority of real pointers even in a stripped image. */
+      if (func_syms.count(vmaddr) != 0) { return true; }
+      /* Entry SHAPES, for the functions a locals-strip left unsymboled. */
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         const std::size_t fo = vmaddr - seg->segment_command.vmaddr
+                              + seg->segment_command.fileoff;
+         /* (a) the standard i386 frame-setup prologue. */
+         if (fo + 3 <= img.size() &&
+             img.template at<uint8_t>(fo)     == 0x55 &&   /* push %ebp     */
+             img.template at<uint8_t>(fo + 1) == 0x89 &&   /* mov %esp,%ebp */
+             img.template at<uint8_t>(fo + 2) == 0xe5) {
+            return true;
+         }
+         /* (b) an i386 C++ ABI ADJUSTOR THUNK entry: adjust the `this` pointer
+          * in place on the stack, then tail-`jmp` to the real override —
+          *    83 /0|/5 44|6c 24 <disp8> <imm8>          add|sub $imm8, disp8(%esp)
+          *    81 /0|/5 44|6c 24 <disp8> <imm32>         add|sub $imm32,disp8(%esp)
+          * immediately followed by E9 rel32 / EB rel8.
+          * (SIB 0x24 = base %esp, no index; disp8 is 4 for a normal `this`,
+          * 8 when a hidden struct-return pointer precedes it — both occur.)
+          *
+          * These ARE function entries: GCC emits one per multiple-inheritance
+          * or covariant-return override and stores it in the VTABLE. But a
+          * thunk is a compiler-generated LOCAL symbol (gone after `strip -x`)
+          * and it has no frame setup, so without this shape a locals-stripped
+          * C++ image would have thousands of genuine vtable slots demoted to
+          * "constants" and left holding i386 addresses. MEASURED on Civ IV:
+          * 7883 of the 9196 words the ENTRY gate demoted were thunk targets. */
+         static const bool no_thunk =
+            std::getenv("M64_NO_THUNK_ENTRY_EVIDENCE") != nullptr;
+         if (!no_thunk && fo + 12 <= img.size()) {
+            const uint8_t op    = img.template at<uint8_t>(fo);
+            const uint8_t modrm = img.template at<uint8_t>(fo + 1);
+            const uint8_t sib   = img.template at<uint8_t>(fo + 2);
+            if ((op == 0x83 || op == 0x81) &&
+                (modrm == 0x44 || modrm == 0x6c) &&   /* /0 add, /5 sub, [esp+d8] */
+                sib == 0x24) {
+               const std::size_t jmp_off = fo + (op == 0x83 ? 5 : 8);
+               const uint8_t jmp = img.template at<uint8_t>(jmp_off);
+               if (jmp == 0xe9 || jmp == 0xeb) { return true; }
+            }
+         }
+         break;
+      }
+      return false;
+   }
+
+   template <Bits bits>
+   bool ParseEnv<bits>::code_alias_lacks_entry_evidence(const Image& img,
+                                                        std::size_t vmaddr) const {
+      static const bool disabled =
+         std::getenv("M64_NO_CODE_ENTRY_GATE") != nullptr;
+      if (disabled) { return false; }
+      /* Exact complement of code_alias_is_constant: that gate owns the
+       * locals-symboled case, this one the locals-stripped case. */
+      if (have_local_text_syms) { return false; }
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(vmaddr)) { continue; }
+            if ((sec->sect.flags &
+                 (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) == 0) {
+               return false;   /* not an instructions section */
+            }
+            return !code_target_has_entry_evidence(img, vmaddr);
+         }
+         return false;   /* in segment but between/outside sections */
+      }
+      return false;
+   }
+
    template class ParseEnv<Bits::M32>;
    template class ParseEnv<Bits::M64>;
 

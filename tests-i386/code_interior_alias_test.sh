@@ -109,25 +109,44 @@ translate() {   # $1 = output stem ; env already set by caller
       -o "$1" build/code_interior_alias.i386 >/dev/null 2>&1
 }
 
-# --- A: gate ON (the fix) -------------------------------------------------
-translate build/code_interior_alias.on.x86_64 || fail "translate (gate on)"
-GOT_ON="$(readback build/code_interior_alias.on.x86_64)"
-[ "$GOT_ON" != "NOTFOUND" ] || fail "sentinel slot not found in translated output (gate on)"
+# The CODE-ENTRY gate (code_entry_alias_test.sh) rejects the SAME fixture word
+# for a different reason (mid-function, no nlist / no `55 89 e5` prologue), so
+# disabling only this gate is not enough to observe the pre-fix behavior. Three
+# arms isolate this gate exactly:
+#   A  both gates on              -> preserved
+#   B  ENTRY gate off, this on    -> preserved  (this gate alone suffices)
+#   C  both gates off             -> rebased    (the fixture really is detected)
 
-# --- B: gate OFF (pre-fix behavior) --------------------------------------
-M64_NO_CODE_INTERIOR_GATE=1 translate build/code_interior_alias.off.x86_64 \
-   || fail "translate (gate off)"
+# --- A: both gates on -----------------------------------------------------
+translate build/code_interior_alias.on.x86_64 || fail "translate (both on)"
+GOT_ON="$(readback build/code_interior_alias.on.x86_64)"
+[ "$GOT_ON" != "NOTFOUND" ] || fail "sentinel slot not found in translated output (both on)"
+
+# --- B: entry gate off, interior gate ON (isolates THIS gate) -------------
+M64_NO_CODE_ENTRY_GATE=1 translate build/code_interior_alias.iso.x86_64 \
+   || fail "translate (entry gate off)"
+GOT_ISO="$(readback build/code_interior_alias.iso.x86_64)"
+[ "$GOT_ISO" != "NOTFOUND" ] || fail "sentinel slot not found in translated output (entry off)"
+
+# --- C: both gates off (pre-fix behavior) --------------------------------
+M64_NO_CODE_INTERIOR_GATE=1 M64_NO_CODE_ENTRY_GATE=1 \
+   translate build/code_interior_alias.off.x86_64 || fail "translate (both off)"
 GOT_OFF="$(readback build/code_interior_alias.off.x86_64)"
-[ "$GOT_OFF" != "NOTFOUND" ] || fail "sentinel slot not found in translated output (gate off)"
+[ "$GOT_OFF" != "NOTFOUND" ] || fail "sentinel slot not found in translated output (both off)"
 
 if [ "$GOT_ON" != "$INTERIOR" ]; then
    printf 'FAIL code-interior-alias (mid-instruction constant 0x%x was rebased to 0x%x)\n' \
       "$INTERIOR" "$GOT_ON"
    exit 1
 fi
+if [ "$GOT_ISO" != "$INTERIOR" ]; then
+   printf 'FAIL code-interior-alias (with only the ENTRY gate disabled the constant 0x%x\n' "$INTERIOR"
+   printf '     was rebased to 0x%x -- this gate is not catching it on its own)\n' "$GOT_ISO"
+   exit 1
+fi
 if [ "$GOT_OFF" = "$INTERIOR" ]; then
-   echo "FAIL code-interior-alias (guard is inert: the constant survives even with"
-   echo "     M64_NO_CODE_INTERIOR_GATE=1, so it does not actually exercise the gate)"
+   echo "FAIL code-interior-alias (guard is inert: the constant survives with BOTH"
+   echo "     gates disabled, so it does not actually exercise pointer detection)"
    exit 1
 fi
 
