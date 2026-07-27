@@ -910,6 +910,7 @@ def flatten_forks(app, dry_run=False, verbose=True):
         tmp = dest.parent / (dest.name + ".86x64tmp")
         with open(tmp, "wb") as o:
             o.write(blob)
+        shutil.copymode(f, tmp)          # keep the classic file's mode bits
         os.replace(tmp, dest)
         for attr in ("com.apple.ResourceFork", "com.apple.FinderInfo"):
             subprocess.run(["xattr", "-d", attr, str(f)], capture_output=True)
