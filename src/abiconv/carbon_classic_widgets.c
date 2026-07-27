@@ -735,6 +735,24 @@ static CCWStatus edit_track(void *call, CCWEventRef ev, void *ud) {
     return 0;
 }
 
+/* kEventControlKeyDown: HIToolbox routes a keystroke to the focused control.
+ * The Dialog Manager also runs a window-level handler (it owns Return/Esc/Tab),
+ * but a nib window has no such handler, so the field must service its own keys
+ * too — that is what makes an IBCarbonEditText genuinely typable. */
+static CCWStatus edit_ctrl_key(void *call, CCWEventRef ev, void *ud) {
+    (void)call;
+    ccw_edit *e = (ccw_edit *)ud;
+    if (!e || !ccw_GetEventParameter) return ccwEventNotHandled;
+    unsigned char ch = 0;
+    uint32_t mods = 0;
+    if (ccw_GetEventParameter(ev, 'kchr' /*kEventParamKeyMacCharCodes*/, 'TEXT',
+                              NULL, sizeof ch, NULL, &ch) != 0)
+        return ccwEventNotHandled;
+    ccw_GetEventParameter(ev, 'kmod' /*kEventParamKeyModifiers*/, 'magn',
+                          NULL, sizeof mods, NULL, &mods);
+    return ccw_edit_key(e, ch, mods) ? 0 : ccwEventNotHandled;
+}
+
 /* kEventControlSetFocusPart: accept keyboard focus (echo the part back). */
 static CCWStatus edit_focus_ev(void *call, CCWEventRef ev, void *ud) {
     (void)call;
@@ -824,7 +842,17 @@ CCWViewRef ccw_edit_install(ccw_edit *e, CCWViewRef parent) {
     if (!e->maxLen) e->maxLen = (int)sizeof e->text - 1;
     e->caret = e->selAnchor = elen(e);
     e->view = ccw_make_view(e->frame, (void *)edit_draw, (void *)ccw_claim_hit,
-                            (void *)edit_track, (void *)edit_focus_ev, e, parent);
+                            (void *)edit_track, NULL, e, parent);
+    /* keyboard: kEventControlKeyDown -> our editor, kEventControlSetFocusPart ->
+     * accept focus.  Installed here rather than through ccw_make_view's single
+     * key slot because the two need DIFFERENT handlers. */
+    if (e->view && ccw_InstallEventHandler && ccw_GetControlEventTarget) {
+        void *tgt = ccw_GetControlEventTarget(e->view);
+        struct { uint32_t cls, kind; } kd = { 'cntl', 11   };  /* KeyDown      */
+        struct { uint32_t cls, kind; } fp = { 'cntl', 4013 };  /* SetFocusPart */
+        ccw_InstallEventHandler(tgt, (void *)edit_ctrl_key,  1, &kd, e, NULL);
+        ccw_InstallEventHandler(tgt, (void *)edit_focus_ev,  1, &fp, e, NULL);
+    }
     /* A bare hiview advertises no features, so HIToolbox will not route keyboard
      * focus to it.  Advertise kHIViewFeatureGetsFocusOnClick (1<<8). */
     if (e->view && ccw_HIViewChangeFeatures) ccw_HIViewChangeFeatures(e->view, (1ull << 8), 0);
