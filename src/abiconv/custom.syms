@@ -128,6 +128,12 @@ _GetResInfo
 _DetachResource
 _ReleaseResource
 
+# FSOpenResFile: hand-shimmed (rsrc_datafork_shim.c) so a resource file whose HFS
+# resource fork had to be flattened for codesign is still found (data fork /
+# .86x64rsrc sidecar). abigen would forward straight to the native call, which
+# only ever looks at the (now empty) resource fork.
+_FSOpenResFile
+
 __sprintf_chk
 __snprintf_chk
 

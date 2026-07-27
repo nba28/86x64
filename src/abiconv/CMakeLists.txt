@@ -476,6 +476,10 @@ add_library(abiconv SHARED
   quicktime_image.c
   imagecapture_shim.c
   carbon_fsspec_shim.c
+  # FSOpenResFile with the flattened-resource-file fallback: codesign forbids HFS
+  # resource forks in a bundle, so `m64 forks --flatten` moves them to the data
+  # fork / a .86x64rsrc sidecar and this finds them there (FSOpenResourceFile).
+  rsrc_datafork_shim.c
   # Civ IV: removed Carbon/QuickDraw/QuickTime-callback subsystems (single-purpose shims,
   # wired through maptable_tramp.asm MTSHIM -> ___<sym> exports). See each file's header.
   # qd_gworld.c = the CG-backed classic QuickDraw substrate (GWorlds/PixMaps/CopyBits/

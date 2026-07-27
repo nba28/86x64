@@ -385,6 +385,12 @@ def translate_bundle(bundle, args):
                 shutil.rmtree(dest)
             info(f"copy {Path(bundle).name} -> {dest}  (source untouched)")
             run(["ditto", str(bundle), str(dest)], dry=False)
+            # ditto faithfully brings the classic HFS resource forks across, but
+            # a bundle containing one cannot be codesigned (and so cannot run on
+            # Apple Silicon). Migrate them to data-fork resource files now, so
+            # the translated tree is signable from birth and the resources are
+            # still readable (rsrc_datafork_shim.c). See flatten_forks().
+            flatten_forks(dest, dry_run=False)
             bundle = dest
 
     # Pull in any framework dependency that lives OUTSIDE the bundle (e.g. the
@@ -849,8 +855,78 @@ def _rsrc_fork_size(path):
         return 0
 
 
+RSRC_SIDECAR_DIR = ".86x64rsrc"
+
+
+def flatten_forks(app, dry_run=False, verbose=True):
+    """Migrate classic HFS resource forks to codesign-safe DATA-fork resource files.
+
+    THE CONFLICT (structural, hits every classic-era target):
+      * a classic resource file (`*.rsrc`, DLOG/DITL/TEXT/'styl' …) keeps its
+        entire payload in the HFS RESOURCE FORK; its data fork is 0 bytes;
+      * modern `codesign` refuses to sign ANY bundle containing a resource fork —
+            App.app: resource fork, Finder information, or similar detritus not allowed
+        (exit 1) — and on Apple Silicon an unsigned bundle cannot launch.
+      A translated bundle therefore cannot keep its forks AND be runnable, and
+      stripping them leaves a 0-byte husk whose resources vanish silently
+      (FSOpenResFile -> -1, Get1Resource -> NULL; e.g. Halo's first-launch EULA
+      dialog is built, finds no 'TEXT' 1024, and exit()s).
+
+    THE MIGRATION (Apple's own `.dfont` model — the modern Resource Manager reads
+    a resource map out of the DATA fork via FSOpenResourceFile):
+      * data fork empty  -> the fork bytes BECOME the file (flatten in place);
+      * data fork in use  -> the fork bytes go to the hidden sidecar
+                             <dir>/.86x64rsrc/<name>, so nothing is ever lost.
+    Either way the fork + FinderInfo xattrs are removed, so the bundle signs.
+    `src/abiconv/rsrc_datafork_shim.c` makes FSOpenResFile look in both places.
+
+    Idempotent: a bundle with no resource forks left is a no-op.
+    """
+    app = Path(app)
+    flat = side = 0
+    for f in sorted(p for p in app.rglob("*") if p.is_file() and not p.is_symlink()):
+        if f.parent.name == RSRC_SIDECAR_DIR:
+            continue
+        n = _rsrc_fork_size(f)
+        if not n:
+            continue
+        data_sz = f.stat().st_size
+        if data_sz == 0:
+            dest, kind = f, "data fork"
+        else:
+            dest = f.parent / RSRC_SIDECAR_DIR / f.name
+            kind = "sidecar"
+        if verbose:
+            info(f"flatten fork {f.relative_to(app)}  ({n} bytes -> {kind})")
+        if dry_run:
+            continue
+        with open(str(f) + "/..namedfork/rsrc", "rb") as i:
+            blob = i.read()
+        if len(blob) != n:
+            raise Die(f"short read of resource fork: {f}")
+        if dest is not f:
+            dest.parent.mkdir(parents=True, exist_ok=True)
+        # Write the payload BEFORE dropping the fork, so a failure never loses it.
+        tmp = dest.parent / (dest.name + ".86x64tmp")
+        with open(tmp, "wb") as o:
+            o.write(blob)
+        os.replace(tmp, dest)
+        for attr in ("com.apple.ResourceFork", "com.apple.FinderInfo"):
+            subprocess.run(["xattr", "-d", attr, str(f)], capture_output=True)
+        if _rsrc_fork_size(f):
+            raise Die(f"could not remove resource fork: {f}")
+        if kind == "data fork":
+            flat += 1
+        else:
+            side += 1
+    if verbose and (flat or side):
+        good(f"forks flattened: {flat} into the data fork, {side} into "
+             f"{RSRC_SIDECAR_DIR}/ sidecars")
+    return flat + side
+
+
 def cmd_forks(args):
-    """List / restore classic Mac RESOURCE FORKS in a bundle.
+    """List / restore / flatten classic Mac RESOURCE FORKS in a bundle.
 
     Old bundles store real data in the resource fork (classic Resource Manager
     files like *.rsrc DLOG/DITL/TEXT dialogs, QuickTime ref movies, ...). The
@@ -863,10 +939,22 @@ def cmd_forks(args):
     m64 forks App.app --from Orig.app -> restore missing/short forks (+ the
                                          com.apple.FinderInfo type/creator
                                          xattr) from the original bundle
+    m64 forks App.app --flatten       -> migrate every remaining fork to a
+                                         codesign-safe data-fork resource file
+                                         (see flatten_forks(); runs
+                                         automatically at translate + sign)
+
+    A full repair of a bundle whose forks were stripped is therefore:
+        m64 forks App.app --from Orig.app && m64 forks App.app --flatten
+    (or simply re-sign it — `m64 sign` flattens first).
     """
     app = Path(args.app)
     if not app.exists():
         raise Die(f"no such bundle: {app}")
+
+    if args.flatten and not args.source:
+        flatten_forks(app, dry_run=args.dry_run)
+        return
 
     if not args.source:                                   # list mode
         n = 0
@@ -894,6 +982,13 @@ def cmd_forks(args):
         if have == want:
             skipped += 1
             continue
+        # Already migrated by flatten_forks()? The payload is in the data fork
+        # (data-fork resource file) or the .86x64rsrc sidecar — restoring the HFS
+        # fork on top of that would only make the bundle unsignable again.
+        if dst.stat().st_size == want or \
+           (dst.parent / RSRC_SIDECAR_DIR / dst.name).is_file():
+            skipped += 1
+            continue
         info(f"restore fork {src.relative_to(src_app)}  ({have} -> {want} bytes)")
         if args.dry_run:
             continue
@@ -910,6 +1005,8 @@ def cmd_forks(args):
             raise Die(f"fork restore failed for {dst}")
         fixed += 1
     good(f"forks: {fixed} restored, {skipped} already ok, {missing} absent from target")
+    if args.flatten:
+        flatten_forks(app, dry_run=args.dry_run)
 
 
 def cmd_tree(args):
@@ -1127,6 +1224,11 @@ def cmd_sign(args):
     ident = bundle_identifier(app) or app.stem
     info(f"sign {app.name}  (identifier {ident})")
     # flat-sign loose dylibs, fix nested signing, then the outer bundle.
+    # codesign refuses to sign a bundle that still carries an HFS resource fork
+    # ("resource fork, Finder information, or similar detritus not allowed",
+    # exit 1). Migrate them to data-fork resource files FIRST so the classic
+    # resources survive instead of being stripped away (flatten_forks()).
+    flatten_forks(app, dry_run=args.dry_run)
     if not args.dry_run:
         _strip_native_execution(app)
         for d in (app / "Contents" / "Frameworks").glob("*.dylib"):
@@ -1297,6 +1399,11 @@ def build_parser():
     fk.add_argument("app", help="the (deployed) bundle to inspect/repair")
     fk.add_argument("--from", dest="source", metavar="ORIG",
                     help="original bundle to restore missing forks from")
+    fk.add_argument("--flatten", action="store_true",
+                    help="migrate every resource fork to a codesign-safe "
+                         "data-fork resource file (data fork if empty, else a "
+                         "hidden .86x64rsrc sidecar); runs automatically at "
+                         "translate + sign")
     common(fk); fk.set_defaults(func=cmd_forks)
 
     # reinterpose
