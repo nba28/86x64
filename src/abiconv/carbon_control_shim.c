@@ -66,6 +66,46 @@ extern int sd_ctrl_set_enabled(void *ctrl, int enabled);
 typedef int32_t OSStatus;
 typedef struct { int16_t top, left, bottom, right; } CRect;
 
+// ---- ControlData tags whose payload is a single OBJECT POINTER ---------------
+// A Size-counted Get/SetControlData buffer is ABI-shaped: an object pointer is
+// 4 bytes on i386 and 8 on x86_64, and on the translated side that 4-byte slot
+// does not even hold a real pointer -- it holds a proxy-ARENA HANDLE (0x808xxxxx,
+// see x64_objc_wrap). Forwarding the buffer VERBATIM to native HIToolbox hands it
+// a handle it dereferences as a live ref: Civ IV's Carbon nib set its edit text's
+// 'cfst' and died in HIStaticTextView::CreateStringCopy at 0x09be8f5880808f88 --
+// an uninitialised high half over the arena handle in the low half.
+//
+// The trigger is STRUCTURAL ("this tag's payload is one object pointer"), never a
+// control kind or an app, so the table is the exhaustive set of such tags read out
+// of the REAL 10.6 Carbon headers (MacOSX10.6.sdk/System/Library/Frameworks/
+// Carbon.framework/.../HIToolbox.framework/Versions/A/Headers -- note they are
+// MacRoman-encoded, so plain grep calls them binary and prints nothing):
+//
+//   CFStringRef payload
+//     'cfst'  kControlStaticTextCFStringTag        HITextViews.h:177   get+set
+//     'cfst'  kControlEditTextCFStringTag          HITextViews.h:717   get+set
+//     'pwcf'  kControlEditTextPasswordCFStringTag  HITextViews.h:724   get
+//     'incf'  kControlEditTextInsertCFStringRefTag HITextViews.h:730   get+set
+//   MenuRef payload (identical 4-vs-8 + arena-handle shape)
+//     'mhan'  kControlPopupButtonMenuRefTag        HIPopupButton.h:156
+//             kControlGroupBoxMenuRefTag           HIContainerViews.h:245
+//     'mhnd'  kControlBevelButtonMenuRefTag        HIButtonViews.h:688
+//     'omrf'  kControlPopupButtonOwnedMenuRefTag   HIPopupButton.h:163
+//             kControlBevelButtonOwnedMenuRefTag   HIButtonViews.h:710
+//
+// An exhaustive scan of every `k... = 'fourcc'` enum member in those headers found
+// no other ControlData tag documented as CFStringRef or MenuRef. Tags whose
+// payload is a UPP or a classic Handle ('vali', 'than', 'prup', 'poup', 'upup')
+// are deliberately NOT here: those are translated-app-side i386 addresses that a
+// native control could not call anyway, so widening them would be a lie.
+static int ctrl_tag_is_cfstring(uint32_t tag) {
+    return tag == 'cfst' || tag == 'pwcf' || tag == 'incf';
+}
+static int ctrl_tag_is_objptr(uint32_t tag) {
+    return ctrl_tag_is_cfstring(tag) ||
+           tag == 'mhan' || tag == 'mhnd' || tag == 'omrf';
+}
+
 #define UNWRAP(i) ((void *)(uintptr_t)x64_objc_unwrap(a[(i)]))
 #define WRAP(p)   ((p) ? ((((uint64_t)(uintptr_t)(p)) >> 32) ? x64_objc_wrap((uint64_t)(uintptr_t)(p)) : (uint32_t)(uintptr_t)(p)) : 0)
 
@@ -166,7 +206,7 @@ uint32_t shim_SetControlData(uint32_t *a) {
     void *data = (void *)(uintptr_t)a[4];
     int is_ours = sd_ctrl_get_text(c, NULL, 0) >= 0;
     if (ctrl_trace()) {
-        uint32_t h = (data && (tag == 'cfst')) ? *(uint32_t *)data : 0;
+        uint32_t h = (data && ctrl_tag_is_objptr(tag)) ? *(uint32_t *)data : 0;
         // Also echo the raw 'text' bytes the app is pushing (the port default
         // "2302"/"2303"): on-target this shows whether the value reaches the field
         // (ours=1) and what it is, vs falling through to native (ours=0 -> empty).
@@ -181,7 +221,7 @@ uint32_t shim_SetControlData(uint32_t *a) {
                 (char)(tag>>24),(char)(tag>>16),(char)(tag>>8),(char)tag, size, h, txt);
     }
     if (is_ours) {   // c is one of our edit fields
-        if (tag == 'cfst' && data) {
+        if (ctrl_tag_is_cfstring(tag) && data) {
             // the buffer holds an i386 CFStringRef (arena handle) -> unwrap to real
             uint32_t h = *(uint32_t *)data;
             const void *cf = (const void *)(uintptr_t)x64_objc_unwrap(h);
@@ -192,7 +232,16 @@ uint32_t shim_SetControlData(uint32_t *a) {
         return 0;   /* noErr — handled by the self-drawn edit field */
     }
     DL(SetControlData, OSStatus, (void *, int16_t, uint32_t, long, const void *));
-    if (SetControlData && c) return (uint32_t)SetControlData(c, (int16_t)a[1], tag, (long)size, data);
+    if (SetControlData && c) {
+        // Object-pointer payload: the i386 caller handed us a 4-byte slot holding
+        // an arena handle. Resolve it and give native a real, correctly SIZED
+        // (sizeof(void*)) pointer buffer -- see ctrl_tag_is_objptr above.
+        if (data && size == sizeof(uint32_t) && ctrl_tag_is_objptr(tag)) {
+            const void *ref = (const void *)(uintptr_t)x64_objc_unwrap(*(uint32_t *)data);
+            return (uint32_t)SetControlData(c, (int16_t)a[1], tag, (long)sizeof ref, &ref);
+        }
+        return (uint32_t)SetControlData(c, (int16_t)a[1], tag, (long)size, data);
+    }
     return 0;
 }
 
@@ -210,7 +259,7 @@ uint32_t shim_GetControlData(uint32_t *a) {
                         "tag=%c%c%c%c\n", a[0], c, is_ours,
                 (char)(tag>>24),(char)(tag>>16),(char)(tag>>8),(char)tag);
     if (is_ours) {   // our edit field
-        if (tag == 'cfst' && data) {
+        if (ctrl_tag_is_cfstring(tag) && data) {
             const void *cf = NULL;
             // INVARIANT (sd_ctrl_get_cfstring): a success return always yields a
             // real, +1-owned CFStringRef, never nil — a noErr GetControlData
@@ -229,6 +278,22 @@ uint32_t shim_GetControlData(uint32_t *a) {
     DL(GetControlData, OSStatus, (void *, int16_t, uint32_t, long, void *, long *));
     if (GetControlData && c) {
         long act = 0;
+        // Inverse of the SetControlData marshalling: native writes a 64-bit ref,
+        // which would both OVERRUN the i386 caller's 4-byte slot and leave it
+        // holding a truncated pointer. Receive into our own 8-byte buffer, then
+        // WRAP the ref into an arena handle the translated code can hold (and
+        // later hand back through our own CFRelease/DisposeMenu bridges). The
+        // reported size stays the i386-side 4.  A data==NULL call is the classic
+        // "how big is it?" query -- answer in i386 terms too.
+        if (ctrl_tag_is_objptr(tag) && (!data || maxsz == sizeof(uint32_t))) {
+            const void *ref = NULL;
+            OSStatus st = GetControlData(c, (int16_t)a[1], tag,
+                                         data ? (long)sizeof ref : 0,
+                                         data ? (void *)&ref : NULL, &act);
+            if (data) *(uint32_t *)data = (st == 0) ? WRAP(ref) : 0;
+            if (actual) *actual = (uint32_t)sizeof(uint32_t);
+            return (uint32_t)st;
+        }
         OSStatus st = GetControlData(c, (int16_t)a[1], tag, (long)maxsz, data, &act);
         if (actual) *actual = (uint32_t)act;
         return (uint32_t)st;
@@ -291,7 +356,13 @@ uint32_t shim_NewCWindow(uint32_t *a) {
         void *(*CFStringCreateWithPascalString)(void *, const uint8_t *, uint32_t) =
             (void *(*)(void *, const uint8_t *, uint32_t))dlsym(RTLD_DEFAULT, "CFStringCreateWithPascalString");
         if (SetWindowTitleWithCFString && CFStringCreateWithPascalString) {
-            void *s = CFStringCreateWithPascalString(0, pstr, 0x08000100 /*MacRoman*/);
+            // A classic Str255 window title is MacRoman, not UTF-8. This used to
+            // pass 0x08000100 (= kCFStringEncodingUTF8, CFString.h:113) while the
+            // comment claimed MacRoman: any title byte >= 0x80 (an accented or
+            // curly-quote character in a localized title) is not valid UTF-8, so
+            // CFStringCreateWithPascalString returned NULL and the window silently
+            // lost its title. kCFStringEncodingMacRoman == 0 (CFString.h:107).
+            void *s = CFStringCreateWithPascalString(0, pstr, 0 /*kCFStringEncodingMacRoman*/);
             if (s) { SetWindowTitleWithCFString(win, s);
                      void (*CFRelease)(const void *) = (void (*)(const void *))dlsym(RTLD_DEFAULT, "CFRelease");
                      if (CFRelease) CFRelease(s); }
