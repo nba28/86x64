@@ -15,14 +15,20 @@ static void shim_note(const char *sym) {
   pthread_mutex_unlock(&mtx);
 }
 
-long ZN10wxGLCanvas10SetCurrentEv(long a, long b, long c_, long d, long e, long f) { shim_note("ZN10wxGLCanvas10SetCurrentEv"); return 0; }
+long ZN10wxGLCanvas10SetCurrentEv(long a, long b, long c_, long d, long e, long f) __asm("__ZN10wxGLCanvas10SetCurrentEv");
+long ZN10wxGLCanvas10SetCurrentEv(long a, long b, long c_, long d, long e, long f) { shim_note("__ZN10wxGLCanvas10SetCurrentEv"); return 0; }
 
-long ZN10wxGLCanvas11SwapBuffersEv(long a, long b, long c_, long d, long e, long f) { shim_note("ZN10wxGLCanvas11SwapBuffersEv"); return 0; }
+long ZN10wxGLCanvas11SwapBuffersEv(long a, long b, long c_, long d, long e, long f) __asm("__ZN10wxGLCanvas11SwapBuffersEv");
+long ZN10wxGLCanvas11SwapBuffersEv(long a, long b, long c_, long d, long e, long f) { shim_note("__ZN10wxGLCanvas11SwapBuffersEv"); return 0; }
 
-long ZN10wxGLCanvas9SetColourEPKw(long a, long b, long c_, long d, long e, long f) { shim_note("ZN10wxGLCanvas9SetColourEPKw"); return 0; }
+long ZN10wxGLCanvas9SetColourEPKw(long a, long b, long c_, long d, long e, long f) __asm("__ZN10wxGLCanvas9SetColourEPKw");
+long ZN10wxGLCanvas9SetColourEPKw(long a, long b, long c_, long d, long e, long f) { shim_note("__ZN10wxGLCanvas9SetColourEPKw"); return 0; }
 
-long ZN10wxGLCanvasC1EP8wxWindowPK11wxGLContextiRK7wxPointRK6wxSizelRK8wxStringPiRK9wxPalette(long a, long b, long c_, long d, long e, long f) { shim_note("ZN10wxGLCanvasC1EP8wxWindowPK11wxGLContextiRK7wxPointRK6wxSizelRK8wxStringPiRK9wxPalette"); return 0; }
+long ZN10wxGLCanvasC1EP8wxWindowPK11wxGLContextiRK7wxPointRK6wxSizelRK8wxStringPiRK9wxPalette(long a, long b, long c_, long d, long e, long f) __asm("__ZN10wxGLCanvasC1EP8wxWindowPK11wxGLContextiRK7wxPointRK6wxSizelRK8wxStringPiRK9wxPalette");
+long ZN10wxGLCanvasC1EP8wxWindowPK11wxGLContextiRK7wxPointRK6wxSizelRK8wxStringPiRK9wxPalette(long a, long b, long c_, long d, long e, long f) { shim_note("__ZN10wxGLCanvasC1EP8wxWindowPK11wxGLContextiRK7wxPointRK6wxSizelRK8wxStringPiRK9wxPalette"); return 0; }
 
-long ZN10wxGLCanvasC1EP8wxWindowiRK7wxPointRK6wxSizelRK8wxStringPiRK9wxPalette(long a, long b, long c_, long d, long e, long f) { shim_note("ZN10wxGLCanvasC1EP8wxWindowiRK7wxPointRK6wxSizelRK8wxStringPiRK9wxPalette"); return 0; }
+long ZN10wxGLCanvasC1EP8wxWindowiRK7wxPointRK6wxSizelRK8wxStringPiRK9wxPalette(long a, long b, long c_, long d, long e, long f) __asm("__ZN10wxGLCanvasC1EP8wxWindowiRK7wxPointRK6wxSizelRK8wxStringPiRK9wxPalette");
+long ZN10wxGLCanvasC1EP8wxWindowiRK7wxPointRK6wxSizelRK8wxStringPiRK9wxPalette(long a, long b, long c_, long d, long e, long f) { shim_note("__ZN10wxGLCanvasC1EP8wxWindowiRK7wxPointRK6wxSizelRK8wxStringPiRK9wxPalette"); return 0; }
 
-long ZN11wxGLContextC1EP19__AGLPixelFormatRecP10wxGLCanvasRK9wxPalettePKS_(long a, long b, long c_, long d, long e, long f) { shim_note("ZN11wxGLContextC1EP19__AGLPixelFormatRecP10wxGLCanvasRK9wxPalettePKS_"); return 0; }
+long ZN11wxGLContextC1EP19__AGLPixelFormatRecP10wxGLCanvasRK9wxPalettePKS_(long a, long b, long c_, long d, long e, long f) __asm("__ZN11wxGLContextC1EP19__AGLPixelFormatRecP10wxGLCanvasRK9wxPalettePKS_");
+long ZN11wxGLContextC1EP19__AGLPixelFormatRecP10wxGLCanvasRK9wxPalettePKS_(long a, long b, long c_, long d, long e, long f) { shim_note("__ZN11wxGLContextC1EP19__AGLPixelFormatRecP10wxGLCanvasRK9wxPalettePKS_"); return 0; }

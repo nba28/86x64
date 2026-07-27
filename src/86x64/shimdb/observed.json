@@ -27,11 +27,23 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_Allocate": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_AreFloatingWindowsVisible": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
+ "_AudioUnitRemovePropertyListener": {
+  "first_seen_fw": "AudioUnit",
+  "stub": "function"
+ },
  "_BackColor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_BackPat": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -63,7 +75,19 @@
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
  },
+ "_CGSGetClientWindowCount": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_CGSGetClientWindowList": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_CGSIsCursorRegistered": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_CGSReleaseObj": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -87,8 +111,20 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
+ "_CallDrawingNotifications": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_ChangeWindowPropertyAttributes": {
   "first_seen_fw": "Carbon",
+  "stub": "function"
+ },
+ "_CharWidth": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_CheckPictureRecording": {
+  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_CheckUpdate": {
@@ -107,12 +143,28 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
+ "_ClosePoly": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_CloseRgn": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_Color2Index": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_ComponentFunctionImplemented": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_CopyBits": {
   "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_CopyCStringToPascal": {
+  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_CopyDeepMask": {
@@ -120,6 +172,14 @@
   "stub": "function"
  },
  "_CopyMask": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_CopyPascalStringToC": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_CopyPixMap": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -219,6 +279,18 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
+ "_DateString": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_DateToSeconds": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_DirCreate": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_DisposeGWorld": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
@@ -236,6 +308,10 @@
   "stub": "function"
  },
  "_DrawPicture": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_DrawString": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -291,7 +367,19 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
+ "_FSMatchAlias": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_FSMatchAliasNoUI": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_FSSpecToNativePathName": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_FSpCreateResFile": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -301,6 +389,50 @@
  },
  "_FSpOpenResFile": {
   "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_FWAVCTSDemuxerCreate": {
+  "first_seen_fw": "FWAVCPrivate",
+  "stub": "function"
+ },
+ "_FWAVCTSDemuxerCreateWithPIDs": {
+  "first_seen_fw": "FWAVCPrivate",
+  "stub": "function"
+ },
+ "_FWAVCTSDemuxerFlush": {
+  "first_seen_fw": "FWAVCPrivate",
+  "stub": "function"
+ },
+ "_FWAVCTSDemuxerGetPMTInfo": {
+  "first_seen_fw": "FWAVCPrivate",
+  "stub": "function"
+ },
+ "_FWAVCTSDemuxerNextTSPacket": {
+  "first_seen_fw": "FWAVCPrivate",
+  "stub": "function"
+ },
+ "_FWAVCTSDemuxerPESPacketGetLen": {
+  "first_seen_fw": "FWAVCPrivate",
+  "stub": "function"
+ },
+ "_FWAVCTSDemuxerPESPacketGetPESBuf": {
+  "first_seen_fw": "FWAVCPrivate",
+  "stub": "function"
+ },
+ "_FWAVCTSDemuxerPESPacketGetStreamType": {
+  "first_seen_fw": "FWAVCPrivate",
+  "stub": "function"
+ },
+ "_FWAVCTSDemuxerRelease": {
+  "first_seen_fw": "FWAVCPrivate",
+  "stub": "function"
+ },
+ "_FWAVCTSDemuxerReset": {
+  "first_seen_fw": "FWAVCPrivate",
+  "stub": "function"
+ },
+ "_FWAVCTSDemuxerReturnPESPacket": {
+  "first_seen_fw": "FWAVCPrivate",
   "stub": "function"
  },
  "_FigAudioFormatDescriptionCreate": {
@@ -487,6 +619,10 @@
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
+ "_FigMuxedFormatDescriptionCreate": {
+  "first_seen_fw": "CoreMediaPrivate",
+  "stub": "function"
+ },
  "_FigNotificationCenterAddListener": {
   "first_seen_fw": "CoreMedia",
   "stub": "function"
@@ -505,6 +641,22 @@
  },
  "_FigPlayerFigCreate": {
   "first_seen_fw": "MediaToolbox",
+  "stub": "function"
+ },
+ "_FigReentrantMutexCreate": {
+  "first_seen_fw": "CoreMediaPrivate",
+  "stub": "function"
+ },
+ "_FigReentrantMutexDestroy": {
+  "first_seen_fw": "CoreMediaPrivate",
+  "stub": "function"
+ },
+ "_FigReentrantMutexLock": {
+  "first_seen_fw": "CoreMediaPrivate",
+  "stub": "function"
+ },
+ "_FigReentrantMutexUnlock": {
+  "first_seen_fw": "CoreMediaPrivate",
   "stub": "function"
  },
  "_FigRegistryAddSearchPath": {
@@ -707,6 +859,10 @@
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
+ "_FillRgn": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_FindWindowOfClass": {
   "first_seen_fw": "Carbon",
   "stub": "function"
@@ -723,12 +879,40 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_FrameArc": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FrameOval": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FramePoly": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_FrameRect": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FrameRgn": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_FrameRoundRect": {
   "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_FreeMem": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_GDeviceChanged": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetAliasInfo": {
+  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_GetAppFont": {
@@ -755,6 +939,14 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_GetComponentVersion": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_GetCompressionInfo": {
+  "first_seen_fw": "CarbonSound",
+  "stub": "function"
+ },
  "_GetCursor": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
@@ -765,6 +957,10 @@
  },
  "_GetFNum": {
   "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetFPos": {
+  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_GetFontInfo": {
@@ -819,11 +1015,23 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_GetPixMapData": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_GetPixRowBytes": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_GetPixelsState": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_GetPort": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortBackPixPat": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -835,7 +1043,31 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_GetPortGrafProcs": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortHiliteColor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortOpColor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_GetPortPenLocation": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortPenPixPat": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortPenSize": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetPortPenVisibility": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -865,6 +1097,14 @@
  },
  "_GetQDGlobalsScreenBits": {
   "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetQDPlayIndex": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_GetString": {
+  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_GetSysFont": {
@@ -959,12 +1199,24 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
+ "_HGRectNull": {
+  "first_seen_fw": "Helium",
+  "stub": "function"
+ },
  "_HIDPIGetScaleFactor": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_HOpenResFile": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_HRstFLock": {
   "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_HasDepth": {
+  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_HideFloatingWindows": {
@@ -983,6 +1235,22 @@
   "first_seen_fw": "InstantMessage",
   "stub": "function"
  },
+ "_IOConnectMethodScalarIScalarO": {
+  "first_seen_fw": "IOKit",
+  "stub": "function"
+ },
+ "_IOConnectMethodScalarIStructureO": {
+  "first_seen_fw": "IOKit",
+  "stub": "function"
+ },
+ "_IOConnectMethodStructureIStructureO": {
+  "first_seen_fw": "IOKit",
+  "stub": "function"
+ },
+ "_Index2Color": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_InvalWindowRect": {
   "first_seen_fw": "Carbon",
   "stub": "function"
@@ -996,6 +1264,10 @@
   "stub": "function"
  },
  "_IsPortOffscreen": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_IsPortPictureBeingDefined": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -1015,15 +1287,47 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
+ "_KillPoly": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_LMGetCurApName": {
   "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_LMGetCurApRefNum": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_LMGetDeviceList": {
+  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_LMGetHiliteMode": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_LMGetMainDevice": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_LMGetQDErr": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_LMGetTheGDevice": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_LMSetHiliteMode": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_LMSetQDErr": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_LMSetTheGDevice": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -1047,7 +1351,27 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_MakeDataExecutable": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_MakeITable": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_MapQDRectToCGSRect": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_MatchAlias": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_Move": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_MoveHHi": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -1057,6 +1381,10 @@
  },
  "_NDR_record": {
   "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_NQDMisc": {
+  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_NSAddImage": {
@@ -1081,6 +1409,10 @@
  },
  "_NSVersionOfRunTimeLibrary": {
   "first_seen_fw": "libSystem.B.dylib",
+  "stub": "function"
+ },
+ "_NativePathNameToFSSpec": {
+  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_NavAskDiscardChanges": {
@@ -1155,6 +1487,10 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
+ "_NewAlias": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_NewAliasMinimal": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
@@ -1172,6 +1508,14 @@
   "stub": "function"
  },
  "_NewIconSuite": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_NewPixMap": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_NewPixPat": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -1443,11 +1787,23 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_OpenPicture": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_OpenPoly": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_OpenRgn": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_PBCatSearchSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBCloseSync": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -1459,6 +1815,10 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
+ "_PBDirCreateSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_PBFlushFileSync": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
@@ -1467,7 +1827,23 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
+ "_PBFlushVolSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_PBGetCatInfoSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBGetEOFSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBGetFCBInfoSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBGetFPosSync": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -1491,11 +1867,35 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
+ "_PBHOpenDenySync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_PBHSetDirAccessSync": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
+ "_PBReadAsync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBReadSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_PBSetCatInfoSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBSetEOFSync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBWriteAsync": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PBWriteSync": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -1523,6 +1923,10 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_PSstilldown": {
+  "first_seen_fw": "AppKit",
+  "stub": "function"
+ },
  "_PaintBehind": {
   "first_seen_fw": "Carbon",
   "stub": "function"
@@ -1531,11 +1935,31 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
+ "_PaintOval": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PaintPoly": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_PaintRect": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_PaintRgn": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_PenMode": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PenPat": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PenPixPat": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -1563,7 +1987,31 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_PortChanged": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PortSize": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_ProtectCursor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_PurgeSpace": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_PutPicOp": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_QDAddRectToDirtyRegion": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_QDDone": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -1572,6 +2020,14 @@
   "stub": "function"
  },
  "_QDFlushPortBuffer": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_QDGetDirtyRegion": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_QDGetNativeWindowFromPort": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -1592,6 +2048,10 @@
   "stub": "function"
  },
  "_QDPictRelease": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_QDSetDirtyRegion": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -2055,6 +2515,10 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_RegisterDrawingNotification": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_RegisterIconRefFromResource": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
@@ -2072,6 +2536,10 @@
   "stub": "function"
  },
  "_ResolveAlias": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_ResolveAliasFile": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -2095,11 +2563,19 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
+ "_SetA5": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_SetClip": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_SetCursor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_SetDrawingNotificationRect": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -2111,11 +2587,31 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_SetPixelsState": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_SetPort": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_SetPortBackPixPat": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_SetPortClipRegion": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_SetPortGrafProcs": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_SetPortPix": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_SetPortVisibleRegion": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -2175,11 +2671,31 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
+ "_SoundComponentGetInfo": {
+  "first_seen_fw": "CarbonSound",
+  "stub": "function"
+ },
+ "_SoundComponentSetInfo": {
+  "first_seen_fw": "CarbonSound",
+  "stub": "function"
+ },
+ "_StdBits": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_StretchBits": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_StringWidth": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_TempDisposeHandle": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_TempFreeMem": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -2203,6 +2719,10 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
+ "_TimeString": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
  "_TrackBox": {
   "first_seen_fw": "Carbon",
   "stub": "function"
@@ -2219,8 +2739,192 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
+ "_TrimRect": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
  "_TruncString": {
   "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_TundraDeviceProcessAVCCommand": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraFileWritingControlTokenAllVolumesAreOutOfDiskSpace": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraFileWritingControlTokenCurrentVolumeIsOutOfDiskSpace": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraFileWritingControlTokenGetDiscontinuityFlags": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraFileWritingControlTokenGetSMPTETime": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraFileWritingControlTokenGetSampleBuffer": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraFileWritingControlTokenMaximumFileSizeHasBeenReached": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraFileWritingControlTokenMaximumRecordDurationHasBeenReached": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraFileWritingControlTokenStartWriting": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraFileWritingControlTokenStopWriting": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraFileWritingControlTokenUnitCanStartWriting": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraFileWritingControlTokenUnitIsWriting": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphAddPropertyListener": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphConnectNodeInput": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphCountNodeConnections": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphCreate": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphCreateAndConfigureForUnits": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphCreateNode": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphDisconnectNodeInput": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphGetNodeByFunctionalDesignationAndIndex": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphGetNodeConnections": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphGetNodeInfo": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphGetProperty": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphGetPropertyInfo": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphInitialize": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphPause": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphRelease": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphRemoveNode": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphRemovePropertyListener": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphResume": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphSetProperty": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphStart": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphStop": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraGraphUninitialize": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraObjectAddPropertyListener": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraObjectGetPropertyData": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraObjectGetPropertyDataSize": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraObjectIsPropertySettable": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraObjectRemovePropertyListener": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraObjectSetPropertyData": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraUnitAddRenderNotify": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraUnitRelease": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraUnitRetain": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraUnitUtilityCreateAudioCompressionOptionsDictionary": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
+  "stub": "function"
+ },
+ "_TundraUnitUtilityGetAudioCompressionOptionsDictionaryFields": {
+  "first_seen_fw": "CoreMediaIOServicesPrivate",
   "stub": "function"
  },
  "_UnlockPixels": {
@@ -2232,6 +2936,26 @@
   "stub": "function"
  },
  "_UnmountVol": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_UnprotectCursor": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_UnregisterDrawingNotification": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_UpdateAlias": {
+  "first_seen_fw": "CoreServices",
+  "stub": "function"
+ },
+ "_UpdateGWorld": {
+  "first_seen_fw": "ApplicationServices",
+  "stub": "function"
+ },
+ "_UpperString": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -21379,6 +22103,10 @@
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
  },
+ "_dotpr": {
+  "first_seen_fw": "vecLib",
+  "stub": "function"
+ },
  "_dyld_stub_binder": {
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
@@ -21424,6 +22152,18 @@
   "stub": "function"
  },
  "_fft_zop": {
+  "first_seen_fw": "vecLib",
+  "stub": "function"
+ },
+ "_fft_zrip": {
+  "first_seen_fw": "Accelerate",
+  "stub": "function"
+ },
+ "_fft_zrop": {
+  "first_seen_fw": "vecLib",
+  "stub": "function"
+ },
+ "_fft_zropt": {
   "first_seen_fw": "vecLib",
   "stub": "function"
  },
@@ -23524,6 +24264,10 @@
   "stub": "function"
  },
  "_ztoc": {
+  "first_seen_fw": "vecLib",
+  "stub": "function"
+ },
+ "_zvcma": {
   "first_seen_fw": "vecLib",
   "stub": "function"
  },

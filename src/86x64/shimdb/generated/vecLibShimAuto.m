@@ -15,20 +15,41 @@ static void shim_note(const char *sym) {
   pthread_mutex_unlock(&mtx);
 }
 
-long create_fftsetup(long a, long b, long c_, long d, long e, long f) { shim_note("create_fftsetup"); return 0; }
+long create_fftsetup(long a, long b, long c_, long d, long e, long f) __asm("_create_fftsetup");
+long create_fftsetup(long a, long b, long c_, long d, long e, long f) { shim_note("_create_fftsetup"); return 0; }
 
-long ctoz(long a, long b, long c_, long d, long e, long f) { shim_note("ctoz"); return 0; }
+long ctoz(long a, long b, long c_, long d, long e, long f) __asm("_ctoz");
+long ctoz(long a, long b, long c_, long d, long e, long f) { shim_note("_ctoz"); return 0; }
 
-long destroy_fftsetup(long a, long b, long c_, long d, long e, long f) { shim_note("destroy_fftsetup"); return 0; }
+long destroy_fftsetup(long a, long b, long c_, long d, long e, long f) __asm("_destroy_fftsetup");
+long destroy_fftsetup(long a, long b, long c_, long d, long e, long f) { shim_note("_destroy_fftsetup"); return 0; }
 
-long fft_zip(long a, long b, long c_, long d, long e, long f) { shim_note("fft_zip"); return 0; }
+long dotpr(long a, long b, long c_, long d, long e, long f) __asm("_dotpr");
+long dotpr(long a, long b, long c_, long d, long e, long f) { shim_note("_dotpr"); return 0; }
 
-long fft_zop(long a, long b, long c_, long d, long e, long f) { shim_note("fft_zop"); return 0; }
+long fft_zip(long a, long b, long c_, long d, long e, long f) __asm("_fft_zip");
+long fft_zip(long a, long b, long c_, long d, long e, long f) { shim_note("_fft_zip"); return 0; }
 
-long vadd(long a, long b, long c_, long d, long e, long f) { shim_note("vadd"); return 0; }
+long fft_zrip(long a, long b, long c_, long d, long e, long f) __asm("_fft_zrip");
+long fft_zrip(long a, long b, long c_, long d, long e, long f) { shim_note("_fft_zrip"); return 0; }
 
-long vmul(long a, long b, long c_, long d, long e, long f) { shim_note("vmul"); return 0; }
+long fft_zrop(long a, long b, long c_, long d, long e, long f) __asm("_fft_zrop");
+long fft_zrop(long a, long b, long c_, long d, long e, long f) { shim_note("_fft_zrop"); return 0; }
 
-long vsmul(long a, long b, long c_, long d, long e, long f) { shim_note("vsmul"); return 0; }
+long fft_zropt(long a, long b, long c_, long d, long e, long f) __asm("_fft_zropt");
+long fft_zropt(long a, long b, long c_, long d, long e, long f) { shim_note("_fft_zropt"); return 0; }
 
-long ztoc(long a, long b, long c_, long d, long e, long f) { shim_note("ztoc"); return 0; }
+long vadd(long a, long b, long c_, long d, long e, long f) __asm("_vadd");
+long vadd(long a, long b, long c_, long d, long e, long f) { shim_note("_vadd"); return 0; }
+
+long vmul(long a, long b, long c_, long d, long e, long f) __asm("_vmul");
+long vmul(long a, long b, long c_, long d, long e, long f) { shim_note("_vmul"); return 0; }
+
+long vsmul(long a, long b, long c_, long d, long e, long f) __asm("_vsmul");
+long vsmul(long a, long b, long c_, long d, long e, long f) { shim_note("_vsmul"); return 0; }
+
+long ztoc(long a, long b, long c_, long d, long e, long f) __asm("_ztoc");
+long ztoc(long a, long b, long c_, long d, long e, long f) { shim_note("_ztoc"); return 0; }
+
+long zvcma(long a, long b, long c_, long d, long e, long f) __asm("_zvcma");
+long zvcma(long a, long b, long c_, long d, long e, long f) { shim_note("_zvcma"); return 0; }

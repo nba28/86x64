@@ -29,3 +29,4 @@ references/
 scratchpad/
 # shimgen export lists are regenerated build artifacts (the .m sources are tracked)
 src/86x64/shimdb/generated/*.exp
+src/86x64/shimdb/generated/reexport_tbd/
