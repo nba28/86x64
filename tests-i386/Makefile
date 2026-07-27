@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -532,6 +532,16 @@ code-interior-alias: $(MACHO_TOOL)
 # directions via the M64_NO_CODE_ENTRY_GATE kill-switch. Needs the i386 sysroot.
 code-entry-alias: $(MACHO_TOOL)
 	@bash code_entry_alias_test.sh $(MACHO_TOOL)
+
+# code-thunk-entry: the OTHER direction of the same ENTRY gate — a __DATA word
+# pointing at an i386 C++ ABI ADJUSTOR THUNK (`add|sub $imm,disp8(%esp)` +
+# tail-`jmp`) is a genuine vtable slot and MUST still be relocated, even though
+# the thunk has no nlist after `strip -x` and no `55 89 e5` frame setup.
+# Measured on the real i386 Civ IV: without this evidence shape the gate demoted
+# 7883 real vtable slots. Asserts BOTH directions via the
+# M64_NO_THUNK_ENTRY_EVIDENCE kill-switch. Needs the i386 sysroot.
+code-thunk-entry: $(MACHO_TOOL)
+	@bash code_thunk_entry_test.sh $(MACHO_TOOL)
 
 # sub-framework: guard for LC_SUB_FRAMEWORK (0x12) support in the core load-command
 # parser (lc.cc). Umbrella sub-frameworks (iMovie's Helium/HeliumRender) carry it;
