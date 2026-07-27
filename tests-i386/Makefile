@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -542,6 +542,19 @@ code-entry-alias: $(MACHO_TOOL)
 # M64_NO_THUNK_ENTRY_EVIDENCE kill-switch. Needs the i386 sysroot.
 code-thunk-entry: $(MACHO_TOOL)
 	@bash code_thunk_entry_test.sh $(MACHO_TOOL)
+
+# memdisp-code-alias: regression for the CODE-ALIAS gate on BASE-REGISTER memory
+# displacements (core instruction.cc memdisp_code_alias_is_constant; Civ IV
+# STEAM "launch in window" SIGBUS at 0x10382008, 2026-07-28). The absolute-table
+# heuristic relocated `lea 0x27ec(%ecx),%edx` — the GMemory free-list loop
+# terminator (0x2800 chunk minus one 0x14 node) — because 0x27ec aliases __text,
+# so the loop never terminated and walked off the chunk into a read-only
+# neighbouring mapping. Applies the IMMEDIATE family's entry-evidence classifier
+# to displacements that carry a base register. Asserts BOTH directions via the
+# M64_NO_MEMDISP_CODE_ALIAS_GATE kill-switch PLUS a negative control (a genuine
+# __DATA table base must still be relocated). Needs the i386 sysroot.
+memdisp-code-alias: $(MACHO_TOOL)
+	@bash memdisp_code_alias_test.sh $(MACHO_TOOL)
 
 # sub-framework: guard for LC_SUB_FRAMEWORK (0x12) support in the core load-command
 # parser (lc.cc). Umbrella sub-frameworks (iMovie's Helium/HeliumRender) carry it;
