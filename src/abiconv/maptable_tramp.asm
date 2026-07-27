@@ -825,6 +825,12 @@ _x64_exc_longjmp:
 	MTSHIM	___FSMakeFSSpec,    _shim_FSMakeFSSpec
 	MTSHIM	___FSpOpenResFile,  _shim_FSpOpenResFile
 
+	; Classic resource-fork open with the FLATTENED (data-fork) fallback
+	; (rsrc_datafork_shim.c). codesign refuses any bundle carrying an HFS
+	; resource fork, so `m64 forks --flatten` migrates *.rsrc payloads into the
+	; data fork / a .86x64rsrc sidecar; this makes FSOpenResFile find them there.
+	MTSHIM	___FSOpenResFile,   _shim_FSOpenResFile
+
 	; ===== Civ IV: removed Carbon/QuickDraw/QuickTime-callback symbols =====
 	; 139 classic APIs deleted from 64-bit macOS that Civ IV's translated __jt_ptrs
 	; slots bind to; without these dyld fails LOAD (Symbol not found _RGBBackColor ...).

@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -625,6 +625,22 @@ stale-check: $(MACHO_TOOL)
 # passes. Inspects the m64 module (+ built artifacts if present); no sysroot.
 inplace-symlink-guard:
 	@bash inplace_symlink_guard_test.sh
+
+# rsrc-datafork: regression guard for the CLASSIC RESOURCE FORK -> DATA-FORK
+# RESOURCE FILE migration (src/86x64/m64 flatten_forks + src/abiconv/
+# rsrc_datafork_shim.c). codesign refuses any bundle carrying an HFS resource
+# fork, and on Apple Silicon an unsigned bundle cannot launch — so the pipeline
+# had to strip the forks, silently emptying every classic *.rsrc (Halo's
+# first-launch EULA: CreateScrollingTextBoxControl -> -192 resNotFound, dialog
+# built then DisposeWindow + exit). Asserts, on a hand-built REAL resource map:
+# codesign refuses the fork / accepts the flattened bundle, flatten_forks moves
+# the payload byte-for-byte (in place when the data fork is empty, else to a
+# .86x64rsrc sidecar, never clobbering a real data fork) and is idempotent, the
+# modern Resource Manager still reads it via FSOpenResourceFile(ref,0,NULL,...),
+# and the shim stays wired (MTSHIM + custom.syms + CMake + built libabiconv).
+# No sysroot needed.
+rsrc-datafork:
+	@bash rsrc_datafork_test.sh
 
 # vendor-dead-system: regression guard for the DEAD-ABSOLUTE-SYSTEM-PATH auto-
 # vendor in src/86x64/_vendor_deps.py. An i386 app links a system framework by
