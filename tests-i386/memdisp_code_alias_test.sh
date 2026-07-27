@@ -53,28 +53,28 @@ mkdir -p build
 fail() { echo "FAIL memdisp-code-alias ($1)"; exit 1; }
 
 clang -arch i386 -isysroot "$SYSROOT" -mmacosx-version-min=10.6 \
-   -c src/99_memdisp_code_alias.s -o build/99_memdisp_code_alias.o \
+   -c src/memdisp_code_alias.s -o build/memdisp_code_alias.o \
    2>/dev/null || fail assemble
 # non-PIE MH_EXECUTE: the fixed-load-address shape that arms the absolute-table
 # heuristic in the first place.
 ld -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" \
-   -lSystem -e _main -o build/99_memdisp_code_alias.i386 \
-   build/99_memdisp_code_alias.o 2>/dev/null || fail link
+   -lSystem -e _main -o build/memdisp_code_alias.i386 \
+   build/memdisp_code_alias.o 2>/dev/null || fail link
 
 # _probe_fn opens with `55 89 e5`; +3 is the `subl $0x18,%esp` boundary — a REAL
 # instruction start, but mid-function with no nlist and no entry shape.
-PROBE="$(nm build/99_memdisp_code_alias.i386 2>/dev/null | awk '$3=="_probe_fn"{print $1}')"
+PROBE="$(nm build/memdisp_code_alias.i386 2>/dev/null | awk '$3=="_probe_fn"{print $1}')"
 [ -n "$PROBE" ] || fail "could not read _probe_fn vmaddr"
 TARGET=$(( 0x$PROBE + 3 ))
 # The heuristic only considers values in [0x1000, 0x80000000).
 [ "$TARGET" -ge 4096 ] || fail "probe vmaddr $PROBE too low to exercise the heuristic"
 
 # _g_table is .globl, so it survives `strip -x` — the NEGATIVE control's target.
-GTAB="$(nm build/99_memdisp_code_alias.i386 2>/dev/null | awk '$3=="_g_table"{print $1}')"
+GTAB="$(nm build/memdisp_code_alias.i386 2>/dev/null | awk '$3=="_g_table"{print $1}')"
 [ -n "$GTAB" ] || fail "could not read _g_table vmaddr"
 
 # Patch the mid-__text address into the LEA's disp32 sentinel (0x11223344).
-python3 - "$TARGET" build/99_memdisp_code_alias.i386 <<'PY' || fail "patch"
+python3 - "$TARGET" build/memdisp_code_alias.i386 <<'PY' || fail "patch"
 import sys, struct
 val = int(sys.argv[1]); path = sys.argv[2]
 d = bytearray(open(path, 'rb').read())
@@ -90,15 +90,15 @@ PY
 
 # Strip locals: no func_syms for _probe_fn, so code_alias_is_constant stays
 # disarmed and the locals-stripped arm carries the classification — Civ's shape.
-strip -x build/99_memdisp_code_alias.i386 2>/dev/null || fail strip
-if nm build/99_memdisp_code_alias.i386 2>/dev/null | grep -q " _probe_fn$"; then
+strip -x build/memdisp_code_alias.i386 2>/dev/null || fail strip
+if nm build/memdisp_code_alias.i386 2>/dev/null | grep -q " _probe_fn$"; then
    fail "_probe_fn still symboled after strip"
 fi
 
 translate() {   # $1 = output stem ; env already set by caller
    rm -f "$1" "$1.dylib"
    bash "$PIPELINE" -m "$MT" -l "$LIBABICONV" -w "$LIBWRAPPER" -i "$LIBINTERPOSE" \
-      -o "$1" build/99_memdisp_code_alias.i386 >/dev/null 2>&1
+      -o "$1" build/memdisp_code_alias.i386 >/dev/null 2>&1
 }
 
 # Report whether the preserved-LEA byte pattern `8d 91 <disp32>` (optionally
@@ -121,14 +121,14 @@ PY
 }
 
 # --- A: gate ON (the fix) -------------------------------------------------
-translate build/99_memdisp_code_alias.on.x86_64 || fail "translate (gate on)"
-read -r LEA_ON NEG_ON <<<"$(probe build/99_memdisp_code_alias.on.x86_64 "$TARGET")"
+translate build/memdisp_code_alias.on.x86_64 || fail "translate (gate on)"
+read -r LEA_ON NEG_ON <<<"$(probe build/memdisp_code_alias.on.x86_64 "$TARGET")"
 [ "$LEA_ON" != "MISSING" ] || fail "no translated dylib (gate on)"
 
 # --- B: gate OFF (pre-fix behavior) --------------------------------------
-M64_NO_MEMDISP_CODE_ALIAS_GATE=1 translate build/99_memdisp_code_alias.off.x86_64 \
+M64_NO_MEMDISP_CODE_ALIAS_GATE=1 translate build/memdisp_code_alias.off.x86_64 \
    || fail "translate (gate off)"
-read -r LEA_OFF NEG_OFF <<<"$(probe build/99_memdisp_code_alias.off.x86_64 "$TARGET")"
+read -r LEA_OFF NEG_OFF <<<"$(probe build/memdisp_code_alias.off.x86_64 "$TARGET")"
 [ "$LEA_OFF" != "MISSING" ] || fail "no translated dylib (gate off)"
 
 if [ "$LEA_ON" != "KEPT" ]; then
