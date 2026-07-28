@@ -8,6 +8,6 @@ for arm in $ARMS; do
   echo "############ ARM=$arm ############"
   for i in $(seq 1 "$N"); do
     echo "---- $arm run $i ----"
-    bash "$SCR/wakeup.sh" "$arm" 2>&1 | grep -E "RESULT|parked in|STILL PARKED|MODAL RETURNED|PROCESS GONE|clicked|DELIVERING|CONTROL"
+    bash "$SCR/wakeup.sh" "$arm" 2>&1 | grep -E "RESULT|parked in|STILL PARKED|MODAL RETURNED|PROCESS GONE|clicked|DELIVER|CONTROL"
   done
 done

@@ -4,7 +4,8 @@
 # Signal: once the modal returns, Civ proceeds into the windowed-launch path and SIGBUSes.
 # So "process gone + fresh SIGBUS crashlog" == the modal RETURNED.
 SCR=${TMPDIR:-/tmp}/86x64-scratch
-APP="$HOME/Library/Application Support/Steam/steamapps/common/Sid Meier's Civilization IV 34440/Civilization IV (test).app"
+DEFAULT_APP="$HOME/Library/Application Support/Steam/steamapps/common/Sid Meier's Civilization IV 34440/Civilization IV (test).app"
+APP="${CIVAPP:-$DEFAULT_APP}"
 MODE="${1:-move}"    # move | none
 
 pkill -9 -x "Civilization IV" 2>/dev/null

@@ -2,7 +2,8 @@
 # Launch, click, and RETRY until we actually catch a hang; then probe the PARKED process
 # (lldb's own attach may unstick it, so we read state BEFORE continuing).
 SCR=${TMPDIR:-/tmp}/86x64-scratch
-APP="$HOME/Library/Application Support/Steam/steamapps/common/Sid Meier's Civilization IV 34440/Civilization IV (test).app"
+DEFAULT_APP="$HOME/Library/Application Support/Steam/steamapps/common/Sid Meier's Civilization IV 34440/Civilization IV (test).app"
+APP="${CIVAPP:-$DEFAULT_APP}"
 MAXTRY="${1:-6}"
 
 for try in $(seq 1 "$MAXTRY"); do

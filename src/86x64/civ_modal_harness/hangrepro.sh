@@ -2,7 +2,8 @@
 # Reproduce the tester's HANG: launch via `open` with the Game Guide SHOWN, then synthetically
 # click the panel's btn-inwindow, then capture CPU% + full sample BEFORE killing anything.
 SCR=${TMPDIR:-/tmp}/86x64-scratch
-APP="$HOME/Library/Application Support/Steam/steamapps/common/Sid Meier's Civilization IV 34440/Civilization IV (test).app"
+DEFAULT_APP="$HOME/Library/Application Support/Steam/steamapps/common/Sid Meier's Civilization IV 34440/Civilization IV (test).app"
+APP="${CIVAPP:-$DEFAULT_APP}"
 TAG="${1:-h1}"
 # nib rects (Cocoa, content-view coords, bottom-left origin), content is 800x577
 #   btn-fullscreen {{20, 89},{236,160}}   btn-inwindow {{255, 89},{153,160}}

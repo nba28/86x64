@@ -2,7 +2,8 @@
 # Launch via LaunchServices (`open`) so the app gets a real activation context.
 # Capture windows, CPU%, and a full sample BEFORE killing anything.
 SCR=${TMPDIR:-/tmp}/86x64-scratch
-APP="$HOME/Library/Application Support/Steam/steamapps/common/Sid Meier's Civilization IV 34440/Civilization IV (test).app"
+DEFAULT_APP="$HOME/Library/Application Support/Steam/steamapps/common/Sid Meier's Civilization IV 34440/Civilization IV (test).app"
+APP="${CIVAPP:-$DEFAULT_APP}"
 TAG="${1:-o1}"
 WAIT="${2:-25}"
 
