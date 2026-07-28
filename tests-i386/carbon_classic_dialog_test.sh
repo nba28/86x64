@@ -138,6 +138,20 @@ static ccd_item g_items[] = {
 #define NITEMS ((int)(sizeof g_items / sizeof g_items[0]))
 #define OK_ITEM 4
 
+/* A Halo-shaped DITL: item 1 = OK, item 2 = the cancel button, then a key field.
+ * This is the exact shape of Halo's real DITL 10001, and it is what exercises
+ * the classic STANDARD item numbers (10.6 HIToolbox/Dialogs.h:
+ * kStdOkItemIndex = 1, kStdCancelItemIndex = 2) that ccd_create applies for the
+ * many classic apps that never call SetDialogCancelItem. */
+#define HW  352
+#define HH2 120
+static ccd_item g_hitems[] = {
+    { 4  /*button*/,   0, 88, 268, 108, 338, "OK"   },   /* kStdOkItemIndex     */
+    { 4  /*button*/,   0, 88, 184, 108, 254, "Quit" },   /* kStdCancelItemIndex */
+    { 16 /*editText*/, 0, 48,  20,  65,  80, ""     },
+};
+#define NHITEMS ((int)(sizeof g_hitems / sizeof g_hitems[0]))
+
 static volatile int g_done;
 static int g_w, g_h, g_struct_h;
 static char g_typed[128];
@@ -192,6 +206,42 @@ static void *watchdog(void *arg) {
     return NULL;
 }
 
+/* Locate the live dialog's content rect; _exit(3) if there is no window. */
+static void front_content(short c[4]) {
+    void *(*FrontWindow)(void) = dlsym(RTLD_DEFAULT, "FrontWindow");
+    int32_t (*GetWindowBounds)(void *, uint32_t, short *) = dlsym(RTLD_DEFAULT, "GetWindowBounds");
+    void *w = FrontWindow ? FrontWindow() : NULL;
+    c[0] = c[1] = c[2] = c[3] = 0;
+    if (w && GetWindowBounds) GetWindowBounds(w, 33 /*kWindowContentRgn*/, c);
+    if (!w || c[3] <= c[1]) { fprintf(stderr, "no window\n"); _exit(3); }
+}
+
+/* Watchdog for the KEYBOARD arms — it never clicks anything.
+ *   "esc":     Escape must end the modal with the classic cancel item.
+ *   "phantom": park the pointer over the OK button with the mouse UP and prove
+ *              the modal does NOT end.  A tracking loop wired to
+ *              kEventControlHit fires on pointer position alone, so the modal
+ *              would self-dismiss here with no input at all — the exact
+ *              phantom-click shape that made a real dialog look like it
+ *              auto-dismissed.  Then Escape, so the arm always terminates. */
+static int g_phantom_ok = -1;
+static void *watchdog_key(void *arg) {
+    const char *mode = (const char *)arg;
+    usleep(1600000);
+    if (!strcmp(mode, "phantom")) {
+        short c[4]; front_content(c);
+        CGWarpMouseCursorPosition(CGPointMake(
+            c[1] + (g_hitems[0].left + g_hitems[0].right) / 2.0,
+            c[0] + (g_hitems[0].top  + g_hitems[0].bottom) / 2.0));
+        usleep(2500000);
+        g_phantom_ok = g_done ? 0 : 1;        /* 1 = no phantom fire (correct) */
+    }
+    tap_key(53 /*Escape*/);                   /* the classic cancel key */
+    usleep(2500000);
+    if (!g_done) { fprintf(stderr, "HUNG trusted=%d\n", (int)AXIsProcessTrusted()); _exit(9); }
+    return NULL;
+}
+
 int main(int argc, char **argv) {
     if (argc > 1) g_mode = argv[1];
 
@@ -199,6 +249,31 @@ int main(int argc, char **argv) {
         int f = edit_model_checks();
         printf("editmodel fails=%d\n", f);
         return f ? 1 : 0;
+    }
+
+    if (!strcmp(g_mode, "items")) {   /* the classic standard item numbers */
+        ccd_dialog *a = ccd_create("A", DW, DH, g_items, NITEMS);
+        if (!a) { fprintf(stderr, "ccd_create failed\n"); return 3; }
+        printf("A default=%d cancel=%d\n", ccd_default_item(a), ccd_cancel_item(a));
+        ccd_dispose(a);
+        ccd_dialog *b = ccd_create("B", HW, HH2, g_hitems, NHITEMS);
+        if (!b) { fprintf(stderr, "ccd_create failed\n"); return 3; }
+        printf("B default=%d cancel=%d\n", ccd_default_item(b), ccd_cancel_item(b));
+        ccd_dispose(b);
+        return 0;
+    }
+
+    if (!strcmp(g_mode, "esc") || !strcmp(g_mode, "phantom")) {
+        /* No ccd_set_cancel_item call: the classic kStdCancelItemIndex default
+         * is what must wire Escape here. */
+        g_dlg = ccd_create("Enter Your Product Key", HW, HH2, g_hitems, NHITEMS);
+        if (!g_dlg) { fprintf(stderr, "ccd_create failed\n"); return 3; }
+        pthread_t t2; pthread_create(&t2, NULL, watchdog_key, (void *)g_mode);
+        int it = ccd_run_modal(g_dlg);
+        g_done = 1;
+        printf("item=%d phantom_ok=%d\n", it, g_phantom_ok);
+        ccd_dispose(g_dlg);
+        return 0;
     }
 
     g_dlg = ccd_create("Enter a value", DW, DH, g_items, NITEMS);
@@ -228,6 +303,11 @@ fi
 
 PASS=1
 
+# Synthetic HID input goes to whichever process is FRONTMOST, so consecutive GUI
+# arms must not overlap: let each harness fully exit and the window server settle
+# before the next one opens its window, or keystrokes bleed between arms.
+settle() { sleep 1.5; }
+
 # (1) the editing model — ALWAYS runs, no window server needed.
 MODEL=$(arch -x86_64 "$TMP/t" model 2>&1); MRC=$?
 echo "$MODEL" | sed -n '/EDIT FAIL/p'
@@ -241,7 +321,20 @@ CREATED=$(echo "$KILL" | sed -n 's/.*created=\([0-9]*\).*/\1/p')
 echo "  3 kill switch:   created=$CREATED (want 0 = decline -> AppKit fallback)"
 
 # (2)(4) the real classic window + synthetic typing and click.
-OUT=$(arch -x86_64 "$TMP/t" click 2>"$TMP/rerr"); RC=$?
+# RETRIED: this arm briefly takes key focus and reads back whatever landed in the
+# field, so anything else typing at that moment goes into it too — most often the
+# HUMAN AT THE KEYBOARD (confirmed live: 'tabc' / 'a bc' / 'nc' were the tester typing
+# while the arm ran), and equally any other process posting synthetic input.
+# The assertion stays EXACT ('abc', nothing else); only the SCHEDULING is
+# tolerant, so a real regression still fails every attempt and fails the arm.
+CLICK_TRIES=3
+RC=0
+for _try in $(seq $CLICK_TRIES); do
+    settle; OUT=$(arch -x86_64 "$TMP/t" click 2>"$TMP/rerr"); RC=$?
+    [ "$RC" -eq 0 ] || break
+    echo "$OUT" | grep -q "typed='abc'" && break
+    [ "$_try" = "$CLICK_TRIES" ] || echo "  4 retry $_try: foreign input ($(echo "$OUT" | sed -n "s/.*\(typed='[^']*'\).*/\1/p"))"
+done
 if [ "$RC" -eq 3 ]; then
     echo "  2/4 window:      SKIP (no window server)"
 elif [ "$RC" -eq 9 ] && grep -q "trusted=0" "$TMP/rerr"; then
@@ -262,6 +355,56 @@ else
     [ "${SH:-0}" -gt "${HH:-0}" ] || PASS=0 # title bar => movable modal
     echo "  2 geometry:      ${WW}x${HH} content, structure_h=$SH (want 352x152, structh>h)"
     echo "  4 typing+click:  typed='$TYPED' item=$ITEM (want 'abc', 4)"
+fi
+
+# (5) the classic STANDARD item numbers: with no SetDialogCancelItem call,
+#     ccd_create must take DITL item 2 as the cancel item when it really is an
+#     enabled push button, and must NOT invent one when it is not.  Before this,
+#     cancelItem stayed 0 forever: Escape/Cmd-. were dead AND the close box fired
+#     the DEFAULT item, so a close gesture reported OK.
+settle; IT=$(arch -x86_64 "$TMP/t" items 2>"$TMP/ierr"); IRC=$?
+if [ "$IRC" -eq 3 ]; then
+    echo "  5 std items:     SKIP (no window server)"
+else
+    ACAN=$(echo "$IT" | sed -n 's/^A .*cancel=\([0-9]*\).*/\1/p')
+    BDEF=$(echo "$IT" | sed -n 's/^B default=\([0-9]*\).*/\1/p')
+    BCAN=$(echo "$IT" | sed -n 's/^B .*cancel=\([0-9]*\).*/\1/p')
+    [ "${ACAN:-x}" = "0" ] || PASS=0      # item 2 is an editText -> no cancel item
+    [ "${BDEF:-x}" = "1" ] || PASS=0      # kStdOkItemIndex
+    [ "${BCAN:-x}" = "2" ] || PASS=0      # kStdCancelItemIndex
+    echo "  5 std items:     item2-not-a-button cancel=$ACAN (want 0);" \
+         "Halo-shaped default=$BDEF cancel=$BCAN (want 1, 2)"
+fi
+
+# (6) Escape must end the modal with that classic cancel item.
+settle; EO=$(arch -x86_64 "$TMP/t" esc 2>"$TMP/eerr"); ERC=$?
+if [ "$ERC" -eq 3 ]; then
+    echo "  6 Escape:        SKIP (no window server)"
+elif [ "$ERC" -eq 9 ] && grep -q "trusted=0" "$TMP/eerr"; then
+    echo "  6 Escape:        SKIP (no Accessibility rights to synthesise input)"
+elif [ "$ERC" -eq 9 ]; then
+    echo "  6 Escape:        FAIL (Escape never dismissed the dialog)"; PASS=0
+else
+    EITEM=$(echo "$EO" | sed -n 's/.*item=\([0-9-]*\).*/\1/p')
+    [ "${EITEM:-x}" = "2" ] || PASS=0
+    echo "  6 Escape:        item=$EITEM (want 2 = kStdCancelItemIndex)"
+fi
+
+# (7) NO PHANTOM CLICK: the pointer resting over a button with the mouse UP must
+#     never fire it.  btn_track used to be installed on kEventControlHit as well
+#     as kEventControlTrack; entered with the mouse up its poll loop exits on the
+#     first iteration and fires purely on where the cursor happens to be.
+settle; PO=$(arch -x86_64 "$TMP/t" phantom 2>"$TMP/perr"); PRC=$?
+if [ "$PRC" -eq 3 ]; then
+    echo "  7 no phantom:    SKIP (no window server)"
+elif [ "$PRC" -eq 9 ] && grep -q "trusted=0" "$TMP/perr"; then
+    echo "  7 no phantom:    SKIP (no Accessibility rights to synthesise input)"
+elif [ "$PRC" -eq 9 ]; then
+    echo "  7 no phantom:    FAIL (dialog never dismissed)"; PASS=0
+else
+    POK=$(echo "$PO" | sed -n 's/.*phantom_ok=\([0-9-]*\).*/\1/p')
+    [ "${POK:-x}" = "1" ] || PASS=0
+    echo "  7 no phantom:    phantom_ok=$POK (want 1 = pointer over OK, mouse up, no fire)"
 fi
 
 if [ "$PASS" = "1" ]; then echo "classicdialog: PASS"; exit 0; fi
