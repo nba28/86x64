@@ -50,6 +50,12 @@ int  ccd_set_text(ccd_dialog *d, int item, const char *utf8);
 /* Classic Return / Esc wiring. */
 void ccd_set_default_item(ccd_dialog *d, int item);
 void ccd_set_cancel_item(ccd_dialog *d, int item);
+/* Read back what the classic layer settled on, so GetDialogDefaultItem /
+ * GetDialogCancelItem report the items that are actually wired to Return and
+ * Escape (ccd_create applies the classic kStdOkItemIndex/kStdCancelItemIndex
+ * defaults itself). 0 = none. */
+int  ccd_default_item(ccd_dialog *d);
+int  ccd_cancel_item(ccd_dialog *d);
 /* Classic control value (checkbox/radio) — GetControlValue on a DITL control. */
 int  ccd_get_value(ccd_dialog *d, int item, int *outValue);
 int  ccd_set_value(ccd_dialog *d, int item, int value);

@@ -150,6 +150,8 @@ typedef struct ccw_button {
     CCWWindowRef win;
     int         *resultOut;         /* item number written here on a real hit */
     int         *doneOut;           /* set to 1 on a real hit (may be NULL)   */
+    int          justTracked;       /* the track loop just resolved this hit:
+                                     * swallow the paired kEventControlHit    */
 } ccw_button;
 
 /* Create + install a classic button.  The struct is owned by the caller and

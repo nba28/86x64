@@ -77,6 +77,16 @@ enum {
     kDItemPicture  = 64,
 };
 
+/* The classic Dialog Manager's STANDARD item numbers, verbatim from the real
+ * 10.6 SDK HIToolbox/Dialogs.h:
+ *     enum { kStdOkItemIndex = 1, kStdCancelItemIndex = 2,
+ *            ok = kStdOkItemIndex, cancel = kStdCancelItemIndex };
+ * A format-level invariant of every classic DITL, not a per-app guess. */
+enum {
+    kStdOkItemIndex     = 1,
+    kStdCancelItemIndex = 2,
+};
+
 #define CCD_MAX_ITEMS 64
 /* Classic dialog body colour: the era's light platinum/aqua window fill. */
 #define CCD_BG 0.929
@@ -212,14 +222,22 @@ static CCWStatus click_handler(void *call, CCWEventRef ev, void *ud) {
     return ccwEventNotHandled;                      /* observe only, never eat */
 }
 
-/* Window close box -> the cancel item (classic behaviour), never a dead modal. */
+/* Window close box -> the CANCEL item, and only ever the cancel item.
+ *
+ * It used to fall back to `defaultItem` when no cancel item was known, which
+ * reported the OK item from a gesture that means the exact opposite — the app
+ * then acted on an empty/unconfirmed dialog as if the user had accepted it.  A
+ * classic modal dialog with no cancel item has no close box at all, so with
+ * nothing to cancel to the right answer is to ignore the close and leave the
+ * modal running (still never a DEAD modal: Return/Enter and the buttons work). */
 static CCWStatus close_handler(void *call, CCWEventRef ev, void *ud) {
     (void)call; (void)ev;
     ccd_dialog *d = (ccd_dialog *)ud;
     if (!d) return ccwEventNotHandled;
-    CCW_LOG("dialog: window-close event\n");
-    fire_item(d, d->cancelItem ? d->cancelItem : d->defaultItem);
-    if (!d->done) { d->result = d->cancelItem ? d->cancelItem : 1; d->done = 1; }
+    CCW_LOG("dialog: window-close event (cancel item %d)\n", d->cancelItem);
+    if (!d->cancelItem) return 0;      /* never report OK for a close gesture */
+    fire_item(d, d->cancelItem);
+    if (!d->done) { d->result = d->cancelItem; d->done = 1; }
     return 0;
 }
 
@@ -304,6 +322,20 @@ ccd_dialog *ccd_create(const char *utf8Title, int contentW, int contentH,
         if (d->it[i].btn && d->it[i].btn->kind == CCW_BTN_PUSH && !d->it[i].disabled)
             ccd_set_default_item(d, i + 1);
 
+    /* ...and DITL item 2 is the cancel item, because that is what the classic
+     * standard item numbers MEAN (kStdCancelItemIndex, above).  Honour it when
+     * item 2 really is an enabled push button and is not already the default:
+     * without this, Escape / Cmd-. are dead and the close box has nothing to
+     * cancel to for the many classic apps that never call SetDialogCancelItem
+     * (Halo's DITL 10001 is exactly that shape — item 1 'OK', item 2 'Quit').
+     * SetDialogCancelItem still overrides it. */
+    if (n >= kStdCancelItemIndex) {
+        struct ccd_item_live *c = &d->it[kStdCancelItemIndex - 1];
+        if (c->btn && c->btn->kind == CCW_BTN_PUSH && !c->disabled &&
+            d->defaultItem != kStdCancelItemIndex)
+            ccd_set_cancel_item(d, kStdCancelItemIndex);
+    }
+
     if (ccw_InstallEventHandler && ccw_GetWindowEventTarget) {
         void *wt = ccw_GetWindowEventTarget(d->win);
         struct { uint32_t cls, kind; } kd[2] = { { 'keyb', 1 },   /* RawKeyDown   */
@@ -387,6 +419,9 @@ void ccd_set_default_item(ccd_dialog *d, int item) {
         if (ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(it->btn->view, 1);
     }
 }
+
+int ccd_default_item(ccd_dialog *d) { return d ? d->defaultItem : 0; }
+int ccd_cancel_item(ccd_dialog *d)  { return d ? d->cancelItem  : 0; }
 
 void ccd_set_cancel_item(ccd_dialog *d, int item) {
     struct ccd_item_live *it = item_at(d, item);

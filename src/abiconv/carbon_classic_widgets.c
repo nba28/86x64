@@ -325,14 +325,15 @@ CCWViewRef ccw_make_view(CGRect f, void *drawFn, void *hitFn, void *trackFn,
         void *tgt = ccw_GetControlEventTarget(v);
         struct { uint32_t cls, kind; } dr = { 'cntl', 4    };  /* kEventControlDraw         */
         struct { uint32_t cls, kind; } ht = { 'cntl', 3    };  /* kEventControlHitTest      */
-        struct { uint32_t cls, kind; } hk = { 'cntl', 1    };  /* kEventControlHit          */
         struct { uint32_t cls, kind; } tk = { 'cntl', 51   };  /* kEventControlTrack        */
         struct { uint32_t cls, kind; } kd = { 'cntl', 11   };  /* kEventControlKeyDown      */
         struct { uint32_t cls, kind; } fp = { 'cntl', 4013 };  /* kEventControlSetFocusPart */
         if (drawFn)  ccw_InstallEventHandler(tgt, drawFn,  1, &dr, ud, NULL);
         if (hitFn)   ccw_InstallEventHandler(tgt, hitFn,   1, &ht, ud, NULL);
+        /* kEventControlTrack ONLY — a tracking loop must never be a widget's
+         * kEventControlHit handler (it would fire on pointer position with the
+         * mouse already up).  A widget that wants Hit installs its own. */
         if (trackFn) ccw_InstallEventHandler(tgt, trackFn, 1, &tk, ud, NULL);
-        if (trackFn) ccw_InstallEventHandler(tgt, trackFn, 1, &hk, ud, NULL);
         if (keyFn)   ccw_InstallEventHandler(tgt, keyFn,   1, &kd, ud, NULL);
         if (keyFn)   ccw_InstallEventHandler(tgt, keyFn,   1, &fp, ud, NULL);
     }
@@ -521,22 +522,29 @@ void ccw_button_fire(ccw_button *b) {
  * held, follow the pointer in and out exactly as the classic Control Manager
  * did, and fire only on a mouse-UP inside.  TrackMouseLocation is gone from
  * 64-bit HIToolbox, so poll the live pointer through CoreGraphics — the tracking
- * then needs no event pump of its own. */
+ * then needs no event pump of its own.
+ *
+ * ONLY kEventControlTrack may run this loop.  Tracking is defined as "the mouse
+ * is currently held down in this control"; if it is entered with the button
+ * already UP the loop exits on its FIRST iteration and then fires purely on
+ * where the pointer happens to be resting — a phantom click on whatever control
+ * is under the cursor.  kEventControlHit therefore gets its own handler below
+ * (btn_hit) rather than sharing this one. */
 static CCWStatus btn_track(void *call, CCWEventRef ev, void *ud) {
-    (void)call;
+    (void)call; (void)ev;
     ccw_button *b = (ccw_button *)ud;
     if (!b) return ccwEventNotHandled;
-    uint32_t ecls = ccw_GetEventClass ? ccw_GetEventClass(ev) : 0;
-    uint32_t ekind = ccw_GetEventKind ? ccw_GetEventKind(ev) : 0;
-    {   double dx = 0, dy = 0;
+    if (ccw_trace()) {
+        double dx = 0, dy = 0;
         ccw_mouse_in_content(b->win, &dx, &dy);
-        CCW_LOG("track enter '%s' (item %d) ev=%c%c%c%c/%u mousedown=%d ptr=%.0f,%.0f "
+        CCW_LOG("track enter '%s' (item %d) mousedown=%d ptr=%.0f,%.0f "
                 "rect=%.0f,%.0f,%.0fx%.0f\n", b->title, b->item,
-                (char)(ecls>>24), (char)(ecls>>16), (char)(ecls>>8), (char)ecls, ekind,
                 mouse_is_down(), dx, dy, b->frame.origin.x, b->frame.origin.y,
                 b->frame.size.width, b->frame.size.height);
     }
     if (b->disabled) return 0;
+    /* A track with no mouse held is not a track: never synthesize a hit from it. */
+    if (!mouse_is_down()) { b->justTracked = 1; return 0; }
     int inside = 1, was = -1;
     for (;;) {
         double lx = 0, ly = 0;
@@ -553,7 +561,24 @@ static CCWStatus btn_track(void *call, CCWEventRef ev, void *ud) {
     }
     b->pressed = 0;
     if (ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(b->view, 1);
+    b->justTracked = 1;                 /* swallow the paired kEventControlHit */
     if (inside) ccw_button_fire(b);
+    return 0;
+}
+
+/* kEventControlHit means "this control WAS hit" — a resolved activation, not a
+ * tracking session, so it fires the button it belongs to directly and consults
+ * no pointer position at all.  HIToolbox emits it after a successful track
+ * (swallowed via justTracked, so one click = one fire) and also for activations
+ * that never track: a keyboard equivalent or an accessibility AXPress. */
+static CCWStatus btn_hit(void *call, CCWEventRef ev, void *ud) {
+    (void)call; (void)ev;
+    ccw_button *b = (ccw_button *)ud;
+    if (!b) return ccwEventNotHandled;
+    if (b->justTracked) { b->justTracked = 0; return 0; }   /* already resolved */
+    if (b->disabled) return 0;
+    CCW_LOG("hit '%s' (item %d) — untracked activation\n", b->title, b->item);
+    ccw_button_fire(b);
     return 0;
 }
 
@@ -561,6 +586,12 @@ CCWViewRef ccw_button_install(ccw_button *b, CCWViewRef parent) {
     if (!b) return NULL;
     b->view = ccw_make_view(b->frame, (void *)btn_draw, (void *)ccw_claim_hit,
                             (void *)btn_track, NULL, b, parent);
+    /* kEventControlHit gets its own handler — see btn_hit. */
+    if (b->view && ccw_InstallEventHandler && ccw_GetControlEventTarget) {
+        struct { uint32_t cls, kind; } hk = { 'cntl', 1 };   /* kEventControlHit */
+        ccw_InstallEventHandler(ccw_GetControlEventTarget(b->view), (void *)btn_hit,
+                                1, &hk, b, NULL);
+    }
     return b->view;
 }
 

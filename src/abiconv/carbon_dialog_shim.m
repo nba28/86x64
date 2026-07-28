@@ -152,8 +152,43 @@ typedef struct Dialog {
 #define DLG_MAGIC 0x444C4731u  /* 'DLG1' */
 
 /* The most-recently-shown dialog. ModalDialog takes no DialogRef (the classic
- * Dialog Manager runs the FRONT modal dialog), so we track it here. */
-static struct Dialog *g_front_dialog = NULL;
+ * Dialog Manager runs the FRONT modal dialog), so we track it here.
+ *
+ * PROCESS-GLOBAL ON PURPOSE — this must NOT be a file static.  A deployed bundle
+ * carries one libabiconv copy PER DIRECTORY (the libabiconv multi-copy gotcha:
+ * Halo.app has three), and every copy gets its own instance of every file
+ * static.  If GetNewDialog is interposed into copy A and ModalDialog into copy
+ * B, copy B's front dialog is NULL and shim_ModalDialog's entry guard reports
+ * item 1 (= kStdOkItemIndex) INSTANTLY with no user input, while copy A's window
+ * is on screen — the modal looks like it dismisses itself, and the app then acts
+ * on an unconfirmed dialog.  The AppKit fallback already had to dodge exactly
+ * this for the modal RESULT by routing it through the shared NSApp; the
+ * front-dialog pointer was the one piece left per-copy.
+ *
+ * The main thread's threadDictionary is a genuine process-global here: Foundation
+ * is mapped ONCE, so every libabiconv copy sees the same NSThread object and the
+ * same dictionary, and an NSString key compares by value (isEqual:/hash) across
+ * copies even though each copy has its own constant-string instance.  The main
+ * thread specifically, not currentThread — every Dialog Manager entry point
+ * already funnels its window work through on_main_sync. */
+static NSString *const kFrontDialogKey = @"86x64.carbon.Dialog.front";
+/* Used only if there is no shared store at all (threadDictionary nil). */
+static struct Dialog *g_front_dialog_fallback = NULL;
+
+static void set_front_dialog(struct Dialog *d) {
+    NSMutableDictionary *reg = [[NSThread mainThread] threadDictionary];
+    g_front_dialog_fallback = d;
+    if (!reg) return;
+    if (d) [reg setObject:[NSValue valueWithPointer:d] forKey:kFrontDialogKey];
+    else   [reg removeObjectForKey:kFrontDialogKey];
+}
+
+static struct Dialog *front_dialog(void) {
+    NSMutableDictionary *reg = [[NSThread mainThread] threadDictionary];
+    if (!reg) return g_front_dialog_fallback;
+    NSValue *v = [reg objectForKey:kFrontDialogKey];
+    return v ? (struct Dialog *)[v pointerValue] : NULL;
+}
 
 extern uint32_t x64_objc_wrap(uint64_t real);
 extern uint64_t x64_objc_unwrap(uint32_t h);
@@ -300,8 +335,16 @@ static int build_classic(Dialog *d) {
     }
     int w = d->bounds.right - d->bounds.left, h = d->bounds.bottom - d->bounds.top;
     d->cd = ccd_create(d->title, w, h, items, d->nitems);
-    if (d->cd) DLG("classic Carbon dialog materialized (%dx%d, %d items)\n", w, h, d->nitems);
-    else       DLG("classic Carbon dialog unavailable -> AppKit fallback\n");
+    if (d->cd) {
+        /* Mirror the classic default/cancel items the classic layer settled on
+         * (it applies the standard kStdOkItemIndex/kStdCancelItemIndex rules), so
+         * GetDialogDefaultItem / GetDialogCancelItem report what is really wired
+         * to Return and Escape instead of a stale 0. */
+        d->defaultItem = ccd_default_item(d->cd);
+        d->cancelItem  = ccd_cancel_item(d->cd);
+        DLG("classic Carbon dialog materialized (%dx%d, %d items, default=%d cancel=%d)\n",
+            w, h, d->nitems, d->defaultItem, d->cancelItem);
+    } else DLG("classic Carbon dialog unavailable -> AppKit fallback\n");
     return d->cd != NULL;
 }
 
@@ -471,7 +514,7 @@ uint32_t shim_GetNewDialog(uint32_t *a) {
     on_main_sync(^{ classic = build_classic(d); });
     if (!classic) on_main_sync(^{ build_window(d, d->title); });
     if (!d->cd && !d->win) { free(d); return 0; }
-    g_front_dialog = d;         /* the newest dialog is the ModalDialog target */
+    set_front_dialog(d);        /* the newest dialog is the ModalDialog target */
     DLG("GetNewDialog %d -> DITL %d, %d items, dialog=%p\n", dlogID, itemsID, d->nitems, d);
     return wrap_ptr(d);
 }
@@ -483,8 +526,9 @@ uint32_t shim_GetNewDialog(uint32_t *a) {
 uint32_t shim_ModalDialog(uint32_t *a) {
     int16_t *itemHit = (int16_t *)PTR(1);
     /* The DialogRef isn't an arg to ModalDialog — the classic Dialog Manager
-     * runs the FRONT modal dialog (tracked in g_front_dialog). */
-    Dialog *d = g_front_dialog;
+     * runs the FRONT modal dialog — see front_dialog(), which is process-global
+     * so a sibling libabiconv copy cannot report a phantom instant OK. */
+    Dialog *d = front_dialog();
     if (!d || (!d->win && !d->cd)) { if (itemHit) *itemHit = 1; return 0; }
     __block NSInteger hit = 0;
 
@@ -649,7 +693,7 @@ uint32_t shim_SetDialogItemText(uint32_t *a) {
  * WindowRef; returning 0 is the safe, faithful choice for a modal dialog.) */
 uint32_t shim_GetDialogWindow(uint32_t *a) {
     Dialog *d = dlg_from(a[0]);
-    if (d) g_front_dialog = d;      /* mark it front for the upcoming ModalDialog */
+    if (d) set_front_dialog(d);     /* mark it front for the upcoming ModalDialog */
     return 0;
 }
 
@@ -666,7 +710,7 @@ uint32_t shim_ClearKeyboardFocus(uint32_t *a) {
 uint32_t shim_DisposeDialog(uint32_t *a) {
     Dialog *d = dlg_from(a[0]);
     if (!d) return 0;
-    if (g_front_dialog == d) g_front_dialog = NULL;
+    if (front_dialog() == d) set_front_dialog(NULL);
     NSWindow *win = d->win;
     ccd_dialog *cd = d->cd;
     on_main_sync(^{
@@ -703,12 +747,32 @@ uint32_t shim_SetDialogDefaultItem(uint32_t *a) {
     }
     return 0;
 }
+/* void SetDialogCancelItem(DialogRef, SInt16 itemNo) — the Escape / Cmd-. and
+ * close-box item.  Promoted out of qt_hitoolbox_shim.c's no-op block (that file
+ * documents exactly this promotion path): the classic layer has had a real
+ * ccd_set_cancel_item all along, so a no-op here silently threw away the app's
+ * own statement of which button means "cancel". */
+uint32_t shim_SetDialogCancelItem(uint32_t *a) {
+    Dialog *d = dlg_from(a[0]);
+    if (!d) return 0;
+    d->cancelItem = (int16_t)a[1];
+    if (d->cd) { on_main_sync(^{ ccd_set_cancel_item(d->cd, d->cancelItem); }); return 0; }
+    /* AppKit fallback: Escape already cancels via the cell's key equivalent. */
+    if (d->cancelItem >= 1 && d->cancelItem <= d->nitems) {
+        DItem *it = &d->items[d->cancelItem - 1];
+        if (it->type == kCtrlItem && it->view) {
+            NSButton *b = (NSButton *)it->view;
+            on_main_sync(^{ b.keyEquivalent = @"\033"; });
+        }
+    }
+    return 0;
+}
 /* GetDialogDefaultItem / GetDialogCancelItem (owned here historically). */
 uint32_t shim_GetDialogDefaultItem(uint32_t *a) { Dialog *d = dlg_from(a[0]); return d ? (uint32_t)d->defaultItem : 0; }
 uint32_t shim_GetDialogCancelItem(uint32_t *a)  { Dialog *d = dlg_from(a[0]); return d ? (uint32_t)d->cancelItem : 0; }
-/* NOTE: DrawDialog/DialogSelect/IsDialogEvent/SetDialogCancelItem/Alert and the
- * Dialog-item list/edit no-ops are owned by qt_hitoolbox_shim.c — not redefined
- * here to avoid duplicate symbols. */
+/* NOTE: DrawDialog/DialogSelect/IsDialogEvent/Alert and the Dialog-item
+ * list/edit no-ops are owned by qt_hitoolbox_shim.c — not redefined here to
+ * avoid duplicate symbols. */
 
 /* TEHandle GetDialogTextEditHandle(DialogRef) — no classic TextEdit; the app
  * uses it only for TESetSelect (caret positioning), which is cosmetic under our
