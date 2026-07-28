@@ -177,6 +177,7 @@ static CCWStatus key_handler(void *call, CCWEventRef ev, void *ud) {
     ccw_GetEventParameter(ev, 'kmod' /*kEventParamKeyModifiers*/, 'magn',
                           NULL, sizeof mods, NULL, &mods);
     const uint32_t cmdKeyMask = 0x0100, shiftKeyMask = 0x0200;
+    CCW_LOG("dialog: key %u mods 0x%x\n", (unsigned)ch, mods);
 
     if (ch == 13 || ch == 3) {                      /* Return / Enter */
         if (d->defaultItem) { fire_item(d, d->defaultItem); return 0; }
@@ -213,6 +214,7 @@ static CCWStatus close_handler(void *call, CCWEventRef ev, void *ud) {
     (void)call; (void)ev;
     ccd_dialog *d = (ccd_dialog *)ud;
     if (!d) return ccwEventNotHandled;
+    CCW_LOG("dialog: window-close event\n");
     fire_item(d, d->cancelItem ? d->cancelItem : d->defaultItem);
     if (!d->done) { d->result = d->cancelItem ? d->cancelItem : 1; d->done = 1; }
     return 0;
