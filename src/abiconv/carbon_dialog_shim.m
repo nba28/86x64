@@ -457,6 +457,28 @@ static void build_window(Dialog *d, const char *title) {
             it->view = nil;                    /* icon/pic/user: not drawn yet */
         }
     }
+    /* The SAME classic contract the classic path applies (see ccd_create): the
+     * first enabled push button is the default item, and DITL item 2 is the
+     * cancel item when it is an enabled push button — the classic standard item
+     * numbers (10.6 Dialogs.h kStdOkItemIndex = 1, kStdCancelItemIndex = 2).
+     * Without this the fallback's Return and Escape are DEAD for every classic
+     * app that never calls SetDialogDefaultItem/SetDialogCancelItem, so falling
+     * back would silently lose the keyboard — both paths must behave the same. */
+    if (!d->defaultItem) {
+        for (int i = 0; i < d->nitems; i++)
+            if (d->items[i].type == kCtrlItem && !d->items[i].disabled && d->items[i].view) {
+                d->defaultItem = i + 1;
+                defaultBtn = (NSButton *)d->items[i].view;
+                break;
+            }
+    }
+    if (!d->cancelItem && d->nitems >= 2) {
+        DItem *c = &d->items[1];                 /* kStdCancelItemIndex */
+        if (c->type == kCtrlItem && !c->disabled && c->view && d->defaultItem != 2) {
+            d->cancelItem = 2;
+            ((NSButton *)c->view).keyEquivalent = @"\033";   /* Escape */
+        }
+    }
     /* Default button = Return key. */
     if (defaultBtn) { defaultBtn.keyEquivalent = @"\r"; win.defaultButtonCell = defaultBtn.cell; }
     /* First editText gets initial keyboard focus. */
