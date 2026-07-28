@@ -57,6 +57,8 @@ CCWStatus  (*ccw_SetEventParameter)(CCWEventRef, uint32_t, uint32_t, unsigned lo
 CCWStatus  (*ccw_ReceiveNextEvent)(uint32_t, const void *, double, uint8_t, CCWEventRef *);
 CCWStatus  (*ccw_SendEventToEventTarget)(CCWEventRef, void *);
 void       (*ccw_ReleaseEvent)(CCWEventRef);
+uint32_t   (*ccw_GetEventClass)(CCWEventRef);
+uint32_t   (*ccw_GetEventKind)(CCWEventRef);
 
 int ccw_available(void) {
     static int state = -1;
@@ -72,6 +74,7 @@ int ccw_available(void) {
     R(GetControlEventTarget); R(GetWindowEventTarget); R(GetEventDispatcherTarget);
     R(InstallEventHandler); R(GetEventParameter); R(SetEventParameter);
     R(ReceiveNextEvent); R(SendEventToEventTarget); R(ReleaseEvent);
+    R(GetEventClass); R(GetEventKind);
 #undef R
     state = (ccw_CreateNewWindow && ccw_HIObjectCreate && ccw_ShowWindow &&
              ccw_HIViewSetFrame && ccw_InstallEventHandler && ccw_GetControlEventTarget &&
@@ -520,10 +523,19 @@ void ccw_button_fire(ccw_button *b) {
  * 64-bit HIToolbox, so poll the live pointer through CoreGraphics — the tracking
  * then needs no event pump of its own. */
 static CCWStatus btn_track(void *call, CCWEventRef ev, void *ud) {
-    (void)call; (void)ev;
+    (void)call;
     ccw_button *b = (ccw_button *)ud;
     if (!b) return ccwEventNotHandled;
-    CCW_LOG("track enter '%s' (item %d)\n", b->title, b->item);
+    uint32_t ecls = ccw_GetEventClass ? ccw_GetEventClass(ev) : 0;
+    uint32_t ekind = ccw_GetEventKind ? ccw_GetEventKind(ev) : 0;
+    {   double dx = 0, dy = 0;
+        ccw_mouse_in_content(b->win, &dx, &dy);
+        CCW_LOG("track enter '%s' (item %d) ev=%c%c%c%c/%u mousedown=%d ptr=%.0f,%.0f "
+                "rect=%.0f,%.0f,%.0fx%.0f\n", b->title, b->item,
+                (char)(ecls>>24), (char)(ecls>>16), (char)(ecls>>8), (char)ecls, ekind,
+                mouse_is_down(), dx, dy, b->frame.origin.x, b->frame.origin.y,
+                b->frame.size.width, b->frame.size.height);
+    }
     if (b->disabled) return 0;
     int inside = 1, was = -1;
     for (;;) {
@@ -862,6 +874,14 @@ CCWViewRef ccw_edit_install(ccw_edit *e, CCWViewRef parent) {
 }
 
 /* =============================== MODAL PUMP ============================== */
+/* Verbose per-event pump trace — separate from CARBON_*_TRACE because it is
+ * far too noisy to leave on with the ordinary structural trace. */
+static int pump_trace(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("CARBON_PUMP_TRACE") != NULL;
+    return v;
+}
+
 int ccw_run_modal_pump(int *done, const int *drew, ccw_edit *const *caretSlot,
                        double proofSecs) {
     if (!ccw_ReceiveNextEvent || !ccw_SendEventToEventTarget || !ccw_GetEventDispatcherTarget)
@@ -876,6 +896,12 @@ int ccw_run_modal_pump(int *done, const int *drew, ccw_edit *const *caretSlot,
         CCWStatus s = ccw_ReceiveNextEvent(0, NULL, tick, 1 /*pull*/, &ev);
         if (s == 0 && ev) {
             idle = 0;
+            if (pump_trace()) {
+                uint32_t c = ccw_GetEventClass ? ccw_GetEventClass(ev) : 0;
+                uint32_t k = ccw_GetEventKind ? ccw_GetEventKind(ev) : 0;
+                CCW_LOG("pump ev %c%c%c%c/%u\n", (char)(c>>24), (char)(c>>16),
+                        (char)(c>>8), (char)c, k);
+            }
             ccw_SendEventToEventTarget(ev, disp);
             if (ccw_ReleaseEvent) ccw_ReleaseEvent(ev);
             continue;

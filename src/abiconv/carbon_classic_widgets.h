@@ -84,6 +84,8 @@ extern CCWStatus  (*ccw_SetEventParameter)(CCWEventRef, uint32_t, uint32_t, unsi
 extern CCWStatus  (*ccw_ReceiveNextEvent)(uint32_t, const void *, double, uint8_t, CCWEventRef *);
 extern CCWStatus  (*ccw_SendEventToEventTarget)(CCWEventRef, void *);
 extern void       (*ccw_ReleaseEvent)(CCWEventRef);
+extern uint32_t   (*ccw_GetEventClass)(CCWEventRef);
+extern uint32_t   (*ccw_GetEventKind)(CCWEventRef);
 
 /* Resolve the natives once.  Returns 1 if the substrate can be used at all
  * (window creation + HIView creation + a modal state are all present). */

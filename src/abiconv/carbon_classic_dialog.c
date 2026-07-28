@@ -120,6 +120,7 @@ static CCWStatus body_draw(void *call, CCWEventRef ev, void *ud) {
     CGContextRef cg = ccw_draw_cg(ev);
     double W = 0, H = 0;
     if (!d || !cg || !ccw_view_size(d->body, &W, &H)) return ccwEventNotHandled;
+    if (!d->drew) CCW_LOG("dialog: body FIRST DRAW %.0fx%.0f\n", W, H);
     d->drew = 1;
     CGContextSaveGState(cg);
     CGContextSetRGBFillColor(cg, CCD_BG, CCD_BG, CCD_BG, 1.0);
@@ -155,6 +156,8 @@ static struct ccd_item_live *item_at(ccd_dialog *d, int item) {
 
 static void fire_item(ccd_dialog *d, int item) {
     struct ccd_item_live *it = item_at(d, item);
+    CCW_LOG("dialog: fire_item(%d) it=%p disabled=%d btn=%p\n", item, (void *)it,
+            it ? it->disabled : -1, it ? (void *)it->btn : NULL);
     if (!it || it->disabled) return;
     if (it->btn) { ccw_button_fire(it->btn); return; }
     d->result = item;
@@ -290,6 +293,9 @@ ccd_dialog *ccd_create(const char *utf8Title, int contentW, int contentH,
             ccw_edit_install(e, parent);
         }
         /* statText / icon / picture / userItem are painted by body_draw */
+        CCW_LOG("dialog:  item %d type=%d dis=%d rect=%.0f,%.0f,%.0fx%.0f '%s'\n",
+                i + 1, it->type, it->disabled, it->frame.origin.x, it->frame.origin.y,
+                it->frame.size.width, it->frame.size.height, it->text);
     }
 
     /* classic default: the FIRST push button is the default item until the app
@@ -329,6 +335,8 @@ int ccd_run_modal(ccd_dialog *d) {
     if (ccw_SelectWindow) ccw_SelectWindow(d->win);
     carbon_ensure_foreground();
     if (ccw_BeginAppModalStateForWindow) ccw_BeginAppModalStateForWindow(d->win);
+    CCW_LOG("dialog: modal enter (default=%d cancel=%d ranOnce=%d)\n",
+            d->defaultItem, d->cancelItem, d->ranOnce);
     /* Only the FIRST round gets the liveness proof: once a round has completed
      * we know the pump works, and a later round legitimately sits idle for as
      * long as the user takes to type. */
