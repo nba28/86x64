@@ -265,9 +265,15 @@ static void parse_ditl(Dialog *d, const uint8_t *p, long len) {
             (it->type >= kCtrlItem && it->type <= kCtrlItem + kRadCtrl)) {
             long c = read_pstr(p + off, len - off, it->text, sizeof it->text, 0);
             off += c;
-        } else if (it->type == kIconItem || it->type == kPicItem || it->type == kResCtrl) {
-            off += 2;                      /* a resource id */
-        } else { /* userItem / helpItem / unknown: 1-byte length prefix, 0 body */
+        } else {
+            /* EVERY other item body is length-prefixed exactly like a text one:
+             * a byte count, then that many bytes (an icon/picture/'CNTL' item
+             * stores count=2 followed by its 2-byte resource id; a userItem
+             * stores count=0).  The old code advanced by a bare 2 for icon and
+             * picture items, which is one byte SHORT of the 1+2 they actually
+             * occupy and desynchronised the parse of every item after them —
+             * a whole classic dialog would come out as garbage rects and text.
+             * Universal: keyed on the DITL encoding, not on any app. */
             if (off < len) off += 1 + p[off];
         }
         if (off & 1) off++;                /* next item is word-aligned */
