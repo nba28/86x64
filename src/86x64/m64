@@ -31,9 +31,56 @@ from pathlib import Path
 # ---- locations -------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent          # src/86x64
 PROJ_ROOT  = SCRIPT_DIR.parent.parent                 # repo root
-BUILD      = PROJ_ROOT / "build"
+
+
+def _resolve_build_root():
+    """Pick the build tree, and be LOUD when the choice is ambiguous.
+
+    The tools are resolved relative to THIS SCRIPT, not the cwd. That is the
+    right default, but it has a sharp edge: `/usr/local/bin/m64` is a symlink
+    into the MAIN checkout, so a bare `m64` run from inside a git worktree
+    silently uses the MAIN build. `m64 resync` then reports a cheerful
+    "N copies synced" while overwriting a worktree's freshly-built libabiconv
+    with master's — the agent is now testing master and does not know it.
+    That has cost this project two whole investigations (a Halo "auto-dismiss"
+    that was only ever stale code, and a Civ libabiconv measurement).
+
+    So: honour an explicit M64_BUILD override, and otherwise keep the
+    script-relative default but WARN when the cwd sits in a different checkout
+    that has a build of its own. Warn rather than auto-switch, because silently
+    changing which compiler output gets deployed is the same class of surprise
+    in the other direction.
+    """
+    env = os.environ.get("M64_BUILD")
+    if env:
+        return Path(env).expanduser().resolve(), None
+
+    default = PROJ_ROOT / "build"
+    try:
+        cwd_root = Path(subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            capture_output=True, text=True, check=True).stdout.strip()).resolve()
+    except Exception:
+        return default, None
+
+    if cwd_root != PROJ_ROOT and (cwd_root / "build" / "src" / "abiconv" / "libabiconv.dylib").exists():
+        return default, cwd_root / "build"
+    return default, None
+
+
+BUILD, _OTHER_BUILD = _resolve_build_root()
 MACHO_TOOL = BUILD / "src" / "macho-tool" / "macho-tool"
 LIBABICONV = BUILD / "src" / "abiconv" / "libabiconv.dylib"
+
+
+def warn_if_build_ambiguous():
+    """Call from any command that DEPLOYS or CONSUMES build output."""
+    if _OTHER_BUILD is None:
+        return
+    warn(f"using build {BUILD}")
+    warn(f"but the cwd is inside another checkout that has its own build: {_OTHER_BUILD}")
+    warn("if you meant that one, re-run with "
+         f"M64_BUILD={_OTHER_BUILD} ... (or invoke that checkout's own src/86x64/m64)")
 
 TRANSLATE_BUNDLE = SCRIPT_DIR / "translate-bundle"
 PIPELINE_SH      = SCRIPT_DIR / "86x64.sh"
@@ -543,9 +590,13 @@ def cmd_retranslate(args):
 def cmd_resync(args):
     """Copy the freshly-built libabiconv.dylib over every copy in a bundle."""
     require(LIBABICONV)
+    warn_if_build_ambiguous()
     app = Path(args.app)
     copies = list(app.rglob("libabiconv.dylib"))
+    # Name the SOURCE, not just the count: "4 copies synced" is exactly the
+    # reassuring message you get when you have just deployed the wrong build.
     info(f"resync libabiconv -> {len(copies)} copies in {app.name}")
+    info(f"  source: {LIBABICONV}")
     for c in copies:
         if args.dry_run:
             print("  dry-run: cp", LIBABICONV, c)

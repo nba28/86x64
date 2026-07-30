@@ -247,6 +247,53 @@ namespace MachO {
       return !env.code_target_has_entry_evidence(img, (std::size_t) imm_val);
    }
 
+   /* Same classifier, for a memory-operand DISPLACEMENT that carries a BASE
+    * REGISTER (`op disp32(%base)` / `op disp32(%base,%idx,s)` / `lea
+    * disp32(%base),%reg`). Those two arms of the absolute-table heuristic treat
+    * disp32 as a global table's vmaddr; but with a base register live, disp32 is
+    * FAR more often an ordinary integer — a struct-member offset, an array
+    * extent, a loop bound — and on a big i386 image __text spans a range
+    * (Civ IV: 0x23b0 .. 0xdd2176) that ordinary small integers alias constantly.
+    *
+    * Ground truth (Civ IV Steam, "launch in window" SIGBUS 2026-07-28): the
+    * GMemory free-list builder allocates 0x2800 bytes and computes the
+    * one-past-the-last-node terminator with `lea 0x27ec(%ecx),%edx`
+    * (0x27ec == 0x2800 - 0x14, the block size minus one 0x14-byte node).
+    * 0x27ec aliases __text, so this arm relocated it: the translated code became
+    * `lea r11,[rip+..]; lea (%rcx,%r11),%edx`, i.e. end = block + 0x599400d.
+    * The iterator never reached the terminator, the zeroing loop ran off the end
+    * of the mmap'd heap chunk and died on the first non-writable page
+    * (KERN_PROTECTION_FAILURE writing 0x10382008, 8 bytes past a 1540K rwx
+    * region whose neighbour is a read-only file mapping).
+    *
+    * Rule: identical to the immediate family — a code-section-aliasing value is
+    * an integer CONSTANT unless there is positive function-ENTRY evidence at it.
+    * The immediate classifier's own contract demands this: classification must
+    * be a PURE FUNCTION of value + image, "never of parse ORDER or of WHICH
+    * IFORM CARRIES the immediate". Before this, 0x27ec was a constant as
+    * `mov $0x27ec,%edx` but a pointer as `lea 0x27ec(%ecx),%edx`.
+    *
+    * Scope: BASE-REGISTER arms ONLY. The baseless arms (`[disp32]` and
+    * `[disp32+idx*scale]`) are untouched — there disp32 IS the whole effective
+    * address, and a switch/jump table legitimately lives in an instructions
+    * section with no symbol and no prologue at its base. Data-section aliases
+    * are likewise untouched (that is where every known true positive of this
+    * heuristic lives: photocd's `movl %edi,0x11260(%edx)`, Halo's
+    * `movb $0,0x453cc0(%edx)` zerofill store, Quinn's __TEXT,__const table).
+    *
+    * M64_NO_MEMDISP_CODE_ALIAS_GATE=1 disarms it (A/B guard
+    * `memdisp_code_alias_test.sh`). */
+   template <Bits bits>
+   static bool memdisp_code_alias_is_constant(const Image& img, ParseEnv<bits>& env,
+                                              std::size_t disp) {
+      static const bool disabled =
+         std::getenv("M64_NO_MEMDISP_CODE_ALIAS_GATE") != nullptr;
+      if (disabled) { return false; }
+      if (bits != Bits::M32) { return false; }
+      if (disp < 0x1000 || disp >= 0x80000000U) { return false; }
+      return imm32_code_alias_is_constant(img, env, (uint32_t) disp);
+   }
+
    /* A code-target imm32 stored into a general-base FIELD (`movl $imm32,
     * disp(%reg)`) or compared against one is a fn-ptr callback install
     * (obj->cb = &handler) ONLY on SYMBOL evidence — a func_syms nlist at the
@@ -775,6 +822,15 @@ namespace MachO {
                      }
                   }
                }
+               /* CODE-ALIAS gate: with a base register live, a disp32 that
+                * merely aliases an instructions section and carries no
+                * function-ENTRY evidence is an integer (struct offset / extent /
+                * loop bound), not a table vmaddr. See
+                * memdisp_code_alias_is_constant — Civ IV's
+                * `lea 0x27ec(%ecx),%edx` free-list terminator. */
+               if (memdisp_code_alias_is_constant(img, env, (std::size_t) disp)) {
+                  disp_in_seg = false;
+               }
                if (disp_in_seg && !memdisp) {
                   memidx = i;
                   memdisp_absolute = true;
@@ -859,6 +915,12 @@ namespace MachO {
                         break;
                      }
                   }
+               }
+               /* CODE-ALIAS gate — identical to the base-only arm above; a
+                * 2-D-array access `tab(%base,%idx,s)` whose disp32 aliases
+                * mid-__text is an integer, not a table vmaddr. */
+               if (memdisp_code_alias_is_constant(img, env, (std::size_t) disp)) {
+                  disp_in_seg = false;
                }
                if (disp_in_seg && !memdisp) {
                   memidx = i;
