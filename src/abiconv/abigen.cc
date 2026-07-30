@@ -1043,6 +1043,30 @@ struct ABIConversion {
          !fp_sret && !fp_reg && int_reg_struct_return(&int_ret_hi_split);
       const CXType ret_canon =
          clang_getCanonicalType(clang_getResultType(function_type));
+      /* BLAST-RADIUS DIAGNOSTIC (ABIGEN_SRET_GAP_TRACE=1, inert otherwise).
+       * Report every record return that NONE of the three classifiers above
+       * claimed. The known gap is the family that is MEMORY on i386 (>8 bytes,
+       * so the callee takes a hidden sret pointer as its implicit first stack
+       * arg) but REGISTER on x86_64 (<=16 bytes) and not homogeneous-FP: for
+       * those we emit no hidden-sret slot, so every declared argument is read 4
+       * bytes low and the return conversion is wrong. Counting them is what
+       * decides whether this is a footnote or systematic. */
+      if (ret_canon.kind == CXType_Record && !fp_sret && !fp_reg && !int_reg_ret &&
+          getenv("ABIGEN_SRET_GAP_TRACE")) {
+         const size_t sz32 = sizeof_type(ret_canon, arch::i386);
+         bool classified = true;
+         size_t sz64 = 0;
+         try {
+            sz64 = byval_classify(ret_canon).sz64;
+         } catch (const std::invalid_argument&) {
+            classified = false;      /* union/packed: byval_classify declines it */
+         }
+         const bool gap = classified && sz32 > 8 && sz64 <= 16;
+         std::cerr << "[abigen-sret-gap] " << (gap ? "GAP  " : "other")
+                   << " i386=" << sz32 << " x86_64=";
+         if (classified) { std::cerr << sz64; } else { std::cerr << "declined"; }
+         std::cerr << " " << sym << "\n";
+      }
       const size_t sret_size =
          fp_sret ? align_up<size_t>(sizeof_type(ret_canon, arch::x86_64), 16) : 0;
       /* the native return buffer sits just ABOVE the outgoing stack args and the
