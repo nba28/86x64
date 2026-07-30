@@ -1218,3 +1218,11 @@ $(BUILD_DIR)/libabiconv.dylib: $(LIBABICONV) | $(BUILD_DIR)
 
 clean:
 	rm -rf $(BUILD_DIR)
+
+# 89_sret_regclass_gap: CoreFoundation isn't in the i386 sysroot, so
+# CFAbsoluteTimeGetGregorianDate (a MEMORY-on-i386 / REGISTER-on-x86_64 struct
+# return) is an undefined dynamic_lookup import resolved at translate time by
+# static-interpose -> libabiconv's ___CFAbsoluteTimeGetGregorianDate shim.
+# lldiv comes from the sysroot but is likewise shimmed by abigen. Overrides %.i386.
+$(BUILD_DIR)/89_sret_regclass_gap.i386: $(BUILD_DIR)/89_sret_regclass_gap.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
