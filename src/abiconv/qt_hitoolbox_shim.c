@@ -97,7 +97,10 @@ uint32_t shim_NewColorDialog(uint32_t *args) { (void)args; return 0; }
 uint32_t shim_NewFeaturesDialog(uint32_t *args) { (void)args; return 0; }
 uint32_t shim_RemoveDialogItems(uint32_t *args) { (void)args; return 0; }
 uint32_t shim_SelectDialogItemText(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetDialogCancelItem(uint32_t *args) { (void)args; return 0; }
+/* SetDialogCancelItem is PROMOTED to a real implementation in
+ * carbon_dialog_shim.m (it now really sets the Escape / close-box item on the
+ * classic Carbon dialog) — see this file's header note on promoting a no-op
+ * whose result turns out to matter. Not defined here: duplicate symbol. */
 uint32_t shim_SetDialogItem(uint32_t *args) { (void)args; return 0; }
 uint32_t shim_SetDialogTracksCursor(uint32_t *args) { (void)args; return 0; }
 uint32_t shim_ShowDialogItem(uint32_t *args) { (void)args; return 0; }

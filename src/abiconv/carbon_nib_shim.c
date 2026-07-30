@@ -54,6 +54,7 @@
 #include <objc/message.h>                // set the backing NSWindow's title
 #include <objc/runtime.h>
 #include "carbon_nib_parse.h"   // pure, headless-testable nib XML reader
+#include "carbon_classic_widgets.h" // THE shared classic-Carbon widget substrate
 
 // arena bridge (objc_shim.c): i386 handle / i386 CFSTR constant <-> real 64-bit ptr.
 extern uint64_t x64_objc_unwrap(uint32_t h);
@@ -582,49 +583,28 @@ static ControlRef make_popup(const char *x, long lo, long hi, const CRect *r,
     return c;
 }
 
-// ---- self-drawn edit-text field ----------------------------------------
+// ---- classic edit-text field -------------------------------------------
 // IBCarbonEditText -> the classic MLTE/edit-text control was removed from 64-bit
-// HIToolbox, so materialize it as a self-drawn com.apple.hiview that (a) draws a
-// classic sunken white field with its current text, and (b) captures the value the
-// app pushes at runtime.  Halo sets the port/IP text with
-// SetControlData(ctl, part, kControlEditTextCFStringTag|kControlEditTextTextTag,
-// size, &value) after resolving the field by its ControlID (signature 'Sprt' etc.).
-// On a compositing HIView SetControlData is delivered as a kEventControlSetData
+// HIToolbox, so materialize it as THE shared classic edit field
+// (carbon_classic_widgets.c): a self-drawn com.apple.hiview that draws the
+// classic sunken white box and, since 2026-07-28, is genuinely TYPABLE — real
+// blinking caret, click-to-place, drag + shift selection, Tab focus and the
+// classic editing keys.  That is the same control the classic Dialog Manager's
+// 'editText' DITL items use, so a nib field and a DLOG field behave identically.
+//
+// On top of the shared control this file adds the one nib-specific behaviour:
+// Halo sets the port/IP text with SetControlData(ctl, part,
+// kControlEditTextCFStringTag|kControlEditTextTextTag, size, &value) after
+// resolving the field by its ControlID (signature 'Sprt' etc.).  On a
+// compositing HIView SetControlData is delivered as a kEventControlSetData
 // carbon event to the view's own handler, so we intercept it there, store the
 // string, and redraw — no SetControlData interposition (which would need a
 // retranslate) required.  Universal for any IBCarbonEditText.
-struct edit { char text[128]; void *view; CRect r; int enabled; int focused; };
-
-static OSStatus edit_draw(void *call, void *ev, void *ud) {
-    (void)call;
-    struct edit *e = (struct edit *)ud;
-    CGContextRef cg = NULL; double W = 0, H = 0;
-    if (!e || !draw_ctx(ev, e->view, &e->r, &cg, &W, &H)) return (OSStatus)-9874;
-    HIRectD b = { 0, 0, W, H };
-    CGContextSaveGState(cg);
-    // sunken white field with a 1px gray inset border
-    CGRect box = CGRectMake(0.5, 0.5, b.w - 1, b.h - 1);
-    CGContextSetRGBFillColor(cg, 1.0, 1.0, 1.0, 1.0);
-    CGContextFillRect(cg, box);
-    CGContextSetRGBStrokeColor(cg, 0.55, 0.55, 0.58, 1.0);
-    CGContextSetLineWidth(cg, 1.0);
-    CGContextStrokeRect(cg, box);
-    // top inner shadow line for the recessed look
-    CGContextSetRGBStrokeColor(cg, 0.78, 0.78, 0.80, 1.0);
-    CGContextBeginPath(cg);
-    CGContextMoveToPoint(cg, 1.5, b.h - 1.5);
-    CGContextAddLineToPoint(cg, b.w - 1.5, b.h - 1.5);
-    CGContextStrokePath(cg);
-    if (e && e->text[0])
-        draw_text(cg, e->text, 5, b.h / 2 + 4, H, 11, 0.05, 0.05, 0.08, 0);
-    CGContextRestoreGState(cg);
-    return noErr;
-}
 
 // kEventControlSetData: capture the CFString/text the app pushes into the field.
 static OSStatus edit_setdata(void *call, void *ev, void *ud) {
     (void)call;
-    struct edit *e = (struct edit *)ud;
+    ccw_edit *e = (ccw_edit *)ud;
     if (!e) return (OSStatus)-9874;
     static OSStatus (*gep)(void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *);
     if (!gep) gep = (void *)dlsym(RTLD_DEFAULT, "GetEventParameter");
@@ -654,76 +634,27 @@ static OSStatus edit_setdata(void *call, void *ev, void *ud) {
     return (OSStatus)-9874;  /* eventNotHandledErr: let HIToolbox handle other tags */
 }
 
-// kEventControlSetFocusPart: accept keyboard focus so the field can be typed into.
-// The event's part is >0 to focus, 0 to unfocus; echo it back as accepted.
-static OSStatus edit_focus(void *call, void *ev, void *ud) {
-    (void)call;
-    struct edit *e = (struct edit *)ud;
-    static OSStatus (*gep)(void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *);
-    static OSStatus (*sep)(void *, uint32_t, uint32_t, unsigned long, const void *);
-    if (!gep) gep = (void *)dlsym(RTLD_DEFAULT, "GetEventParameter");
-    if (!sep) sep = (void *)dlsym(RTLD_DEFAULT, "SetEventParameter");
-    int16_t part = 0;
-    if (gep) gep(ev, 'cprt', 'cprt', NULL, sizeof part, NULL, &part);
-    if (e) { e->focused = part != 0; if (e->view && n_HIViewSetNeedsDisplay) n_HIViewSetNeedsDisplay(e->view, 1); }
-    if (sep) sep(ev, 'cprt', 'cprt', sizeof part, &part);   /* accept the focus */
-    return noErr;
-}
-
-// kEventControlKeyDown / kEventTextInputUnicodeForKeyEvent: edit the field text.
-static OSStatus edit_key(void *call, void *ev, void *ud) {
-    (void)call;
-    struct edit *e = (struct edit *)ud;
-    if (!e || !e->enabled) return (OSStatus)-9874;
-    static OSStatus (*gep)(void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *);
-    if (!gep) gep = (void *)dlsym(RTLD_DEFAULT, "GetEventParameter");
-    if (!gep) return (OSStatus)-9874;
-    char ch = 0;
-    // kEventParamKeyMacCharCodes 'kchr' typeChar 'TEXT'
-    if (gep(ev, 'kchr', 'TEXT', NULL, sizeof ch, NULL, &ch) != 0) return (OSStatus)-9874;
-    int n = (int)strlen(e->text);
-    if (ch == 8 || ch == 127) {            /* backspace / delete */
-        if (n > 0) e->text[n - 1] = 0;
-    } else if (ch == 13 || ch == 3 || ch == 9) {
-        return (OSStatus)-9874;            /* return/enter/tab: let the app handle */
-    } else if (ch >= 32 && ch < 127 && n < (int)sizeof e->text - 1) {
-        e->text[n] = ch; e->text[n + 1] = 0;
-    } else {
-        return (OSStatus)-9874;
-    }
-    if (e->view && n_HIViewSetNeedsDisplay) n_HIViewSetNeedsDisplay(e->view, 1);
-    return noErr;
-}
-
 static ControlRef make_edit_field(const char *x, long lo, long hi, const CRect *r,
-                                  ControlRef parent) {
+                                  ControlRef parent, WindowRef win) {
     (void)x; (void)lo; (void)hi;
-    ControlRef c = NULL;
-    if (!n_HIObjectCreate) return NULL;
-    n_HIObjectCreate(CFSTR("com.apple.hiview"), NULL, (HIObjectRef *)&c);
-    if (!c) return NULL;
-    set_frame(c, r);
-    struct edit *e = (struct edit *)calloc(1, sizeof *e);
-    if (e) { e->view = c; if (r) e->r = *r; e->enabled = 1; sd_register(c, SD_EDIT, e); }
-    if (e && n_InstallEventHandler2 && n_GetControlEventTarget2) {
+    if (!ccw_available()) return NULL;
+    ccw_edit *e = (ccw_edit *)calloc(1, sizeof *e);
+    if (!e) return NULL;
+    if (r) e->frame = CGRectMake(r->left, r->top, r->right - r->left, r->bottom - r->top);
+    e->enabled = 1;
+    e->win = win;                       /* needed for click/drag hit mapping */
+    /* THE shared classic edit field: sunken frame, caret, click-to-place, drag
+     * selection, Tab focus and the classic editing keys all come from here. */
+    ControlRef c = (ControlRef)ccw_edit_install(e, (CCWViewRef)parent);
+    if (!c) { free(e); return NULL; }
+    sd_register(c, SD_EDIT, e);
+    /* nib-only addition: the app pushes its runtime value with SetControlData,
+     * which a compositing HIView receives as kEventControlSetData. */
+    if (n_InstallEventHandler2 && n_GetControlEventTarget2) {
         void *tgt = n_GetControlEventTarget2(c);
-        struct { uint32_t cls, kind; } dr = { 'cntl', 4  /*kEventControlDraw*/     };
-        struct { uint32_t cls, kind; } sd = { 'cntl', 20 /*kEventControlSetData*/  };
-        struct { uint32_t cls, kind; } ht = { 'cntl', 3  /*kEventControlHitTest*/  };
-        struct { uint32_t cls, kind; } fp = { 'cntl', 4013/*kEventControlSetFocusPart*/ };
-        struct { uint32_t cls, kind; } kd = { 'cntl', 11 /*kEventControlKeyDown*/  };
-        n_InstallEventHandler2(tgt, (void *)edit_draw,    1, &dr, e, NULL);
+        struct { uint32_t cls, kind; } sd = { 'cntl', 20 /*kEventControlSetData*/ };
         n_InstallEventHandler2(tgt, (void *)edit_setdata, 1, &sd, e, NULL);
-        n_InstallEventHandler2(tgt, (void *)sd_hittest,   1, &ht, e, NULL);
-        n_InstallEventHandler2(tgt, (void *)edit_focus,   1, &fp, e, NULL);
-        n_InstallEventHandler2(tgt, (void *)edit_key,     1, &kd, e, NULL);
     }
-    if (n_HIViewSetVisible) n_HIViewSetVisible(c, 1);   // base hiview starts hidden
-    // A bare hiview advertises no features, so HIToolbox won't route keyboard focus to
-    // it and the field is non-editable. Advertise kHIViewFeatureGetsFocusOnClick (1<<8)
-    // so a click focuses the field (via sd_hittest) and edit_focus/edit_key service typing.
-    if (n_HIViewChangeFeatures) n_HIViewChangeFeatures(c, (1ull << 8), 0);
-    if (parent) n_HIViewAddSubview(parent, c);
     return c;
 }
 
@@ -762,7 +693,7 @@ int sd_ctrl_get_value(void *ctrl, int32_t *out) {
 int sd_ctrl_set_cfstring(void *ctrl, const void *cfstr) {
     struct sd_entry *e = sd_find(ctrl);
     if (!e || e->kind != SD_EDIT) return 0;
-    struct edit *ed = (struct edit *)e->rec;
+    ccw_edit *ed = (ccw_edit *)e->rec;
     ed->text[0] = 0;
     CFStringRef cf = (CFStringRef)cfstr;
     if (cf && CFGetTypeID(cf) == CFStringGetTypeID())
@@ -775,7 +706,7 @@ int sd_ctrl_set_cfstring(void *ctrl, const void *cfstr) {
 int sd_ctrl_set_text(void *ctrl, const char *buf, int len) {
     struct sd_entry *e = sd_find(ctrl);
     if (!e || e->kind != SD_EDIT) return 0;
-    struct edit *ed = (struct edit *)e->rec;
+    ccw_edit *ed = (ccw_edit *)e->rec;
     int n = len; if (n < 0) n = 0; if (n > (int)sizeof ed->text - 1) n = sizeof ed->text - 1;
     if (buf && n) memcpy(ed->text, buf, n);
     ed->text[n] = 0;
@@ -788,7 +719,7 @@ int sd_ctrl_set_text(void *ctrl, const char *buf, int len) {
 int sd_ctrl_get_text(void *ctrl, char *buf, int bufsz) {
     struct sd_entry *e = sd_find(ctrl);
     if (!e || e->kind != SD_EDIT) return -1;
-    struct edit *ed = (struct edit *)e->rec;
+    ccw_edit *ed = (ccw_edit *)e->rec;
     int n = (int)strlen(ed->text);
     if (buf && bufsz > 0) { int c = n < bufsz ? n : bufsz - 1; memcpy(buf, ed->text, c); buf[c] = 0; }
     return n;
@@ -799,7 +730,7 @@ int sd_ctrl_get_text(void *ctrl, char *buf, int bufsz) {
 int sd_ctrl_get_cfstring(void *ctrl, const void **out) {
     struct sd_entry *e = sd_find(ctrl);
     if (!e || e->kind != SD_EDIT) return 0;
-    struct edit *ed = (struct edit *)e->rec;
+    ccw_edit *ed = (ccw_edit *)e->rec;
     if (out) {
         // CFStringCreateWithCString returns NULL for ANY byte sequence that is
         // not valid in the requested encoding, and ed->text takes RAW bytes from
@@ -825,7 +756,7 @@ int sd_ctrl_set_enabled(void *ctrl, int enabled) {
     struct sd_entry *e = sd_find(ctrl);
     if (!e) return 0;
     if (e->kind == SD_POPUP) { ((struct popup *)e->rec)->enabled = enabled; sd_redraw(((struct popup *)e->rec)->view); }
-    else if (e->kind == SD_EDIT) { ((struct edit *)e->rec)->enabled = enabled; sd_redraw(((struct edit *)e->rec)->view); }
+    else if (e->kind == SD_EDIT) { ((ccw_edit *)e->rec)->enabled = enabled; sd_redraw(((ccw_edit *)e->rec)->view); }
     return 1;
 }
 
@@ -895,7 +826,7 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
             // classic sunken box and captures the text the app pushes via
             // SetControlData. Wire its ControlID so GetControlByID({'Sprt',0}) etc.
             // resolves the field for the app's runtime value set.
-            ControlRef ec = make_edit_field(x, il, ih, &r, parent);
+            ControlRef ec = make_edit_field(x, il, ih, &r, parent, win);
             if (ec) wire_ids(x, il, ih, ec);
             if (ec && getenv("ABICONV_CTRL_TRACE")) {
                 // Log the created field's ControlID signature so an on-target run can

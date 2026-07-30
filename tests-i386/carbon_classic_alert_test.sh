@@ -46,8 +46,12 @@ set -u
 cd "$(dirname "$0")"
 
 SRC="../src/abiconv/carbon_classic_alert.c"
+# The classic widgets (window/button/text/modal pump) live in the shared
+# substrate the alert, the classic Dialog Manager and the nib materializer
+# all draw from; the alert file itself is now only the alert's layout.
+WIDGETS="../src/abiconv/carbon_classic_widgets.c"
 HOST="../src/abiconv/carbon_appkit_host.c"
-if [ ! -f "$SRC" ] || [ ! -f "$HOST" ]; then
+if [ ! -f "$SRC" ] || [ ! -f "$WIDGETS" ] || [ ! -f "$HOST" ]; then
     echo "classicalert: SKIP (shim source missing)"; exit 0
 fi
 
@@ -123,8 +127,8 @@ int main(int argc, char **argv) {
 }
 EOF
 
-if ! clang -arch x86_64 -Wno-deprecated-declarations -o "$TMP/t" "$TMP/h.c" \
-        "$SRC" "$HOST" \
+if ! clang -arch x86_64 -Wno-deprecated-declarations -I../src/abiconv \
+        -o "$TMP/t" "$TMP/h.c" "$SRC" "$WIDGETS" "$HOST" \
         -framework Carbon -framework Cocoa -framework CoreText \
         -framework ApplicationServices 2>"$TMP/cerr"; then
     echo "classicalert: SKIP (compile failed)"; sed -n '1,25p' "$TMP/cerr"; exit 0

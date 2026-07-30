@@ -1,5 +1,21 @@
 /*
- * carbon_dialog_shim.m — REAL classic Dialog Manager on modern AppKit.
+ * carbon_dialog_shim.m — the REAL classic Dialog Manager: resource parsing,
+ * i386 marshalling, and CLASSIC-FIRST materialization.
+ *
+ * ★ 2026-07-28: the view layer is now AUTHENTIC CLASSIC CARBON, not AppKit.
+ * GetNewDialog hands the parsed DLOG/DITL to carbon_classic_dialog.c, which
+ * builds a real compositing Carbon window of self-drawn classic HIViews
+ * (classic bevelled push buttons, check boxes, radio buttons, Lucida Grande
+ * static text, and the classic sunken edit field with a real blinking caret,
+ * click-to-place, drag selection and Tab focus) and runs it with a real Carbon
+ * modal session.  Project doctrine is that every window should look the way it
+ * did on its original macOS (the authentic-original-look rule); the AppKit
+ * window below is kept ONLY as the fallback for when the classic substrate
+ * cannot be materialized or its pump proves dead on this OS, so function never
+ * regresses.  Both paths return the SAME classic item numbers, so the app's own
+ * OK/Cancel/validate loop runs unchanged either way.
+ *
+ * The ORIGINAL rationale for the shim itself follows and still stands.
  *
  * The classic Dialog Manager (a DialogRef built from a 'DLOG'+'DITL' resource,
  * run by ModalDialog, its items read/written via GetDialogItem[Text]) was
@@ -49,6 +65,7 @@
 #import <AppKit/AppKit.h>
 #import <CoreFoundation/CoreFoundation.h>
 #import <objc/runtime.h>          /* objc_setAssociatedObject (retain the delegate) */
+#include "carbon_classic_dialog.h"   /* the AUTHENTIC classic Carbon view layer */
 #include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
@@ -58,6 +75,11 @@
 /* AppKit window-host bootstrap (carbon_appkit_host.c): a pure-Carbon translated
  * process has no WindowManagement delegate until NSApplicationLoad runs. */
 extern void carbon_ensure_window_host(void);
+/* carbon_classic_alert.c — the AUTHENTIC classic Carbon alert (returns the
+ * classic item 1/2/3, or 0 if it could not be materialized on this OS). */
+extern int carbon_classic_alert_run(int alertType, const char *message, const char *informative,
+                                    const char *okText, const char *cancelText, const char *otherText,
+                                    int defaultButton, int cancelButton);
 
 #define PTR(i) ((void *)(uintptr_t)a[(i)])
 #define DLOG_NO_ERR (0)
@@ -100,12 +122,14 @@ enum {
 };
 
 /* One materialized DITL item. */
-typedef struct {
-    int          type;        /* raw type byte with the disable bit stripped */
-    int          disabled;    /* the disable bit                             */
-    CRect        rect;        /* classic local coords (top,left,bottom,right) */
-    char         text[256];   /* button title / static text / edit contents  */
-    NSView      *view;        /* the live AppKit view (button/field/label)    */
+typedef struct DItem {
+    int             type;     /* raw type byte with the disable bit stripped */
+    int             disabled; /* the disable bit                             */
+    CRect           rect;     /* classic local coords (top,left,bottom,right) */
+    char            text[256];/* button title / static text / edit contents  */
+    NSView         *view;     /* the live AppKit view (FALLBACK path only)    */
+    struct Dialog  *owner;    /* back-pointer, so an item handle can reach    */
+    int             index;    /* the classic dialog + 1-based item number     */
 } DItem;
 
 #define DLG_MAX_ITEMS 64
@@ -116,7 +140,8 @@ typedef struct {
  * the rest of the bridge (a <4GB pointer wraps to itself). */
 typedef struct Dialog {
     uint32_t     magic;       /* DLG_MAGIC */
-    NSWindow    *win;
+    ccd_dialog  *cd;          /* the CLASSIC Carbon dialog (preferred path)   */
+    NSWindow    *win;         /* the AppKit FALLBACK window (only if !cd)     */
     int          nitems;
     DItem        items[DLG_MAX_ITEMS];
     int          defaultItem; /* 1-based, 0 = none */
@@ -127,8 +152,43 @@ typedef struct Dialog {
 #define DLG_MAGIC 0x444C4731u  /* 'DLG1' */
 
 /* The most-recently-shown dialog. ModalDialog takes no DialogRef (the classic
- * Dialog Manager runs the FRONT modal dialog), so we track it here. */
-static struct Dialog *g_front_dialog = NULL;
+ * Dialog Manager runs the FRONT modal dialog), so we track it here.
+ *
+ * PROCESS-GLOBAL ON PURPOSE — this must NOT be a file static.  A deployed bundle
+ * carries one libabiconv copy PER DIRECTORY (the libabiconv multi-copy gotcha:
+ * Halo.app has three), and every copy gets its own instance of every file
+ * static.  If GetNewDialog is interposed into copy A and ModalDialog into copy
+ * B, copy B's front dialog is NULL and shim_ModalDialog's entry guard reports
+ * item 1 (= kStdOkItemIndex) INSTANTLY with no user input, while copy A's window
+ * is on screen — the modal looks like it dismisses itself, and the app then acts
+ * on an unconfirmed dialog.  The AppKit fallback already had to dodge exactly
+ * this for the modal RESULT by routing it through the shared NSApp; the
+ * front-dialog pointer was the one piece left per-copy.
+ *
+ * The main thread's threadDictionary is a genuine process-global here: Foundation
+ * is mapped ONCE, so every libabiconv copy sees the same NSThread object and the
+ * same dictionary, and an NSString key compares by value (isEqual:/hash) across
+ * copies even though each copy has its own constant-string instance.  The main
+ * thread specifically, not currentThread — every Dialog Manager entry point
+ * already funnels its window work through on_main_sync. */
+static NSString *const kFrontDialogKey = @"86x64.carbon.Dialog.front";
+/* Used only if there is no shared store at all (threadDictionary nil). */
+static struct Dialog *g_front_dialog_fallback = NULL;
+
+static void set_front_dialog(struct Dialog *d) {
+    NSMutableDictionary *reg = [[NSThread mainThread] threadDictionary];
+    g_front_dialog_fallback = d;
+    if (!reg) return;
+    if (d) [reg setObject:[NSValue valueWithPointer:d] forKey:kFrontDialogKey];
+    else   [reg removeObjectForKey:kFrontDialogKey];
+}
+
+static struct Dialog *front_dialog(void) {
+    NSMutableDictionary *reg = [[NSThread mainThread] threadDictionary];
+    if (!reg) return g_front_dialog_fallback;
+    NSValue *v = [reg objectForKey:kFrontDialogKey];
+    return v ? (struct Dialog *)[v pointerValue] : NULL;
+}
 
 extern uint32_t x64_objc_wrap(uint64_t real);
 extern uint64_t x64_objc_unwrap(uint32_t h);
@@ -230,19 +290,62 @@ static void parse_ditl(Dialog *d, const uint8_t *p, long len) {
          * (4 reserved + 8 rect + 1 type) is odd, so read_pstr must NOT self-pad;
          * we align `off` to even after the whole body (verified against Halo's
          * DITL 10001: "OK" body = 02 4f 4b, next item lands naturally on even). */
+        /* A ctrlItem's SUBTYPE is in the low 2 bits: 4=button, 5=checkbox,
+         * 6=radio, 7=control-from-'CNTL'.  All four store a pascal-string body
+         * (the 'CNTL' one stores a 2-byte id behind the same length prefix), so
+         * reading the title for 5/6 as well is offset-identical to the old
+         * catch-all `off += 1 + p[off]` — it just no longer THROWS the title
+         * away, which is what a classic check box / radio button needs to draw. */
         if (it->type == kStatText || it->type == kEditText ||
-            it->type == kCtrlItem  /* button/checkbox/radio: pascal title */) {
+            (it->type >= kCtrlItem && it->type <= kCtrlItem + kRadCtrl)) {
             long c = read_pstr(p + off, len - off, it->text, sizeof it->text, 0);
             off += c;
-        } else if (it->type == kIconItem || it->type == kPicItem || it->type == kResCtrl) {
-            off += 2;                      /* a resource id */
-        } else { /* userItem / helpItem / unknown: 1-byte length prefix, 0 body */
+        } else {
+            /* EVERY other item body is length-prefixed exactly like a text one:
+             * a byte count, then that many bytes (an icon/picture/'CNTL' item
+             * stores count=2 followed by its 2-byte resource id; a userItem
+             * stores count=0).  The old code advanced by a bare 2 for icon and
+             * picture items, which is one byte SHORT of the 1+2 they actually
+             * occupy and desynchronised the parse of every item after them —
+             * a whole classic dialog would come out as garbage rects and text.
+             * Universal: keyed on the DITL encoding, not on any app. */
             if (off < len) off += 1 + p[off];
         }
         if (off & 1) off++;                /* next item is word-aligned */
+        it->owner = d;
+        it->index = d->nitems + 1;         /* classic item numbers are 1-based */
         d->nitems++;
     }
     DLG("parsed DITL: %d items\n", d->nitems);
+}
+
+/* ======================= CLASSIC Carbon materialization ==================
+ * The authentic path: hand the parsed DITL straight to carbon_classic_dialog.c.
+ * Universal — it keys only on the item TYPE and rect, never on the app. */
+static int build_classic(Dialog *d) {
+    ccd_item items[DLG_MAX_ITEMS];
+    for (int i = 0; i < d->nitems; i++) {
+        items[i].type     = d->items[i].type;
+        items[i].disabled = d->items[i].disabled;
+        items[i].top      = d->items[i].rect.top;
+        items[i].left     = d->items[i].rect.left;
+        items[i].bottom   = d->items[i].rect.bottom;
+        items[i].right    = d->items[i].rect.right;
+        items[i].text     = d->items[i].text;
+    }
+    int w = d->bounds.right - d->bounds.left, h = d->bounds.bottom - d->bounds.top;
+    d->cd = ccd_create(d->title, w, h, items, d->nitems);
+    if (d->cd) {
+        /* Mirror the classic default/cancel items the classic layer settled on
+         * (it applies the standard kStdOkItemIndex/kStdCancelItemIndex rules), so
+         * GetDialogDefaultItem / GetDialogCancelItem report what is really wired
+         * to Return and Escape instead of a stale 0. */
+        d->defaultItem = ccd_default_item(d->cd);
+        d->cancelItem  = ccd_cancel_item(d->cd);
+        DLG("classic Carbon dialog materialized (%dx%d, %d items, default=%d cancel=%d)\n",
+            w, h, d->nitems, d->defaultItem, d->cancelItem);
+    } else DLG("classic Carbon dialog unavailable -> AppKit fallback\n");
+    return d->cd != NULL;
 }
 
 /* ============================ AppKit materialization =================== */
@@ -354,6 +457,28 @@ static void build_window(Dialog *d, const char *title) {
             it->view = nil;                    /* icon/pic/user: not drawn yet */
         }
     }
+    /* The SAME classic contract the classic path applies (see ccd_create): the
+     * first enabled push button is the default item, and DITL item 2 is the
+     * cancel item when it is an enabled push button — the classic standard item
+     * numbers (10.6 Dialogs.h kStdOkItemIndex = 1, kStdCancelItemIndex = 2).
+     * Without this the fallback's Return and Escape are DEAD for every classic
+     * app that never calls SetDialogDefaultItem/SetDialogCancelItem, so falling
+     * back would silently lose the keyboard — both paths must behave the same. */
+    if (!d->defaultItem) {
+        for (int i = 0; i < d->nitems; i++)
+            if (d->items[i].type == kCtrlItem && !d->items[i].disabled && d->items[i].view) {
+                d->defaultItem = i + 1;
+                defaultBtn = (NSButton *)d->items[i].view;
+                break;
+            }
+    }
+    if (!d->cancelItem && d->nitems >= 2) {
+        DItem *c = &d->items[1];                 /* kStdCancelItemIndex */
+        if (c->type == kCtrlItem && !c->disabled && c->view && d->defaultItem != 2) {
+            d->cancelItem = 2;
+            ((NSButton *)c->view).keyEquivalent = @"\033";   /* Escape */
+        }
+    }
     /* Default button = Return key. */
     if (defaultBtn) { defaultBtn.keyEquivalent = @"\r"; win.defaultButtonCell = defaultBtn.cell; }
     /* First editText gets initial keyboard focus. */
@@ -405,9 +530,13 @@ uint32_t shim_GetNewDialog(uint32_t *a) {
     parse_ditl(d, ditl, ilen);
     free(ditl);
 
-    on_main_sync(^{ build_window(d, d->title); });
-    if (!d->win) { free(d); return 0; }
-    g_front_dialog = d;         /* the newest dialog is the ModalDialog target */
+    /* AUTHENTIC FIRST: a real classic Carbon window of self-drawn classic
+     * HIViews.  Carbon window/HIView calls are MAIN-THREAD ONLY. */
+    __block int classic = 0;
+    on_main_sync(^{ classic = build_classic(d); });
+    if (!classic) on_main_sync(^{ build_window(d, d->title); });
+    if (!d->cd && !d->win) { free(d); return 0; }
+    set_front_dialog(d);        /* the newest dialog is the ModalDialog target */
     DLG("GetNewDialog %d -> DITL %d, %d items, dialog=%p\n", dlogID, itemsID, d->nitems, d);
     return wrap_ptr(d);
 }
@@ -419,10 +548,34 @@ uint32_t shim_GetNewDialog(uint32_t *a) {
 uint32_t shim_ModalDialog(uint32_t *a) {
     int16_t *itemHit = (int16_t *)PTR(1);
     /* The DialogRef isn't an arg to ModalDialog — the classic Dialog Manager
-     * runs the FRONT modal dialog (tracked in g_front_dialog). */
-    Dialog *d = g_front_dialog;
-    if (!d || !d->win) { if (itemHit) *itemHit = 1; return 0; }
+     * runs the FRONT modal dialog — see front_dialog(), which is process-global
+     * so a sibling libabiconv copy cannot report a phantom instant OK. */
+    Dialog *d = front_dialog();
+    if (!d || (!d->win && !d->cd)) { if (itemHit) *itemHit = 1; return 0; }
     __block NSInteger hit = 0;
+
+    /* CLASSIC path. ccd_run_modal returns 0 only if the Carbon pump proved dead
+     * on this OS; in that case tear the classic window down and materialize the
+     * AppKit fallback so the app's prompt loop never stalls. */
+    if (d->cd) {
+        __block int item = 0;
+        on_main_sync(^{
+            item = ccd_run_modal(d->cd);
+            if (item <= 0) {
+                ccd_dispose(d->cd);
+                d->cd = NULL;
+                build_window(d, d->title);
+            }
+        });
+        if (item > 0) {
+            if (itemHit) *itemHit = (int16_t)item;
+            DLG("ModalDialog (classic Carbon) -> item %d\n", item);
+            return 0;
+        }
+        if (!d->win) { if (itemHit) *itemHit = 1; return 0; }
+        DLG("ModalDialog: classic pump dead -> AppKit fallback\n");
+    }
+
     on_main_sync(^{
         NSWindow *win = d->win;
         if (!win.isVisible) { [win makeKeyAndOrderFront:nil]; }
@@ -467,9 +620,15 @@ static DItem *item_from_handle(uint32_t h) {
     return c->item;
 }
 
-/* Pull the current UI string out of an item's live view into it->text. */
+/* Pull the current UI string out of an item's live control into it->text —
+ * the classic Carbon field if we have one, else the AppKit fallback view. */
 static void sync_item_from_view(DItem *it) {
-    if (!it || !it->view) return;
+    if (!it) return;
+    if (it->owner && it->owner->cd) {
+        ccd_get_text(it->owner->cd, it->index, it->text, sizeof it->text);
+        return;
+    }
+    if (!it->view) return;
     if (it->type == kEditText || it->type == kStatText) {
         NSTextField *tf = (NSTextField *)it->view;
         if ([tf isKindOfClass:[NSTextField class]]) {
@@ -484,6 +643,7 @@ static void set_item_text(DItem *it, const char *s) {
     if (!it) return;
     strncpy(it->text, s ? s : "", sizeof it->text - 1);
     it->text[sizeof it->text - 1] = 0;
+    if (it->owner && it->owner->cd) { ccd_set_text(it->owner->cd, it->index, it->text); return; }
     if (it->view && (it->type == kEditText || it->type == kStatText)) {
         NSTextField *tf = (NSTextField *)it->view;
         NSString *ns = ns_str(it->text);
@@ -555,7 +715,7 @@ uint32_t shim_SetDialogItemText(uint32_t *a) {
  * WindowRef; returning 0 is the safe, faithful choice for a modal dialog.) */
 uint32_t shim_GetDialogWindow(uint32_t *a) {
     Dialog *d = dlg_from(a[0]);
-    if (d) g_front_dialog = d;      /* mark it front for the upcoming ModalDialog */
+    if (d) set_front_dialog(d);     /* mark it front for the upcoming ModalDialog */
     return 0;
 }
 
@@ -563,6 +723,7 @@ uint32_t shim_GetDialogWindow(uint32_t *a) {
  * NSTextField editing owns the caret). Safe for any handle incl. NULL. */
 uint32_t shim_ClearKeyboardFocus(uint32_t *a) {
     Dialog *d = dlg_from(a[0]);
+    if (d && d->cd) { on_main_sync(^{ ccd_clear_focus(d->cd); }); return 0; }
     if (d && d->win) { NSWindow *win = d->win; on_main_sync(^{ [win makeFirstResponder:nil]; }); }
     return 0;
 }
@@ -571,9 +732,14 @@ uint32_t shim_ClearKeyboardFocus(uint32_t *a) {
 uint32_t shim_DisposeDialog(uint32_t *a) {
     Dialog *d = dlg_from(a[0]);
     if (!d) return 0;
-    if (g_front_dialog == d) g_front_dialog = NULL;
+    if (front_dialog() == d) set_front_dialog(NULL);
     NSWindow *win = d->win;
-    on_main_sync(^{ if (win) { [win orderOut:nil]; win.delegate = nil; } });
+    ccd_dialog *cd = d->cd;
+    on_main_sync(^{
+        if (cd) ccd_dispose(cd);
+        if (win) { [win orderOut:nil]; win.delegate = nil; }
+    });
+    d->cd = NULL;
     /* drop item-handle cells that referenced this dialog's items */
     for (int i = 0; i < ITEMH_POOL; i++) {
         DItem *cit = g_itemh_pool[i].item;
@@ -591,6 +757,7 @@ uint32_t shim_SetDialogDefaultItem(uint32_t *a) {
     Dialog *d = dlg_from(a[0]);
     if (!d) return 0;
     d->defaultItem = (int16_t)a[1];
+    if (d->cd) { on_main_sync(^{ ccd_set_default_item(d->cd, d->defaultItem); }); return 0; }
     /* wire Return to that button if it exists */
     if (d->defaultItem >= 1 && d->defaultItem <= d->nitems) {
         DItem *it = &d->items[d->defaultItem - 1];
@@ -602,12 +769,32 @@ uint32_t shim_SetDialogDefaultItem(uint32_t *a) {
     }
     return 0;
 }
+/* void SetDialogCancelItem(DialogRef, SInt16 itemNo) — the Escape / Cmd-. and
+ * close-box item.  Promoted out of qt_hitoolbox_shim.c's no-op block (that file
+ * documents exactly this promotion path): the classic layer has had a real
+ * ccd_set_cancel_item all along, so a no-op here silently threw away the app's
+ * own statement of which button means "cancel". */
+uint32_t shim_SetDialogCancelItem(uint32_t *a) {
+    Dialog *d = dlg_from(a[0]);
+    if (!d) return 0;
+    d->cancelItem = (int16_t)a[1];
+    if (d->cd) { on_main_sync(^{ ccd_set_cancel_item(d->cd, d->cancelItem); }); return 0; }
+    /* AppKit fallback: Escape already cancels via the cell's key equivalent. */
+    if (d->cancelItem >= 1 && d->cancelItem <= d->nitems) {
+        DItem *it = &d->items[d->cancelItem - 1];
+        if (it->type == kCtrlItem && it->view) {
+            NSButton *b = (NSButton *)it->view;
+            on_main_sync(^{ b.keyEquivalent = @"\033"; });
+        }
+    }
+    return 0;
+}
 /* GetDialogDefaultItem / GetDialogCancelItem (owned here historically). */
 uint32_t shim_GetDialogDefaultItem(uint32_t *a) { Dialog *d = dlg_from(a[0]); return d ? (uint32_t)d->defaultItem : 0; }
 uint32_t shim_GetDialogCancelItem(uint32_t *a)  { Dialog *d = dlg_from(a[0]); return d ? (uint32_t)d->cancelItem : 0; }
-/* NOTE: DrawDialog/DialogSelect/IsDialogEvent/SetDialogCancelItem/Alert and the
- * Dialog-item list/edit no-ops are owned by qt_hitoolbox_shim.c — not redefined
- * here to avoid duplicate symbols. */
+/* NOTE: DrawDialog/DialogSelect/IsDialogEvent/Alert and the Dialog-item
+ * list/edit no-ops are owned by qt_hitoolbox_shim.c — not redefined here to
+ * avoid duplicate symbols. */
 
 /* TEHandle GetDialogTextEditHandle(DialogRef) — no classic TextEdit; the app
  * uses it only for TESetSelect (caret positioning), which is cosmetic under our
@@ -639,6 +826,15 @@ static uint32_t run_alert(uint32_t *a, const char *kind) {
     }
     if (!msg) msg = @"Alert";
     __block NSInteger hit = 1;
+    /* AUTHENTIC FIRST, exactly as the standard-alert family does: the classic
+     * self-drawn Carbon alert; the AppKit NSAlert only if it cannot run. */
+    __block int classic = 0;
+    NSString *msgCopy = msg;
+    on_main_sync(^{
+        classic = carbon_classic_alert_run(0 /*stop*/, [msgCopy UTF8String], NULL,
+                                           "OK", NULL, NULL, 1, 0);
+    });
+    if (classic >= 1) { DLG("%s(%d) -> classic item %d\n", kind, alrtID, classic); return 1; }
     on_main_sync(^{
         carbon_ensure_window_host();
         NSAlert *al = [[NSAlert alloc] init];

@@ -531,6 +531,19 @@ add_library(abiconv SHARED
   # even an AX press dismisses it) AND draws modern chrome, so it is neither
   # functional nor authentic. Falls back to the AppKit modal if it can't run.
   carbon_classic_alert.c
+  # THE shared classic-Carbon widget substrate: the real Carbon compositing
+  # window plus the SELF-DRAWN classic HIViews (push button / check box / radio,
+  # Lucida Grande text, and the classic sunken EDIT FIELD with a real blinking
+  # caret, click-to-place, drag selection and Tab focus) that 64-bit macOS
+  # deleted outright.  Factored out of carbon_classic_alert.c so the classic
+  # alert, the classic Dialog Manager and the IBCarbon nib materializer all draw
+  # the SAME authentic classic chrome instead of each growing a private copy.
+  carbon_classic_widgets.c
+  # The classic Dialog Manager's VIEW layer: an already-parsed 'DLOG'+'DITL'
+  # materialized as a real classic Carbon window on that substrate and run by a
+  # real Carbon modal session, returning the classic item numbers.  Replaces the
+  # modern AppKit dialog (kept in carbon_dialog_shim.m purely as the fallback).
+  carbon_classic_dialog.c
   # Restore the user's system keyboard input source when a translated app exits
   # (Halo forces US in-game and leaves it there; snapshot at load, re-select at
   # exit). Non-invasive: does not suppress the app's in-run layout forcing.
