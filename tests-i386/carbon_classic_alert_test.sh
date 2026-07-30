@@ -117,6 +117,15 @@ static void *watchdog(void *arg) {
 
 int main(int argc, char **argv) {
     if (argc > 1) g_which = argv[1];
+    /* Park the cursor away from where the alert will appear BEFORE creating it.
+     * A pointer left resting over the button area makes HIToolbox treat the
+     * control as already hovered, and the synthetic click below then fails to
+     * dismiss -- the guard reports "never dismissed" + HUNG and looks like a
+     * code regression.  Measured on an otherwise identical tree: pointer over
+     * the button 0/4 pass, pointer parked away 3/3.  Without this the guard's
+     * result depends on wherever the mouse happened to be left. */
+    CGWarpMouseCursorPosition(CGPointMake(20, 20));
+    usleep(150000);
     pthread_t t; pthread_create(&t, NULL, watchdog, NULL);
     int item = carbon_classic_alert_run(0 /*kAlertStopAlert*/, "XML Load Error",
                                         "Assets//GameInfo/CIV4PlayerOptionInfos.xml",

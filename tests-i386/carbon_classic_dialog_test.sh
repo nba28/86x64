@@ -245,6 +245,15 @@ static void *watchdog_key(void *arg) {
 int main(int argc, char **argv) {
     if (argc > 1) g_mode = argv[1];
 
+    /* Park the cursor away from where the dialog will appear.  Same reason as
+     * carbon_classic_alert_test.sh: an ambient pointer resting over the button
+     * area leaves the control pre-hovered and the synthetic click never
+     * dismisses, so the arm fails for a reason that has nothing to do with the
+     * code under test.  The phantom arm warps deliberately later; this only
+     * fixes the STARTING position. */
+    CGWarpMouseCursorPosition(CGPointMake(20, 20));
+    usleep(150000);
+
     if (!strcmp(g_mode, "model")) {               /* headless editing model only */
         int f = edit_model_checks();
         printf("editmodel fails=%d\n", f);
