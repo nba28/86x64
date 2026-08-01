@@ -83,6 +83,25 @@ static int agl_trace(void)
 }
 #define AGLLOG(...) do { if (agl_trace()) fprintf(stderr, "[agl] " __VA_ARGS__); } while (0)
 
+/* ---- make libabiconv's AGL bridges self-sufficient ------------------------
+ * libabiconv exports ~52 ___agl* ABI bridges whose bodies do a flat-namespace
+ * `call _aglXxx`, and this file dlsym's aglSetWindowRef.  Both need AGL to be
+ * LOADED in the process.  libabiconv cannot link it: AGL.framework has had no
+ * SDK stub for years (`ld -framework AGL` fails) even though the code is very
+ * much alive in the dyld shared cache.  An app that carries its own AGL load
+ * command is fine, but one whose AGL dependency did not survive translation
+ * gets an unbound lazy stub and jumps to address 0 on its first AGL call.
+ * dlopen by shared-cache path fixes that for every such bridge at once.  This
+ * is strictly cheaper than the ~25 frameworks libabiconv already links
+ * unconditionally (OpenGL among them, which AGL is a thin layer over), and
+ * merely loading it opens no window-server connection. */
+__attribute__((constructor))
+static void agl_load_framework(void)
+{
+   if (!dlopen("/System/Library/Frameworks/AGL.framework/AGL", RTLD_LAZY | RTLD_GLOBAL))
+      AGLLOG("AGL.framework dlopen failed: %s\n", dlerror());
+}
+
 #define AGL_NATIVE(var, ty, name) \
    static ty var; if (!var) { var = (ty)dlsym(RTLD_DEFAULT, name); }
 typedef GLboolean (*agl_set_win)(void *, void *);

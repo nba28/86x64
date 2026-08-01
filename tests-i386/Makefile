@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -377,6 +377,22 @@ window-chrome: $(LIBABICONV)
 # Reuses the main suite's binary; SKIPs when it has not been built.
 carbon-window-compositing: $(BUILD_DIR)/99_carbon_window_compositing.x86_64
 	@bash carbon_window_compositing_test.sh
+# agl-window-drawable: A/B guard for the Carbon+AGL DRAWABLE contract
+# (qd_gworld.c window-backed ports + agl_drawable_shim.c). 64-bit macOS deleted
+# GetWindowPort, so the universal 32-bit-era idiom
+#   aglSetDrawable(ctx, GetWindowPort(win))
+# attached a NULL drawable -> aglSetDrawable returns 0 and NO GL context comes
+# up, dropping the app into an error path 2006 hardware never ran (Halo CE: 21
+# aglSetDrawable call sites, zero aglSetWindowRef). The fix gives the window a
+# real port that records its WindowRef and routes such a drawable to the
+# surviving native aglSetWindowRef. The ON side is the main-suite fixture
+# 99_agl_window_drawable, which asserts a LIVE GL context (glGetString(RENDERER)
+# non-empty) plus the port round-trip and the save/detach/restore cycle apps run
+# around QuickDraw UI; this target adds the OFF side by re-running that binary
+# under M64_NO_AGL_WINDOWREF=1 and asserting the NULL-drawable failure returns.
+# Reuses the main suite's binary; SKIPs when it has not been built.
+agl-window-drawable: $(BUILD_DIR)/99_agl_window_drawable.x86_64
+	@bash agl_window_drawable_test.sh
 # focus-ring: canary guard for the legacy focus-ring contract (audit verdict:
 # no compat needed — pins WHY). (A) OS side: NSSetFocusRingStyle(NSFocusRingOnly)
 # + fill still draws headlessly, leaves the shape interior unpainted, and the
@@ -1144,6 +1160,16 @@ $(BUILD_DIR)/97_carbon_fixed32_paramrec.i386: $(BUILD_DIR)/97_carbon_fixed32_par
 # CreateNewWindow (Halo CE's fullscreen + windowed render window) came back NULL
 # and the app took its error path. Overrides %.i386.
 $(BUILD_DIR)/99_carbon_window_compositing.i386: $(BUILD_DIR)/99_carbon_window_compositing.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_agl_window_drawable: neither Carbon/HIToolbox nor AGL is in the i386
+# sysroot, and libabiconv exports a ___<sym> shim for every symbol this fixture
+# needs (___CreateNewWindow/___GetWindowPort/___GetWindowFromPort/___DisposeWindow
+# plus the ___agl*/___glGetString legacy bridges), so the whole surface is
+# undefined dynamic_lookup and static-interpose binds it at translate time. That
+# also keeps the fixture independent of `make sysroot-gl` / the SL DVD.
+# Overrides %.i386.
+$(BUILD_DIR)/99_agl_window_drawable.i386: $(BUILD_DIR)/99_agl_window_drawable.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 95_crypto_cdkey_verify: like 39/49/79/85, the i386 sysroot's openssl headers
