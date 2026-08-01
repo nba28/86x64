@@ -25,6 +25,9 @@ typedef struct { int16_t v, h; } QDPoint;
 // forwarding to native HIToolbox.
 extern uint64_t x64_objc_unwrap(uint32_t h);
 extern uint32_t x64_objc_wrap(uint64_t real);
+// qd_gworld.c window-backed port substrate (GetWindowPort/GetWindowFromPort).
+extern uint32_t qd_port_for_window(void *win);
+extern void    *qd_port_window(uint32_t port_h);
 extern int sd_ctrl_set_value(void *ctrl, int32_t value);
 extern int sd_ctrl_get_value(void *ctrl, int32_t *out);
 #define UICTRL(n) ((void *)(uintptr_t)x64_objc_unwrap(args[(n)]))
@@ -35,8 +38,28 @@ void     shim_BeginUpdate(uint32_t *args)       { (void)args; }
 void     shim_EndUpdate(uint32_t *args)         { (void)args; }
 void     shim_SetWRefCon(uint32_t *args)        { (void)args; }
 void     shim_SetPortWindowPort(uint32_t *args) { (void)args; }
-uint32_t shim_GetWindowPort(uint32_t *args)     { (void)args; return 0; }   // CGrafPtr NULL
-uint32_t shim_GetWindowFromPort(uint32_t *args) { (void)args; return 0; }   // WindowRef NULL
+// GetWindowPort(WindowRef) / GetWindowFromPort(CGrafPtr): REAL window-backed
+// ports from the QuickDraw registry (qd_gworld.c).  Both entry points are gone
+// from 64-bit macOS, and the old `return 0` pair broke far more than drawing:
+// the universal Carbon+OpenGL idiom is `aglSetDrawable(ctx, GetWindowPort(win))`,
+// so a NULL port left every translated Carbon+AGL app with NO GL drawable at
+// all.  qd_port_for_window mints (once per window) a real port that records the
+// WindowRef, which is what lets agl_drawable_shim.c recognise the drawable and
+// route it to the surviving native aglSetWindowRef.  Ports are stable, so an
+// app comparing two GetWindowPort results, or round-tripping port -> window,
+// gets the answers the classic API promised.
+uint32_t shim_GetWindowPort(uint32_t *args)
+{
+    return qd_port_for_window((void *)(uintptr_t)x64_objc_unwrap(args[0]));
+}
+uint32_t shim_GetWindowFromPort(uint32_t *args)
+{
+    void *win = qd_port_window(args[0]);
+    // x64_objc_wrap is dedup'd by real pointer, so this is the SAME handle the
+    // app already holds for that window — its `port's window == my window`
+    // compares work.
+    return win ? x64_objc_wrap((uint64_t)(uintptr_t)win) : 0;
+}
 uint32_t shim_InvalWindowRect(uint32_t *args)   { (void)args; return UI_NO_ERR; }
 uint32_t shim_ValidWindowRect(uint32_t *args)   { (void)args; return UI_NO_ERR; }
 uint32_t shim_SetWindowContentColor(uint32_t *args)        { (void)args; return UI_NO_ERR; }

@@ -487,6 +487,14 @@ add_library(abiconv SHARED
   qd_gworld.c
   qd_shim.c
   carbon_ui_shim.c
+  # agl_drawable_shim.c: ONE job — the AGL drawable binding of a Carbon window.
+  # 64-bit macOS deleted GetWindowPort, so the universal Carbon+OpenGL idiom
+  # `aglSetDrawable(ctx, GetWindowPort(win))` attached a NULL drawable and no GL
+  # context ever came up. qd_gworld.c now returns a REAL window-backed port;
+  # this file recognises it structurally and routes the attach to the surviving
+  # native aglSetWindowRef, and owns the ctx->drawable association because
+  # native aglGetDrawable is blind to a WindowRef attach (measured).
+  agl_drawable_shim.c
   # carbon_nib_shim.c: REAL IBCarbon nib window/control materialization (fixes the
   # -5601 non-compositing window failure + dropped IBCarbonEditText UserPane gap).
   carbon_nib_shim.c

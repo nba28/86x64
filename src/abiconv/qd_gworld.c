@@ -180,6 +180,9 @@ typedef struct qd_port {
    int          pen_hidden;
    int16_t      txFont, txFace, txSize, txMode;
    void        *clip_nat;         /* native RgnHandle clip (owned), or NULL  */
+   void        *win;              /* real 64-bit WindowRef when this port IS
+                                   * a window's GrafPort, else NULL — see the
+                                   * window-backed-port block below.         */
    struct qd_port *next;
 } qd_port;
 
@@ -332,6 +335,108 @@ CGContextRef qd_port_context(uint32_t port_h)
 {
    qd_port *p = port_from_i386(port_h ? port_h : tl_cur_port);
    return p ? p->ctx : NULL;
+}
+
+/* ---- window-backed ports: THE Carbon + AGL drawable substrate -------------
+ *
+ * 64-bit macOS deleted GetWindowPort / GetWindowFromPort outright, so every
+ * 32-bit-era Carbon app that asks a window for its GrafPort got NULL. That is
+ * benign for drawing (this file owns that anyway) but FATAL for OpenGL: the
+ * universal Carbon+AGL idiom is
+ *      aglSetDrawable(ctx, GetWindowPort(win));
+ * and with a NULL port there is no drawable at all — measured, on a real
+ * compositing window: aglSetDrawable(ctx, NULL) -> 0 and no GL context, while
+ * aglSetWindowRef(ctx, win) -> 1 with a live accelerated renderer. So the
+ * window's port has to become a REAL object that still knows which window it
+ * came from, and the AGL entry points have to recognise it (agl_drawable_shim.c).
+ *
+ * A window port is an ORDINARY qd_port from this same registry with the real
+ * 64-bit WindowRef recorded in ->win.  Consequences that matter:
+ *   - every existing GetPort / SetPort / PixMap / CopyBits / CreateCGContext-
+ *     ForPort path accepts it with no special case, and none of them can be
+ *     handed a half-formed port (it has real bounds, a real PixMap record and a
+ *     real backing CGBitmapContext, exactly like a GWorld);
+ *   - the REGISTRY IS THE CACHE — one port per WindowRef, found by walking
+ *     g_ports — so port_destroy (DisposePort / DisposeGWorld / UpdateGWorld)
+ *     un-caches it for free and no second table can dangle.
+ *
+ * Universal: keyed on "this port carries a WindowRef", never on an app name.
+ * M64_NO_AGL_WINDOWREF=1 disarms the whole substrate (GetWindowPort returns to
+ * NULL and the AGL shim forwards raw), which is the A/B guard's kill switch.
+ */
+typedef int32_t (*qn_getwindowbounds)(void *, uint16_t, QDRect *);
+
+int qd_agl_windowref_enabled(void)
+{
+   static int e = -1;
+   if (e < 0) e = getenv("M64_NO_AGL_WINDOWREF") ? 0 : 1;
+   return e;
+}
+
+/* Serializes find-or-create so two threads cannot mint two ports for one
+ * window. Distinct from g_ports_lk, which port_create takes for itself. */
+static os_unfair_lock g_winport_lk = OS_UNFAIR_LOCK_INIT;
+
+static qd_port *port_from_window(void *win)
+{
+   qd_port *p = NULL;
+   os_unfair_lock_lock(&g_ports_lk);
+   for (qd_port *q = g_ports; q; q = q->next)
+      if (q->magic == QD_PORT_MAGIC && q->win == win) { p = q; break; }
+   os_unfair_lock_unlock(&g_ports_lk);
+   return p;
+}
+
+/* GetWindowPort(win): the window's CGrafPtr — created on demand, then stable
+ * for the life of the window (repeated calls return the same i386 handle). */
+uint32_t qd_port_for_window(void *win)
+{
+   if (!win || !qd_agl_windowref_enabled()) return 0;
+
+   os_unfair_lock_lock(&g_winport_lk);
+   qd_port *p = port_from_window(win);
+   if (p) {
+      uint32_t h = to_i386(p);
+      os_unfair_lock_unlock(&g_winport_lk);
+      return h;
+   }
+
+   /* Size the port to the window's CONTENT region expressed in the LOCAL
+    * (0-origin) coordinates GetWindowPortBounds reports.  A window with no
+    * usable content rect yet falls back to the main display so the port is
+    * always well-formed — port_create rejects a degenerate rect, and returning
+    * NULL is exactly the breakage being fixed. */
+   QDRect r = { 0, 0, 0, 0 };
+   QD_NATIVE(gwb, qn_getwindowbounds, "GetWindowBounds");
+   if (gwb) {
+      QDRect cr = { 0, 0, 0, 0 };
+      if (gwb(win, 33 /*kWindowContentRgn*/, &cr) == 0) {
+         r.bottom = (int16_t)(cr.bottom - cr.top);
+         r.right  = (int16_t)(cr.right  - cr.left);
+      }
+   }
+   if (r.bottom <= 0 || r.right <= 0) {
+      CGDirectDisplayID d = CGMainDisplayID();
+      r.bottom = (int16_t)CGDisplayPixelsHigh(d);
+      r.right  = (int16_t)CGDisplayPixelsWide(d);
+   }
+
+   uint32_t h = 0;
+   if (port_create(to_i386(&h), &r, 32, NULL, 0) != 0) h = 0;
+   qd_port *np = port_from_i386(h);
+   if (np) np->win = win; else h = 0;
+   os_unfair_lock_unlock(&g_winport_lk);
+   QDLOG("port_for_window win=%p -> %08x (%dx%d)\n", win, h, r.right, r.bottom);
+   return h;
+}
+
+/* GetWindowFromPort(port), and the STRUCTURAL test agl_drawable_shim.c uses
+ * ("is this drawable really a window?"): the WindowRef this port stands for,
+ * or NULL for an ordinary offscreen GWorld / a value that is not a port. */
+void *qd_port_window(uint32_t port_h)
+{
+   qd_port *p = port_from_i386(port_h);
+   return p ? p->win : NULL;
 }
 
 /* ---- graphics-state helpers ---------------------------------------------- */
