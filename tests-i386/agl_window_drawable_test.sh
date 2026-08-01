@@ -54,8 +54,8 @@ fi
 # The window itself still comes up (that is the compositing shim's job, guarded
 # separately); everything downstream of the port must collapse.
 off=$(M64_NO_AGL_WINDOWREF=1 "$BIN" 2>/dev/null)
-if has "$off" 'window=1'      && has "$off" 'port=0'  && has "$off" 'roundtrip=0' &&
-   has "$off" 'set=0'         && has "$off" 'renderer=0' &&
+if has "$off" 'window=1'      && has "$off" 'port=0'      && has "$off" 'stable=0' &&
+   has "$off" 'roundtrip=0'   && has "$off" 'set=0'       && has "$off" 'renderer=0' &&
    has "$off" 'getdrawable=0' && has "$off" 'restore=0'; then
   echo "  OFF (kill-switch):   GetWindowPort -> NULL, aglSetDrawable -> 0, no GL        OK"
 else
