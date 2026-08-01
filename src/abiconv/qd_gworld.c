@@ -439,6 +439,15 @@ void *qd_port_window(uint32_t port_h)
    return p ? p->win : NULL;
 }
 
+/* Is this i386 value one of OUR ports (window-backed or an offscreen GWorld)?
+ * Used by agl_drawable_shim.c to refuse to hand a qd_port that is NOT a window
+ * to native AGL: our struct is not a GrafPort, so AGL would dereference a wild
+ * pointer.  Failing the call is the only safe answer. */
+int qd_is_port(uint32_t port_h)
+{
+   return port_from_i386(port_h) != NULL;
+}
+
 /* ---- graphics-state helpers ---------------------------------------------- */
 static void set_cg_fill_qd(CGContextRef ctx, const QDRGBColor *c)
 { CGContextSetRGBFillColor(ctx, c->red/65535.0, c->green/65535.0, c->blue/65535.0, 1.0); }

@@ -71,6 +71,7 @@ extern uint64_t x64_objc_unwrap(uint32_t h);
 
 /* qd_gworld.c window-backed port substrate. */
 extern void *qd_port_window(uint32_t port_h);
+extern int   qd_is_port(uint32_t port_h);
 extern int   qd_agl_windowref_enabled(void);
 
 typedef unsigned char GLboolean;
@@ -178,6 +179,18 @@ uint32_t shim_aglSetDrawable(uint32_t *a)
          bind_set(ctx, 0);
          return ok ? 1 : 0;
       }
+   }
+
+   /* A qd_port that is NOT window-backed (an offscreen GWorld the app asked to
+    * render into). Our port struct is not a GrafPort, so forwarding it would
+    * have native AGL dereference a wild pointer — fail the call instead. Same
+    * rule as the PAGEZERO C-string gate: never hand a framework a pointer that
+    * is structurally incapable of being what it expects. */
+   if (qd_is_port(draw_h)) {
+      AGLLOG("SetDrawable ctx=%p port=%08x is an offscreen GWorld, not a window"
+             " -> refusing (a qd_port is not a GrafPort)\n", ctx, draw_h);
+      bind_set(ctx, 0);
+      return 0;
    }
 
    /* Not one of ours: preserve today's behaviour exactly — forward the raw
