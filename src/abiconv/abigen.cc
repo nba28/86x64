@@ -439,6 +439,105 @@ struct ABIConversion {
       return align_up(off, salign);
    }
 
+   /* ---- i386 twins of the byval_field_x64_* layout helpers ----
+    * Same fixed-32-typedef correction, but i386 widths (long/pointer = 4) and
+    * the Darwin i386 rule that no struct MEMBER demands more than 4-byte
+    * alignment (a `double` field sits at a 4-aligned offset; alignof_record
+    * already encodes this for nested records — mirror it for bare scalars).
+    * Used only by byval_layout_identical() below. */
+   static size_t byval_field_i386_size(const byval_field& f) {
+      if (byval_field_is_int32(f)) { return 4; }
+      const CXType c = f.canon;
+      if (c.kind == CXType_Record) { return sizeof_type(c, arch::i386); }
+      if (c.kind == CXType_ConstantArray) {
+         return static_cast<size_t>(clang_getArraySize(c)) *
+                byval_field_i386_size(byval_array_elem(f));
+      }
+      return sizeof_type(c, arch::i386);
+   }
+   static size_t byval_field_i386_align(const byval_field& f) {
+      if (byval_field_is_int32(f)) { return 4; }
+      const CXType c = f.canon;
+      if (c.kind == CXType_Record) {
+         std::vector<byval_field> fs;
+         byval_collect_fields(c, fs);
+         size_t a = 1;
+         for (const byval_field& g : fs) { a = std::max(a, byval_field_i386_align(g)); }
+         return a;
+      }
+      if (c.kind == CXType_ConstantArray) {
+         return byval_field_i386_align(byval_array_elem(f));
+      }
+      return std::min<size_t>(alignof_type(c, arch::i386), 4);
+   }
+
+   static size_t byval_field_size(const byval_field& f, arch a) {
+      return a == arch::i386 ? byval_field_i386_size(f) : byval_field_x64_size(f);
+   }
+   static size_t byval_field_align(const byval_field& f, arch a) {
+      return a == arch::i386 ? byval_field_i386_align(f) : byval_field_x64_align(f);
+   }
+
+   /* Flatten a record to its scalar leaves as (offset, size) pairs under `a`'s
+    * layout rules. `bad` is set for any field the comparison cannot model
+    * faithfully — most importantly a CGFloat, whose canonical type under the
+    * modern parse is `double` (8 bytes) while the real i386 field is a 4-byte
+    * float, so a naive i386 walk would silently report the wrong offsets. */
+   static void byval_collect_leaves(CXType record_canon, size_t base, arch a,
+                                    std::vector<std::pair<size_t, size_t>>& out,
+                                    bool& bad) {
+      std::vector<byval_field> fs;
+      byval_collect_fields(record_canon, fs);
+      size_t off = 0;
+      for (const byval_field& f : fs) {
+         if (byval_field_is_cgfloat(f)) { bad = true; return; }
+         off = align_up(off, byval_field_align(f, a));
+         const size_t sz = byval_field_size(f, a);
+         const CXType c = f.canon;
+         if (!byval_field_is_int32(f) && c.kind == CXType_Record) {
+            byval_collect_leaves(c, base + off, a, out, bad);
+            if (bad) { return; }
+         } else if (!byval_field_is_int32(f) && c.kind == CXType_ConstantArray) {
+            const byval_field ef = byval_array_elem(f);
+            if (byval_field_is_cgfloat(ef)) { bad = true; return; }
+            const size_t esz = byval_field_size(ef, a);
+            const long long n = clang_getArraySize(c);
+            for (long long i = 0; i < n; ++i) {
+               if (ef.canon.kind == CXType_Record) {
+                  byval_collect_leaves(ef.canon, base + off + i * esz, a, out, bad);
+                  if (bad) { return; }
+               } else {
+                  out.emplace_back(base + off + i * esz, esz);
+               }
+            }
+         } else {
+            out.emplace_back(base + off, sz);
+         }
+         off += sz;
+      }
+   }
+
+   /* True iff `record_canon` has BYTE-IDENTICAL i386 and x86_64 layouts: every
+    * scalar leaf lands at the same offset with the same width, and the total
+    * sizes agree. This is the precondition for copying an x86_64 return image
+    * VERBATIM into an i386 caller's struct buffer (mem32_reg64_return below).
+    * Declining is always safe — the caller falls back to the pre-existing
+    * behaviour. Structural: no name is ever consulted. */
+   static bool byval_layout_identical(CXType record_canon) {
+      std::vector<std::pair<size_t, size_t>> l32, l64;
+      bool bad = false;
+      try {
+         byval_collect_leaves(record_canon, 0, arch::i386, l32, bad);
+         if (bad) { return false; }
+         byval_collect_leaves(record_canon, 0, arch::x86_64, l64, bad);
+         if (bad) { return false; }
+      } catch (const std::exception&) {
+         return false;
+      }
+      if (l32.empty() || l32 != l64) { return false; }
+      return sizeof_type(record_canon, arch::i386) == byval_x64_sizeof(record_canon);
+   }
+
    static void byval_mark(byval_plan& plan, size_t off, size_t size, bool fp) {
       for (size_t k = off / 8; k <= (off + size - 1) / 8; ++k) {
          if (k >= plan.eb_int.size()) { plan.eb_int.resize(k + 1); plan.eb_fp.resize(k + 1); }
@@ -744,6 +843,69 @@ struct ABIConversion {
       return true;
    }
 
+   /* Kill-switch for the 4th struct-return classifier below: M64_NO_ABIGEN_SRET_GAP=1
+    * restores the pre-fix behaviour (no hidden-sret slot for the MEMORY-on-i386 /
+    * REGISTER-on-x86_64 family), so the tests-i386 guard can A/B the fix rather
+    * than pass inertly. Read once. */
+   static bool sret_gap_disabled() {
+      static const bool off = getenv("M64_NO_ABIGEN_SRET_GAP") != nullptr;
+      return off;
+   }
+
+   /* ★ 4th struct-return classifier: the return is MEMORY on i386 but REGISTER
+    * on x86_64 — the shape none of the three above claim, and the one that made
+    * every declared arg read 4 bytes low.
+    *
+    *   i386 cdecl: sizeof > 8 => the caller allocates the buffer and passes its
+    *     address as the IMPLICIT FIRST STACK ARG; the value comes back in eax;
+    *     and (verified from `clang -arch i386 -O1 -S` codegen) the CALLEE POPS
+    *     IT — `retl $4`. Our generated bridge IS that i386 callee, so its
+    *     declared args start one 4-byte slot later ([rbp+16], not [rbp+12]) and
+    *     its epilogue must pop 8, not 4.
+    *   x86_64 SysV: sz64 <= 16 => returned in REGISTERS (rax/rdx and/or
+    *     xmm0/xmm1 per eightbyte class). NO hidden pointer, so rdi is NOT
+    *     consumed and the native INTEGER args do NOT shift.
+    *
+    * Members measured with ABIGEN_SRET_GAP_TRACE=1 (5 in the modern pass, 0 in
+    * the legacy pass), spanning all three x86_64 return-register shapes:
+    *   all-INTEGER 2 eightbytes  lldiv, CFUUIDGetUUIDBytes           rax:rdx
+    *   homogeneous-FP 2 eightbytes  __sincos_stret, __sincospi_stret xmm0:xmm1
+    *   MIXED INTEGER+SSE  CFAbsoluteTimeGetGregorianDate             rax + xmm0
+    * which is why the emitter must store PER EIGHTBYTE off plan.eb_sse(k).
+    *
+    * Mutual exclusion with the other three, made explicit here rather than
+    * relying on the emitter's ordering:
+    *   - fp_sret_return  needs x86_64 > 16   -> excluded by plan.sz64 <= 16;
+    *   - int_reg_struct_return needs i386 <= 8 -> excluded by sz32 > 8;
+    *   - fp_reg_return  CAN overlap: under the modern parse CGFloat
+    *     canonicalizes to `double`, so a CGPoint reads as sizeof_type(i386)==16
+    *     even though its REAL i386 size is 8 (eax:edx, no hidden pointer). It is
+    *     rejected twice over — explicitly, and by byval_layout_identical(),
+    *     which declines any record carrying a CGFloat.
+    *
+    * byval_layout_identical() is the extra precondition that lets the emitter
+    * copy the x86_64 return image VERBATIM into the i386 caller's buffer; a
+    * record whose two layouts differ would need a field-by-field x86_64->i386
+    * conversion (byval_flat_convert only runs i386->x86_64) and is left on the
+    * pre-existing path. Triggers on the STRUCTURAL return shape, never a name. */
+   bool mem32_reg64_return(byval_plan *out = nullptr) const {
+      if (sret_gap_disabled()) { return false; }
+      const CXType ret = clang_getCanonicalType(clang_getResultType(function_type));
+      if (ret.kind != CXType_Record) { return false; }
+      byval_plan plan;
+      try {
+         plan = byval_classify(ret);          /* throws on union/packed -> skip */
+      } catch (const std::invalid_argument&) {
+         return false;
+      }
+      if (plan.sz64 > 16) { return false; }                    /* x86_64 MEMORY  */
+      if (sizeof_type(ret, arch::i386) <= 8) { return false; } /* i386 eax:edx   */
+      if (fp_sret_return() || fp_reg_return()) { return false; }
+      if (!byval_layout_identical(ret)) { return false; }
+      if (out) { *out = std::move(plan); }
+      return true;
+   }
+
    /* Marshal one i386 FP field (a 4-byte CGFloat or an 8-byte double) at `src` to
     * an x86_64 double at `dst` (an xmm register or an 8-byte stack slot), widening
     * float->double when `widen`. A MEMORY (stack) destination bounces through
@@ -1041,6 +1203,17 @@ struct ABIConversion {
       bool int_ret_hi_split = false;
       const bool int_reg_ret =
          !fp_sret && !fp_reg && int_reg_struct_return(&int_ret_hi_split);
+      /* ★ MEMORY-on-i386 / REGISTER-on-x86_64 struct return (mem32_reg64_return:
+       * lldiv, CFUUIDGetUUIDBytes, __sincos_stret, __sincospi_stret,
+       * CFAbsoluteTimeGetGregorianDate). The i386 caller allocated the buffer and
+       * passed its address as the implicit FIRST stack arg, so the declared args
+       * shift to [rbp+16] and the epilogue must pop 8 — but the NATIVE side hands
+       * the value back in registers, so rdi is NOT an sret pointer and the native
+       * arg registers do NOT shift (no ++info.reg_it, and stack_args_size() keeps
+       * reg_i at 0). mrs_plan carries the per-eightbyte INT/SSE classes. */
+      byval_plan mrs_plan;
+      const bool mem_reg_sret =
+         !fp_sret && !fp_reg && !int_reg_ret && mem32_reg64_return(&mrs_plan);
       const CXType ret_canon =
          clang_getCanonicalType(clang_getResultType(function_type));
       /* BLAST-RADIUS DIAGNOSTIC (ABIGEN_SRET_GAP_TRACE=1, inert otherwise).
@@ -1052,7 +1225,7 @@ struct ABIConversion {
        * bytes low and the return conversion is wrong. Counting them is what
        * decides whether this is a footnote or systematic. */
       if (ret_canon.kind == CXType_Record && !fp_sret && !fp_reg && !int_reg_ret &&
-          getenv("ABIGEN_SRET_GAP_TRACE")) {
+          !mem_reg_sret && getenv("ABIGEN_SRET_GAP_TRACE")) {
          const size_t sz32 = sizeof_type(ret_canon, arch::i386);
          bool classified = true;
          size_t sz64 = 0;
@@ -1067,8 +1240,14 @@ struct ABIConversion {
          if (classified) { std::cerr << sz64; } else { std::cerr << "declined"; }
          std::cerr << " " << sym << "\n";
       }
+      /* Native return buffer. fp_sret needs one because rdi must point at it;
+       * mem_reg_sret needs one because the value arrives in REGISTERS and must be
+       * captured to memory IMMEDIATELY after the call (the out-param copy-backs
+       * and the return-wrap block that follow can clobber rax/rdx/xmm0/xmm1)
+       * before it is copied, byte-exactly, into the i386 caller's buffer. */
       const size_t sret_size =
-         fp_sret ? align_up<size_t>(sizeof_type(ret_canon, arch::x86_64), 16) : 0;
+         fp_sret ? align_up<size_t>(sizeof_type(ret_canon, arch::x86_64), 16)
+                 : (mem_reg_sret ? align_up<size_t>(mrs_plan.sz64, 16) : 0);
       /* the native return buffer sits just ABOVE the outgoing stack args and the
        * pointer-deep-copy scratch data, at the top of the reserved frame */
       const size_t sret_buf_off = stack_args_size() + stack_data_size();
@@ -1094,9 +1273,21 @@ struct ABIConversion {
        * i386 caller's first arg slot, so the real declared args start one i386 slot
        * later and the first INTEGER arg shifts from rdi to rsi. */
       if (fp_sret) { ++info.reg_it; }
+      /* ★ mem_reg_sret does NOT advance info.reg_it. The two halves of "hidden
+       * sret pointer" are independent and only fp_sret has BOTH: the i386 side
+       * has one (so load_loc shifts by 4 below), but the x86_64 side returns the
+       * aggregate in registers and therefore consumes NO rdi. Advancing reg_it
+       * here would push the first INTEGER arg into rsi and hand the native callee
+       * garbage in rdi — e.g. CFAbsoluteTimeGetGregorianDate's CFTimeZoneRef would
+       * land in rsi. Confirmed by the same reasoning in stack_args_size(), which
+       * likewise starts reg_i at 0 for this class. */
       int param_it;
       int param_end = clang_getNumArgTypes(function_type);
-      MemoryLocation load_loc(rbp, fp_sret ? 16 : 12);
+      /* i386 arg shift: the hidden sret buffer pointer occupies the FIRST i386
+       * stack slot ([rbp+12]), so declared args start one 4-byte slot later.
+       * Matches `clang -arch i386` codegen, where a struct-returning callee reads
+       * the buffer at 8(%ebp) and its first declared arg at 12(%ebp). */
+      MemoryLocation load_loc(rbp, (fp_sret || mem_reg_sret) ? 16 : 12);
 
       std::stringstream to_ss;
       std::stringstream from_ss;
@@ -1140,7 +1331,7 @@ struct ABIConversion {
              * (exactly the old failure mode for still-unsupported shapes:
              * unions, packed, bitfields, CGFloat-under-i386-parse). */
             const byval_plan plan = byval_classify(type);
-            if (ret_is_record && !fp_sret && !fp_reg && !int_reg_ret) {
+            if (ret_is_record && !fp_sret && !fp_reg && !int_reg_ret && !mem_reg_sret) {
                /* An UNRECOGNIZED record return leaves the i386 hidden sret pointer
                 * / arg offsets unmodelled -> pairing it with a byval arg would
                 * marshal every arg from the wrong slot. But a REGISTER-class
@@ -1322,6 +1513,34 @@ struct ABIConversion {
 
       /* call */
       emit_call(os);
+
+      /* ★ mem_reg_sret CAPTURE, PER EIGHTBYTE, immediately after the call.
+       * The native callee returned the aggregate in registers, assigned in SysV
+       * order: INTEGER eightbytes take rax then rdx, SSE eightbytes take xmm0
+       * then xmm1, INDEPENDENTLY — so a MIXED {int, double} return
+       * (CFAbsoluteTimeGetGregorianDate) is rax + xmm0, an all-INTEGER return
+       * (lldiv_t, CFUUIDBytes) is rax:rdx, and a homogeneous-FP return
+       * (__sincos_stret) is xmm0:xmm1. A single movsd/mov cannot serve all three,
+       * hence plan.eb_sse(k) per eightbyte with its OWN counter.
+       * Captured here, before the from_ss out-param copy-backs and the return-wrap
+       * block, both of which may call into the runtime bridge and clobber
+       * rax/rdx/xmm0-7. The copy into the i386 caller's buffer happens in the tail
+       * block, where rcx/r11 are free. */
+      if (mem_reg_sret) {
+         os << "\t; capture x86_64 register-class struct return -> native buffer"
+            << std::endl;
+         static const char *const int_ret[] = {"rax", "rdx"};
+         unsigned int_i = 0, sse_i = 0;
+         for (unsigned k = 0; k < mrs_plan.ebs(); ++k) {
+            const std::string slot =
+               "qword [rsp + " + std::to_string(sret_buf_off + 8 * k) + "]";
+            if (mrs_plan.eb_sse(k)) {
+               emit_inst(os, "movsd", slot, "xmm" + std::to_string(sse_i++));
+            } else {
+               emit_inst(os, "mov", slot, int_ret[int_i++]);
+            }
+         }
+      }
 
       /* Scalar float/double return: the native x86_64 callee returns the value
        * in xmm0, but the i386 caller (cdecl) expects it on the x87 stack (st0).
@@ -1515,6 +1734,39 @@ struct ABIConversion {
          emit_inst(os, "shr", "rdx", "32");
       }
 
+      /* ★ mem_reg_sret STORE-BACK: copy the captured x86_64 return image into the
+       * i386 caller's hidden buffer (its address is still untouched at [rbp+12],
+       * a low-4GB i386 pointer) and hand that pointer back in eax, which is what
+       * the i386 cdecl ABI promises a struct-returning callee leaves there.
+       * mem32_reg64_return only fires when byval_layout_identical() holds, so the
+       * two layouts are byte-identical and this is a straight sz-byte copy — no
+       * field-by-field narrowing (that is fp_sret's CGFloat job). rcx and r11 are
+       * caller-saved and dead here; rdi/rsi are still saved at [rbp-8]/[rbp-16].
+       * The copy is chunked 8/4/2/1 so a non-multiple-of-8 aggregate never writes
+       * past the end of the caller's buffer. */
+      if (mem_reg_sret) {
+         const size_t sz = mrs_plan.sz64;
+         os << "\t; copy x86_64 register-class struct return -> i386 sret buffer ("
+            << sz << " bytes)" << std::endl;
+         emit_inst(os, "mov", "ecx", "dword [rbp + 12]");   /* i386 sret ptr */
+         size_t o = 0;
+         while (o < sz) {
+            size_t chunk = 8;
+            while (chunk > 1 && o + chunk > sz) { chunk >>= 1; }
+            const char *sfx = chunk == 8 ? "qword" : chunk == 4 ? "dword"
+                                         : chunk == 2 ? "word" : "byte";
+            const char *tmp = chunk == 8 ? "r11" : chunk == 4 ? "r11d"
+                                         : chunk == 2 ? "r11w" : "r11b";
+            emit_inst(os, "mov", tmp,
+                      std::string(sfx) + " [rsp + " +
+                      std::to_string(sret_buf_off + o) + "]");
+            emit_inst(os, "mov",
+                      std::string(sfx) + " [rcx + " + std::to_string(o) + "]", tmp);
+            o += chunk;
+         }
+         emit_inst(os, "mov", "eax", "dword [rbp + 12]");   /* return it in eax */
+      }
+
       // emit_inst(os, "add", "rsp", stack_data_size() + stack_args_size());
       emit_inst(os, "lea", "rsp", "[rbp - 0x10]");
       
@@ -1523,9 +1775,17 @@ struct ABIConversion {
       emit_inst(os, "pop", "rdi");
       emit_inst(os, "leave");
 
-      /* return */
+      /* return. This shim IS the i386 callee, so it obeys i386 cdecl: pop the
+       * 4-byte return address... and, for a struct return passed through a hidden
+       * caller-allocated buffer, ALSO the 4-byte hidden pointer — `retl $4`, the
+       * callee-pops rule verified from real `clang -arch i386 -O1 -S` codegen
+       * (the caller's own `addl` after the call already excludes those 4 bytes).
+       * Popping only 4 there leaves the i386 caller's esp 4 bytes off PER CALL,
+       * which corrupts far from the call site (guard 89's esp-balance check).
+       * NOTE: fp_sret is the same shape and is deliberately NOT changed here —
+       * see the journal; that is a separate, untested-by-this-guard fix. */
       emit_inst(os, "mov", "r11d", "dword [rsp]");
-      emit_inst(os, "add", "rsp", "4");
+      emit_inst(os, "add", "rsp", mem_reg_sret ? "8" : "4");
       emit_inst(os, "jmp", "r11");
       
    }
