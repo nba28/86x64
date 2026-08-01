@@ -903,6 +903,16 @@ _x64_exc_longjmp:
 	MTSHIM	___TextFont,                          _shim_TextFont
 	MTSHIM	___TextSize,                          _shim_TextSize
 	MTSHIM	___TextWidth,                         _shim_TextWidth
+	; --- AGL drawable binding of a Carbon window (agl_drawable_shim.c) ---
+	;     GetWindowPort now returns a REAL window-backed qd_port, so the
+	;     abigen legacy bridge must NOT keep forwarding it to native
+	;     aglSetDrawable as a CGrafPtr (it would deref a non-GrafPort).
+	;     These two MTSHIMs both intercept the pair AND remove it from the
+	;     abigen legacy pass. aglGetDrawable is here because native AGL is
+	;     BLIND to an aglSetWindowRef attach (measured), and Carbon+AGL apps
+	;     save/restore the drawable around QuickDraw UI.
+	MTSHIM	___aglSetDrawable,                    _shim_aglSetDrawable
+	MTSHIM	___aglGetDrawable,                    _shim_aglGetDrawable
 	; --- Carbon HIToolbox UI + Display Mgr (carbon_ui_shim.c) ---
 	MTSHIM	___BeginUpdate,                       _shim_BeginUpdate
 	MTSHIM	___FindWindow,                        _shim_FindWindow

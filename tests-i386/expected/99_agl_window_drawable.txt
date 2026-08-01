@@ -1,0 +1,9 @@
+window=1
+port=1
+stable=1
+roundtrip=1
+set=1
+renderer=1
+getdrawable=1
+restore=1
+exit_code: 0

@@ -25,8 +25,29 @@ wherever you put the built helpers.
 | `wakeup.sh` | the wake-up discriminator: park the app, then deliver `none` / `move` / `click` events and report parked-vs-returned, with a CPU-time-advance delivery proof. |
 | `wakeN.sh` | runs `wakeup.sh` N times per arm — the hang is a RACE, so only frequencies mean anything. |
 | `catchhang.sh` | retries until it actually catches a hang, then attaches and runs `probe.py` on the parked process. |
+| `axdump.m` | dumps a pid's Accessibility tree (role/title/value + CG-global centre of every element), so a click can target a NAMED button instead of a guessed coordinate. Returns nothing useful for a SELF-DRAWN Carbon window (our HIView widgets expose no AX tree) — that is itself the signal to fall back to computing coordinates from the nib/xib `bounds`. |
+| `activate.m` | forces an app frontmost via `NSRunningApplication activateWithOptions:` and reports `isActive` + `activationPolicy` + who is actually frontmost. **Run this before any synthetic-input run**: if it reports `activate=1` but `isActive=0`, input will silently go nowhere. |
+
+Build the two extra helpers with:
+
+    clang -arch arm64 -fno-objc-arc -framework Foundation -framework ApplicationServices -o axdump   axdump.m
+    clang -arch arm64 -fno-objc-arc -framework AppKit                                     -o activate activate.m
 
 ## Hard-won gotchas (each cost real time)
+
+0. **CHECK THE SCREEN LOCK FIRST — before blaming anything on the app.**
+   With the screen locked, `loginwindow` owns frontmost, NOTHING can be
+   activated, and every synthetic `CGEventPost` is silently discarded. It looks
+   exactly like "the app ignores clicks" / "the modal is inert", and it makes
+   the `classic-alert` and `classic-dialog` guards go red for no code reason.
+   One command, run it before every GUI run:
+
+       python3 -c "import Quartz; d=Quartz.CGSessionCopyCurrentDictionary(); \
+         print('locked =', d.get('CGSSessionScreenIsLocked'), \
+               'onconsole =', d.get('kCGSSessionOnConsoleKey'))"
+
+   `locked = True` means STOP: no GUI measurement in this session is meaningful.
+   (Cost an agent a full Halo verification pass on 2026-08-02.)
 
 1. **Never measure window state from a bare `exec` of `Contents/MacOS/<binary>`.**
    With no LaunchServices activation the app never shows a window, which
