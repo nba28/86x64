@@ -10,11 +10,19 @@
 # executes `jmp *0`. Measured live in Halo CE: rip=0, call site Halo.dylib+0x3a09a6,
 # with arg1 = 0x1F03 = GL_EXTENSIONS.
 #
-# The main-suite fixture 99_cgl_macro_dispatch runs the ON side (a real dispatch
-# slot at the hardcoded i386 offset 0x1D8, called, returning REAL GL strings). This
+# The main-suite fixture 99_cgl_macro_dispatch runs the ON side (real dispatch
+# slots at the hardcoded i386 offsets 0x1D8/0x1A4, called the CGLMacro way). This
 # script adds the OFF side: re-run the SAME translated binary with the kill switch
-# M64_NO_CGL_MACRO=1 and assert the slot is 0 again — i.e. that the fixture is
+# M64_NO_CGL_MACRO=1 and assert the slots are 0 again — i.e. that the fixture is
 # genuinely exercising the shadow and cannot pass inertly.
+#
+# `glstr` additionally covers abigen's C-string RETURN bounce (_x64_cstr_ret_low):
+# get_string hands back a `const GLubyte *` to a native string above 4GB, which the
+# i386 4-byte result slot cannot hold. glstr=1 means the i386 side received a
+# NON-ZERO pointer BELOW 4GB whose bytes were readable — exactly what Halo does next
+# (strcpy of glGetString(GL_EXTENSIONS), then strstr for GL_EXT_framebuffer_object
+# and NVIDIA). That emit was reverted once before over a NASM convergence problem,
+# so it gets a standing assertion here rather than a note in todo_gaps.
 #
 # Needs the i386 sysroot; SKIPs when the binary has not been built.
 set -u
@@ -33,13 +41,15 @@ has() { printf '%s\n' "$1" | grep -q "^$2\$"; }
 # --- ON: the context is an i386-layout shadow with a live dispatch table ------
 on=$("$BIN" 2>/dev/null)
 if has "$on" 'pixfmt=1' && has "$on" 'ctx=1' && has "$on" 'slot=1' &&
-   has "$on" 'islot=1' && has "$on" 'maxtex=1'; then
+   has "$on" 'islot=1' && has "$on" 'maxtex=1' && has "$on" 'glstr=1'; then
   echo "  ON  (shim armed):    disp slots at the hardcoded i386 offsets 0x1D8/0x1A4 are"
-  echo "                       live thunks; calling one the CGLMacro way read back a real"
-  echo "                       hardware limit, twice, with the stack balanced           OK"
-  printf '%s\n' "$on" | grep -E '^MAX_TEXTURE_SIZE=' | sed 's/^/      /'
+  echo "                       live thunks; calling them the CGLMacro way read back a real"
+  echo "                       hardware limit (twice, stack balanced) and a REAL GL string"
+  echo "                       at an address the i386 4-byte slot can hold             OK"
+  printf '%s\n' "$on" | grep -E '^(MAX_TEXTURE_SIZE|GL_VENDOR)=' | sed 's/^/      /'
 else
-  echo "  ON  (shim armed):    expected callable dispatch slots and a real GL limit, got:"
+  echo "  ON  (shim armed):    expected callable dispatch slots, a real GL limit and a"
+  echo "                       readable low-4GB GL string, got:"
   printf '%s\n' "$on" | sed 's/^/      /'
   fail=1
 fi
@@ -50,7 +60,7 @@ off=$(M64_NO_CGL_MACRO=1 "$BIN" 2>/dev/null)
 # the i386 side is HANDED, not whether CGL works), so ctx=1 is deliberately an
 # invariant and is not what distinguishes the arms.
 if has "$off" 'ctx=1' && has "$off" 'slot=0' && has "$off" 'islot=0' &&
-   has "$off" 'maxtex=0'; then
+   has "$off" 'maxtex=0' && has "$off" 'glstr=0'; then
   echo "  OFF (kill-switch):   the arena handle has 0 at offset 0x1D8 — the unfixed"
   echo "                       'jmp *0' state                                        OK"
 else
