@@ -503,6 +503,13 @@ add_library(abiconv SHARED
   # the qd_gworld.c GDevice registry that minted the GDevice from a
   # CGDirectDisplayID in the first place.
   agl_renderer_shim.c
+  # fault_report_shim.c: ONE job — make a fatal fault in translated i386 code
+  # speak. The OS unwinder cannot walk a translated frame (and walks NOTHING at
+  # all when rip==0), so the call site is otherwise unrecoverable; on a rip==0
+  # fault [rsp] IS the call site and this dumps it as <image>+0xOFFSET.
+  # Diagnostic only, OFF unless M64_FAULT_REPORT=1, and it chains to the previous
+  # handler so the process still dies identically.
+  fault_report_shim.c
   # carbon_nib_shim.c: REAL IBCarbon nib window/control materialization (fixes the
   # -5601 non-compositing window failure + dropped IBCarbonEditText UserPane gap).
   carbon_nib_shim.c
