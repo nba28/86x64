@@ -73,6 +73,7 @@ extern OSStatus CreateNewWindow(UInt32 cls, UInt32 attrs, const Rect *bounds,
                                 CarbonWindowRef *outWindow);
 extern void ShowWindow(CarbonWindowRef w);
 extern void HideWindow(CarbonWindowRef w);
+extern void DisposeWindow(CarbonWindowRef w);
 
 static void dump_mode(const char *tag, CFDictionaryRef m)
 {
@@ -193,6 +194,20 @@ int main(int argc, char **argv)
          HideWindow((CarbonWindowRef)wref);
          [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
          fprintf(stderr, "[probe] hid Carbon window; NSApp windows=%lu\n",
+                 (unsigned long)[[NSApp windows] count]);
+      }
+
+      /* MEASURED 2026-08-03: "carbonhide" PANICS anyway, and the line above says
+       * why — after HideWindow the count is still 1. Visibility is irrelevant;
+       * AppKit enumerates the window regardless and re-creates the CGS context of
+       * anything that ever HAD one ("carbonhidden", never shown, survives).
+       * So the real question is whether DISPOSING it — what the classic 2006
+       * idiom actually did before going fullscreen — drops it from the walk. */
+      if (strstr(mode, "dispose") && wref) {
+         DisposeWindow((CarbonWindowRef)wref);
+         wref = NULL;
+         [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.2]];
+         fprintf(stderr, "[probe] disposed Carbon window; NSApp windows=%lu\n",
                  (unsigned long)[[NSApp windows] count]);
       }
 
