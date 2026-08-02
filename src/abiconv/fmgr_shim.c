@@ -50,7 +50,15 @@ uint32_t shim_FSpOpenDF(uint32_t *args) {
     return (uint32_t)FM_FNF_ERR;
 }
 uint32_t shim_FSpDelete(uint32_t *args)   { (void)args; return (uint32_t)FM_FNF_ERR; }
-uint32_t shim_FSpGetFInfo(uint32_t *args) { (void)args; return (uint32_t)FM_FNF_ERR; }
+// ★Same output-buffer invariant as shim_FSpOpenDF above (and carbon_fsspec_shim.c): a
+// classic caller that skips the OSErr check would otherwise read its own uninitialised
+// stack back as an FInfo — a garbage fdType/fdCreator is exactly the class of defect that
+// produced the Halo nil-CFStringRef SIGSEGV. FInfo is 16 bytes: OSType fdType, OSType
+// fdCreator, UInt16 fdFlags, Point fdLocation, SInt16 fdFldr.
+uint32_t shim_FSpGetFInfo(uint32_t *args) {
+    void *fndrInfo = PTR(1); if (fndrInfo) { memset(fndrInfo, 0, 16); }
+    return (uint32_t)FM_FNF_ERR;
+}
 uint32_t shim_FSpRstFLock(uint32_t *args) { (void)args; return (uint32_t)FM_FNF_ERR; }
 uint32_t shim_FSpSetFLock(uint32_t *args) { (void)args; return (uint32_t)FM_FNF_ERR; }
 
