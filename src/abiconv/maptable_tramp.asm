@@ -936,6 +936,33 @@ _x64_exc_longjmp:
 	MTSHIM	___aglNextRendererInfo,               _shim_aglNextRendererInfo
 	MTSHIM	___aglDescribeRenderer,               _shim_aglDescribeRenderer
 	MTSHIM	___aglDestroyRendererInfo,            _shim_aglDestroyRendererInfo
+	; --- CGL/AGL CONTEXT OBJECT (cgl_macro_shim.c) ---
+	;     <OpenGL/CGLMacro.h> #defines every glXxx() to jump through the
+	;     context object's embedded GLIFunctionDispatch table, so a 32-bit
+	;     game DEREFERENCES its AGLContext and never calls a GL symbol. A
+	;     proxy arena handle read as a struct _CGLContextObject yields a
+	;     truncated pointer for ->rend and 0 for every ->disp entry (measured:
+	;     Halo jmp *0 at disp offset 0x1D8 = get_string). Every entry point
+	;     that produces or consumes a context is owned here so the i386-layout
+	;     SHADOW is the only thing the app ever holds — token ownership has to
+	;     be end to end.
+	MTSHIM	___aglCreateContext,                  _shim_aglCreateContext
+	MTSHIM	___aglDestroyContext,                 _shim_aglDestroyContext
+	MTSHIM	___aglGetCurrentContext,              _shim_aglGetCurrentContext
+	MTSHIM	___aglSetCurrentContext,              _shim_aglSetCurrentContext
+	MTSHIM	___aglUpdateContext,                  _shim_aglUpdateContext
+	MTSHIM	___aglSwapBuffers,                    _shim_aglSwapBuffers
+	MTSHIM	___aglSetInteger,                     _shim_aglSetInteger
+	MTSHIM	___aglGetInteger,                     _shim_aglGetInteger
+	MTSHIM	___aglSetFullScreen,                  _shim_aglSetFullScreen
+	MTSHIM	___aglGetVirtualScreen,               _shim_aglGetVirtualScreen
+	MTSHIM	___aglSetVirtualScreen,               _shim_aglSetVirtualScreen
+	MTSHIM	___aglTexImagePBuffer,                _shim_aglTexImagePBuffer
+	MTSHIM	___aglSetPBuffer,                     _shim_aglSetPBuffer
+	MTSHIM	___CGLCreateContext,                  _shim_CGLCreateContext
+	MTSHIM	___CGLDestroyContext,                 _shim_CGLDestroyContext
+	MTSHIM	___CGLGetCurrentContext,              _shim_CGLGetCurrentContext
+	MTSHIM	___CGLSetCurrentContext,              _shim_CGLSetCurrentContext
 	; --- Carbon HIToolbox UI + Display Mgr (carbon_ui_shim.c) ---
 	MTSHIM	___BeginUpdate,                       _shim_BeginUpdate
 	MTSHIM	___FindWindow,                        _shim_FindWindow

@@ -503,6 +503,20 @@ add_library(abiconv SHARED
   # the qd_gworld.c GDevice registry that minted the GDevice from a
   # CGDirectDisplayID in the first place.
   agl_renderer_shim.c
+  # cgl_macro_shim.c: ONE job — the CGL/AGL CONTEXT OBJECT. <OpenGL/CGLMacro.h>
+  # #defines every glXxx() to jump through the context's embedded 760-entry
+  # GLIFunctionDispatch table, so a 32-bit game DEREFERENCES its AGLContext and
+  # never calls a GL symbol. A proxy arena handle read as a _CGLContextObject
+  # gives a truncated ->rend and 0 for every ->disp slot => jmp *0. This returns
+  # an i386-layout SHADOW whose disp slots are gli_tramp.asm thunks.
+  cgl_macro_shim.c
+  # fault_report_shim.c: ONE job — make a fatal fault in translated i386 code
+  # speak. The OS unwinder cannot walk a translated frame (and walks NOTHING at
+  # all when rip==0), so the call site is otherwise unrecoverable; on a rip==0
+  # fault [rsp] IS the call site and this dumps it as <image>+0xOFFSET.
+  # Diagnostic only, OFF unless M64_FAULT_REPORT=1, and it chains to the previous
+  # handler so the process still dies identically.
+  fault_report_shim.c
   # carbon_nib_shim.c: REAL IBCarbon nib window/control materialization (fixes the
   # -5601 non-compositing window failure + dropped IBCarbonEditText UserPane gap).
   carbon_nib_shim.c
@@ -634,6 +648,11 @@ add_library(abiconv SHARED
   cb_tramp.asm
   block_tramp.asm
   dlsym_tramp.asm
+  # gli_tramp.asm: the 760 dispatch-slot thunks for cgl_macro_shim.c's shadow
+  # context. Each drops the leading `rend` argument (a signature-independent
+  # frame edit, because i386 cdecl passes everything in 4-byte stack slots) and
+  # tail-jumps to the abigen bridge ___gl<Name>.
+  gli_tramp.asm
   init_trampoline.asm
   maptable_tramp.asm
   cow_string_tramp.asm

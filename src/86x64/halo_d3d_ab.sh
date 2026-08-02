@@ -52,19 +52,59 @@ if [ "$ARM" = off ]; then
 fi
 [ "${TRACE:-0}" = 1 ] && ENVARGS+=(--env ABICONV_AGL_TRACE=1)
 
+# EXEC=1 launches Contents/MacOS/Halo DIRECTLY instead of through `open`, so the
+# shell owns the process and `wait` yields the real WAIT STATUS.  That is the only
+# way to tell an exit(N) from a fatal signal for a process that leaves no crash
+# report.  Everything else about the run is identical.  EXTRA_ENV="A=1 B=2" adds
+# env vars in both launch modes.
 : > "$LOG"
-open -a "$APP" --stderr "$LOG" --stdout "$LOG" "${ENVARGS[@]}"
-sleep 12
+if [ "${EXEC:-0}" = 1 ]; then
+  # `exec` replaces the subshell so $! IS Halo's own pid (otherwise we would wait
+  # on the subshell and learn nothing about how Halo died).
+  ( cd "$APP/Contents/MacOS" && exec env ${EXTRA_ENV:-} M64_AB_ARM="$ARM" \
+      $( [ "$ARM" = off ] && echo M64_NO_AGL_RENDERERINFO=1 M64_NO_DM_DISPLAYID=1 ) \
+      $( [ "${TRACE:-0}" = 1 ] && echo ABICONV_AGL_TRACE=1 ) \
+      ./Halo ) >"$LOG" 2>&1 &
+  HALOPID=$!
+else
+  for kv in ${EXTRA_ENV:-}; do ENVARGS+=(--env "$kv"); done
+  open -a "$APP" --stderr "$LOG" --stdout "$LOG" "${ENVARGS[@]}"
+  HALOPID=
+fi
+# Poll for the Graphics Settings window instead of a fixed sleep: startup time
+# varies a lot between `open` and a direct exec, and clicking before the window
+# exists silently does nothing (that produced a false "still running" once).
+for i in $(seq 1 90); do
+  sleep 1
+  "$SCR/winlist" Halo 2>/dev/null | grep -q "'Halo Graphics Settings'" && break
+done
+echo "== Graphics Settings window seen after ${i}s =="
 
+# ⚠ A DIRECTLY-EXEC'd binary has no NSRunningApplication (the `activate` helper
+# reports "pid 0"), so it cannot be fronted that way — and a synthetic click that
+# lands while another app is frontmost is silently dropped.  System Events works
+# for both launch modes, so front it with BOTH and verify.
 "$SCR/activate" Halo >/dev/null 2>&1
+osascript -e 'tell application "System Events" to set frontmost of process "Halo" to true' >/dev/null 2>&1
 sleep 1
+echo "== frontmost now: $(osascript -e 'tell application "System Events" to get name of first application process whose frontmost is true' 2>/dev/null) =="
 
 # Compute OK's CG-global centre from the LIVE Graphics Settings window bounds
 # rather than a hardcoded point. From the xib: Graphics window id=236, content
 # 468x559, OK button bounds {top,left,bottom,right} = {519,368,539,448} -> its
 # centre is (408,529) in CONTENT coords. CGWindow bounds include the 22pt title
 # bar (live: 468x581 = 559+22), so content origin = (wx, wy+22).
-geom=$("$SCR/winlist" Halo 2>/dev/null | sed -n "s/.*'Halo Graphics Settings'.*bounds=(\([0-9-]*\),\([0-9-]*\) \([0-9]*\)x\([0-9]*\)).*/\1 \2 \3 \4/p" | head -1)
+# ⚠ Read the geometry until it STOPS MOVING. Halo repositions this window shortly
+# after showing it, and a click computed from the pre-move bounds lands on the
+# desktop and is silently lost (observed: read 1087,140 / clicked / window was
+# already at 1016,143, and the run looked like "no effect" rather than "missed").
+readgeom() { "$SCR/winlist" Halo 2>/dev/null | sed -n "s/.*'Halo Graphics Settings'.*bounds=(\([0-9-]*\),\([0-9-]*\) \([0-9]*\)x\([0-9]*\)).*/\1 \2 \3 \4/p" | head -1; }
+geom=$(readgeom)
+for i in 1 2 3 4 5 6 7 8; do
+  sleep 1; g2=$(readgeom)
+  [ -n "$g2" ] && [ "$g2" = "$geom" ] && break
+  geom="$g2"
+done
 if [ -n "$geom" ]; then
   set -- $geom; wx=$1; wy=$2; ww=$3; wh=$4
   cx=$(( wx + 408 ))
@@ -72,6 +112,8 @@ if [ -n "$geom" ]; then
 else
   wx=?; wy=?; ww=?; wh=?
   cx=567; cy=721                      # recorded fallback (halo_target.md)
+  echo "== WARNING: no Graphics Settings geometry; winlist said: =="
+  "$SCR/winlist" Halo 2>&1 | head -10
 fi
 echo "== arm=$ARM  clicking OK at ($cx,$cy)  [graphics window at ${wx:-?},${wy:-?} ${ww:-?}x${wh:-?}]"
 "$SCR/clicker" "$cx" "$cy" >/dev/null 2>&1
@@ -81,4 +123,16 @@ echo "== windows after the click =="
 "$SCR/winlist" Halo 2>/dev/null
 echo "== alive? =="
 pgrep -x Halo >/dev/null && echo "Halo STILL RUNNING (pid $(pgrep -x Halo))" || echo "Halo EXITED"
+if [ -n "${HALOPID:-}" ]; then
+  if kill -0 "$HALOPID" 2>/dev/null; then
+    echo "== wait status: still running (pid $HALOPID) =="
+  else
+    wait "$HALOPID"; st=$?
+    if [ "$st" -gt 128 ]; then
+      echo "== WAIT STATUS: KILLED BY SIGNAL $(( st - 128 )) ($(kill -l $(( st - 128 )) 2>/dev/null)) =="
+    else
+      echo "== WAIT STATUS: exit($st) =="
+    fi
+  fi
+fi
 if [ -s "$LOG" ]; then echo "== stderr (tail) =="; tail -40 "$LOG"; fi

@@ -69,6 +69,20 @@
 extern uint32_t x64_objc_wrap(uint64_t real);
 extern uint64_t x64_objc_unwrap(uint32_t h);
 
+/* cgl_macro_shim.c owns the CGL/AGL CONTEXT OBJECT: because <OpenGL/CGLMacro.h>
+ * makes 32-bit apps DEREFERENCE their context, it hands the i386 side an
+ * i386-layout SHADOW rather than a proxy arena handle. So a context arriving
+ * here is a shadow, not something x64_objc_unwrap knows about — resolve it
+ * through its owner first, and keep the arena path for anything that reached
+ * i386 by another route. */
+extern uint64_t cgl_macro_ctx_native(uint32_t h);
+static void *agl_ctx_in(uint32_t h)
+{
+   uint64_t n = cgl_macro_ctx_native(h);
+   if (!n) n = x64_objc_unwrap(h);
+   return (void *)(uintptr_t)n;
+}
+
 /* qd_gworld.c window-backed port substrate. */
 extern void *qd_port_window(uint32_t port_h);
 extern int   qd_is_port(uint32_t port_h);
@@ -146,7 +160,7 @@ static uint32_t bind_get(void *ctx)
 /* ---- GLboolean aglSetDrawable(AGLContext ctx, AGLDrawable draw) ---------- */
 uint32_t shim_aglSetDrawable(uint32_t *a)
 {
-   void *ctx = (void *)(uintptr_t)x64_objc_unwrap(a[0]);
+   void *ctx = agl_ctx_in(a[0]);
    uint32_t draw_h = a[1];
    if (!ctx) return 0;
 
@@ -208,7 +222,7 @@ uint32_t shim_aglSetDrawable(uint32_t *a)
 /* ---- AGLDrawable aglGetDrawable(AGLContext ctx) -------------------------- */
 uint32_t shim_aglGetDrawable(uint32_t *a)
 {
-   void *ctx = (void *)(uintptr_t)x64_objc_unwrap(a[0]);
+   void *ctx = agl_ctx_in(a[0]);
    if (!ctx) return 0;
 
    uint32_t ours = bind_get(ctx);

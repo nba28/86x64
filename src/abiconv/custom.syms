@@ -617,3 +617,17 @@ _BN_bin2bn
 _RSA_new
 _RSA_verify
 _RSA_free
+
+# CGL context family (cgl_macro_shim.c). <OpenGL/CGLMacro.h> makes a 32-bit app
+# DEREFERENCE its CGLContextObj — every glXxx() is #defined to jump through the
+# context's embedded 760-entry GLIFunctionDispatch table — so the context can
+# never be a proxy arena handle (read as a struct _CGLContextObject that gives a
+# truncated ->rend and 0 for every ->disp slot, i.e. jmp *0). Hand-shimmed to
+# return an i386-layout SHADOW instead. Excluded here so abigen does not also
+# emit colliding ___CGL{Create,Destroy,Get,Set}CurrentContext globals; the AGL
+# half of the family lives in the legacy pass, which excludes maptable_tramp.asm
+# automatically.
+_CGLCreateContext
+_CGLDestroyContext
+_CGLGetCurrentContext
+_CGLSetCurrentContext
