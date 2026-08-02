@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-renderer-info
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -393,6 +393,26 @@ carbon-window-compositing: $(BUILD_DIR)/99_carbon_window_compositing.x86_64
 # Reuses the main suite's binary; SKIPs when it has not been built.
 agl-window-drawable: $(BUILD_DIR)/99_agl_window_drawable.x86_64
 	@bash agl_window_drawable_test.sh
+# agl-renderer-info: A/B guard for the classic GPU-ENUMERATION contract
+# (agl_renderer_shim.c + the DM* half in carbon_ui_shim.c, bridged by
+# qd_gworld.c's GDevice registry). On 64-bit macOS the 32-bit-era sequence
+#   gd = DMGetFirstScreenDevice(true);
+#   DMGetDisplayIDByGDevice(gd, &displayID, true);
+#   ri = aglQueryRendererInfo(&gd, 1);
+# is dead twice over: aglQueryRendererInfo takes a QuickDraw GDHandle and
+# returns NULL for EVERY input (measured -- it does not even set an AGL error),
+# and DMGetDisplayIDByGDevice was shimmed to paramErr. The app concludes the
+# machine has no accelerated GPU (Halo CE's IDirect3D_Mac::IDirect3D_Mac then
+# raises its own "unrecoverable error" alert at i386 0x2b477f / 0x2b47a5). The
+# fix routes the query to the surviving aglQueryRendererInfoForCGDirectDisplayIDs
+# and answers the DM pair from the registry that minted the GDevice. The ON side
+# is the main-suite fixture 99_agl_renderer_info, which asserts a REAL
+# accelerated renderer with a real renderer id and VRAM figure; this target adds
+# the OFF side by re-running that binary under M64_NO_AGL_RENDERERINFO=1
+# M64_NO_DM_DISPLAYID=1 and asserting the zero-GPU failure returns.
+# Reuses the main suite's binary; SKIPs when it has not been built.
+agl-renderer-info: $(BUILD_DIR)/99_agl_renderer_info.x86_64
+	@bash agl_renderer_info_test.sh
 # focus-ring: canary guard for the legacy focus-ring contract (audit verdict:
 # no compat needed — pins WHY). (A) OS side: NSSetFocusRingStyle(NSFocusRingOnly)
 # + fill still draws headlessly, leaves the shape interior unpainted, and the
@@ -1187,6 +1207,15 @@ $(BUILD_DIR)/99_carbon_window_compositing.i386: $(BUILD_DIR)/99_carbon_window_co
 # also keeps the fixture independent of `make sysroot-gl` / the SL DVD.
 # Overrides %.i386.
 $(BUILD_DIR)/99_agl_window_drawable.i386: $(BUILD_DIR)/99_agl_window_drawable.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_agl_renderer_info: same shape as 99_agl_window_drawable -- neither the
+# Display Manager (___DMGetFirstScreenDevice / ___DMGetDisplayIDByGDevice) nor
+# AGL (___aglQueryRendererInfo / ___aglNextRendererInfo / ___aglDescribeRenderer /
+# ___aglDestroyRendererInfo) is in the i386 sysroot, and libabiconv exports a
+# ___<sym> shim for every one, so the whole surface is undefined dynamic_lookup
+# and static-interpose binds it at translate time. Overrides %.i386.
+$(BUILD_DIR)/99_agl_renderer_info.i386: $(BUILD_DIR)/99_agl_renderer_info.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 95_crypto_cdkey_verify: like 39/49/79/85, the i386 sysroot's openssl headers
