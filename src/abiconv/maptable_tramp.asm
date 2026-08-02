@@ -824,6 +824,17 @@ _x64_exc_longjmp:
 	MTSHIM	___FSpMakeFSRef,    _shim_FSpMakeFSRef
 	MTSHIM	___FSMakeFSSpec,    _shim_FSMakeFSSpec
 	MTSHIM	___FSpOpenResFile,  _shim_FSpOpenResFile
+	; FSRefMakePath itself is native and works; hand-shimmed ONLY to enforce the
+	; output-buffer invariant — Apple documents `path` as UNDEFINED on failure, so a
+	; caller that skips the OSStatus check reads its own stack garbage as a C string
+	; (Halo 0x2da50c -> CFStringCreateWithCString -> NULL -> CFStringGetCString SIGSEGV).
+	MTSHIM	___FSRefMakePath,   _shim_FSRefMakePath
+	; FindFolder is the PRODUCER of the (vRefNum, dirID) pair FSpMakeFSRef consumes.
+	; Modern CarbonCore returns a small internal token (6, 7, 8 ...) as the dirID, not a
+	; catalog node id, and every API that once consumed a dirID is deleted — so the pair
+	; is a dead end. We delegate to the native FSRef-based FSFindFolder and mint a dirID
+	; our own consumer half can resolve. See carbon_fsspec_shim.c.
+	MTSHIM	___FindFolder,      _shim_FindFolder
 
 	; Classic resource-fork open with the FLATTENED (data-fork) fallback
 	; (rsrc_datafork_shim.c). codesign refuses any bundle carrying an HFS

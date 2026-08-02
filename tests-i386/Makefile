@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -598,6 +598,23 @@ handle-marshal:
 # 32-bit product overflow) + single-volume index-enumeration termination.
 fmgr-vinfo:
 	@bash fmgr_vinfo_test.sh
+
+# fsspec-resolve: regression guard for REAL FSSpec resolution + the OUTPUT-BUFFER
+# invariant (src/abiconv/carbon_fsspec_shim.c). The FSSpec generation of the Carbon
+# File Manager was deleted from 64-bit macOS, and the old one-line shims returned
+# fnfErr WITHOUT writing their out-params -- so Halo's 0x2da50c
+#   FSpMakeFSRef -> FSRefMakePath -> CFStringCreateWithCString -> CFStringGetCString
+# (every OSErr ignored, as classic code does) read its own uninitialised stack as an
+# FSRef, then as a path, and CFStringCreateWithCString legitimately returned NULL for
+# non-UTF8 bytes -> nil CFStringRef -> EXC_BAD_ACCESS at 0x0. A heisenbug: any observer
+# perturbs the stack garbage into valid UTF-8. Asserts (a) Halo's exact chain
+# FindFolder -> FSpMakeFSRef -> FSRefMakePath lands on the native folder path, (b) the
+# real-CNID (/.vol/<dev>/<inode>) branch and a named leaf, (c) FSMakeFSSpec always fills
+# the spec, and (d) an unchecked-error caller NEVER sees an undefined output buffer.
+# Runs both arms of the ABICONV_FSSPEC_LEGACY kill switch and requires them to differ.
+# Native x86_64; no i386 sysroot needed.
+fsspec-resolve:
+	@bash fsspec_resolve_test.sh
 
 # jt-weak-import: regression test for the WEAK-IMPORT jump-table fix. Exercises
 # the classic i386 __IMPORT,__jump_table self-modifying stub path: undefined
