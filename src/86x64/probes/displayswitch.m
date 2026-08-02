@@ -38,6 +38,18 @@
  *                            CGDisplaySetDisplayMode instead (does Rule B help?)
  *             "carbonhide"   the same window, HIDDEN across the switch and
  *                            re-shown after — the candidate fix
+ *             "carbonmove"   NO display switch at all: just SetWindowBounds the
+ *                            Carbon window's content region to 0,0 800x600.
+ *                            The panic stack runs through -[NSCGSWindow
+ *                            setFrame:], so before building a fix that PRESENTS
+ *                            the game window instead of reconfiguring the
+ *                            display we must know whether setting an
+ *                            NSCarbonWindow's frame is itself fatal.
+ *             "aglmove"      the same move with a live AGL drawable attached,
+ *                            plus aglUpdateContext + a real clear/swap, to prove
+ *                            the drawable SURVIVES the geometry change (a
+ *                            "no crash" with a dead or zero-sized drawable is
+ *                            not success).
  *
  * ⚠It really changes the display mode. It restores the entry mode on every exit
  * path (including the panic path is NOT possible — so it prints the entry mode
@@ -45,7 +57,9 @@
  *
  * Build:
  *   clang -arch x86_64 -framework Cocoa -framework ApplicationServices \
- *         -o displayswitch displayswitch.m
+ *         -Wl,-undefined,dynamic_lookup -o displayswitch displayswitch.m
+ * (dynamic_lookup: CreateNewWindow/ShowWindow/SetWindowBounds/... have no
+ *  64-bit SDK stub but are alive in HIToolbox, which AppKit loads.)
  */
 
 #import <Cocoa/Cocoa.h>
@@ -74,6 +88,13 @@ extern OSStatus CreateNewWindow(UInt32 cls, UInt32 attrs, const Rect *bounds,
 extern void ShowWindow(CarbonWindowRef w);
 extern void HideWindow(CarbonWindowRef w);
 extern void DisposeWindow(CarbonWindowRef w);
+extern OSStatus SetWindowBounds(CarbonWindowRef w, UInt32 region, const Rect *b);
+extern OSStatus GetWindowBounds(CarbonWindowRef w, UInt32 region, Rect *b);
+#define kWinContentRgn 33
+
+/* The AGL context the "agl*" arms attach, so the "move" arms can revalidate the
+ * drawable after the window geometry changes. */
+static void *g_aglctx = NULL;
 
 static void dump_mode(const char *tag, CFDictionaryRef m)
 {
@@ -157,6 +178,7 @@ int main(int argc, char **argv)
                                73 /*ACCELERATED*/, 0 /*NONE*/ };
          void *pix = aglChoosePixelFormat ? aglChoosePixelFormat(0, 0, attrs) : NULL;
          void *ctx = pix && aglCreateContext ? aglCreateContext(pix, NULL) : NULL;
+         g_aglctx = ctx;
          int sw = (ctx && wref && aglSetWindowRef) ? aglSetWindowRef(ctx, wref) : -1;
          int cc = (ctx && aglSetCurrentContext) ? aglSetCurrentContext(ctx) : -1;
          fprintf(stderr, "[probe] pix=%p ctx=%p wref=%p aglSetWindowRef=%d "
@@ -166,6 +188,65 @@ int main(int argc, char **argv)
          if (cc == 1 && p_glGetString)
             fprintf(stderr, "[probe] GL_RENDERER=%s\n", (const char *)p_glGetString(0x1F01));
          [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.4]];
+      }
+
+      /* ---- "move" arms: NO display switch at all --------------------------
+       * The panic stack goes through -[NSCGSWindow setFrame:] -> _updateLayer
+       * -> _createRootLayerAndContextIfNeeded... -> _createContext, so before
+       * building a fix that PRESENTS the game window fullscreen (move+resize
+       * the NSCarbonWindow instead of reconfiguring the display) we have to
+       * know whether setting an NSCarbonWindow's frame is itself fatal — and,
+       * for "aglmove", whether the attached AGL drawable survives it.
+       * These arms change nothing about the display, so they are safe. */
+      if (strstr(mode, "move") && wref) {
+         Rect before = { 0 }, after = { 0 };
+         GetWindowBounds((CarbonWindowRef)wref, kWinContentRgn, &before);
+         fprintf(stderr, "[probe] content before = %d,%d %dx%d\n", before.left,
+                 before.top, before.right - before.left, before.bottom - before.top);
+         /* MEASURED 2026-08-03: the plain "move" arm (which also RESIZES, 800x622
+          * content -> 800x600) SIGILLs in NSCGSPanic via -[NSCGSWindow setSize:]
+          * -> _updateLayer -> _createRootLayerAndContextIfNeeded -> _createContext.
+          * No display switch is involved at all. So bisect the two halves:
+          * "moveonly" keeps the size and changes only the ORIGIN. */
+         const int keep = strstr(mode, "moveonly") != NULL;
+         const int w = keep ? before.right - before.left : 800;
+         const int h = keep ? before.bottom - before.top : 600;
+         Rect target = { 0, 0, (short)h, (short)w };  /* t,l,b,r -> 0,0 w x h */
+         OSStatus st = SetWindowBounds((CarbonWindowRef)wref, kWinContentRgn, &target);
+         fprintf(stderr, "[probe] SetWindowBounds(content 0,0 %dx%d, %s) -> %d (SURVIVED)\n",
+                 w, h, keep ? "size UNCHANGED" : "size CHANGED", (int)st);
+         [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.5]];
+         GetWindowBounds((CarbonWindowRef)wref, kWinContentRgn, &after);
+         fprintf(stderr, "[probe] content after  = %d,%d %dx%d\n", after.left,
+                 after.top, after.right - after.left, after.bottom - after.top);
+         for (NSWindow *w in [NSApp windows])
+            fprintf(stderr, "[probe] NSApp window now: class=%s visible=%d frame=%.0fx%.0f@%.0f,%.0f\n",
+                    class_getName([w class]), (int)[w isVisible],
+                    [w frame].size.width, [w frame].size.height,
+                    [w frame].origin.x, [w frame].origin.y);
+         if (g_aglctx) {
+            unsigned char (*aglUpdateContext)(void *) = dlsym(RTLD_DEFAULT, "aglUpdateContext");
+            int uc = aglUpdateContext ? aglUpdateContext(g_aglctx) : -1;
+            void (*p_glViewport)(int, int, int, int) = dlsym(RTLD_DEFAULT, "glViewport");
+            void (*p_glGetIntegerv)(unsigned, int *) = dlsym(RTLD_DEFAULT, "glGetIntegerv");
+            void (*p_glClearColor)(float, float, float, float) = dlsym(RTLD_DEFAULT, "glClearColor");
+            void (*p_glClear)(unsigned) = dlsym(RTLD_DEFAULT, "glClear");
+            unsigned char (*p_aglSwapBuffers)(void *) = dlsym(RTLD_DEFAULT, "aglSwapBuffers");
+            int vp[4] = { -1, -1, -1, -1 };
+            if (p_glViewport) p_glViewport(0, 0, 800, 600);
+            if (p_glGetIntegerv) p_glGetIntegerv(0x0BA2 /*GL_VIEWPORT*/, vp);
+            if (p_glClearColor) p_glClearColor(0.f, 0.4f, 0.8f, 1.f);
+            if (p_glClear) p_glClear(0x4000 /*GL_COLOR_BUFFER_BIT*/);
+            if (p_aglSwapBuffers) p_aglSwapBuffers(g_aglctx);
+            const unsigned char *(*p_glGetString)(unsigned int) =
+               dlsym(RTLD_DEFAULT, "glGetString");
+            fprintf(stderr, "[probe] aglUpdateContext=%d viewport=%d,%d %dx%d renderer=%s\n",
+                    uc, vp[0], vp[1], vp[2], vp[3],
+                    p_glGetString ? (const char *)p_glGetString(0x1F01) : "(none)");
+            [[NSRunLoop currentRunLoop] runUntilDate:[NSDate dateWithTimeIntervalSinceNow:0.6]];
+         }
+         fprintf(stderr, "[probe] DONE, no panic (move only, display untouched)\n");
+         return 0;
       }
 
       if (strstr(mode, "cap")) {
