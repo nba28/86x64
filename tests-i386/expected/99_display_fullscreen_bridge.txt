@@ -1,0 +1,17 @@
+best_exact=1
+exact=1
+gl1=1
+capture=0
+captured=1
+switch=0
+current_ok=1
+bounds_ok=1
+pixels_ok=1
+bpp_ok=1
+moved=1
+size_kept=1
+gl2=1
+release=0
+captured2=0
+restored=1
+exit_code: 0
