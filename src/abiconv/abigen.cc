@@ -1780,12 +1780,27 @@ struct ABIConversion {
        * caller-allocated buffer, ALSO the 4-byte hidden pointer — `retl $4`, the
        * callee-pops rule verified from real `clang -arch i386 -O1 -S` codegen
        * (the caller's own `addl` after the call already excludes those 4 bytes).
-       * Popping only 4 there leaves the i386 caller's esp 4 bytes off PER CALL,
-       * which corrupts far from the call site (guard 89's esp-balance check).
-       * NOTE: fp_sret is the same shape and is deliberately NOT changed here —
-       * see the journal; that is a separate, untested-by-this-guard fix. */
+       * Popping only 4 leaves the i386 caller's esp 4 bytes off PER CALL, which
+       * corrupts far from the call site rather than at it.
+       *
+       * BOTH hidden-pointer families are covered:
+       *   mem_reg_sret  MEMORY on i386 / REGISTER on x86_64  (guard 89)
+       *   fp_sret       homogeneous-FP, MEMORY on BOTH ABIs — the
+       *                 CGAffineTransform / CGRect / NSRect geometry family
+       * fp_sret already reads its args from the SHIFTED slots ([rbp+16], and the
+       * first INTEGER arg moved off rdi), i.e. it already models the hidden
+       * pointer as present on the i386 stack — so popping only 4 was simply
+       * inconsistent with its own arg handling. It went unnoticed because a
+       * 4-byte-per-call leak changes no returned VALUE: 50_cgaffine_sret
+       * exercises this exact family and passes on values alone. Guard
+       * 90_fp_sret_stack_balance measures the caller's esp instead and was RED
+       * (exit 1 of 15: value ok, all three esp checks failed).
+       * Kill-switch M64_NO_FP_SRET_POP8=1 restores the old 4-byte pop so that
+       * guard can A/B this rather than pass inertly. */
+      const bool pop_hidden_ptr =
+         mem_reg_sret || (fp_sret && !getenv("M64_NO_FP_SRET_POP8"));
       emit_inst(os, "mov", "r11d", "dword [rsp]");
-      emit_inst(os, "add", "rsp", mem_reg_sret ? "8" : "4");
+      emit_inst(os, "add", "rsp", pop_hidden_ptr ? "8" : "4");
       emit_inst(os, "jmp", "r11");
       
    }

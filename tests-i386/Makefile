@@ -1252,3 +1252,10 @@ clean:
 # lldiv comes from the sysroot but is likewise shimmed by abigen. Overrides %.i386.
 $(BUILD_DIR)/89_sret_regclass_gap.i386: $(BUILD_DIR)/89_sret_regclass_gap.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 90_fp_sret_stack_balance: CoreGraphics isn't in the i386 sysroot, so the
+# CGAffineTransform* builders are undefined dynamic_lookup imports resolved at
+# translate time by static-interpose -> libabiconv's ___CGAffineTransform*
+# fp_sret shims. Overrides %.i386.
+$(BUILD_DIR)/90_fp_sret_stack_balance.i386: $(BUILD_DIR)/90_fp_sret_stack_balance.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
