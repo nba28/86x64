@@ -495,6 +495,14 @@ add_library(abiconv SHARED
   # native aglSetWindowRef, and owns the ctx->drawable association because
   # native aglGetDrawable is blind to a WindowRef attach (measured).
   agl_drawable_shim.c
+  # agl_renderer_shim.c: ONE job — the AGL renderer-info ENUMERATION family.
+  # aglQueryRendererInfo takes a QuickDraw GDHandle, so on 64-bit it is a dead
+  # entry point (measured: NULL for every input, aglGetError()==0) and every
+  # 32-bit-era "have I got an accelerated GPU?" check counts zero renderers.
+  # Routed to the surviving aglQueryRendererInfoForCGDirectDisplayIDs through
+  # the qd_gworld.c GDevice registry that minted the GDevice from a
+  # CGDirectDisplayID in the first place.
+  agl_renderer_shim.c
   # carbon_nib_shim.c: REAL IBCarbon nib window/control materialization (fixes the
   # -5601 non-compositing window failure + dropped IBCarbonEditText UserPane gap).
   carbon_nib_shim.c

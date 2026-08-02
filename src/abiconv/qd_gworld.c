@@ -1020,6 +1020,7 @@ uint32_t shim_CopyDeepMask(uint32_t *a)
 /* GDevice — a real main-screen device record                              */
 /* ======================================================================== */
 static uint32_t g_main_gdevice;
+static CGDirectDisplayID g_main_gdevice_id;   /* the display it was minted from */
 static os_unfair_lock g_gd_lk = OS_UNFAIR_LOCK_INIT;
 
 static uint32_t make_main_gdevice(void)
@@ -1027,6 +1028,7 @@ static uint32_t make_main_gdevice(void)
    os_unfair_lock_lock(&g_gd_lk);
    if (g_main_gdevice) { os_unfair_lock_unlock(&g_gd_lk); return g_main_gdevice; }
    CGDirectDisplayID d = CGMainDisplayID();
+   g_main_gdevice_id = d;
    int w = (int)CGDisplayPixelsWide(d), h = (int)CGDisplayPixelsHigh(d);
    if (w <= 0) w = 1024; if (h <= 0) h = 768;
    uint32_t pmh = cm_new_handle(sizeof(qd_pm_blk), 1);
@@ -1048,6 +1050,40 @@ static uint32_t make_main_gdevice(void)
    QDLOG("main GDevice %dx%d -> %08x\n", w, h, gdh);
    return gdh;
 }
+/* ---- GDevice <-> CGDirectDisplayID ---------------------------------------
+ * Classic code identifies a screen by GDHandle; every modern replacement API
+ * (CGDisplay*, aglQueryRendererInfoForCGDirectDisplayIDs, CGDisplayIDToOpenGL-
+ * DisplayMask) identifies it by CGDirectDisplayID.  We MINTED our GDevice from
+ * a CGDirectDisplayID, so the mapping is a fact we already hold rather than
+ * something to guess.  Exported so the Display Manager entry points
+ * (carbon_ui_shim.c) and the AGL renderer-info family (agl_renderer_shim.c)
+ * share one authority instead of each inventing its own.
+ *
+ * Returns 0 for a handle we never minted — callers decide what that means;
+ * they must not silently substitute the main display for an unknown device.
+ * The registry currently holds exactly one entry because DMGetNextScreenDevice/
+ * GetNextDevice present a single screen; keep both halves in step if that
+ * changes. */
+uint32_t qd_gdevice_display_id(uint32_t gdh)
+{
+   if (!gdh) return 0;
+   make_main_gdevice();                       /* idempotent; ensures the map exists */
+   os_unfair_lock_lock(&g_gd_lk);
+   uint32_t id = (gdh == g_main_gdevice) ? (uint32_t)g_main_gdevice_id : 0;
+   os_unfair_lock_unlock(&g_gd_lk);
+   return id;
+}
+
+/* The inverse. 0 if this display is not the one we present. */
+uint32_t qd_gdevice_for_display_id(uint32_t display_id)
+{
+   uint32_t gdh = make_main_gdevice();
+   os_unfair_lock_lock(&g_gd_lk);
+   uint32_t r = (display_id == (uint32_t)g_main_gdevice_id) ? gdh : 0;
+   os_unfair_lock_unlock(&g_gd_lk);
+   return r;
+}
+
 uint32_t shim_GetMainDevice(uint32_t *a)  { (void)a; return make_main_gdevice(); }
 uint32_t shim_GetDeviceList(uint32_t *a)  { (void)a; return make_main_gdevice(); }
 uint32_t shim_GetGDevice(uint32_t *a)     { (void)a; return tl_cur_gd ? tl_cur_gd : make_main_gdevice(); }
