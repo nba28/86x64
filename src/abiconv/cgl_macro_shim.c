@@ -106,6 +106,7 @@ extern uint64_t x64_objc_unwrap(uint32_t h);
 extern uint64_t x64_gli_thunk_table[];   /* stub addresses, i386-callable      */
 extern uint64_t x64_gli_nslots;
 extern uint64_t g_gli_target[];          /* resolved ___glXxx bridge per slot  */
+extern uint8_t  g_gli_argbytes[];        /* exact i386 arg-block size per slot  */
 
 typedef unsigned char GLboolean;
 typedef int           GLint;
@@ -172,8 +173,11 @@ static void gli_targets_init(void)
       snprintf(key, sizeof(key), "__%s", nm);
       void *fn = self ? dlsym(self, key) : NULL;
       if (!fn) fn = dlsym(RTLD_DEFAULT, key);
-      if (fn) { g_gli_target[i] = (uint64_t)(uintptr_t)fn; mapped++; }
-      else    { missing++; }
+      if (fn) {
+         g_gli_target[i]   = (uint64_t)(uintptr_t)fn;
+         g_gli_argbytes[i] = gli_slot_argbytes[i];
+         mapped++;
+      } else { missing++; }
    }
    CGLLOG("dispatch table: %d/%d slots bound, %d unmapped (loud stub)\n",
           mapped, GLI_DISPATCH_SLOTS, missing);

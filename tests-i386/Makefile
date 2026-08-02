@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-renderer-info
+.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-renderer-info cgl-macro-dispatch
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -411,6 +411,14 @@ agl-window-drawable: $(BUILD_DIR)/99_agl_window_drawable.x86_64
 # the OFF side by re-running that binary under M64_NO_AGL_RENDERERINFO=1
 # M64_NO_DM_DISPLAYID=1 and asserting the zero-GPU failure returns.
 # Reuses the main suite's binary; SKIPs when it has not been built.
+# cgl-macro-dispatch: A/B guard for the <OpenGL/CGLMacro.h> direct-dispatch
+# contract. A 32-bit game never calls a GL symbol -- it jumps through its
+# CGLContextObj's embedded dispatch table -- so the context cannot be a proxy
+# arena handle. The ON side is the main-suite fixture 99_cgl_macro_dispatch; this
+# adds the M64_NO_CGL_MACRO=1 side and fails if the arms do not differ.
+cgl-macro-dispatch: $(BUILD_DIR)/99_cgl_macro_dispatch.x86_64
+	@bash cgl_macro_dispatch_test.sh
+
 agl-renderer-info: $(BUILD_DIR)/99_agl_renderer_info.x86_64
 	@bash agl_renderer_info_test.sh
 # focus-ring: canary guard for the legacy focus-ring contract (audit verdict:
@@ -1216,6 +1224,14 @@ $(BUILD_DIR)/99_agl_window_drawable.i386: $(BUILD_DIR)/99_agl_window_drawable.o
 # ___<sym> shim for every one, so the whole surface is undefined dynamic_lookup
 # and static-interpose binds it at translate time. Overrides %.i386.
 $(BUILD_DIR)/99_agl_renderer_info.i386: $(BUILD_DIR)/99_agl_renderer_info.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_cgl_macro_dispatch: same shape again -- AGL (___aglChoosePixelFormat /
+# ___aglCreateContext / ___aglSetCurrentContext / ___aglDestroyContext /
+# ___aglDestroyPixelFormat) is not in the i386 sysroot and libabiconv exports a
+# ___<sym> shim for every one, so the surface is undefined dynamic_lookup and
+# static-interpose binds it at translate time. Overrides %.i386.
+$(BUILD_DIR)/99_cgl_macro_dispatch.i386: $(BUILD_DIR)/99_cgl_macro_dispatch.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 95_crypto_cdkey_verify: like 39/49/79/85, the i386 sysroot's openssl headers

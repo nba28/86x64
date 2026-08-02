@@ -94,7 +94,17 @@ echo "== frontmost now: $(osascript -e 'tell application "System Events" to get 
 # 468x559, OK button bounds {top,left,bottom,right} = {519,368,539,448} -> its
 # centre is (408,529) in CONTENT coords. CGWindow bounds include the 22pt title
 # bar (live: 468x581 = 559+22), so content origin = (wx, wy+22).
-geom=$("$SCR/winlist" Halo 2>/dev/null | sed -n "s/.*'Halo Graphics Settings'.*bounds=(\([0-9-]*\),\([0-9-]*\) \([0-9]*\)x\([0-9]*\)).*/\1 \2 \3 \4/p" | head -1)
+# ⚠ Read the geometry until it STOPS MOVING. Halo repositions this window shortly
+# after showing it, and a click computed from the pre-move bounds lands on the
+# desktop and is silently lost (observed: read 1087,140 / clicked / window was
+# already at 1016,143, and the run looked like "no effect" rather than "missed").
+readgeom() { "$SCR/winlist" Halo 2>/dev/null | sed -n "s/.*'Halo Graphics Settings'.*bounds=(\([0-9-]*\),\([0-9-]*\) \([0-9]*\)x\([0-9]*\)).*/\1 \2 \3 \4/p" | head -1; }
+geom=$(readgeom)
+for i in 1 2 3 4 5 6 7 8; do
+  sleep 1; g2=$(readgeom)
+  [ -n "$g2" ] && [ "$g2" = "$geom" ] && break
+  geom="$g2"
+done
 if [ -n "$geom" ]; then
   set -- $geom; wx=$1; wy=$2; ww=$3; wh=$4
   cx=$(( wx + 408 ))
