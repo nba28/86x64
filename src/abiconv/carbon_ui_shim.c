@@ -10,8 +10,10 @@
 // MTSHIM convention: rdi -> &i386 args[0] (4-byte cdecl slots), uint32_t result in eax.
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
+#include <CoreGraphics/CoreGraphics.h>
 
 #define PTR(n) ((void *)(uintptr_t)args[(n)])
 #define UI_NO_ERR   (0)
@@ -99,16 +101,52 @@ uint32_t shim_GetControl32BitValue(uint32_t *args) {
 // carbon_themetext_shim.c (DrawThemeTextBox / DrawThemeText /
 // GetThemeTextDimensions) — the old no-ops here left text-shaped holes. ----
 
-// ---- Display Manager: removed; report unavailable so callers fall back to CGDirectDisplay
-// (Civ IV also links CGGetDisplaysWithPoint / CGDisplay*, which resolve natively). ----
+// ---- Display Manager: the GDevice <-> CGDirectDisplayID pair is REAL, not dead ----
+// The API is gone from 64-bit Carbon, but the information it returns is not: our own
+// qd_gworld.c mints the screen GDevice FROM a CGDirectDisplayID, so the translation
+// both directions is a fact we already hold. Reporting paramErr here was a no-op that
+// only looked harmless: a caller that does not fall back reads it as a hard failure.
+// (Measured: Halo's IDirect3D_Mac::IDirect3D_Mac calls DMGetDisplayIDByGDevice and
+// raises its own unrecoverable-error alert the instant the OSErr is non-zero — see
+// the Halo AGL deploy journal. Same doctrine as the FSSpec fix: a shim that
+// fails is not neutral, and a shim that CAN succeed must.)
+// Structural trigger: "this GDHandle came out of our GDevice registry", never an app.
+// Kill switch M64_NO_DM_DISPLAYID=1 restores the historical paramErr behaviour.
+extern uint32_t qd_gdevice_display_id(uint32_t gdh);        // qd_gworld.c
+extern uint32_t qd_gdevice_for_display_id(uint32_t did);    // qd_gworld.c
+
+static int dm_displayid_enabled(void) {
+    static int e = -1;
+    if (e < 0) e = getenv("M64_NO_DM_DISPLAYID") ? 0 : 1;
+    return e;
+}
+
 uint32_t shim_DMGetDeskRegion(uint32_t *args) {
     uint32_t *out = (uint32_t *)PTR(0); if (out) *out = 0; return (uint32_t)UI_PARAM_ERR;
 }
+// OSErr DMGetDisplayIDByGDevice(GDHandle displayDevice, DisplayIDType *displayID,
+//                               Boolean failToMain)
 uint32_t shim_DMGetDisplayIDByGDevice(uint32_t *args) {
-    uint32_t *out = (uint32_t *)PTR(1); if (out) *out = 0; return (uint32_t)UI_PARAM_ERR;
+    uint32_t *out = (uint32_t *)PTR(1);
+    if (out) *out = 0;                       // rule A: define the out-param first
+    if (!dm_displayid_enabled()) return (uint32_t)UI_PARAM_ERR;
+    uint32_t id = qd_gdevice_display_id(args[0]);
+    if (!id && args[2]) id = (uint32_t)CGMainDisplayID();   // failToMain
+    if (!id) return (uint32_t)UI_PARAM_ERR;
+    if (out) *out = id;
+    return 0;                                // noErr
 }
+// OSErr DMGetGDeviceByDisplayID(DisplayIDType displayID, GDHandle *displayDevice,
+//                               Boolean failToMain)
 uint32_t shim_DMGetGDeviceByDisplayID(uint32_t *args) {
-    uint32_t *out = (uint32_t *)PTR(1); if (out) *out = 0; return (uint32_t)UI_PARAM_ERR;
+    uint32_t *out = (uint32_t *)PTR(1);
+    if (out) *out = 0;
+    if (!dm_displayid_enabled()) return (uint32_t)UI_PARAM_ERR;
+    uint32_t gdh = qd_gdevice_for_display_id(args[0]);
+    if (!gdh && args[2]) gdh = qd_gdevice_for_display_id((uint32_t)CGMainDisplayID());
+    if (!gdh) return (uint32_t)UI_PARAM_ERR;
+    if (out) *out = gdh;
+    return 0;
 }
 
 // ---- FindWindow / MenuSelect: FORWARD to the live native HIToolbox ----

@@ -924,6 +924,18 @@ _x64_exc_longjmp:
 	;     save/restore the drawable around QuickDraw UI.
 	MTSHIM	___aglSetDrawable,                    _shim_aglSetDrawable
 	MTSHIM	___aglGetDrawable,                    _shim_aglGetDrawable
+	; --- AGL renderer-info enumeration (agl_renderer_shim.c) ---
+	;     aglQueryRendererInfo takes a QuickDraw GDHandle and is a DEAD entry
+	;     point on 64-bit (measured: NULL for every input), so classic GPU
+	;     capability checks count zero renderers. Routed to the surviving
+	;     aglQueryRendererInfoForCGDirectDisplayIDs via the qd_gworld GDevice
+	;     registry. The whole family is here because a real AGLRendererInfo is
+	;     a >4GB native pointer that must be arena-wrapped end to end.
+	MTSHIM	___aglQueryRendererInfo,              _shim_aglQueryRendererInfo
+	MTSHIM	___aglQueryRendererInfoForCGDirectDisplayIDs, _shim_aglQueryRendererInfoForCGDirectDisplayIDs
+	MTSHIM	___aglNextRendererInfo,               _shim_aglNextRendererInfo
+	MTSHIM	___aglDescribeRenderer,               _shim_aglDescribeRenderer
+	MTSHIM	___aglDestroyRendererInfo,            _shim_aglDestroyRendererInfo
 	; --- Carbon HIToolbox UI + Display Mgr (carbon_ui_shim.c) ---
 	MTSHIM	___BeginUpdate,                       _shim_BeginUpdate
 	MTSHIM	___FindWindow,                        _shim_FindWindow

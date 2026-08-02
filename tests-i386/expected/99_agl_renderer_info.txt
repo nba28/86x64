@@ -1,0 +1,7 @@
+outdef=1
+gdevice=1
+displayid=1
+info=1
+accel=1
+props=1
+exit_code: 0
