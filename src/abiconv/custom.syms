@@ -661,3 +661,45 @@ _CGDisplayCaptureWithOptions
 _CGReleaseAllDisplays
 _CGDisplayRelease
 _CGDisplayIsCaptured
+
+# carbon_memory.c / carbon_memory_tramp.asm — the classic Memory Manager on the
+# low-4GB heap. CarbonCore exports every entry point twice (classic name +
+# CSMem* twin); the translated QuickTime.framework imports 22 CSMem* names. A
+# Handle is Ptr*, so native 64-bit CarbonCore reads 8 bytes where our i386
+# Handle stores 4 -> free() on a garbage pointer -> malloc abort.
+_NewEmptyHandle
+_EmptyHandle
+_ReallocateHandle
+_RecoverHandle
+_HandToHand
+_HandAndHand
+_PtrToHand
+_PtrToXHand
+_PtrAndHand
+_Munger
+_HGetState
+_HSetState
+_GetPtrSize
+_SetPtrSize
+_CSMemNewHandle
+_CSMemNewHandleClear
+_CSMemNewEmptyHandle
+_CSMemDisposeHandle
+_CSMemEmptyHandle
+_CSMemGetHandleSize
+_CSMemSetHandleSize
+_CSMemReallocateHandle
+_CSMemRecoverHandle
+_CSMemHandToHand
+_CSMemHandAndHand
+_CSMemPtrToHand
+_CSMemPtrToXHand
+_CSMemPtrAndHand
+_CSMemMunger
+_CSMemHGetState
+_CSMemHSetState
+_CSMemNewPtr
+_CSMemNewPtrClear
+_CSMemDisposePtr
+_CSMemGetPtrSize
+_CSMemSetPtrSize

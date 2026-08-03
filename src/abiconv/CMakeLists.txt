@@ -687,6 +687,7 @@ add_library(abiconv SHARED
   cow_string_tramp.asm
   cg_display_tramp.asm
   cfstring_range_tramp.asm
+  carbon_memory_tramp.asm
   eh_tramp.asm
   dyld_stub_binder.asm
   dyld_func_lookup.asm

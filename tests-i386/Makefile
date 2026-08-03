@@ -447,6 +447,16 @@ agl-renderer-info: $(BUILD_DIR)/99_agl_renderer_info.x86_64
 # M64_NO_CFSTRING_RANGE_CLAMP=1 side and fails if the arms do not differ.
 cfstring-range: $(BUILD_DIR)/99_cfstring_range_overrun.x86_64
 	@bash cfstring_range_test.sh
+# csmem-handle: A/B guard for CarbonCore's CSMem* Memory Manager twins. A classic
+# Handle is Ptr* (4 bytes on i386); the CSMem spelling is what CarbonCore and the
+# classic QuickTime.framework call internally, and it was never shimmed, so it
+# bound to the native 64-bit Memory Manager -- >4GB Handles truncating into the
+# i386 slot on the way out, and i386 Handles read as 8 bytes on the way in
+# (measured: free() of 0x0000_0037_9000_ff9c aborted Civ IV). The ON side is the
+# main-suite fixture 99_csmem_handle_family; this adds the M64_NO_CSMEM_SHIM=1
+# side and fails if the arms do not differ.
+csmem-handle: $(BUILD_DIR)/99_csmem_handle_family.x86_64
+	@bash csmem_handle_test.sh
 # focus-ring: canary guard for the legacy focus-ring contract (audit verdict:
 # no compat needed — pins WHY). (A) OS side: NSSetFocusRingStyle(NSFocusRingOnly)
 # + fill still draws headlessly, leaves the shape interior unpainted, and the
@@ -1333,6 +1343,13 @@ $(BUILD_DIR)/99_cf_key_concat_replace.i386: $(BUILD_DIR)/99_cf_key_concat_replac
 # clamp trampoline (cfstring_range_tramp.asm) rather than an abigen bridge.
 # Overrides %.i386.
 $(BUILD_DIR)/99_cfstring_range_overrun.i386: $(BUILD_DIR)/99_cfstring_range_overrun.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_csmem_handle_family: the whole CSMem* family is undefined dynamic_lookup --
+# CarbonCore's CSMem* names are not in the i386 sysroot and libabiconv exports a
+# ___CSMem<name> trampoline for each (carbon_memory_tramp.asm), so
+# static-interpose binds them at translate time. Overrides %.i386.
+$(BUILD_DIR)/99_csmem_handle_family.i386: $(BUILD_DIR)/99_csmem_handle_family.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +

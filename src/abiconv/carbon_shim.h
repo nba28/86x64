@@ -104,5 +104,10 @@ uint32_t cm_new_handle(uint32_t size, int clear);
 void    *cm_handle_block(uint32_t h);
 uint32_t cm_handle_size(uint32_t h);
 void     cm_dispose_handle(uint32_t h);
+/* Ptr blocks carry the same header as Handle blocks (exact GetPtrSize), so
+ * every Ptr alloc/free must go through this pair, never bare malloc/free. */
+uint32_t cm_new_ptr(uint32_t size, int clear);
+uint32_t cm_ptr_size(uint32_t p);
+void     cm_dispose_ptr(uint32_t p);
 
 #endif /* ABICONV_CARBON_SHIM_H */
