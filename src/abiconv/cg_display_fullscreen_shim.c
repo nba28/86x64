@@ -448,6 +448,8 @@ uint32_t shim_CGDisplayBounds(uint32_t *a)
       out[0] = (float)r.origin.x;   out[1] = (float)r.origin.y;
       out[2] = (float)r.size.width; out[3] = (float)r.size.height;
    }
+   DLOG("Bounds(display=%u) -> %.0f,%.0f %.0fx%.0f\n", id, r.origin.x, r.origin.y,
+        r.size.width, r.size.height);
    return a[0];
 }
 
@@ -472,14 +474,14 @@ static int virt_geom(uint32_t id, int *w, int *h, int *bpp)
 uint32_t shim_CGDisplayPixelsWide(uint32_t *a)
 {
    int w = 0;
-   if (virt_geom(a[0], &w, NULL, NULL)) return (uint32_t)w;
+   if (virt_geom(a[0], &w, NULL, NULL)) { DLOG("PixelsWide(display=%u) -> %d (virtual)\n", a[0], w); return (uint32_t)w; }
    return (uint32_t)CGDisplayPixelsWide(a[0]);
 }
 
 uint32_t shim_CGDisplayPixelsHigh(uint32_t *a)
 {
    int h = 0;
-   if (virt_geom(a[0], NULL, &h, NULL)) return (uint32_t)h;
+   if (virt_geom(a[0], NULL, &h, NULL)) { DLOG("PixelsHigh(display=%u) -> %d (virtual)\n", a[0], h); return (uint32_t)h; }
    return (uint32_t)CGDisplayPixelsHigh(a[0]);
 }
 
@@ -493,10 +495,30 @@ uint32_t shim_CGDisplayBitsPerPixel(uint32_t *a)
    return (uint32_t)dict_int(CGDisplayCurrentMode(a[0]), K_BPP, 32);
 }
 
-/* ---- the capture family: tracked, never performed ------------------------ */
+/* ---- the capture family: tracked, never performed ------------------------
+ * ★OBSERVED ON THE LIVE MACHINE: a real CGCaptureAllDisplays makes the WHOLE
+ * display SLOWLY FADE TO BLACK and stay black for as long as the capture is
+ * held — the user only got their screen back because the process DIED and the
+ * kernel released it implicitly. So a bridge that neutralised only the mode
+ * switch and let the capture through would leave the user staring at a black
+ * screen with no crash to rescue them. Owning the capture half is therefore a
+ * SAFETY requirement, not just a correctness one.
+ *
+ * The armed path never captures, so there is nothing to leak. The DISARMED
+ * path (kill switch) does forward to the real thing, and that is exactly the
+ * configuration an A/B runs — so register a one-shot atexit release the first
+ * time a real capture is forwarded. It costs nothing and it means no arm of any
+ * experiment can end with a black screen on a normal exit. */
+static void release_on_exit(void) { CGReleaseAllDisplays(); }
+static void arm_capture_safety_net(void)
+{
+   static int armed;
+   if (!armed) { armed = 1; atexit(release_on_exit); }
+}
+
 static uint32_t capture_all(void)
 {
-   if (bridge_off()) return (uint32_t)CGCaptureAllDisplays();
+   if (bridge_off()) { arm_capture_safety_net(); return (uint32_t)CGCaptureAllDisplays(); }
    os_unfair_lock_lock(&g_lk);
    g_all_captured = 1;
    for (int i = 0; i < MAX_DISP; i++) if (g_disp[i].used) g_disp[i].captured = 1;
@@ -510,13 +532,13 @@ uint32_t shim_CGCaptureAllDisplays(uint32_t *a) { (void)a; return capture_all();
 
 uint32_t shim_CGCaptureAllDisplaysWithOptions(uint32_t *a)
 {
-   if (bridge_off()) return (uint32_t)CGCaptureAllDisplaysWithOptions(a[0]);
+   if (bridge_off()) { arm_capture_safety_net(); return (uint32_t)CGCaptureAllDisplaysWithOptions(a[0]); }
    return capture_all();
 }
 
 uint32_t shim_CGDisplayCapture(uint32_t *a)
 {
-   if (bridge_off()) return (uint32_t)CGDisplayCapture(a[0]);
+   if (bridge_off()) { arm_capture_safety_net(); return (uint32_t)CGDisplayCapture(a[0]); }
    os_unfair_lock_lock(&g_lk);
    int s = slot_for(a[0]);
    if (s >= 0) g_disp[s].captured = 1;
@@ -527,7 +549,7 @@ uint32_t shim_CGDisplayCapture(uint32_t *a)
 
 uint32_t shim_CGDisplayCaptureWithOptions(uint32_t *a)
 {
-   if (bridge_off()) return (uint32_t)CGDisplayCaptureWithOptions(a[0], a[1]);
+   if (bridge_off()) { arm_capture_safety_net(); return (uint32_t)CGDisplayCaptureWithOptions(a[0], a[1]); }
    return shim_CGDisplayCapture(a);
 }
 
