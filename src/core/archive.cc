@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <vector>
 #include <map>
+#include <set>
 #include <cstdint>
 #include <mach-o/nlist.h>
 
@@ -388,6 +389,29 @@ namespace MachO {
          const bool dbg = std::getenv("MACHO_BUILD_DEBUG") != nullptr;
          std::size_t moved = 0;
 
+         /* SAFETY NET. inject_xrel_section is idempotent: if this image ALREADY
+          * carries a __86x64_xrel section (a re-Build of an already-translated
+          * image — the pipeline re-parses several times: modify --insert,
+          * static-interpose, convert) it declines to emit a second one. Erasing
+          * binds here in that situation would delete them from the dyld stream
+          * with nothing recording them: the slot would be written by NOBODY.
+          * So do not divert at all once the section exists — leave every bind
+          * where it is. With the bind-target adjacency rule below the first
+          * Build already moves everything divertible, so this is a guard, not a
+          * behaviour: it fires only if some future change breaks convergence,
+          * and then it fails LOUDLY instead of silently unbinding a slot. */
+         if (const Segment<b> *data_seg = segment(SEG_DATA)) {
+            for (const Section<b> *s : data_seg->sections) {
+               if (s->name() == "__86x64_xrel") {
+                  if (dbg) {
+                     fprintf(stderr, "divert_narrow_const_binds_to_xrel: image "
+                             "already has __DATA,__86x64_xrel; skipping divert\n");
+                  }
+                  return;
+               }
+            }
+         }
+
          /* A bind's target slot is a NARROW (4-byte) data slot when its resolved
           * blob is an Immediate (Immediate::size()==4 in both M32 and M64 — the
           * i386 __const RTTI/vtable pointer never widens). A dyld BIND_TYPE_
@@ -412,6 +436,29 @@ namespace MachO {
           * section's content list is already in address order and an Immediate is
           * always exactly 4 bytes (Immediate::size()), so the blob immediately
           * following `slot` in `content` is exactly the +4 field. */
+         /* ★A BIND TARGET IS ITSELF A LIVE POINTER FIELD, and must count as one
+          * for the adjacency test below — otherwise the pass does not CONVERGE.
+          * An i386 typeinfo is {__vtable@0 = bind; __name@4 = bind-or-pointer}:
+          * when __name carries its own (weak) bind, its Immediate has no
+          * `pointee` yet, so on the FIRST Build the __vtable bind looks harmless
+          * and stays. Once the __name bind has been diverted, a LATER Build of
+          * the same image re-parses the slot as a plain pointer, and only THEN
+          * wants to divert __vtable — but by then __86x64_xrel already exists,
+          * inject_xrel_section is (correctly) idempotent, and the entries are
+          * dropped after the binds were already erased: the vtable field ends up
+          * bound by nobody. Counting bind targets as pointer fields makes every
+          * divertible bind move in a single pass, so no later pass has work. */
+         std::set<const SectionBlob<b> *> bind_targets;
+         auto collect = [&] (auto *info) {
+            if (info == nullptr) { return; }
+            for (auto *node : info->bindees) {
+               if (node->blob != nullptr) { bind_targets.insert(node->blob); }
+            }
+         };
+         collect(dyld->bind);
+         collect(dyld->weak_bind);
+         collect(dyld->lazy_bind);
+
          auto clobbers_adjacent_pointer = [&] (const SectionBlob<b> *slot) -> bool {
             const Section<b> *sect = slot->section;
             if (sect == nullptr) { return false; }
@@ -426,6 +473,7 @@ namespace MachO {
             while (it != content.end() && (*it)->size() == 0) { ++it; }
             if (it == content.end()) { return false; }
             const SectionBlob<b> *next = *it;
+            if (bind_targets.count(next) != 0) { return true; }
             if (auto *im = dynamic_cast<const Immediate<b> *>(next)) {
                return im->pointee != nullptr;
             }
@@ -434,13 +482,56 @@ namespace MachO {
             return false;
          };
 
-         auto divert = [&] (auto& bindees) {
+         /* ★WEAK-COALESCED NARROW BINDS ALWAYS DIVERT (guard
+          * 97_dynamic_cast_crosscast).  The pointer-adjacency test above is
+          * necessary but NOT sufficient: an i386 `__vmi_class_type_info`
+          * base_info entry is {__base_type@0 = bind; __offset_flags@4 = INTEGER},
+          * so the wide write silently zeroes __offset_flags — losing the base's
+          * OFFSET, its `public` bit and its `virtual` bit.  Every cross-cast and
+          * every virtual-base cast then walks a hierarchy in which no base is
+          * public and every base sits at offset 0, and returns NULL.  The same
+          * shape recurs for a `__ZTS` name bind whose +4 neighbour is the next
+          * typeinfo's integer vtable addend.  An INTEGER neighbour is therefore
+          * only benign when the slot genuinely WANTS the native 8-byte value.
+          *
+          * The structural discriminator is the bind STREAM, not the neighbour:
+          *  - the WEAK bind stream exists for weak-def COALESCING, which in a
+          *    Mach-O is C++ linkonce data — vtables, typeinfo, typeinfo names,
+          *    template statics.  All of it is i386-layout data the translated
+          *    image reads through 4-byte fields, so a wide write is ALWAYS
+          *    destructive there and the slot must be bound 4-byte-narrow by
+          *    libabiconv.
+          *  - the slots that legitimately want dyld's native 8-byte write are
+          *    runtime-object pointers (__NSConcreteGlobalBlock in a global block
+          *    literal, __CFConstantStringClassReference in a CFSTR record,
+          *    _OBJC_CLASS_$_*), and those are REGULAR binds — never weak.
+          * So: divert a narrow bind when it clobbers an adjacent pointer OR when
+          * it comes from the weak stream.  Universal (a property of the bind
+          * stream + the slot width), never a symbol-name match; test
+          * 37_objc_blocks' regular __NSConcreteGlobalBlock bind is untouched.
+          * Kill switch M64_NO_WEAK_NARROW_DIVERT=1 restores the old predicate. */
+         static const bool no_weak_divert =
+            std::getenv("M64_NO_WEAK_NARROW_DIVERT") != nullptr;
+
+         auto divert = [&] (auto& bindees, bool weak_stream) {
             for (auto it = bindees.begin(); it != bindees.end(); ) {
                auto *node = *it;
                const SectionBlob<b> *slot = node->blob;
-               if (slot != nullptr &&
+               /* slot->section != nullptr is the CONVERGENCE gate. The pipeline
+                * Builds an image several times; on the very first (the M32->M64
+                * transform's own output) the bind target blobs are not yet
+                * attached to a Section, so clobbers_adjacent_pointer cannot even
+                * find the +4 neighbour and silently answers "no". Diverting on
+                * that pass would move only the stream-qualified (weak) binds,
+                * inject __86x64_xrel, and leave the adjacency-qualified ones for
+                * a later pass that can no longer inject. Requiring a resolved
+                * section makes ALL diverts happen on the same pass — the first
+                * one that has real section content — so a single injection
+                * captures every entry. */
+               if (slot != nullptr && slot->section != nullptr &&
                    dynamic_cast<const Immediate<b> *>(slot) != nullptr &&
-                   clobbers_adjacent_pointer(slot)) {
+                   ((weak_stream && !no_weak_divert) ||
+                    clobbers_adjacent_pointer(slot))) {
                   typename Dysymtab<b>::XrelEntry e;
                   e.slot = slot;
                   e.name = node->sym;                 /* linker name, leading '_' */
@@ -455,9 +546,9 @@ namespace MachO {
             }
          };
 
-         if (dyld->bind      != nullptr) { divert(dyld->bind->bindees); }
-         if (dyld->weak_bind != nullptr) { divert(dyld->weak_bind->bindees); }
-         if (dyld->lazy_bind != nullptr) { divert(dyld->lazy_bind->bindees); }
+         if (dyld->bind      != nullptr) { divert(dyld->bind->bindees, false); }
+         if (dyld->weak_bind != nullptr) { divert(dyld->weak_bind->bindees, true); }
+         if (dyld->lazy_bind != nullptr) { divert(dyld->lazy_bind->bindees, false); }
 
          if (dbg) {
             fprintf(stderr, "divert_narrow_const_binds_to_xrel: moved %zu "

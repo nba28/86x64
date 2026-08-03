@@ -611,6 +611,52 @@ enum ti_kind { TI_UNKNOWN = 0, TI_CLASS, TI_SI, TI_VMI };
 static inline uint32_t ld32(uint32_t p)  { return *(uint32_t *)(uintptr_t)p; }
 static inline int32_t  ld32s(uint32_t p) { return *(int32_t  *)(uintptr_t)p; }
 
+/* ---- RTTI diagnostic trace (env ABICONV_CXX_RTTI_TRACE) ------------------
+ * The whole typed-dynamic_cast family lives or dies on ONE comparison: does a
+ * typeinfo's vtable field (+0) point at libabiconv's i386-layout __cxxabiv1
+ * sentinel, or somewhere else? When it points elsewhere every typed cast bails
+ * as TI_UNKNOWN and returns NULL, which is indistinguishable from "the cast
+ * legitimately failed" — so there is no way to tell the two apart without
+ * printing the pointer. This hook prints the observed vtable value, the three
+ * sentinel addresses, and (via dladdr) WHICH IMAGE the value belongs to.
+ * Diagnostic only; off unless the env var is set. */
+static int cxx_rtti_trace(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("ABICONV_CXX_RTTI_TRACE") != NULL; }
+   return t;
+}
+
+static enum ti_kind ti_kind_of(uint32_t ti);
+
+static void cxx_rtti_dump_ti(const char *tag, uint32_t ti) {
+   if (!ti) { fprintf(stderr, "[rtti] %s ti=NULL\n", tag); return; }
+   uint32_t v = ld32(ti);
+   uint32_t nm = ld32(ti + 4);
+   Dl_info di;
+   const char *img = "?";
+   if (v && dladdr((void *)(uintptr_t)v, &di) && di.dli_fname) {
+      const char *s = strrchr(di.dli_fname, '/');
+      img = s ? s + 1 : di.dli_fname;
+   }
+   fprintf(stderr, "[rtti] %s ti=%#x vtbl=%#x (image %s) name=%#x \"%s\"\n",
+           tag, ti, v, img, nm,
+           nm ? (const char *)(uintptr_t)nm : "");
+   if (ti_kind_of(ti) == TI_SI) {
+      fprintf(stderr, "[rtti]      si base=%#x\n", ld32(ti + 8));
+   } else if (ti_kind_of(ti) == TI_VMI) {
+      uint32_t n = ld32(ti + 12);
+      fprintf(stderr, "[rtti]      vmi flags=%#x nbase=%u\n", ld32(ti + 8), n);
+      for (uint32_t i = 0; i < n && i < 8; i++) {
+         uint32_t of = ld32(ti + 16 + 8 * i + 4);
+         fprintf(stderr, "[rtti]        base[%u] type=%#x off_flags=%#x "
+                 "(off=%d virt=%d pub=%d)\n", i, ld32(ti + 16 + 8 * i), of,
+                 (int)(((int32_t)of) >> 8), (int)(of & 1), (int)((of >> 1) & 1));
+      }
+   }
+}
+
+static void cxx_rtti_dump_sentinels(void);
+
 static enum ti_kind ti_kind_of(uint32_t ti) {
    if (!ti) return TI_UNKNOWN;
    uint32_t v  = ld32(ti);                            /* typeinfo vtable-ptr (+0) */
@@ -621,6 +667,13 @@ static enum ti_kind ti_kind_of(uint32_t ti) {
    if (v >= sb && v < sb + 16) return TI_SI;
    if (v >= vb && v < vb + 16) return TI_VMI;
    return TI_UNKNOWN;                                 /* native/foreign typeinfo */
+}
+
+static void cxx_rtti_dump_sentinels(void) {
+   fprintf(stderr, "[rtti] sentinels class=%#x si=%#x vmi=%#x\n",
+           (uint32_t)(uintptr_t)cxxabi_class_vtbl,
+           (uint32_t)(uintptr_t)cxxabi_si_vtbl,
+           (uint32_t)(uintptr_t)cxxabi_vmi_vtbl);
 }
 
 /* std::type_info equality on the i386 layout: same typeinfo, else same name
@@ -805,6 +858,19 @@ uint32_t shim_dynamic_cast(uint32_t *a) {
    int32_t  off_to_top = ld32s(vtable - 8);          /* i386 vtable_prefix */
    uint32_t whole_type = ld32(vtable - 4);
    uint32_t whole_ptr  = (uint32_t)((int32_t)src_ptr + off_to_top);
+
+   if (cxx_rtti_trace()) {
+      fprintf(stderr, "[rtti] __dynamic_cast sub=%#x vtbl=%#x off2top=%d\n",
+              src_ptr, vtable, off_to_top);
+      cxx_rtti_dump_sentinels();
+      cxx_rtti_dump_ti("whole", whole_type);
+      cxx_rtti_dump_ti("src  ", src_type);
+      cxx_rtti_dump_ti("dst  ", dst_type);
+      fprintf(stderr, "[rtti] kinds whole=%d src=%d dst=%d\n",
+              (int)ti_kind_of(whole_type), (int)ti_kind_of(src_type),
+              (int)ti_kind_of(dst_type));
+      fflush(stderr);
+   }
 
    /* If the most-derived typeinfo isn't one we recognize (its vtable bind was
     * not redirected — a native/foreign type), we cannot walk it safely. Fail
