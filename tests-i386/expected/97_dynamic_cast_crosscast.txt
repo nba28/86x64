@@ -1,0 +1,8 @@
+downcast         ok
+crosscast        ok
+cross-adjust     ok
+cross-usable     ok
+virtual-base     ok
+must-fail        ok
+must-fail-2      ok
+void-complete    ok
