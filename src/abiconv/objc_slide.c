@@ -1493,14 +1493,59 @@ extern uint32_t x64_objc_wrap(uint64_t real);
 /* Resolve an xrel target symbol to a LOW-4GB-usable address (0 if not found).
  * Mirrors the data-shadow ctor (objc_shim.c x64_init_data_shadows): dlsym the C
  * name (strip the linker's leading '_'); a defined-local or libabiconv symbol
- * resolves <4GB and is used directly; a native >4GB symbol (e.g. libc++abi's
- * __cxxabiv1 typeinfo vtables, ___cxa_pure_virtual) is wrapped into a low-4GB
- * proxy handle so the 4-byte slot is non-NULL and READABLE — which is all that's
- * needed to stop the dropped-reloc deref SIGBUS. (Full C++ RTTI correctness
- * across the i386/x86_64 typeinfo layout difference is a separate Tier-2
- * concern; see the known-gaps list.) */
+ * resolves <4GB and is used directly; a native >4GB symbol is wrapped into a
+ * low-4GB proxy handle so the 4-byte slot is non-NULL and READABLE (which stops
+ * the dropped-reloc deref SIGBUS, but is semantically opaque).
+ *
+ * ★INTERPOSE-FIRST (the load-bearing step). A bind that macho-tool DIVERTED into
+ * __86x64_xrel has, by construction, left the dyld bind stream — so
+ * static-interpose (which rewrites bind opcodes at translate time) never saw it
+ * and never got the chance to redirect it to libabiconv's own replacement. The
+ * two binding paths must not disagree about what a symbol means, so this one
+ * applies the SAME rule static-interpose does: shim export == PREFIX "__" +
+ * the full nlist symbol name; prefer it whenever libabiconv defines it.
+ *
+ * Structural, not a name list: the only symbols affected are the ones libabiconv
+ * deliberately re-implements in i386 layout, and for those the raw native symbol
+ * is the WRONG answer at any width. The concrete case that exposed it: the three
+ * __cxxabiv1 type_info vtables. Diverted (96_rtti_const_vtable_bind) -> resolved
+ * raw -> macOS libc++abi's 8-byte-layout vtable -> >4GB -> proxy handle, so
+ * cxx_shim's ti_kind_of() saw a pointer matching none of its sentinels, called
+ * every typeinfo TI_UNKNOWN, and returned NULL from EVERY typed dynamic_cast
+ * (guard 97_dynamic_cast_crosscast).
+ *
+ * Kill switch ABICONV_XREL_NO_SHIM_PREFIX=1 restores the raw-name-only lookup. */
+static int xrel_no_shim_prefix(void) {
+   static int v = -1;
+   if (v < 0) { v = getenv("ABICONV_XREL_NO_SHIM_PREFIX") != NULL; }
+   return v;
+}
+
+/* libabiconv's replacement for `name`, or 0. The dlsym argument is the symbol
+ * name minus ONE leading underscore (dlsym re-adds it), so asking for the
+ * PREFIX+name symbol means asking dlsym for "_" + name. Only accepted when it
+ * lands <4GB — a >4GB "replacement" would have to be proxy-wrapped, which is
+ * exactly the opaque outcome this path exists to avoid. */
+static uint64_t xrel_shim_lookup(const char *name) {
+   if (xrel_no_shim_prefix() || name[0] != '_') { return 0; }
+   size_t n = strlen(name);
+   char stackbuf[256], *buf = stackbuf;
+   if (n + 2 > sizeof stackbuf) {           /* mangled C++ names can be huge */
+      buf = (char *)malloc(n + 2);
+      if (buf == NULL) { return 0; }
+   }
+   buf[0] = '_';
+   memcpy(buf + 1, name, n + 1);
+   void *p = dlsym(RTLD_DEFAULT, buf);
+   if (buf != stackbuf) { free(buf); }
+   uintptr_t v = (uintptr_t)p;
+   return (p != NULL && v < 0x100000000UL) ? (uint64_t)v : 0;
+}
+
 static uint64_t xrel_resolve(const char *name) {
    if (name == NULL || name[0] == '\0') { return 0; }
+   uint64_t shim = xrel_shim_lookup(name);
+   if (shim != 0) { return shim; }                     /* libabiconv replacement */
    const char *dn = (name[0] == '_') ? name + 1 : name;
    void *p = dlsym(RTLD_DEFAULT, dn);
    if (p == NULL) { return 0; }
@@ -1563,6 +1608,15 @@ static void bind_external_relocs(const struct mach_header_64 *mh64, intptr_t sli
 
       const char *name = (const char *)(xrel + name_off); /* section-relative */
       uint64_t target = xrel_resolve(name);
+      if (g_verbose) {
+         const uint32_t *pk =
+            (const uint32_t *)(uintptr_t)((uint64_t)slot_vmaddr + (int64_t)slide);
+         fprintf(stderr, "abiconv objc_slide:   xrel %s slot=%#x -> %#llx%s "
+                 "[pre %08x %08x]\n", name, slot_vmaddr,
+                 (unsigned long long)target,
+                 xrel_shim_lookup(name) ? " (libabiconv shim)" : "",
+                 pk[0], pk[1]);
+      }
       if (target == 0) { ++unresolved; continue; }        /* leave it NULL */
 
       uint32_t *slot =

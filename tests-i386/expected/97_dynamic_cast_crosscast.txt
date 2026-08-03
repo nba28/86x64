@@ -6,3 +6,4 @@ virtual-base     ok
 must-fail        ok
 must-fail-2      ok
 void-complete    ok
+exit_code: 0

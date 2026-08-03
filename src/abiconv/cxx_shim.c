@@ -626,6 +626,8 @@ static int cxx_rtti_trace(void) {
    return t;
 }
 
+static enum ti_kind ti_kind_of(uint32_t ti);
+
 static void cxx_rtti_dump_ti(const char *tag, uint32_t ti) {
    if (!ti) { fprintf(stderr, "[rtti] %s ti=NULL\n", tag); return; }
    uint32_t v = ld32(ti);
@@ -639,6 +641,18 @@ static void cxx_rtti_dump_ti(const char *tag, uint32_t ti) {
    fprintf(stderr, "[rtti] %s ti=%#x vtbl=%#x (image %s) name=%#x \"%s\"\n",
            tag, ti, v, img, nm,
            nm ? (const char *)(uintptr_t)nm : "");
+   if (ti_kind_of(ti) == TI_SI) {
+      fprintf(stderr, "[rtti]      si base=%#x\n", ld32(ti + 8));
+   } else if (ti_kind_of(ti) == TI_VMI) {
+      uint32_t n = ld32(ti + 12);
+      fprintf(stderr, "[rtti]      vmi flags=%#x nbase=%u\n", ld32(ti + 8), n);
+      for (uint32_t i = 0; i < n && i < 8; i++) {
+         uint32_t of = ld32(ti + 16 + 8 * i + 4);
+         fprintf(stderr, "[rtti]        base[%u] type=%#x off_flags=%#x "
+                 "(off=%d virt=%d pub=%d)\n", i, ld32(ti + 16 + 8 * i), of,
+                 (int)(((int32_t)of) >> 8), (int)(of & 1), (int)((of >> 1) & 1));
+      }
+   }
 }
 
 static void cxx_rtti_dump_sentinels(void);
