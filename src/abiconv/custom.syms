@@ -703,3 +703,11 @@ _CSMemNewPtrClear
 _CSMemDisposePtr
 _CSMemGetPtrSize
 _CSMemSetPtrSize
+
+# carbon_datetime_shim.c / carbon_datetime_tramp.asm — the classic Date & Time
+# Utilities were REMOVED from modern macOS (measured: dlsym fails for all of
+# them). abigen's bridge calls a bind the pipeline weakened to NULL -> rip=0.
+_SecondsToDate
+_DateToSeconds
+_LongSecondsToDate
+_LongDateToSeconds

@@ -524,6 +524,13 @@ add_library(abiconv SHARED
   # DETERMINISTIC terminator, better than the garbage classic CF copied).
   # Symbol listed in custom.syms so abigen never dup-emits it.
   cfstring_range_shim.c
+  # carbon_datetime_shim.c / carbon_datetime_tramp.asm: ONE job — the classic
+  # Date & Time Utilities (SecondsToDate / DateToSeconds / LongSecondsToDate /
+  # LongDateToSeconds), which modern macOS REMOVED. abigen still emits a bridge,
+  # the pipeline weakens the dangling bind to NULL, and the call jumps to 0.
+  # Classic epoch is 1904-01-01 in LOCAL time (2082844800s before the Unix
+  # epoch) — using gmtime here would silently shift every date by the timezone.
+  carbon_datetime_shim.c
   # agl_renderer_shim.c: ONE job — the AGL renderer-info ENUMERATION family.
   # aglQueryRendererInfo takes a QuickDraw GDHandle, so on 64-bit it is a dead
   # entry point (measured: NULL for every input, aglGetError()==0) and every
@@ -687,6 +694,7 @@ add_library(abiconv SHARED
   cow_string_tramp.asm
   cg_display_tramp.asm
   cfstring_range_tramp.asm
+  carbon_datetime_tramp.asm
   carbon_memory_tramp.asm
   eh_tramp.asm
   dyld_stub_binder.asm

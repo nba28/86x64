@@ -447,6 +447,11 @@ agl-renderer-info: $(BUILD_DIR)/99_agl_renderer_info.x86_64
 # M64_NO_CFSTRING_RANGE_CLAMP=1 side and fails if the arms do not differ.
 cfstring-range: $(BUILD_DIR)/99_cfstring_range_overrun.x86_64
 	@bash cfstring_range_test.sh
+# carbon-datetime: A/B guard for the classic Date & Time Utilities, REMOVED from
+# modern macOS. abigen still emits a bridge; the pipeline weakens the dangling
+# bind to NULL, so the classic call jumps to 0 (Halo, rip=0, 2026-08-03).
+carbon-datetime: $(BUILD_DIR)/99_carbon_datetime.x86_64
+	@bash carbon_datetime_test.sh
 # csmem-handle: A/B guard for CarbonCore's CSMem* Memory Manager twins. A classic
 # Handle is Ptr* (4 bytes on i386); the CSMem spelling is what CarbonCore and the
 # classic QuickTime.framework call internally, and it was never shimmed, so it
@@ -1358,6 +1363,12 @@ $(BUILD_DIR)/99_cf_key_concat_replace.i386: $(BUILD_DIR)/99_cf_key_concat_replac
 # clamp trampoline (cfstring_range_tramp.asm) rather than an abigen bridge.
 # Overrides %.i386.
 $(BUILD_DIR)/99_cfstring_range_overrun.i386: $(BUILD_DIR)/99_cfstring_range_overrun.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_carbon_datetime: the whole family is undefined dynamic_lookup — these
+# symbols are gone from modern macOS and libabiconv exports a ___<name>
+# trampoline for each (carbon_datetime_tramp.asm). Overrides %.i386.
+$(BUILD_DIR)/99_carbon_datetime.i386: $(BUILD_DIR)/99_carbon_datetime.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 99_csmem_handle_family: the whole CSMem* family is undefined dynamic_lookup --
