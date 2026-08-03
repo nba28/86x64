@@ -32,14 +32,21 @@
 #include <unistd.h>
 #include <dlfcn.h>
 #include <wchar.h>
+#include <os/lock.h>
 
 struct shim_FILE {
    void *real_fp;
    uint32_t magic;
    int fd;
-   char _pad[112];
+   struct shim_FILE *free_next;   /* free-list link; live only while recycled */
+   char _pad[104];                /* keeps sizeof == 128, as before */
 };
 #define SHIM_FILE_MAGIC 0x68690a55
+_Static_assert(sizeof(struct shim_FILE) == 128, "shim_FILE size must not change");
+_Static_assert(__builtin_offsetof(struct shim_FILE, real_fp) == 0
+               && __builtin_offsetof(struct shim_FILE, magic) == 8
+               && __builtin_offsetof(struct shim_FILE, fd) == 12,
+               "is_shim/resolve_file read real_fp@0, magic@8, fd@12");
 
 extern struct shim_FILE *_86x64_stderr_shim __attribute__((weak));
 
@@ -230,14 +237,59 @@ static FILE *resolve_file(FILE *fp) {
 }
 
 /* Wrap a real FILE* in a fresh low-4GB shim so a 32-bit caller can hold it.
- * Falls back to returning the raw pointer if no low memory is available. */
+ *
+ * ⚠ THE FALLBACK IS A CLIFF, NOT A DEGRADATION. `_86x64_alloc_low_4gb` (defined
+ * by the wrapper executable, src/86x64/wrapper_setup.c) is a NON-RECLAIMING bump
+ * allocator over a single 64 KB low page = 512 shim_FILEs for the life of the
+ * process, and it is a WEAK UNDEFINED symbol here, so it is NULL outright in any
+ * image set whose wrapper does not define it. When it yields nothing we hand the
+ * caller the RAW native FILE*, which an i386 caller stores in a 4-byte slot: the
+ * >4GB pointer truncates and the very next FILE* call faults in is_shim's magic
+ * probe on an address that is in no VM region (Halo, 2026-08-03, fp=0x59d56d80).
+ *
+ * So: RECYCLE. fclose returns the record to a free list and wrap_file pops it,
+ * which makes the common open/close-in-a-loop pattern unbounded instead of
+ * capped at 512. The raw-pointer fallback stays for the genuinely-out-of-memory
+ * case (it is still correct for a NATIVE caller, which can hold 64 bits, and a
+ * failing fopen would break those), but it now says so once on stderr instead of
+ * failing silently thousands of instructions later. */
 extern void *_86x64_alloc_low_4gb(size_t) __attribute__((weak));
+
+static struct shim_FILE *g_file_freelist;
+static os_unfair_lock g_file_freelist_lk = OS_UNFAIR_LOCK_INIT;
+
+static void shim_file_recycle(struct shim_FILE *shim) {
+   shim->real_fp = NULL;
+   shim->fd = -1;
+   os_unfair_lock_lock(&g_file_freelist_lk);
+   shim->free_next = g_file_freelist;
+   g_file_freelist = shim;
+   os_unfair_lock_unlock(&g_file_freelist_lk);
+}
 
 static FILE *wrap_file(FILE *real) {
    if (!real) return NULL;
-   void *region = _86x64_alloc_low_4gb ? _86x64_alloc_low_4gb(sizeof(struct shim_FILE)) : NULL;
-   if (!region) return real;   /* caller may truncate, but no better option */
-   struct shim_FILE *shim = (struct shim_FILE *)region;
+   os_unfair_lock_lock(&g_file_freelist_lk);
+   struct shim_FILE *shim = g_file_freelist;
+   if (shim) { g_file_freelist = shim->free_next; }
+   os_unfair_lock_unlock(&g_file_freelist_lk);
+   if (!shim) {
+      void *region = _86x64_alloc_low_4gb
+                        ? _86x64_alloc_low_4gb(sizeof(struct shim_FILE)) : NULL;
+      if (!region) {
+         static int warned;
+         if (!warned) {
+            warned = 1;
+            dprintf(2, "abiconv: file_shim: no low-4GB memory for a shim FILE "
+                       "(_86x64_alloc_low_4gb=%p); returning the raw %p — an "
+                       "i386 caller WILL truncate it\n",
+                    (void *)_86x64_alloc_low_4gb, (void *)real);
+         }
+         return real;   /* caller may truncate, but no better option */
+      }
+      shim = (struct shim_FILE *)region;
+   }
+   shim->free_next = NULL;
    shim->real_fp = real;
    shim->magic = SHIM_FILE_MAGIC;
    shim->fd = fileno(real);
@@ -439,7 +491,12 @@ int fclose(FILE *fp) {
    if (is_shim(fp)) {
       struct shim_FILE *shim = (struct shim_FILE *)fp;
       if (shim->fd <= 2) return 0;        /* refuse to close stdio */
-      return real_fclose((FILE *)shim->real_fp);
+      int r = real_fclose((FILE *)shim->real_fp);
+      /* Return the record to the low-4GB free list: the wrapper's arena is a
+       * non-reclaiming 64 KB bump allocator, so without this an open/close loop
+       * exhausts it and wrap_file starts handing back untruncatable pointers. */
+      shim_file_recycle(shim);
+      return r;
    }
    return real_fclose(fp);
 }
