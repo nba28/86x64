@@ -57,6 +57,7 @@ fi
 # way to tell an exit(N) from a fatal signal for a process that leaves no crash
 # report.  Everything else about the run is identical.  EXTRA_ENV="A=1 B=2" adds
 # env vars in both launch modes.
+RUN_EPOCH=$(python3 -c "import time;print(time.time())")
 : > "$LOG"
 if [ "${EXEC:-0}" = 1 ]; then
   # `exec` replaces the subshell so $! IS Halo's own pid (otherwise we would wait
@@ -136,3 +137,46 @@ if [ -n "${HALOPID:-}" ]; then
   fi
 fi
 if [ -s "$LOG" ]; then echo "== stderr (tail) =="; tail -40 "$LOG"; fi
+
+# ---- CRASH-SIGNATURE VERDICT ------------------------------------------------
+# ★On a Halo GUI A/B the verdict is the crash-report SIGNATURE, never window
+# presence or "still running": Halo's license-key modal is invisible in a
+# screenshot but grabs all input, so a click can be swallowed and the run merely
+# beeps.  ⚠A SANDBOXED `ls ~/Library/Logs/DiagnosticReports/` returns EMPTY WITH
+# NO ERROR — that once faked a "no crash report" conclusion — so this uses find.
+echo "== crash-report verdict =="
+RUN_START_FILE=${RUN_START_FILE:-}
+python3 - "$RUN_EPOCH" <<'PY'
+import glob, json, os, sys, time
+start = float(sys.argv[1])
+reps = [p for p in glob.glob(os.path.expanduser(
+            "~/Library/Logs/DiagnosticReports/Halo-*.ips")) if os.path.getmtime(p) >= start]
+if not reps:
+    print("  no Halo crash report written during this run")
+    raise SystemExit
+for p in sorted(reps, key=os.path.getmtime):
+    raw = open(p).read(); i = raw.index("\n")
+    body = json.loads(raw[i:])
+    imgs = body.get("usedImages", [])
+    frames = []
+    for t in body.get("threads", []):
+        if t.get("triggered"):
+            for f in t["frames"]:
+                nm = imgs[f["imageIndex"]].get("name") or "?"
+                frames.append("%s %s" % (nm, f.get("symbol") or ""))
+    blob = "\n".join(frames)
+    sig = "UNCLASSIFIED"
+    if "NSCGSPanic" in blob and "CGDisplaySwitchToMode" in blob:
+        sig = "THE DISPLAY-SWITCH WALL (NSCGSPanic <- __CGDisplaySwitchToMode)"
+    elif "NSCGSPanic" in blob and ("setSize:" in blob or "SetBounds" in blob):
+        sig = "THE NSCarbonWindow GEOMETRY WALL (NSCGSPanic <- setSize:, no display API)"
+    elif "NSCGSPanic" in blob:
+        sig = "NSCGSPanic, some OTHER path"
+    elif "fr_handler" in blob:
+        sig = "an M64_FAULT_REPORT=1 armed run, not a distinct crash"
+    elif frames and frames[0].startswith("?"):
+        sig = "the translated-code fault family (rip in translated text)"
+    print("  %s\n    signature: %s" % (os.path.basename(p), sig))
+    for f in frames[:8]:
+        print("      " + f)
+PY

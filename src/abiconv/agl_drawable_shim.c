@@ -147,6 +147,30 @@ done:
    os_unfair_lock_unlock(&g_bind_lk);
 }
 
+/* THE GL RENDER TARGET, for anyone who has to reason about the window an app is
+ * actually drawing into.  This file already owns the ctx -> drawable
+ * association, so answering "which WindowRef currently has a GL drawable
+ * attached, and through which context" is a read of state it owns rather than a
+ * second job.  cg_display_fullscreen_shim.c uses it to identify the window the
+ * classic `CGCaptureAllDisplays + CGDisplaySwitchToMode` fullscreen idiom means
+ * to present, structurally — never by window title, class or app name.
+ * Returns 1 and fills the out-params when a window-backed drawable is attached. */
+int agl_gl_render_target(void **win_out, void **ctx_out)
+{
+   int found = 0;
+   os_unfair_lock_lock(&g_bind_lk);
+   for (int i = 0; i < AGL_MAX_CTX; i++) {
+      if (!g_bind[i].ctx || !g_bind[i].drawable) continue;
+      void *w = qd_port_window(g_bind[i].drawable);
+      if (!w) continue;
+      if (win_out) *win_out = w;
+      if (ctx_out) *ctx_out = g_bind[i].ctx;
+      found = 1;                        /* last attach wins */
+   }
+   os_unfair_lock_unlock(&g_bind_lk);
+   return found;
+}
+
 static uint32_t bind_get(void *ctx)
 {
    uint32_t d = 0;

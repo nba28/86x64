@@ -495,6 +495,23 @@ add_library(abiconv SHARED
   # native aglSetWindowRef, and owns the ctx->drawable association because
   # native aglGetDrawable is blind to a WindowRef attach (measured).
   agl_drawable_shim.c
+  # cg_display_fullscreen_shim.c / cg_display_tramp.asm: ONE job — the classic
+  # FULLSCREEN DISPLAY-MODE idiom (CGCaptureAllDisplays +
+  # CGDisplayBestModeForParameters + CGDisplaySwitchToMode). PERFORMING it is
+  # fatal on modern macOS: the reconfiguration makes AppKit setFrame: every
+  # window in the process and -[NSCGSWindow _createContext] cannot be created
+  # for an NSCarbonWindow -> SIGILL in NSCGSPanic. (Measured: a plain RESIZING
+  # SetWindowBounds panics identically with no display API in the stack, so it
+  # is the window class, not the display switch — and a MOVE-only survives.)
+  # So the switch is never performed: a VIRTUAL mode is recorded, every mode
+  # query (CurrentMode/Bounds/PixelsWide/High/BitsPerPixel) answers from it,
+  # BestModeForParameters synthesises an exact match for the requested geometry
+  # (native returns 1920x1200 for a 800x600 request — modern Macs have no small
+  # modes), the capture family is tracked rather than performed, and the app's
+  # own GL window is MOVED (never resized) to the display origin so virtual and
+  # screen coordinates coincide. Symbols listed in custom.syms so abigen never
+  # dup-emits them.
+  cg_display_fullscreen_shim.c
   # agl_renderer_shim.c: ONE job — the AGL renderer-info ENUMERATION family.
   # aglQueryRendererInfo takes a QuickDraw GDHandle, so on 64-bit it is a dead
   # entry point (measured: NULL for every input, aglGetError()==0) and every
@@ -656,6 +673,7 @@ add_library(abiconv SHARED
   init_trampoline.asm
   maptable_tramp.asm
   cow_string_tramp.asm
+  cg_display_tramp.asm
   eh_tramp.asm
   dyld_stub_binder.asm
   dyld_func_lookup.asm

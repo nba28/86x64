@@ -631,3 +631,29 @@ _CGLCreateContext
 _CGLDestroyContext
 _CGLGetCurrentContext
 _CGLSetCurrentContext
+
+# Classic FULLSCREEN DISPLAY-MODE family (cg_display_fullscreen_shim.c /
+# cg_display_tramp.asm). Hand-shimmed because PERFORMING the classic
+# `CGCaptureAllDisplays + CGDisplayBestModeForParameters + CGDisplaySwitchToMode`
+# idiom is fatal on modern macOS: the reconfiguration makes AppKit setFrame:
+# every window in the process, and -[NSCGSWindow _createContext] cannot be
+# created for an NSCarbonWindow -> SIGILL in NSCGSPanic (measured, and a plain
+# resizing SetWindowBounds panics identically with no display API involved).
+# The shim records a VIRTUAL mode, answers every mode query from it, and
+# presents the app's existing GL window instead. Listed here so neither abigen
+# pass emits a second ___CG* definition.
+_CGDisplaySwitchToMode
+_CGDisplayCurrentMode
+_CGDisplayBestModeForParameters
+_CGDisplayBestModeForParametersAndRefreshRate
+_CGDisplayPixelsWide
+_CGDisplayPixelsHigh
+_CGDisplayBitsPerPixel
+_CGDisplayBounds
+_CGCaptureAllDisplays
+_CGCaptureAllDisplaysWithOptions
+_CGDisplayCapture
+_CGDisplayCaptureWithOptions
+_CGReleaseAllDisplays
+_CGDisplayRelease
+_CGDisplayIsCaptured
