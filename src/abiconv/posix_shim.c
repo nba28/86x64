@@ -321,12 +321,53 @@ int32_t shim_dlerror(uint32_t *a) {
  * todo_gaps. */
 extern uint64_t _86x64_unwrap_obj_arg(uint32_t a);  /* objc_shim.c: full resolver */
 
+/* ★ The generic marshalling thunk fnptr_lookup_result mints is NOT enough for a
+ * symbol libabiconv also INTERPOSES. The thunk lifts the i386 cdecl frame to the
+ * x86_64 ABI and calls the native function — correct for the call — but it
+ * returns whatever the native callee returned in %eax, i.e. TRUNCATED TO 32
+ * BITS. For a native function that returns an OPAQUE >4GB POINTER the i386
+ * caller must keep (FILE*, DIR*, iconv_t, …) that is fatal, and it is exactly
+ * what libabiconv's own interpose exists to prevent: `_fopen` in file_shim.c
+ * wraps the real FILE* in a low-4GB `struct shim_FILE`, so the 4-byte i386 slot
+ * holds it losslessly and `resolve_file`/`is_shim` can unwrap it again.
+ *
+ * shim_dlsym and ns_symbol_resolve already prefer the interpose shim
+ * ("__"+name -> nlist "___name") over a raw thunk; this CF twin was the one
+ * member of the by-name lookup family that never got that step. Measured on
+ * Halo CE (MacSoft 2.0.4), which has NO `_fopen` import at all and instead does
+ *     g_fopen = CFBundleGetFunctionPointerForName(bundle, CFSTR("fopen"));
+ *     ...  calll *g_fopen                                     (i386 0x29e72e)
+ * then hands the result to the imported `_ftell`. Without this step the stored
+ * handle is (uint32_t)(uintptr_t)<native FILE*>, so
+ * `___ftell.l1 -> ftell -> resolve_file -> is_shim` dereferences fp+8 on an
+ * address that is in no VM region at all: SIGSEGV, KERN_INVALID_ADDRESS.
+ *
+ * Universal — triggers on the structural property "libabiconv exports an
+ * interpose shim for this name", never on an app. Kill switch
+ * M64_NO_CFBUNDLE_FNPTR_SHIM=1 restores the raw-thunk behaviour. */
+static int cfbundle_fnptr_shim_disabled(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("M64_NO_CFBUNDLE_FNPTR_SHIM") ? 1 : 0; }
+   return t;
+}
+
 int32_t shim_CFBundleGetFunctionPointerForName(uint32_t *a) {
    CFBundleRef bundle = (CFBundleRef)(uintptr_t)_86x64_unwrap_obj_arg(a[0]);
    CFStringRef fname  = (CFStringRef)(uintptr_t)_86x64_unwrap_obj_arg(a[1]);
    char nm[256];
    nm[0] = '\0';
    if (fname) { CFStringGetCString(fname, nm, sizeof nm, kCFStringEncodingUTF8); }
+   if (nm[0] && !cfbundle_fnptr_shim_disabled()) {
+      uint32_t shimaddr = dlsym_shim_for(nm);
+      if (shimaddr) {
+         if (posix_trace()) {
+            fprintf(stderr, "[posix] CFBundleGetFunctionPointerForName(\"%s\") -> "
+                    "libabiconv interpose shim @0x%x\n", nm, shimaddr);
+            fflush(stderr);
+         }
+         return (int32_t)shimaddr;
+      }
+   }
    void *fp = bundle ? CFBundleGetFunctionPointerForName(bundle, fname) : NULL;
    if (posix_trace()) {
       fprintf(stderr, "[posix] CFBundleGetFunctionPointerForName(\"%s\") = %p\n",
