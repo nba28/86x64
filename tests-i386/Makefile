@@ -437,6 +437,16 @@ cgl-macro-dispatch: $(BUILD_DIR)/99_cgl_macro_dispatch.x86_64
 
 agl-renderer-info: $(BUILD_DIR)/99_agl_renderer_info.x86_64
 	@bash agl_renderer_info_test.sh
+# cfstring-range: A/B guard for the classic CFRange TOLERANCE contract. Classic
+# CoreFoundation never validated the range handed to CFStringGetCharacters, so
+# asking for length+1 to pick up a NUL terminator was a normal 32-bit-era idiom;
+# modern CF validates in NSTaggedPointerString but NOT __NSCFString, so the same
+# call site is fatal for a SHORT string and harmless for a longer one, and the
+# throw is an ObjC exception a 2006 C frame cannot catch -> abort. The ON side
+# is the main-suite fixture 99_cfstring_range_overrun; this adds the
+# M64_NO_CFSTRING_RANGE_CLAMP=1 side and fails if the arms do not differ.
+cfstring-range: $(BUILD_DIR)/99_cfstring_range_overrun.x86_64
+	@bash cfstring_range_test.sh
 # focus-ring: canary guard for the legacy focus-ring contract (audit verdict:
 # no compat needed — pins WHY). (A) OS side: NSSetFocusRingStyle(NSFocusRingOnly)
 # + fill still draws headlessly, leaves the shape interior unpainted, and the
@@ -1314,6 +1324,15 @@ $(BUILD_DIR)/98_cf_append_format_valist.i386: $(BUILD_DIR)/98_cf_append_format_v
 # content through the proxy wrap/unwrap round-trip (the blank-alert probe).
 # Overrides %.i386.
 $(BUILD_DIR)/99_cf_key_concat_replace.i386: $(BUILD_DIR)/99_cf_key_concat_replace.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_cfstring_range_overrun: same shape — CFStringCreateWithCString /
+# CFStringGetLength / CFStringGetCharacters / CFRelease are undefined
+# dynamic_lookup imports resolved at translate time by static-interpose ->
+# libabiconv's ___CF* shims, and ___CFStringGetCharacters is now the hand-written
+# clamp trampoline (cfstring_range_tramp.asm) rather than an abigen bridge.
+# Overrides %.i386.
+$(BUILD_DIR)/99_cfstring_range_overrun.i386: $(BUILD_DIR)/99_cfstring_range_overrun.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +

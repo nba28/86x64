@@ -512,6 +512,18 @@ add_library(abiconv SHARED
   # screen coordinates coincide. Symbols listed in custom.syms so abigen never
   # dup-emits them.
   cg_display_fullscreen_shim.c
+  # cfstring_range_shim.c / cfstring_range_tramp.asm: ONE job — restore classic
+  # CoreFoundation's TOLERANT CFRange handling for CFStringGetCharacters.
+  # Classic CF never validated the range, so asking for length+1 to pick up a
+  # NUL terminator was a normal idiom. Modern CF validates in SOME concrete
+  # string classes only: -[NSTaggedPointerString getCharacters:range:] throws
+  # while __NSCFString tolerates, so the SAME call site is fatal for a short
+  # string and harmless for a longer one. The throw is an ObjC exception
+  # crossing a 2006 C frame that cannot catch it -> _objc_terminate -> abort.
+  # Clamps the copy to the characters that exist and zero-fills the tail (a
+  # DETERMINISTIC terminator, better than the garbage classic CF copied).
+  # Symbol listed in custom.syms so abigen never dup-emits it.
+  cfstring_range_shim.c
   # agl_renderer_shim.c: ONE job — the AGL renderer-info ENUMERATION family.
   # aglQueryRendererInfo takes a QuickDraw GDHandle, so on 64-bit it is a dead
   # entry point (measured: NULL for every input, aglGetError()==0) and every
@@ -674,6 +686,7 @@ add_library(abiconv SHARED
   maptable_tramp.asm
   cow_string_tramp.asm
   cg_display_tramp.asm
+  cfstring_range_tramp.asm
   eh_tramp.asm
   dyld_stub_binder.asm
   dyld_func_lookup.asm

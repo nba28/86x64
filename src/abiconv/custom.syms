@@ -189,6 +189,10 @@ _CFStringCreateWithFormat
 _CFStringCreateWithFormatAndArguments
 _CFStringAppendFormatAndArguments
 
+# cfstring_range_shim.c / cfstring_range_tramp.asm — classic CF never validated
+# the CFRange; modern CF throws from NSTaggedPointerString but not __NSCFString.
+_CFStringGetCharacters
+
 _NSUnionRect
 _NSIntersectionRect
 _NSInsetRect
