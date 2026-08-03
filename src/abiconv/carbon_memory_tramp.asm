@@ -99,3 +99,9 @@
 	MTSHIM	___CSMemDisposePtr,	_shim_CSMemDisposePtr
 	MTSHIM	___CSMemGetPtrSize,	_shim_CSMemGetPtrSize
 	MTSHIM	___CSMemSetPtrSize,	_shim_CSMemSetPtrSize
+
+	;; --- BlockMove/BlockZero: removed natives, so these MUST be ours ----
+	MTSHIM	___BlockMove,		_shim_BlockMove
+	MTSHIM	___BlockMoveData,	_shim_BlockMoveData
+	MTSHIM	___BlockZero,		_shim_BlockZero
+	MTSHIM	___BlockZeroData,	_shim_BlockZeroData

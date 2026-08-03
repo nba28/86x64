@@ -467,3 +467,37 @@ CSMEM_ALIAS(PtrToXHand)       CSMEM_ALIAS(PtrAndHand)
 CSMEM_ALIAS(Munger)           CSMEM_ALIAS(HGetState)
 CSMEM_ALIAS(HSetState)        CSMEM_ALIAS(NewPtrClear)
 CSMEM_ALIAS(GetPtrSize)       CSMEM_ALIAS(SetPtrSize)
+
+/* ---- BlockMove / BlockZero: removed from macOS, and NOT optional ---------
+ * These are the classic bulk-copy primitives, and `find_null_jump_bridges.py`
+ * flagged them as NULL-JUMP ORPHANS: libabiconv exported a bridge, the native
+ * definition is gone from modern macOS, so the bridge jumped to 0. Nothing else
+ * in the process provides them, so unlike the QuickTime family this cannot be
+ * fixed by staying out of the path -- it has to be implemented. Almost every
+ * classic app calls BlockMoveData, so this was a latent jump-to-zero across the
+ * whole target set.
+ *
+ * BlockMove is defined to tolerate OVERLAPPING regions, so memmove (not memcpy)
+ * is the correct primitive. The only difference between BlockMove and
+ * BlockMoveData historically was instruction-cache flushing on 68K/PPC, which
+ * has no meaning here, so they share an implementation. */
+
+/* void BlockMove(const void *srcPtr, void *destPtr, Size byteCount); */
+uint32_t shim_BlockMove(uint32_t *a)
+{
+   void *src = i386_ptr(a[0]), *dst = i386_ptr(a[1]);
+   uint32_t n = a[2];
+   if (src && dst && n) memmove(dst, src, n);
+   return 0;
+}
+uint32_t shim_BlockMoveData(uint32_t *a)     { return shim_BlockMove(a); }
+
+/* void BlockZero(void *destPtr, Size byteCount); */
+uint32_t shim_BlockZero(uint32_t *a)
+{
+   void *dst = i386_ptr(a[0]);
+   uint32_t n = a[1];
+   if (dst && n) memset(dst, 0, n);
+   return 0;
+}
+uint32_t shim_BlockZeroData(uint32_t *a)     { return shim_BlockZero(a); }

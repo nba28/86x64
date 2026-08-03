@@ -447,6 +447,15 @@ agl-renderer-info: $(BUILD_DIR)/99_agl_renderer_info.x86_64
 # M64_NO_CFSTRING_RANGE_CLAMP=1 side and fails if the arms do not differ.
 cfstring-range: $(BUILD_DIR)/99_cfstring_range_overrun.x86_64
 	@bash cfstring_range_test.sh
+# nulljump-no-shadow: A/B guard proving static-interpose refuses to redirect a
+# bind into a bridge that can only jump to NULL. abigen emits ___X while a native
+# _X exists; when Apple removes the API the bridge survives, the pipeline weakens
+# the dangling bind to NULL, and redirecting into it REPLACES whatever the app
+# would have bound to with a guaranteed crash. Measured: 507 such bridges, 358
+# shadowing implementations the app itself ships (Civ IV's
+# QTNewDataReferenceFromFSRef). OFF arm empties the list via NULLJUMP=/dev/null.
+nulljump-no-shadow: $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL)
+	@bash nulljump_no_shadow_test.sh
 # carbon-datetime: A/B guard for the classic Date & Time Utilities, REMOVED from
 # modern macOS. abigen still emits a bridge; the pipeline weakens the dangling
 # bind to NULL, so the classic call jumps to 0 (Halo, rip=0, 2026-08-03).
@@ -1365,6 +1374,12 @@ $(BUILD_DIR)/99_cf_key_concat_replace.i386: $(BUILD_DIR)/99_cf_key_concat_replac
 $(BUILD_DIR)/99_cfstring_range_overrun.i386: $(BUILD_DIR)/99_cfstring_range_overrun.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 99_nulljump_no_shadow: CTabChanged is a removed classic QuickDraw call, so it
+# is undefined dynamic_lookup and static-interpose decides at translate time
+# whether to redirect it. Overrides %.i386.
+$(BUILD_DIR)/99_nulljump_no_shadow.i386: $(BUILD_DIR)/99_nulljump_no_shadow.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # 99_carbon_datetime: the whole family is undefined dynamic_lookup — these
 # symbols are gone from modern macOS and libabiconv exports a ___<name>
 # trampoline for each (carbon_datetime_tramp.asm). Overrides %.i386.
@@ -1390,8 +1405,14 @@ $(BUILD_DIR)/%.x86_64: $(BUILD_DIR)/%.i386 $(MACHO_TOOL) $(BUILD_DIR)/libabiconv
 	    -i $(LIBINTERPOSE) -o $@ $<
 	@chmod +x $@
 
+# The .nulljump list must travel WITH the dylib: static-interpose looks for it
+# next to whatever -l it was given, and without it every guard would silently
+# keep interposing the bridges that can only jump to NULL -- i.e. the suites
+# would stop exercising the very behaviour they are meant to protect.
 $(BUILD_DIR)/libabiconv.dylib: $(LIBABICONV) | $(BUILD_DIR)
 	cp $< $@
+	@cp $(dir $(LIBABICONV))libabiconv.nulljump $(BUILD_DIR)/ 2>/dev/null || echo "warning: libabiconv.nulljump missing next to $(LIBABICONV)"
+
 
 clean:
 	rm -rf $(BUILD_DIR)

@@ -711,3 +711,11 @@ _SecondsToDate
 _DateToSeconds
 _LongSecondsToDate
 _LongDateToSeconds
+
+# BlockMove/BlockZero (carbon_memory.c) -- removed from modern macOS, so abigen's
+# bridge could only jump to NULL. Nothing else provides them, so they are
+# implemented rather than merely un-shadowed.
+_BlockMove
+_BlockMoveData
+_BlockZero
+_BlockZeroData
