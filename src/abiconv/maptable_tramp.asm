@@ -836,6 +836,25 @@ _x64_exc_longjmp:
 	; our own consumer half can resolve. See carbon_fsspec_shim.c.
 	MTSHIM	___FindFolder,      _shim_FindFolder
 
+	; The classic File Manager WRITE path (carbon_fsspec_shim.c). These were NULL-JUMP
+	; ORPHANS: the legacy shim pass reads the 10.6 SDK's i386 headers and emits a
+	; pass-through bridge that calls a native which has never existed on x86_64 -- checked
+	; against the REAL Mojave 10.14 x86_64 CarbonCore (the last macOS that ran 32-bit code),
+	; only 2 of our 114 orphans exist there, and none of these. So the bridge could only
+	; `call 0`, and nothing else in the process supplies them. This is the family a classic
+	; app uses to SAVE.
+	MTSHIM	___FSpCreate,       _shim_FSpCreate
+	MTSHIM	___FSpDirCreate,    _shim_FSpDirCreate
+	MTSHIM	___DirCreate,       _shim_DirCreate
+	MTSHIM	___HDelete,         _shim_HDelete
+	MTSHIM	___FSpRename,       _shim_FSpRename
+	MTSHIM	___HRename,         _shim_HRename
+	MTSHIM	___CatMove,         _shim_CatMove
+	MTSHIM	___FSpCatMove,      _shim_FSpCatMove
+	MTSHIM	___FSpExchangeFiles, _shim_FSpExchangeFiles
+	MTSHIM	___FSpSetFInfo,     _shim_FSpSetFInfo
+	MTSHIM	___FlushVol,        _shim_FlushVol
+
 	; Classic resource-fork open with the FLATTENED (data-fork) fallback
 	; (rsrc_datafork_shim.c). codesign refuses any bundle carrying an HFS
 	; resource fork, so `m64 forks --flatten` migrates *.rsrc payloads into the

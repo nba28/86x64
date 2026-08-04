@@ -719,3 +719,19 @@ _BlockMove
 _BlockMoveData
 _BlockZero
 _BlockZeroData
+
+# The classic File Manager WRITE path (carbon_fsspec_shim.c). Listing them here is
+# LOAD-BEARING: it stops the legacy shim pass emitting a competing pass-through bridge to a
+# native that has never existed on x86_64 (verified against the real Mojave 10.14 x86_64
+# CarbonCore, not an SDK stub). FSpDelete is already listed via fmgr_shim.c's set.
+_FSpCreate
+_FSpDirCreate
+_DirCreate
+_HDelete
+_FSpRename
+_HRename
+_CatMove
+_FSpCatMove
+_FSpExchangeFiles
+_FSpSetFInfo
+_FlushVol

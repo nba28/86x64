@@ -380,3 +380,377 @@ int shim_FSRefMakePath(uint32_t *args) {
     if (st != 0 && path && maxPathSize && !fsspec_legacy()) { path[0] = '\0'; }
     return st;
 }
+
+// ════════════════════════════════════════════════════════════════════════════════════════
+// THE CLASSIC FILE MANAGER *WRITE* PATH
+//
+// Everything above answers "where is this file?". This half answers "make it so" —
+// create, delete, rename, move, exchange, set Finder info. It is the same job (the dead
+// FSSpec/HFS File Manager, resolved for real against the live file system) and shares the
+// same resolver and the same ABICONV_FSSPEC_LEGACY kill switch, so it lives here rather
+// than in a dylib of its own.
+//
+// WHY IT WAS MISSING. find_null_jump_bridges.py (2026-08-04) classified these as NULL-JUMP
+// ORPHANS: the legacy shim pass reads the 10.6 SDK's *i386* headers and emits a
+// pass-through bridge `___FSpCreate` that calls a native `_FSpCreate`. That native has NEVER
+// existed on x86_64 — checking the 10.6 SDK's own stub library, FSpCreate/NewAlias/
+// ResolveAlias/UpperString/... are present in the i386 slice and absent from the x86_64
+// slice, i.e. Apple had already dropped them from 64-bit Carbon in 2009. So the bridge could
+// only ever `call 0`. Nothing else in the process supplies them, which is exactly the case
+// the shadowing fix cannot help with: they have to be implemented.
+//
+// This is the family a classic app uses to SAVE, so the whole write path of every Carbon
+// target depended on it.
+//
+// SCOPE. Implemented here are the calls that COMPLETE inside the shim. Deliberately NOT
+// here: the ones that hand back a File Manager refNum for some other API to consume
+// (FSpOpenRF, HOpenResFile, PBGetFCBInfoSync, GetFPos) — a refNum we mint means nothing to
+// native FSRead/FSClose, so those need the fork/refNum layer and are tracked separately.
+
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+#include <sys/attr.h>
+
+#define FM_DUPFN_ERR (-48)   // dupFNErr  — a file with that name already exists
+#define FM_IO_ERR     (-36)  // ioErr     — generic I/O failure
+#define FM_BDNAM_ERR  (-37)  // bdNamErr  — bad file name
+#define FM_FBSY_ERR   (-47)  // fBsyErr   — file/directory busy
+
+// errno -> the OSErr a classic caller knows how to branch on.
+static int fm_err_from_errno(void) {
+    switch (errno) {
+    case 0:        return FM_NO_ERR;
+    case EEXIST:   return FM_DUPFN_ERR;
+    case ENOENT:   return FM_FNF_ERR;
+    case ENOTEMPTY:
+    case EBUSY:    return FM_FBSY_ERR;
+    case EINVAL:
+    case ENAMETOOLONG: return FM_BDNAM_ERR;
+    default:       return FM_IO_ERR;
+    }
+}
+
+// (vRefNum, dirID, HFS leaf name) -> POSIX path. The HFS-style half of the API family
+// addresses files this way instead of by FSSpec; the resolution is identical, so this just
+// assembles the same two pieces fsspec_to_path uses.
+static int hfs_to_path(int16_t vRefNum, int32_t dirID, const uint8_t *pname,
+                       char *out, size_t outsz) {
+    char parent[1024];
+    char leaf[128];
+    size_t pl;
+
+    if (!fsdir_to_path(vRefNum, dirID, parent, sizeof parent)) { return 0; }
+    if (!pname || pname[0] == 0) { snprintf(out, outsz, "%s", parent); return 1; }
+    hfs_leaf_to_posix(pname, leaf, sizeof leaf);
+    pl = strlen(parent);
+    snprintf(out, outsz, "%s%s%s", parent, (pl && parent[pl - 1] == '/') ? "" : "/", leaf);
+    return 1;
+}
+
+// Replace the last path component, keeping the directory. Used by the rename calls, which
+// are documented to rename IN PLACE (a new name, never a new parent).
+static void path_with_new_leaf(const char *path, const uint8_t *pname,
+                               char *out, size_t outsz) {
+    char leaf[128];
+    const char *slash = strrchr(path, '/');
+    size_t dirlen = slash ? (size_t)(slash - path) : 0;
+
+    hfs_leaf_to_posix(pname, leaf, sizeof leaf);
+    snprintf(out, outsz, "%.*s/%s", (int)dirlen, path, leaf);
+}
+
+static void fm_trace(const char *what, const char *a, const char *b, int err) {
+    if (!fsspec_trace()) { return; }
+    fprintf(stderr, "[fsspec] %s '%s'%s%s -> %d\n", what, a ? a : "", b ? "' -> '" : "",
+            b ? b : "", err);
+    fflush(stderr);
+}
+
+// A directory's classic dirID is its catalog node id = the inode number. Callers pass a
+// `long *` that must be DEFINED even when the call fails (the out-param rule that cost us
+// the Halo nil-CFStringRef crash), so it is written before anything can go wrong.
+static void set_dir_id(uint32_t slot, const char *path) {
+    int32_t *out = (int32_t *)(uintptr_t)slot;
+    struct stat st;
+    if (!out) { return; }
+    *out = 0;
+    if (path && stat(path, &st) == 0 && (uint64_t)st.st_ino <= 0x7FFFFFFFULL) {
+        *out = (int32_t)st.st_ino;
+    }
+}
+
+// ── create ──────────────────────────────────────────────────────────────────────────────
+
+// OSErr FSpCreate(const FSSpec *spec, OSType creator, OSType fileType, ScriptCode script);
+// Classic contract: creates an EMPTY data fork and fails with dupFNErr if the name is
+// taken — never truncates an existing file. O_EXCL is exactly that.
+int shim_FSpCreate(uint32_t *args) {
+    const uint8_t *spec = (const uint8_t *)(uintptr_t)args[0];
+    char path[2048];
+    int fd;
+
+    if (fsspec_legacy()) { return FM_FNF_ERR; }
+    if (!spec) { return FM_PARAM_ERR; }
+    if (!fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
+
+    fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0666);
+    if (fd < 0) { int e = fm_err_from_errno(); fm_trace("FSpCreate", path, NULL, e); return e; }
+    close(fd);
+    // creator/fileType are Finder metadata; set through the same path FSpSetFInfo uses so
+    // there is one implementation of the Finder-info write.
+    {
+        struct attrlist al;
+        uint8_t fi[32];
+        memset(&al, 0, sizeof al);
+        memset(fi, 0, sizeof fi);
+        al.bitmapcount = ATTR_BIT_MAP_COUNT;
+        al.commonattr = ATTR_CMN_FNDRINFO;
+        // FInfo: OSType fdType @0, OSType fdCreator @4 — big-endian on disk, as classic
+        // code already stores them.
+        fi[0] = (uint8_t)(args[2] >> 24); fi[1] = (uint8_t)(args[2] >> 16);
+        fi[2] = (uint8_t)(args[2] >> 8);  fi[3] = (uint8_t)args[2];
+        fi[4] = (uint8_t)(args[1] >> 24); fi[5] = (uint8_t)(args[1] >> 16);
+        fi[6] = (uint8_t)(args[1] >> 8);  fi[7] = (uint8_t)args[1];
+        if (args[1] || args[2]) { setattrlist(path, &al, fi, sizeof fi, 0); }
+    }
+    fm_trace("FSpCreate", path, NULL, FM_NO_ERR);
+    return FM_NO_ERR;
+}
+
+// OSErr FSpDirCreate(const FSSpec *spec, ScriptCode script, long *createdDirID);
+int shim_FSpDirCreate(uint32_t *args) {
+    const uint8_t *spec = (const uint8_t *)(uintptr_t)args[0];
+    char path[2048];
+    int e;
+
+    set_dir_id(args[2], NULL);                    // defined before any failure path
+    if (fsspec_legacy()) { return FM_FNF_ERR; }
+    if (!spec) { return FM_PARAM_ERR; }
+    if (!fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
+    if (mkdir(path, 0777) != 0) {
+        e = fm_err_from_errno(); fm_trace("FSpDirCreate", path, NULL, e); return e;
+    }
+    set_dir_id(args[2], path);
+    fm_trace("FSpDirCreate", path, NULL, FM_NO_ERR);
+    return FM_NO_ERR;
+}
+
+// OSErr DirCreate(short vRefNum, long parentDirID, ConstStr255Param name, long *createdDirID);
+int shim_DirCreate(uint32_t *args) {
+    char path[2048];
+    int e;
+
+    set_dir_id(args[3], NULL);
+    if (fsspec_legacy()) { return FM_FNF_ERR; }
+    if (!hfs_to_path((int16_t)(uint16_t)args[0], (int32_t)args[1],
+                     (const uint8_t *)(uintptr_t)args[2], path, sizeof path)) {
+        return FM_NSV_ERR;
+    }
+    if (mkdir(path, 0777) != 0) {
+        e = fm_err_from_errno(); fm_trace("DirCreate", path, NULL, e); return e;
+    }
+    set_dir_id(args[3], path);
+    fm_trace("DirCreate", path, NULL, FM_NO_ERR);
+    return FM_NO_ERR;
+}
+
+// ── delete ──────────────────────────────────────────────────────────────────────────────
+
+// Classic Delete/HDelete removes a file OR an empty directory; POSIX splits the two.
+static int fm_delete_path(const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) { return FM_FNF_ERR; }
+    if (S_ISDIR(st.st_mode)) { return rmdir(path) == 0 ? FM_NO_ERR : fm_err_from_errno(); }
+    return unlink(path) == 0 ? FM_NO_ERR : fm_err_from_errno();
+}
+
+// OSErr HDelete(short vRefNum, long dirID, ConstStr255Param fileName);
+int shim_HDelete(uint32_t *args) {
+    char path[2048];
+    int e;
+    if (fsspec_legacy()) { return FM_FNF_ERR; }
+    if (!hfs_to_path((int16_t)(uint16_t)args[0], (int32_t)args[1],
+                     (const uint8_t *)(uintptr_t)args[2], path, sizeof path)) {
+        return FM_NSV_ERR;
+    }
+    e = fm_delete_path(path);
+    fm_trace("HDelete", path, NULL, e);
+    return e;
+}
+
+// OSErr FSpDelete(const FSSpec *spec);
+int shim_FSpDelete(uint32_t *args) {
+    const uint8_t *spec = (const uint8_t *)(uintptr_t)args[0];
+    char path[2048];
+    int e;
+    if (fsspec_legacy()) { return FM_FNF_ERR; }
+    if (!spec) { return FM_PARAM_ERR; }
+    if (!fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
+    e = fm_delete_path(path);
+    fm_trace("FSpDelete", path, NULL, e);
+    return e;
+}
+
+// ── rename / move ───────────────────────────────────────────────────────────────────────
+
+// OSErr FSpRename(const FSSpec *spec, ConstStr255Param newName);
+// Renames within the SAME directory — the classic call cannot move a file (that is CatMove).
+int shim_FSpRename(uint32_t *args) {
+    const uint8_t *spec = (const uint8_t *)(uintptr_t)args[0];
+    const uint8_t *newName = (const uint8_t *)(uintptr_t)args[1];
+    char path[2048], dest[2048];
+    int e;
+
+    if (fsspec_legacy()) { return FM_FNF_ERR; }
+    if (!spec || !newName || newName[0] == 0) { return FM_PARAM_ERR; }
+    if (!fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
+    path_with_new_leaf(path, newName, dest, sizeof dest);
+    e = rename(path, dest) == 0 ? FM_NO_ERR : fm_err_from_errno();
+    fm_trace("FSpRename", path, dest, e);
+    return e;
+}
+
+// OSErr HRename(short vRefNum, long dirID, ConstStr255Param oldName, ConstStr255Param newName);
+int shim_HRename(uint32_t *args) {
+    const uint8_t *newName = (const uint8_t *)(uintptr_t)args[3];
+    char path[2048], dest[2048];
+    int e;
+
+    if (fsspec_legacy()) { return FM_FNF_ERR; }
+    if (!newName || newName[0] == 0) { return FM_PARAM_ERR; }
+    if (!hfs_to_path((int16_t)(uint16_t)args[0], (int32_t)args[1],
+                     (const uint8_t *)(uintptr_t)args[2], path, sizeof path)) {
+        return FM_NSV_ERR;
+    }
+    path_with_new_leaf(path, newName, dest, sizeof dest);
+    e = rename(path, dest) == 0 ? FM_NO_ERR : fm_err_from_errno();
+    fm_trace("HRename", path, dest, e);
+    return e;
+}
+
+// OSErr CatMove(short vRefNum, long dirID, ConstStr255Param oldName,
+//               long newDirID, ConstStr255Param newName);
+// Moves to a new PARENT. `newName` names the destination DIRECTORY when non-empty
+// (classic quirk: it is a directory name inside newDirID, not the file's new leaf), so the
+// destination directory is (newDirID / newName) and the leaf is unchanged.
+int shim_CatMove(uint32_t *args) {
+    int16_t vRefNum = (int16_t)(uint16_t)args[0];
+    const uint8_t *oldName = (const uint8_t *)(uintptr_t)args[2];
+    char src[2048], dstdir[2048], dest[2048];
+    char leaf[128];
+    size_t dl;
+    int e;
+
+    if (fsspec_legacy()) { return FM_FNF_ERR; }
+    if (!hfs_to_path(vRefNum, (int32_t)args[1], oldName, src, sizeof src)) { return FM_NSV_ERR; }
+    if (!hfs_to_path(vRefNum, (int32_t)args[3], (const uint8_t *)(uintptr_t)args[4],
+                     dstdir, sizeof dstdir)) {
+        return FM_NSV_ERR;
+    }
+    hfs_leaf_to_posix(oldName, leaf, sizeof leaf);
+    dl = strlen(dstdir);
+    snprintf(dest, sizeof dest, "%s%s%s", dstdir, (dl && dstdir[dl - 1] == '/') ? "" : "/", leaf);
+    e = rename(src, dest) == 0 ? FM_NO_ERR : fm_err_from_errno();
+    fm_trace("CatMove", src, dest, e);
+    return e;
+}
+
+// OSErr FSpCatMove(const FSSpec *source, const FSSpec *dest);
+// `dest` names the destination DIRECTORY; the moved item keeps its own leaf name.
+int shim_FSpCatMove(uint32_t *args) {
+    const uint8_t *sspec = (const uint8_t *)(uintptr_t)args[0];
+    const uint8_t *dspec = (const uint8_t *)(uintptr_t)args[1];
+    char src[2048], dstdir[2048], dest[2048];
+    const char *slash;
+    size_t dl;
+    int e;
+
+    if (fsspec_legacy()) { return FM_FNF_ERR; }
+    if (!sspec || !dspec) { return FM_PARAM_ERR; }
+    if (!fsspec_to_path(sspec, src, sizeof src, NULL)) { return FM_NSV_ERR; }
+    if (!fsspec_to_path(dspec, dstdir, sizeof dstdir, NULL)) { return FM_NSV_ERR; }
+    slash = strrchr(src, '/');
+    dl = strlen(dstdir);
+    snprintf(dest, sizeof dest, "%s%s%s", dstdir, (dl && dstdir[dl - 1] == '/') ? "" : "/",
+             slash ? slash + 1 : src);
+    e = rename(src, dest) == 0 ? FM_NO_ERR : fm_err_from_errno();
+    fm_trace("FSpCatMove", src, dest, e);
+    return e;
+}
+
+// OSErr FSpExchangeFiles(const FSSpec *source, const FSSpec *dest);
+// The classic safe-save primitive: swap two files' CONTENTS while both keep their own
+// identity, so an open refNum / alias to `dest` sees the new data. renameatx_np(RENAME_SWAP)
+// is the modern equivalent; exchangedata() is the direct descendant but is deprecated and
+// unimplemented on APFS. Both are looked up by name so libabiconv stays loadable if either
+// disappears, and the fallback is an honest error rather than a silent half-swap.
+int shim_FSpExchangeFiles(uint32_t *args) {
+    static int (*p_renameatx)(int, const char *, int, const char *, unsigned int);
+    static int (*p_exchangedata)(const char *, const char *, unsigned int);
+    static int probed;
+    const uint8_t *sspec = (const uint8_t *)(uintptr_t)args[0];
+    const uint8_t *dspec = (const uint8_t *)(uintptr_t)args[1];
+    char a[2048], b[2048];
+    int e;
+
+    if (fsspec_legacy()) { return FM_FNF_ERR; }
+    if (!sspec || !dspec) { return FM_PARAM_ERR; }
+    if (!fsspec_to_path(sspec, a, sizeof a, NULL)) { return FM_NSV_ERR; }
+    if (!fsspec_to_path(dspec, b, sizeof b, NULL)) { return FM_NSV_ERR; }
+    if (!probed) {
+        p_renameatx = (int (*)(int, const char *, int, const char *, unsigned int))
+                      dlsym(RTLD_DEFAULT, "renameatx_np");
+        p_exchangedata = (int (*)(const char *, const char *, unsigned int))
+                         dlsym(RTLD_DEFAULT, "exchangedata");
+        probed = 1;
+    }
+    if (p_renameatx) {
+        e = p_renameatx(AT_FDCWD, a, AT_FDCWD, b, 0x0002 /* RENAME_SWAP */) == 0
+            ? FM_NO_ERR : fm_err_from_errno();
+    } else if (p_exchangedata) {
+        e = p_exchangedata(a, b, 0) == 0 ? FM_NO_ERR : fm_err_from_errno();
+    } else {
+        e = FM_IO_ERR;
+    }
+    fm_trace("FSpExchangeFiles", a, b, e);
+    return e;
+}
+
+// ── Finder info ─────────────────────────────────────────────────────────────────────────
+
+// OSErr FSpSetFInfo(const FSSpec *spec, const FInfo *fndrInfo);
+// FInfo is the first 16 bytes of the 32-byte Finder-info blob setattrlist takes; the rest
+// (FXInfo) is preserved by reading it back first, so setting a file type does not silently
+// wipe the extended info.
+int shim_FSpSetFInfo(uint32_t *args) {
+    const uint8_t *spec = (const uint8_t *)(uintptr_t)args[0];
+    const uint8_t *finfo = (const uint8_t *)(uintptr_t)args[1];
+    char path[2048];
+    struct attrlist al;
+    struct { uint32_t len; uint8_t fi[32]; } buf;
+    uint8_t out[32];
+
+    if (fsspec_legacy()) { return FM_FNF_ERR; }
+    if (!spec || !finfo) { return FM_PARAM_ERR; }
+    if (!fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
+
+    memset(&al, 0, sizeof al);
+    al.bitmapcount = ATTR_BIT_MAP_COUNT;
+    al.commonattr = ATTR_CMN_FNDRINFO;
+    memset(out, 0, sizeof out);
+    if (getattrlist(path, &al, &buf, sizeof buf, 0) == 0) { memcpy(out, buf.fi, sizeof out); }
+    memcpy(out, finfo, 16);                       // FInfo replaces only its own half
+    if (setattrlist(path, &al, out, sizeof out, 0) != 0) {
+        int e = fm_err_from_errno(); fm_trace("FSpSetFInfo", path, NULL, e); return e;
+    }
+    fm_trace("FSpSetFInfo", path, NULL, FM_NO_ERR);
+    return FM_NO_ERR;
+}
+
+// OSErr FlushVol(ConstStr63Param volName, short vRefNum);
+// Classic "commit this volume's cached blocks". POSIX has no per-volume flush that an
+// unprivileged process may call, and every write above is already unbuffered at the syscall
+// layer, so the honest answer is success: the data a caller is asking us to commit is
+// already committed. sync() is deliberately NOT used — it is a whole-system stall.
+int shim_FlushVol(uint32_t *args) { (void)args; return fsspec_legacy() ? FM_NSV_ERR : FM_NO_ERR; }

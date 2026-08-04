@@ -49,7 +49,10 @@ uint32_t shim_FSpOpenDF(uint32_t *args) {
     int16_t *refNum = (int16_t *)PTR(2); if (refNum) *refNum = 0;
     return (uint32_t)FM_FNF_ERR;
 }
-uint32_t shim_FSpDelete(uint32_t *args)   { (void)args; return (uint32_t)FM_FNF_ERR; }
+// shim_FSpDelete has MOVED to carbon_fsspec_shim.c, which grew a real FSSpec->POSIX
+// resolver and can therefore actually delete the file. That file now owns the whole
+// classic write path (create/delete/rename/move/exchange/set-Finder-info); the graceful
+// errors left here are the ones that still cannot be honoured — see the FOLLOW-UP above.
 // ★Same output-buffer invariant as shim_FSpOpenDF above (and carbon_fsspec_shim.c): a
 // classic caller that skips the OSErr check would otherwise read its own uninitialised
 // stack back as an FInfo — a garbage fdType/fdCreator is exactly the class of defect that
