@@ -781,16 +781,27 @@ add_test(NAME snd_convert_test COMMAND snd_convert_test)
 # _X undefined, and _X no longer resolves on this OS (Apple removed the API).
 # static-interpose.sh reads this and refuses to redirect an app's bind into one.
 #
-# Measured 2026-08-03: 507 of them, 358 shadowing a WORKING implementation the
-# app itself ships (347 from its own bundled translated QuickTime.framework, 11
+# Measured 2026-08-04: 536 of them, 422 shadowing a WORKING implementation the
+# app itself ships (347 from its own bundled translated QuickTime.framework, 75
 # from its bundled Python). Interposing those replaced working code with a
 # guaranteed crash -- Civ IV's QTNewDataReferenceFromFSRef death.
 #
 # Generated at BUILD time rather than checked in, because "does _X resolve" is a
 # runtime dlsym question whose answer changes with the OS version: a list frozen
 # on one macOS would silently rot on the next.
-add_custom_command(TARGET abiconv POST_BUILD
+#
+# ⚠It DEPENDS on the finder and its x86_64 probe, not just on the dylib. As a
+# plain POST_BUILD it only regenerated when abiconv happened to relink, so a
+# corrected finder left the old list in place and every subsequent translate used
+# it. The OUTPUT form below re-runs whenever any of the three inputs changes.
+add_custom_command(
+  OUTPUT  ${CMAKE_CURRENT_BINARY_DIR}/libabiconv.nulljump
   COMMAND ${CMAKE_COMMAND} -E echo "generating libabiconv.nulljump (bridges with no native target)"
   COMMAND python3 ${CMAKE_SOURCE_DIR}/src/86x64/find_null_jump_bridges.py --emit
-          $<TARGET_FILE:abiconv> > $<TARGET_FILE_DIR:abiconv>/libabiconv.nulljump
+          $<TARGET_FILE:abiconv> > ${CMAKE_CURRENT_BINARY_DIR}/libabiconv.nulljump
+  DEPENDS abiconv
+          ${CMAKE_SOURCE_DIR}/src/86x64/find_null_jump_bridges.py
+          ${CMAKE_SOURCE_DIR}/src/86x64/nulljump_probe.c
   VERBATIM)
+add_custom_target(abiconv_nulljump ALL
+  DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/libabiconv.nulljump)

@@ -30,6 +30,18 @@ Condition 3 is checked by actually dlopening the frameworks a translated app
 loads and dlsym'ing the name -- the same question dyld will ask at run time --
 rather than by guessing from header availability.
 
+★THAT PROBE RUNS IN A SEPARATE x86_64 PROCESS (src/86x64/nulljump_probe.c), and
+must. Asking it in-process was wrong twice over, measured 2026-08-04:
+  * python3 here is arm64, so it answered for the WRONG ARCHITECTURE. 33 symbols
+    that exist only on x86_64 were called dead -- objc_msgSend_stret / _fpret /
+    Super_stret and the whole $INODE64 stat/readdir/scandir family. Excluding
+    those from interposition binds them straight to native x86_64 code invoked
+    with i386 4-byte argument slots.
+  * the probing process WAS Python, so RTLD_DEFAULT found the Python C-API in the
+    interpreter itself and declared 63 `Py*` bridges healthy. They are not: they
+    were still being interposed into jump-to-zero, and Civilization IV runs its
+    entire game logic through that API.
+
 Hand-written shims are NOT traps: they implement the work themselves and leave
 no undefined native, so condition 2 excludes them automatically. That matters --
 a blanket "exclude all _QT*" would break quicktime_image.c and the golden
@@ -39,11 +51,19 @@ usage: find_null_jump_bridges.py <libabiconv.dylib> [bundle-to-check-for-defs ..
        find_null_jump_bridges.py --emit <libabiconv.dylib>   # bare symbol list
                                                              # for static-interpose
 """
-import ctypes
-import ctypes.util
 import subprocess
 import sys
 import os
+
+# ★The dlsym probe MUST run in an x86_64 process. This script used to answer
+# "does _X resolve?" with ctypes in its own interpreter, which on Apple Silicon
+# is arm64 -- a different question from the one dyld asks when it binds a
+# TRANSLATED x86_64 app. Measured 2026-08-04: 33 of 147 "orphans" were that false
+# positive, among them objc_msgSend_stret / _fpret / Super_stret and the entire
+# $INODE64 stat/readdir/scandir family. Excluding those from interposition leaves
+# them bound straight to native x86_64 code called with i386 4-byte argument
+# slots. See src/86x64/nulljump_probe.c.
+PROBE_SRC = os.path.join(os.path.dirname(os.path.abspath(__file__)), "nulljump_probe.c")
 
 # The frameworks a translated classic app actually has loaded. dlopen'ing them
 # puts their exports in reach of an RTLD_DEFAULT lookup, so the dlsym below asks
@@ -62,7 +82,48 @@ FRAMEWORKS = [
     "/System/Library/Frameworks/AudioToolbox.framework/AudioToolbox",
     "/System/Library/Frameworks/IOKit.framework/IOKit",
     "/usr/lib/libSystem.B.dylib",
+    "/usr/lib/libobjc.A.dylib",
 ]
+
+
+def resolves_on_x86_64(names):
+    """Subset of `names` that a translated x86_64 app's dyld would resolve.
+
+    Compiles nulljump_probe.c -arch x86_64 and runs it under `arch -x86_64`.
+    There is deliberately NO fallback to an in-process ctypes answer: that is the
+    bug this replaced, and a plausible wrong list is worse than a loud failure.
+    """
+    if os.environ.get("M64_NULLJUMP_PROBE_ARCH") == "native":
+        # KILL SWITCH -- reinstates the pre-2026-08-04 in-process answer so the
+        # guard can show the invariant breaking. Never use it to build a list.
+        import ctypes
+        for fw in FRAMEWORKS:
+            try:
+                ctypes.CDLL(fw)
+            except OSError:
+                pass
+        here, got = ctypes.CDLL(None), set()
+        for n in names:
+            try:
+                getattr(here, n[1:])
+                got.add(n)
+            except AttributeError:
+                pass
+        return got
+
+    probe = os.path.join(os.environ.get("TMPDIR", "/tmp"), "nulljump_probe.x86_64")
+    if not os.path.exists(probe) or os.path.getmtime(probe) < os.path.getmtime(PROBE_SRC):
+        cc = subprocess.run(["clang", "-arch", "x86_64", "-O0", "-o", probe, PROBE_SRC],
+                            capture_output=True, text=True)
+        if cc.returncode != 0:
+            raise SystemExit("find_null_jump_bridges: cannot build the x86_64 probe:\n"
+                             + cc.stderr)
+    run = subprocess.run(["arch", "-x86_64", probe] + FRAMEWORKS,
+                         input="\n".join(sorted(names)), capture_output=True, text=True)
+    if run.returncode != 0:
+        raise SystemExit("find_null_jump_bridges: the x86_64 probe failed (is Rosetta "
+                         "installed?):\n" + run.stderr)
+    return set(run.stdout.split())
 
 
 def nm(args, path):
@@ -115,15 +176,12 @@ def main():
             return 2
     lib = sys.argv[1]
 
-    for fw in FRAMEWORKS:                      # populate the search scope
-        try:
-            ctypes.CDLL(fw)
-        except OSError:
-            pass                               # absent framework: that IS the finding
-    here = ctypes.CDLL(None)
-
     bridges = exported_bridges(lib)
     undef = undefined_natives(lib)
+
+    # One batched probe rather than one process per symbol.
+    candidates = {br[2:] for br in bridges if br[2:] in undef}
+    live = resolves_on_x86_64(candidates)
 
     # Symbols provided by any bundle the caller pointed us at (translated
     # frameworks count -- they are real, working implementations).
@@ -148,11 +206,8 @@ def main():
         native = br[2:]                        # ___X -> _X
         if native not in undef:
             continue                           # hand-written shim: no native call
-        try:
-            getattr(here, native[1:])          # dlsym without the leading _
-            continue                           # resolves: the bridge is fine
-        except AttributeError:
-            pass
+        if native in live:
+            continue                           # resolves on x86_64: the bridge is fine
         traps.append((native, bundled.get(native)))
 
     if emit:

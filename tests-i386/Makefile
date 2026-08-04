@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim
+.PHONY: nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -456,6 +456,14 @@ cfstring-range: $(BUILD_DIR)/99_cfstring_range_overrun.x86_64
 # QTNewDataReferenceFromFSRef). OFF arm empties the list via NULLJUMP=/dev/null.
 nulljump-no-shadow: $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL)
 	@bash nulljump_no_shadow_test.sh
+# nulljump-probe-arch: the exclusion list above is only as good as the dlsym that
+# builds it, and that question is ARCHITECTURE-DEPENDENT. Asking it in-process
+# was wrong twice: python3 here is arm64 (33 x86_64-only symbols called dead,
+# incl. objc_msgSend_stret and the $INODE64 stat/readdir family), and the process
+# was python (63 Py* bridges called healthy because RTLD_DEFAULT found the C-API
+# in the interpreter). Invariant: nothing on the list may resolve on x86_64.
+nulljump-probe-arch: $(BUILD_DIR)/libabiconv.dylib
+	@bash nulljump_probe_arch_test.sh
 # carbon-datetime: A/B guard for the classic Date & Time Utilities, REMOVED from
 # modern macOS. abigen still emits a bridge; the pipeline weakens the dangling
 # bind to NULL, so the classic call jumps to 0 (Halo, rip=0, 2026-08-03).
