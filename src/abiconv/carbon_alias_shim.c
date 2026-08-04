@@ -168,6 +168,18 @@ static int alias_trace(void) {
     if (c < 0) { c = getenv("ABICONV_ALIAS_TRACE") != NULL; }
     return c;
 }
+// ★A SECOND, NARROWER kill switch, for the half of this file that is not a bridge.
+// ABICONV_ALIAS_LEGACY=1 turns the whole Alias Manager off, which proves the family is
+// implemented but says nothing about WHICH half makes an alias behave like an alias.
+// ABICONV_ALIAS_NO_BOOKMARK=1 keeps the bridge onto Apple's surviving engine and omits only
+// the appendix, so the guard can show that resolving IN PLACE still works while following a
+// RENAME stops working. Without that third arm, "FOLLOWED_RENAME=1" could in principle be
+// the native engine doing the work, and the hybrid would be decoration.
+static int alias_no_bookmark(void) {
+    static int c = -1;
+    if (c < 0) { const char *e = getenv("ABICONV_ALIAS_NO_BOOKMARK"); c = (e && *e && *e != '0'); }
+    return c;
+}
 static void am_trace(const char *what, const char *a, int err) {
     if (!alias_trace()) { return; }
     fprintf(stderr, "[alias] %s '%s' -> %d\n", what, a ? a : "", err);
@@ -323,7 +335,14 @@ static int am_path_from_native(const uint8_t *rec, uint32_t len, char *out, size
 
 // The POSIX path an OS X-era record carries in tag 18. Apple stores it WITHOUT the leading
 // '/' (measured: "private/tmp/x"), relative to the mountpoint in tag 19.
-static int am_path_from_tag18(const uint8_t *rec, uint32_t len, char *out, size_t outsz) {
+//
+// ★`require_exists` is what separates the reader's TWO jobs, and getting it wrong is a real
+// defect the guard caught: as a step in the resolution ladder the path is only an answer if
+// something is actually there, but as the source of the `wasChanged` / `needsUpdate`
+// comparison it is wanted precisely WHEN the recorded target no longer exists — that is the
+// definition of the target having moved. One flag, two callers, no duplicated parser.
+static int am_path_from_tag18(const uint8_t *rec, uint32_t len, char *out, size_t outsz,
+                              int require_exists) {
     const uint8_t *p = NULL, *mp = NULL;
     uint32_t n = am_find_tag(rec, len, AR_TAG_POSIX_PATH, &p);
     uint32_t mn = am_find_tag(rec, len, 19 /*posix path to mountpoint*/, &mp);
@@ -338,13 +357,14 @@ static int am_path_from_tag18(const uint8_t *rec, uint32_t len, char *out, size_
     }
     if (mount[0] != '/' || strcmp(mount, "/") == 0) { snprintf(out, outsz, "/%.*s", (int)n, p); }
     else { snprintf(out, outsz, "%s/%.*s", mount, (int)n, p); }
-    return stat(out, &st) == 0;
+    return require_exists ? (stat(out, &st) == 0) : 1;
 }
 
 // The Carbon colon path (tag 2), for records predating tag 18. Measured form on this OS:
 // "/:private:tmp:dir:leaf" — a mountpoint, then ':'-separated components with the usual
 // '/' <-> ':' exchange inside each one.
-static int am_path_from_tag2(const uint8_t *rec, uint32_t len, char *out, size_t outsz) {
+static int am_path_from_tag2(const uint8_t *rec, uint32_t len, char *out, size_t outsz,
+                             int require_exists) {
     const uint8_t *p = NULL;
     uint32_t n = am_find_tag(rec, len, AR_TAG_CARBON_PATH, &p);
     struct stat st;
@@ -362,7 +382,7 @@ static int am_path_from_tag2(const uint8_t *rec, uint32_t len, char *out, size_t
     }
     buf[o] = '\0';
     snprintf(out, outsz, "%s", buf);
-    return stat(out, &st) == 0;
+    return require_exists ? (stat(out, &st) == 0) : 1;
 }
 
 // ★The resolution ladder. `moved` (optional) reports whether the answer differs from the
@@ -379,17 +399,18 @@ static int am_path_from_record(const uint8_t *rec, uint32_t len, char *out, size
     if (!rec || len < AR_TAGS_OFF) { return 0; }
     out[0] = '\0';
 
-    // What the record itself says the path was, used only to answer `wasChanged`. Reading
-    // it cannot fail the resolve.
+    // What the record itself says the path WAS, used only to answer `wasChanged`. Read with
+    // require_exists = 0: the interesting case is precisely the one where that path is now
+    // empty. Reading it cannot fail the resolve.
     recorded[0] = '\0';
-    have_recorded = am_path_from_tag18(rec, len, recorded, sizeof recorded) ||
-                    am_path_from_tag2(rec, len, recorded, sizeof recorded);
+    have_recorded = am_path_from_tag18(rec, len, recorded, sizeof recorded, 0) ||
+                    am_path_from_tag2(rec, len, recorded, sizeof recorded, 0);
 
     bl = am_find_appendix(rec, len, &blob);
     if (bl && am_path_from_bookmark(blob, bl, out, outsz)) { ok = 1; }
     if (!ok && am_path_from_native(rec, len, out, outsz)) { ok = 1; }
-    if (!ok && am_path_from_tag18(rec, len, out, outsz)) { ok = 1; }
-    if (!ok && am_path_from_tag2(rec, len, out, outsz)) { ok = 1; }
+    if (!ok && am_path_from_tag18(rec, len, out, outsz, 1)) { ok = 1; }
+    if (!ok && am_path_from_tag2(rec, len, out, outsz, 1)) { ok = 1; }
 
     if (ok && moved && have_recorded) { *moved = (strcmp(out, recorded) != 0); }
     return ok;
@@ -404,7 +425,7 @@ static int am_record_from_path(const char *path, int minimal, uint8_t **out, uin
     const uint8_t *rec;
     uint8_t *buf;
     uint32_t total;
-    CFURLRef u;
+    CFURLRef u = NULL;
     CFDataRef bm = NULL;
     CFIndex bl = 0;
 
@@ -428,11 +449,13 @@ static int am_record_from_path(const char *path, int minimal, uint8_t **out, uin
 
     // The move-following half. A failure here is NOT fatal: we still hand back a perfectly
     // good classic alias, it just cannot follow a move.
-    u = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path,
-                                                (CFIndex)strlen(path), false);
-    if (u) {
-        bm = CFURLCreateBookmarkData(NULL, u, 0, NULL, NULL, NULL);
-        CFRelease(u);
+    if (!alias_no_bookmark()) {
+        u = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path,
+                                                    (CFIndex)strlen(path), false);
+        if (u) {
+            bm = CFURLCreateBookmarkData(NULL, u, 0, NULL, NULL, NULL);
+            CFRelease(u);
+        }
     }
     if (bm) { bl = CFDataGetLength(bm); }
     total = (uint32_t)n;
