@@ -65,6 +65,12 @@
 #include <dlfcn.h>
 #include <sys/stat.h>
 
+// The FSSpec <-> POSIX mapping below is this module's product, not its private
+// business: carbon_alias_shim.c builds and resolves AliasHandles out of exactly
+// these triples. Declaring the shared half in a header keeps ONE implementation
+// of the volfs / dirID-table / HFS-name-swap rules instead of a drifting copy.
+#include "carbon_fsspec.h"
+
 // Classic File Manager OSErr codes (Files.h / MacErrors.h), stable across all of Mac history.
 #define FM_NO_ERR      0
 #define FM_PARAM_ERR (-50)   // paramErr — bad parameter
@@ -143,7 +149,7 @@ static const char *dirtab_lookup(int16_t vref, int32_t id) {
     }
     return NULL;
 }
-static void dirtab_remember(int16_t vref, int32_t id, const char *path) {
+void cfs_dirtab_remember(int16_t vref, int32_t id, const char *path) {
     for (int i = 0; i < g_dirtab_n; i++) {
         if (g_dirtab[i].id == id && g_dirtab[i].vref == vref) { return; }
     }
@@ -160,7 +166,7 @@ static void dirtab_remember(int16_t vref, int32_t id, const char *path) {
 // legal *character* inside a name — and the BSD layer of macOS presents exactly that name
 // with '/' and ':' exchanged. Applying the same exchange to the leaf turns a classic name
 // into the POSIX name of the same file.
-static void hfs_leaf_to_posix(const uint8_t *pname, char *out, size_t outsz) {
+void cfs_hfs_leaf_to_posix(const uint8_t *pname, char *out, size_t outsz) {
     size_t n = pname[0];
     if (n > 63) { n = 63; }
     if (n > outsz - 1) { n = outsz - 1; }
@@ -176,7 +182,7 @@ static void hfs_leaf_to_posix(const uint8_t *pname, char *out, size_t outsz) {
 //   * a classic directory ID is the file system's catalog node ID = the inode number, which
 //     macOS addresses directly as /.vol/<st_dev>/<CNID> (the volfs namespace).
 // Returns 1 on success with a NUL-terminated path in `out`.
-static int fsdir_to_path(int16_t vRefNum, int32_t dirID, char *out, size_t outsz) {
+int cfs_fsdir_to_path(int16_t vRefNum, int32_t dirID, char *out, size_t outsz) {
     uint8_t rootRef[FSREF_SIZE];
     uint8_t volpath[1024];
     struct stat st;
@@ -205,7 +211,7 @@ static int fsdir_to_path(int16_t vRefNum, int32_t dirID, char *out, size_t outsz
 // `exists` (optional) reports whether the resulting path is actually present: FSMakeFSSpec
 // must return a fully-formed spec for a not-yet-existing file, so "resolvable" and "exists"
 // are distinct answers.
-static int fsspec_to_path(const uint8_t *spec, char *out, size_t outsz, int *exists) {
+int cfs_fsspec_to_path(const uint8_t *spec, char *out, size_t outsz, int *exists) {
     char parent[1024];
     char leaf[128];
     struct stat st;
@@ -214,17 +220,90 @@ static int fsspec_to_path(const uint8_t *spec, char *out, size_t outsz, int *exi
 
     memcpy(&vRefNum, spec, sizeof vRefNum);
     memcpy(&parID, spec + 2, sizeof parID);
-    if (!fsdir_to_path(vRefNum, parID, parent, sizeof parent)) { return 0; }
+    if (!cfs_fsdir_to_path(vRefNum, parID, parent, sizeof parent)) { return 0; }
 
     if (spec[FSSPEC_NAME] == 0) {
         snprintf(out, outsz, "%s", parent);
     } else {
         size_t pl = strlen(parent);
-        hfs_leaf_to_posix(spec + FSSPEC_NAME, leaf, sizeof leaf);
+        cfs_hfs_leaf_to_posix(spec + FSSPEC_NAME, leaf, sizeof leaf);
         snprintf(out, outsz, "%s%s%s", parent,
                  (pl && parent[pl - 1] == '/') ? "" : "/", leaf);
     }
     if (exists) { *exists = (stat(out, &st) == 0); }
+    return 1;
+}
+
+// ── POSIX path -> FSSpec (the inverse) ──────────────────────────────────────────────────
+//
+// WHY IT LIVES HERE. Everything above answers "where is this spec?"; the Alias Manager also
+// needs the other direction, because ResolveAlias hands the caller back an FSSpec for a path
+// it has just resolved. That is the same mapping read backwards, and it has to agree with
+// cfs_fsspec_to_path EXACTLY or the round trip silently breaks — so it belongs in the module
+// that owns the mapping, not in the one that happens to need it first.
+
+// The same '/' <-> ':' exchange, POSIX leaf -> Pascal HFS name. The exchange is its own
+// inverse, so this differs from cfs_hfs_leaf_to_posix only in the string representation.
+void cfs_posix_leaf_to_hfs(const char *leaf, uint8_t *pout) {
+    size_t n = leaf ? strlen(leaf) : 0;
+    if (n > 63) { n = 63; }
+    pout[0] = (uint8_t)n;
+    for (size_t i = 0; i < n; i++) {
+        char c = leaf[i];
+        pout[1 + i] = (uint8_t)((c == '/') ? ':' : (c == ':') ? '/' : c);
+    }
+}
+
+// POSIX path -> FSSpec. Returns 1 on success; `spec` (70 bytes) is fully written first,
+// which is the out-param rule that came out of the Halo nil-CFStringRef crash.
+//
+// The parent directory is ALWAYS recorded in the dirID table on the way out. The primary
+// mapping (parID = the parent's catalog node id, resolved back through /.vol/<dev>/<CNID>)
+// is exact, but the volfs namespace is not readable on every volume and an APFS inode can
+// overflow the SInt32 a classic dirID is declared as; remembering the path makes the round
+// trip work anyway, exactly as shim_FindFolder already does for the folder ids it mints.
+int cfs_path_to_fsspec(const char *path, uint8_t *spec) {
+    char parent[1024];
+    const char *slash;
+    struct stat pst;
+    int16_t vRefNum = 0;
+    int32_t parID = FS_RT_DIR_ID;
+    size_t plen;
+
+    if (!spec) { return 0; }
+    memset(spec, 0, FSSPEC_SIZE);                 // ★defined before anything can fail
+    if (!path || !*path) { return 0; }
+
+    // Split into parent directory + leaf. A bare "/" is the root of the boot volume: no leaf.
+    slash = strrchr(path, '/');
+    if (!slash || slash == path) {
+        snprintf(parent, sizeof parent, "/");
+    } else {
+        plen = (size_t)(slash - path);
+        if (plen >= sizeof parent) { plen = sizeof parent - 1; }
+        memcpy(parent, path, plen);
+        parent[plen] = '\0';
+    }
+    if (stat(parent, &pst) != 0) { return 0; }
+
+    // The volume refNum the classic caller expects, taken from the same authority
+    // shim_FindFolder uses: FSGetCatalogInfo's `volume` field at offset 2 of FSCatalogInfo.
+    if (fs_native_ready() && p_FSGetCatalogInfo) {
+        uint8_t ref[FSREF_SIZE], ci[512];
+        memset(ref, 0, sizeof ref);
+        memset(ci, 0, sizeof ci);
+        if (p_FSPathMakeRef((const uint8_t *)parent, ref, NULL) == 0 &&
+            p_FSGetCatalogInfo(ref, 0x00000004u /*kFSCatInfoVolume*/, ci, NULL, NULL, NULL) == 0) {
+            memcpy(&vRefNum, ci + 2, sizeof vRefNum);
+        }
+    }
+    // A directory ID is the catalog node id where it fits the classic SInt32, else a token.
+    parID = ((uint64_t)pst.st_ino <= 0x7FFFFFFFULL) ? (int32_t)pst.st_ino : g_dirtab_next++;
+    cfs_dirtab_remember(vRefNum, parID, parent);
+
+    memcpy(spec, &vRefNum, sizeof vRefNum);
+    memcpy(spec + 2, &parID, sizeof parID);
+    if (slash && slash[1]) { cfs_posix_leaf_to_hfs(slash + 1, spec + FSSPEC_NAME); }
     return 1;
 }
 
@@ -243,7 +322,7 @@ int shim_FSpMakeFSRef(uint32_t *args) {
     if (fsspec_legacy()) { return FM_FNF_ERR; }
     if (!spec || !newRef) { return FM_PARAM_ERR; }
 
-    if (!fsspec_to_path(spec, path, sizeof path, &exists)) { return FM_NSV_ERR; }
+    if (!cfs_fsspec_to_path(spec, path, sizeof path, &exists)) { return FM_NSV_ERR; }
     if (!exists) { return FM_FNF_ERR; }
     if (p_FSPathMakeRef((const uint8_t *)path, newRef, NULL) != 0) {
         memset(newRef, 0, FSREF_SIZE);
@@ -277,7 +356,7 @@ int shim_FSMakeFSSpec(uint32_t *args) {
         spec[FSSPEC_NAME] = n;
         memcpy(spec + FSSPEC_NAME + 1, fileName + 1, n);
     }
-    if (!fsspec_to_path(spec, path, sizeof path, &exists)) { return FM_NSV_ERR; }
+    if (!cfs_fsspec_to_path(spec, path, sizeof path, &exists)) { return FM_NSV_ERR; }
     return exists ? FM_NO_ERR : FM_FNF_ERR;
 }
 
@@ -341,7 +420,7 @@ int shim_FindFolder(uint32_t *args) {
     }
     // The real catalog node id when it fits a classic SInt32, else a minted token.
     dirID = ((uint64_t)st.st_ino <= 0x7FFFFFFFULL) ? (int32_t)st.st_ino : g_dirtab_next++;
-    dirtab_remember(outv, dirID, (const char *)path);
+    cfs_dirtab_remember(outv, dirID, (const char *)path);
     *foundVRefNum = outv;
     *foundDirID = dirID;
     if (fsspec_trace()) {
@@ -433,16 +512,16 @@ static int fm_err_from_errno(void) {
 
 // (vRefNum, dirID, HFS leaf name) -> POSIX path. The HFS-style half of the API family
 // addresses files this way instead of by FSSpec; the resolution is identical, so this just
-// assembles the same two pieces fsspec_to_path uses.
+// assembles the same two pieces cfs_fsspec_to_path uses.
 static int hfs_to_path(int16_t vRefNum, int32_t dirID, const uint8_t *pname,
                        char *out, size_t outsz) {
     char parent[1024];
     char leaf[128];
     size_t pl;
 
-    if (!fsdir_to_path(vRefNum, dirID, parent, sizeof parent)) { return 0; }
+    if (!cfs_fsdir_to_path(vRefNum, dirID, parent, sizeof parent)) { return 0; }
     if (!pname || pname[0] == 0) { snprintf(out, outsz, "%s", parent); return 1; }
-    hfs_leaf_to_posix(pname, leaf, sizeof leaf);
+    cfs_hfs_leaf_to_posix(pname, leaf, sizeof leaf);
     pl = strlen(parent);
     snprintf(out, outsz, "%s%s%s", parent, (pl && parent[pl - 1] == '/') ? "" : "/", leaf);
     return 1;
@@ -456,7 +535,7 @@ static void path_with_new_leaf(const char *path, const uint8_t *pname,
     const char *slash = strrchr(path, '/');
     size_t dirlen = slash ? (size_t)(slash - path) : 0;
 
-    hfs_leaf_to_posix(pname, leaf, sizeof leaf);
+    cfs_hfs_leaf_to_posix(pname, leaf, sizeof leaf);
     snprintf(out, outsz, "%.*s/%s", (int)dirlen, path, leaf);
 }
 
@@ -492,7 +571,7 @@ int shim_FSpCreate(uint32_t *args) {
 
     if (fsspec_legacy()) { return FM_FNF_ERR; }
     if (!spec) { return FM_PARAM_ERR; }
-    if (!fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
+    if (!cfs_fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
 
     fd = open(path, O_CREAT | O_EXCL | O_WRONLY, 0666);
     if (fd < 0) { int e = fm_err_from_errno(); fm_trace("FSpCreate", path, NULL, e); return e; }
@@ -527,7 +606,7 @@ int shim_FSpDirCreate(uint32_t *args) {
     set_dir_id(args[2], NULL);                    // defined before any failure path
     if (fsspec_legacy()) { return FM_FNF_ERR; }
     if (!spec) { return FM_PARAM_ERR; }
-    if (!fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
+    if (!cfs_fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
     if (mkdir(path, 0777) != 0) {
         e = fm_err_from_errno(); fm_trace("FSpDirCreate", path, NULL, e); return e;
     }
@@ -586,7 +665,7 @@ int shim_FSpDelete(uint32_t *args) {
     int e;
     if (fsspec_legacy()) { return FM_FNF_ERR; }
     if (!spec) { return FM_PARAM_ERR; }
-    if (!fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
+    if (!cfs_fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
     e = fm_delete_path(path);
     fm_trace("FSpDelete", path, NULL, e);
     return e;
@@ -604,7 +683,7 @@ int shim_FSpRename(uint32_t *args) {
 
     if (fsspec_legacy()) { return FM_FNF_ERR; }
     if (!spec || !newName || newName[0] == 0) { return FM_PARAM_ERR; }
-    if (!fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
+    if (!cfs_fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
     path_with_new_leaf(path, newName, dest, sizeof dest);
     e = rename(path, dest) == 0 ? FM_NO_ERR : fm_err_from_errno();
     fm_trace("FSpRename", path, dest, e);
@@ -648,7 +727,7 @@ int shim_CatMove(uint32_t *args) {
                      dstdir, sizeof dstdir)) {
         return FM_NSV_ERR;
     }
-    hfs_leaf_to_posix(oldName, leaf, sizeof leaf);
+    cfs_hfs_leaf_to_posix(oldName, leaf, sizeof leaf);
     dl = strlen(dstdir);
     snprintf(dest, sizeof dest, "%s%s%s", dstdir, (dl && dstdir[dl - 1] == '/') ? "" : "/", leaf);
     e = rename(src, dest) == 0 ? FM_NO_ERR : fm_err_from_errno();
@@ -668,8 +747,8 @@ int shim_FSpCatMove(uint32_t *args) {
 
     if (fsspec_legacy()) { return FM_FNF_ERR; }
     if (!sspec || !dspec) { return FM_PARAM_ERR; }
-    if (!fsspec_to_path(sspec, src, sizeof src, NULL)) { return FM_NSV_ERR; }
-    if (!fsspec_to_path(dspec, dstdir, sizeof dstdir, NULL)) { return FM_NSV_ERR; }
+    if (!cfs_fsspec_to_path(sspec, src, sizeof src, NULL)) { return FM_NSV_ERR; }
+    if (!cfs_fsspec_to_path(dspec, dstdir, sizeof dstdir, NULL)) { return FM_NSV_ERR; }
     slash = strrchr(src, '/');
     dl = strlen(dstdir);
     snprintf(dest, sizeof dest, "%s%s%s", dstdir, (dl && dstdir[dl - 1] == '/') ? "" : "/",
@@ -696,8 +775,8 @@ int shim_FSpExchangeFiles(uint32_t *args) {
 
     if (fsspec_legacy()) { return FM_FNF_ERR; }
     if (!sspec || !dspec) { return FM_PARAM_ERR; }
-    if (!fsspec_to_path(sspec, a, sizeof a, NULL)) { return FM_NSV_ERR; }
-    if (!fsspec_to_path(dspec, b, sizeof b, NULL)) { return FM_NSV_ERR; }
+    if (!cfs_fsspec_to_path(sspec, a, sizeof a, NULL)) { return FM_NSV_ERR; }
+    if (!cfs_fsspec_to_path(dspec, b, sizeof b, NULL)) { return FM_NSV_ERR; }
     if (!probed) {
         p_renameatx = (int (*)(int, const char *, int, const char *, unsigned int))
                       dlsym(RTLD_DEFAULT, "renameatx_np");
@@ -733,7 +812,7 @@ int shim_FSpSetFInfo(uint32_t *args) {
 
     if (fsspec_legacy()) { return FM_FNF_ERR; }
     if (!spec || !finfo) { return FM_PARAM_ERR; }
-    if (!fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
+    if (!cfs_fsspec_to_path(spec, path, sizeof path, NULL)) { return FM_NSV_ERR; }
 
     memset(&al, 0, sizeof al);
     al.bitmapcount = ATTR_BIT_MAP_COUNT;

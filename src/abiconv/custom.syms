@@ -735,3 +735,25 @@ _FSpCatMove
 _FSpExchangeFiles
 _FSpSetFInfo
 _FlushVol
+
+# The classic ALIAS MANAGER (carbon_alias_shim.c + carbon_alias_tramp.asm). Listing them
+# here is LOAD-BEARING: it stops the legacy shim pass emitting a competing pass-through
+# bridge to a native that Apple deleted from 64-bit Carbon in 2009 -- that bridge would
+# shadow this implementation and could only `call 0`.
+# ★Only the DEAD (FSSpec-generation) spellings appear here. The FSRef generation
+# (FSNewAlias / FSResolveAlias / FSResolveAliasFile / FSIsAliasFile / FSCopyAliasInfo /
+# GetAliasSize / GetAliasUserType / FSMatchAliasBulk) is ALIVE on x86_64 -- measured with
+# src/86x64/nulljump_probe.c under Rosetta -- and carbon_alias_shim.c bridges ONTO it, so
+# shadowing any of those names would replace working Apple code with our own.
+_NewAlias
+_NewAliasMinimal
+_NewAliasMinimalFromFullPath
+_QTNewAlias
+_ResolveAlias
+_ResolveAliasFile
+_ResolveAliasWithMountFlags
+_ResolveAliasFileWithMountFlags
+_ResolveAliasFileWithMountFlagsNoUI
+_MatchAlias
+_MatchAliasNoUI
+_FSMatchAliasNoUI
