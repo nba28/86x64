@@ -42,6 +42,11 @@ extern uint32_t _86x64_call_i386(uint64_t fn, uint64_t nwords,
                                  const uint32_t *words, uint64_t lowstack_top);
 
 #define SND_NO_ERR (0)
+/* Classic MemError/Sound Manager out-of-memory (Memory Manager `memFullErr`,
+ * which is what the classic Sound Manager returns when it cannot allocate a
+ * channel). Used only on the allocation-failure path, which must still leave
+ * the caller's out-param defined — see shim_SndNewChannel. */
+#define SND_NOT_ENOUGH_MEMORY ((uint32_t)(int32_t)-108)
 #define PTR(n) ((void *)(uintptr_t)args[(n)])
 
 /* ---- classic SndChannel field offsets (pack(2), i386) --------------------- */
@@ -321,7 +326,16 @@ uint32_t shim_SndNewChannel(uint32_t *args) {
    uint32_t block = incoming;
    if (!block) {
       void *p = malloc(SC_SIZE);              /* low-4GB, faithful SndChannel */
-      if (!p) return SND_NO_ERR;              /* graceful: report success anyway */
+      if (!p) {
+         /* RULE A: a failing shim must leave every out-param DEFINED. Returning
+          * "success" while *chanpp keeps whatever the caller's stack happened to
+          * hold is the FSpMakeFSRef defect verbatim — the app then stores an
+          * undefined word into its channel table and dereferences it later, far
+          * from here. Report the classic out-of-memory error AND define the
+          * out-param, so a caller that checks either one behaves sanely. */
+         if (chanpp) { *chanpp = 0; }
+         return SND_NOT_ENOUGH_MEMORY;
+      }
       memset(p, 0, SC_SIZE);
       block = (uint32_t)(uintptr_t)p;
    }
