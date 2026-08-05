@@ -476,6 +476,15 @@ add_library(abiconv SHARED
   quicktime_image.c
   imagecapture_shim.c
   carbon_fsspec_shim.c
+  # carbon_alias_shim.c: ONE job — the classic Alias Manager. Its FSSpec generation
+  # (NewAlias/ResolveAlias/ResolveAliasFile/MatchAlias/...) was a NULL-jump orphan, but
+  # MEASURED with src/86x64/nulljump_probe.c under Rosetta the FSRef generation
+  # (FSNewAlias/FSResolveAlias/FSResolveAliasFile/FSIsAliasFile/GetAliasSize) is ALIVE on
+  # x86_64 — so this BRIDGES onto Apple's own surviving engine (genuine alias records in,
+  # Apple's own parser out) rather than reimplementing the format, and adds a CFURL
+  # bookmark appendix for the one thing that engine no longer does: follow a moved file.
+  # Shares carbon_fsspec_shim.c's FSSpec<->POSIX resolver through carbon_fsspec.h.
+  carbon_alias_shim.c
   # FSOpenResFile with the flattened-resource-file fallback: codesign forbids HFS
   # resource forks in a bundle, so `m64 forks --flatten` moves them to the data
   # fork / a .86x64rsrc sidecar and this finds them there (FSOpenResourceFile).
@@ -696,6 +705,7 @@ add_library(abiconv SHARED
   cfstring_range_tramp.asm
   carbon_datetime_tramp.asm
   carbon_memory_tramp.asm
+  carbon_alias_tramp.asm
   eh_tramp.asm
   dyld_stub_binder.asm
   dyld_func_lookup.asm
