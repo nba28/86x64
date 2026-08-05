@@ -139,6 +139,32 @@ namespace MachO {
       std::set<std::size_t> local_reloc_addrs;
       bool have_classic_local_relocs = false;
 
+      /* M32 CONSTANT-CLASSIFICATION PROVENANCE (M64 re-parses only): the vmaddr
+       * of every 4-byte data slot that the M32 pass classified as a CONSTANT and
+       * whose value could alias the translated image. Lifted STRAIGHT FROM THE
+       * RAW `__DATA,__86x64_cpin` SECTION BYTES in the Archive ctor, before any
+       * Section::Parse1 runs, so DataParser can consult it while sweeping the
+       * very first section (the section itself lives in __DATA, i.e. LAST — a
+       * blob-order lift would arrive far too late).
+       *
+       * WHY. Every false-positive discriminator in DataParser is M32-only
+       * because each needs the ORIGINAL i386 image (its local reloc table, its
+       * text symbols, its instruction decode). The M64 re-parse has none of
+       * that and runs the raw in-range heuristic, so a constant whose value
+       * happens to land in the 0x10000000-based translated image gets
+       * "rebased" by the next layout shift. Instead of re-deriving the answer
+       * from the value — impossible, since such a constant can resolve to an
+       * EXACT instruction boundary — carry the M32 pass's own verdict across
+       * the file boundary. Membership is EXACT, not heuristic.
+       *
+       * Armed only when the image actually carries the table
+       * (have_const_pins); an image produced before this mechanism, or any
+       * native binary passed through `macho-tool modify`, leaves it disarmed
+       * and keeps the legacy behavior. Kill switch M64_NO_CONST_PIN=1.
+       * See Archive::inject_cpin_section / ConstPinBlob. */
+      std::set<std::size_t> const_pin_slots;
+      bool have_const_pins = false;
+
       /* GCC PIC thunks (`___i686.get_pc_thunk.<r>`), keyed by the thunk's
        * entry vmaddr (= its nlist n_value) and valued by the x86 GPR encoding
        * (0=EAX,1=ECX,2=EDX,3=EBX,5=EBP,6=ESI,7=EDI) the thunk loads with the

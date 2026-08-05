@@ -100,6 +100,24 @@ namespace MachO {
          }
       }
 
+      /* The M32 constant-classification provenance table
+       * (Archive::inject_cpin_section; consumed by ParseEnv::const_pin_slots via
+       * Archive's pre-parse lift). Same re-parse contract as __86x64_xrel /
+       * __86x64_abs32: lift it into a live ConstPinBlob that RE-RESOLVES each
+       * pinned slot to the blob now there, so a later stage re-emits current
+       * addresses. Routing it away from DataParser is doubly required: its
+       * entries ARE in-image vmaddrs, so the generic pointer detection would
+       * "rebase" the table describing what must not be rebased. Only M64
+       * carries this section. */
+      if (std::string(sect.sectname,
+                      strnlen(sect.sectname, sizeof(sect.sectname))) == "__86x64_cpin") {
+         if constexpr (bits == Bits::M64) {
+            return new Section<bits>(img, offset, env, ConstPinBlob<bits>::Parse);
+         } else {
+            return new Section<bits>(img, offset, env, DataBlob<bits>::Parse);
+         }
+      }
+
       /* The C++ exception PC map + per-function LSDA table
        * (Archive::inject_pcmap_section / inject_ehlsda_section; consumed by
        * libabiconv eh_shim.c). Same re-parse contract as __86x64_xrel /
@@ -359,6 +377,45 @@ namespace MachO {
                  (int)env.have_local_text_syms,
                  (int)env.have_classic_local_relocs,
                  (int)in_objc_symbols, (int)is_text_const_sect);
+      }
+
+      /* M32 CONSTANT-PROVENANCE PIN (M64 re-parses only, and only when the
+       * image carries the table). Every discriminator below is M32-gated
+       * because each one needs the ORIGINAL i386 image; the M64 re-parse runs
+       * the bare in-range heuristic, and the translated image is based at
+       * 0x10000000, so an ordinary constant like 0x10080808 — far ABOVE the
+       * small i386 image, hence correctly left alone by the M32 pass — reads as
+       * a perfectly good translated __text address here and gets "rebased" by
+       * the next layout shift.
+       *
+       * No value test can separate the two: Halo's 0x10080808 resolves to an
+       * EXACT instruction boundary in the translated __text, so even
+       * code_interior_alias is blind to it, and 79% of the measured corruptions
+       * target __TEXT,__eh_frame, which no code/cstring/zerofill gate covers.
+       * But the answer is already KNOWN — the M32 pass, holding the original
+       * image, its relocs and its symbols, already classified this exact slot.
+       * __DATA,__86x64_cpin carries that verdict across the file boundary, so
+       * membership here is EXACT rather than heuristic.
+       *
+       * ★MEASURED (2026-08-05, same-offset i386-vs-translated diff): Civ IV
+       * Steam 738 reclassified constants, iPhoto 143, iMovie 10, Halo CE 1,
+       * Quinn/Pages/Numbers/iWeb 0. iPhoto's 13 __DATA,__gcc_except_tab hits
+       * are round LSDA constants shifted by -0xF0 (corrupted C++ exception
+       * tables); 14 words were "relocated" into __DATA,__86x64_pcmap, a section
+       * WE synthesize.
+       *
+       * Self-disarming: an image with no table (produced before this mechanism,
+       * or any native binary passed through `macho-tool modify`) keeps the
+       * legacy behavior. Only ever REMOVES false positives — a genuine pointer
+       * is never listed. Kill switch M64_NO_CONST_PIN=1 (A/B harness). */
+      static const bool no_const_pin = std::getenv("M64_NO_CONST_PIN") != nullptr;
+      if (bits == Bits::M64 && env.have_const_pins && !no_const_pin &&
+          env.const_pin_slots.count(loc.vmaddr) != 0) {
+         if (dbg) {
+            fprintf(stderr, "[dbgptr]   pinned CONSTANT by M32 provenance "
+                    "(__86x64_cpin) => is_pointer=0\n");
+         }
+         return Immediate<bits>::Parse(img, loc, env, /*is_pointer=*/false);
       }
 
       bool is_pointer = false;

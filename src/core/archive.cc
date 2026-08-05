@@ -114,6 +114,47 @@ namespace MachO {
          }
       }
 
+      /* M32 CONSTANT-CLASSIFICATION PROVENANCE LIFT (M64 re-parses only).
+       * Read `__DATA,__86x64_cpin` straight out of the raw image and seed
+       * ParseEnv::const_pin_slots before ANY section is swept. It has to happen
+       * here, not from the section's own blob: the table lives in __DATA, which
+       * is parsed last, while the words it protects sit in __TEXT,__const —
+       * swept first. Raw-byte read, so no blob graph is needed (the same
+       * order-safety argument as the PIC-thunk scan above).
+       *
+       * The table lists slots the M32 pass classified as CONSTANTS whose value
+       * could alias the translated image; DataParser must not reclassify them as
+       * pointers. See ParseEnv::const_pin_slots / Archive::inject_cpin_section.
+       * Absent section => disarmed => legacy behavior. */
+      if constexpr (b == Bits::M64) {
+         for (LoadCommand<b> *cmd : load_commands) {
+            auto seg = dynamic_cast<Segment<b> *>(cmd);
+            if (seg == nullptr) continue;
+            for (Section<b> *sect : seg->sections) {
+               if (std::string(sect->sect.sectname,
+                               strnlen(sect->sect.sectname,
+                                       sizeof(sect->sect.sectname))) !=
+                   "__86x64_cpin") { continue; }
+               if (sect->sect.offset == 0 || sect->sect.size < 8) { continue; }
+               const std::size_t base = sect->sect.offset;
+               if (img.at<uint32_t>(base) != ConstPinBlob<b>::MAGIC) { continue; }
+               const uint32_t count = img.at<uint32_t>(base + 4);
+               /* Trust the section size over the count field. */
+               const std::size_t max_ents = (sect->sect.size - 8) / 4;
+               const std::size_t n = std::min<std::size_t>(count, max_ents);
+               for (std::size_t i = 0; i < n; ++i) {
+                  const uint32_t slot = img.at<uint32_t>(base + 8 + i * 4);
+                  if (slot != 0) { env.const_pin_slots.insert(slot); }
+               }
+               env.have_const_pins = true;
+               if (std::getenv("MACHO_BUILD_DEBUG")) {
+                  fprintf(stderr, "const-pin lift: %zu pinned constant slot(s) "
+                          "from __DATA,__86x64_cpin\n", env.const_pin_slots.size());
+               }
+            }
+         }
+      }
+
       for (LoadCommand<b> *cmd : load_commands) {
          cmd->Parse1(img, env);
       }
@@ -229,6 +270,12 @@ namespace MachO {
        * a reparse carries the section as a live re-resolving Abs32Blob). Must
        * also run before the layout accounting below. */
       inject_abs32_section();
+
+      /* Freeze the M32 pass's CONSTANT verdicts so the later M64 re-parses
+       * (modify / strip-bind / static-interpose / convert) cannot reclassify
+       * them as pointers. M64 only, idempotent, and — like the injects above —
+       * must run before the layout accounting below. */
+      inject_cpin_section();
 
       /* Manufacture a modern LC_DYLD_INFO_ONLY for a classic image (opt-in via
        * convert --synthesize-dyld-info). Runs AFTER inject_xrel_section so the
@@ -1042,6 +1089,103 @@ namespace MachO {
          if (std::getenv("MACHO_BUILD_DEBUG")) {
             fprintf(stderr, "inject_abs32_section: %zu abs32 site(s) -> "
                     "__DATA,__86x64_abs32\n", blob->ents.size());
+         }
+      }
+   }
+
+   template <Bits b>
+   void Archive<b>::inject_cpin_section() {
+      if constexpr (b != Bits::M64) {
+         return; /* the M32 pass IS the provenance; only its output records it */
+      } else {
+         Segment<b> *data_seg = segment(SEG_DATA);
+         if (data_seg == nullptr) { return; }
+
+         /* Idempotent: a reparse carries the table as a live ConstPinBlob whose
+          * Parse re-resolved every slot — Emit re-emits it correctly. Injecting
+          * a second copy would also be WRONG, not merely redundant: by then the
+          * constants are pinned, so re-deriving the set from this parse would
+          * fold in whatever the (ungated) re-parse decided. The FIRST M64 build
+          * is the only one that still holds the M32 verdicts. */
+         for (Segment<b> *seg : segments()) {
+            for (Section<b> *s : seg->sections) {
+               if (s->name() == "__86x64_cpin") { return; }
+            }
+         }
+
+         /* A constant can only be MISTAKEN for a pointer if its value aliases
+          * the translated image, which starts at this archive's M64 base
+          * (0x10000000, set by macho-tool transform/convert). The upper bound
+          * is DataParser's own detection window. Deliberately a SUPERSET of the
+          * genuinely at-risk slots — Build has not laid the image out yet, so
+          * the exact top is unknown, and an extra entry merely re-asserts a
+          * verdict the M32 pass already reached, which can never be wrong.
+          * Measured cost: Halo 67 KB, iPhoto 125 KB, Civ IV Steam 287 KB.
+          *
+          * ★THE LOWER BOUND IS ALSO WHAT MAKES THIS INCAPABLE OF REGRESSING.
+          * The M64 re-parse's pointer detection has a legitimate second job
+          * besides tracking layout: RESCUING a genuine pointer the M32 pass
+          * missed and left with its raw i386 value. Such a value is an i386
+          * address, i.e. far BELOW the M64 base — so it can never satisfy this
+          * predicate and is never pinned. The rescue path is preserved intact;
+          * the pin covers only values already in the translated address space,
+          * which no un-relocated i386 pointer can hold.
+          *
+          * Nor can a pinned word be corrupted by the other emitters: only
+          * 8-byte NonLazySymbolPointer slots get REBASE opcodes (see
+          * synthesize_dyld_info step 4), and inject_abs32_section skips
+          * pointee-less Immediates, so the runtime slide patcher never sees
+          * one either. */
+         const std::size_t lo = this->vmaddr;
+         auto *blob = ConstPinBlob<b>::Create();
+         for (Segment<b> *seg : segments()) {
+            for (Section<b> *s : seg->sections) {
+               for (SectionBlob<b> *sb : s->content) {
+                  auto *im = dynamic_cast<Immediate<b> *>(sb);
+                  if (im == nullptr) { continue; }
+                  /* pointee != nullptr => the M32 pass called it a POINTER;
+                   * those must keep tracking the layout and are never pinned. */
+                  if (im->pointee != nullptr) { continue; }
+                  if (im->value < lo || im->value >= 0x80000000u) { continue; }
+                  typename ConstPinBlob<b>::Ent ent;
+                  ent.blob = im;
+                  ent.off = 0;
+                  blob->ents.push_back(ent);
+               }
+            }
+         }
+
+         /* Emit EVEN WHEN EMPTY for our own translated output (it links
+          * libabiconv, or will by the next stage): an empty table is valid
+          * ground truth — "the M32 pass pinned nothing" — and arming the gate
+          * with it is correct. Anything that does NOT link libabiconv (a native
+          * binary run through `macho-tool modify` in an unrelated flow) keeps
+          * the old behavior and gets no section at all. Mirrors
+          * inject_abs32_section's rule. */
+         if (blob->ents.empty()) {
+            bool links_abiconv = false;
+            for (const DylibCommand<b> *dc :
+                    this->template subcommands<DylibCommand>()) {
+               if (dc->dylib_cmd.cmd == LC_LOAD_DYLIB &&
+                   dc->name.find("libabiconv") != std::string::npos) {
+                  links_abiconv = true;
+                  break;
+               }
+            }
+            if (!links_abiconv) { delete blob; return; }
+         }
+
+         auto *sect = Section<b>::Synthetic(SEG_DATA, "__86x64_cpin",
+                                            S_REGULAR, /*align=*/2);
+         sect->segment = data_seg;
+         sect->content.push_back(blob);
+         blob->section = sect;
+         blob->segment = data_seg;
+         insert_section_before_zerofill(data_seg, sect);
+         invalidate_segments_cache();
+         if (std::getenv("MACHO_BUILD_DEBUG")) {
+            fprintf(stderr, "inject_cpin_section: %zu pinned constant slot(s) -> "
+                    "__DATA,__86x64_cpin\n", blob->ents.size());
          }
       }
    }

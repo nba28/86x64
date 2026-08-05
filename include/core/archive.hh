@@ -196,6 +196,19 @@ namespace MachO {
        * inject_pcmap_section. */
       void inject_abs32_section();
 
+      /* Synthesize __DATA,__86x64_cpin: the M32 pass's CONSTANT verdicts for
+       * every 4-byte data slot whose value could alias the translated image, so
+       * the later M64 re-parses (modify / strip-bind / static-interpose /
+       * convert) — where every false-positive discriminator in
+       * Section::DataParser is disarmed — cannot reclassify them as pointers and
+       * "rebase" them on the next layout shift. M64 only; idempotent (a reparse
+       * lifts the section into a re-resolving ConstPinBlob, see section.cc) —
+       * and idempotency is REQUIRED for correctness here, not just efficiency:
+       * only the first M64 Build still holds the M32 verdicts. Called from Build
+       * alongside inject_abs32_section. See ConstPinBlob for the measurement
+       * that motivated it. */
+      void inject_cpin_section();
+
       template <template <Bits> class Blob>
       Blob<b> *find_blob(std::size_t vmaddr) const {
          for (Segment<b> *segment : segments()) {

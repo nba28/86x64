@@ -460,6 +460,91 @@ namespace MachO {
    };
 
    /*
+    * `__DATA,__86x64_cpin` — the M32 CONSTANT-CLASSIFICATION PROVENANCE table.
+    *
+    * WHY IT EXISTS. `Section::DataParser` pointer-detects a 4-byte aligned data
+    * word whose value falls inside a segment. That detection is a HEURISTIC,
+    * and every discriminator that tames it (classic-reloc table, func-entry,
+    * code-interior, cstring-interior, zerofill) is deliberately M32-only: they
+    * need the ORIGINAL i386 image's relocs/symbols/decode, which only the first
+    * pass has. The later pipeline stages (`modify`, `strip-bind`,
+    * `static-interpose`, `convert`) RE-PARSE the already-translated M64 image,
+    * where DataParser runs completely ungated.
+    *
+    * That leaves a hole. The translated image is based at 0x10000000. A word the
+    * M32 pass correctly left alone — because its value was far ABOVE the small
+    * i386 image and therefore could not be an address there — can look like a
+    * perfectly good translated `__text`/`__const`/`__eh_frame` address on the
+    * M64 re-parse and get "rebased" by the next layout shift. Constants of that
+    * shape (0x10000000, 0x10080808, packed byte patterns, RGBA/flag words, LSDA
+    * length constants) are ordinary.
+    *
+    * ★MEASURED 2026-08-05 by same-offset i386-vs-translated diff:
+    *   Civ IV (Steam) 738 · iPhoto 143 · iMovie 10 · Halo CE 1 · Quinn/Pages/
+    *   Numbers/iWeb 0.  79% of the corrupted words were "relocated" into
+    *   `__TEXT,__eh_frame`, 14 of them into `__DATA,__86x64_pcmap` — a section
+    *   WE synthesize, which no original i386 pointer can possibly target.
+    *   iPhoto's 13 `__DATA,__gcc_except_tab` hits are round LSDA constants
+    *   (0x11000000, 0x10910000) shifted by -0xF0: corrupted C++ exception tables.
+    *
+    * WHY A TABLE AND NOT ANOTHER VALUE TEST. On the M64 side the value is
+    * indistinguishable from a genuine pointer by construction: Halo's 0x10080808
+    * resolves to an EXACT instruction boundary in the translated `__text`, so
+    * even the code-interior test cannot see it. But the ANSWER IS ALREADY KNOWN
+    * — the M32 pass, holding the original image, already classified this exact
+    * slot. So carry that classification across the file boundary instead of
+    * re-deriving it: EXACT, not heuristic.
+    *
+    * WHAT IS RECORDED. Every `Immediate` slot the M32 pass classified as a
+    * CONSTANT (pointee == nullptr) whose value could ALIAS the translated image
+    * (value >= the archive's M64 base). Deliberately a SUPERSET — an extra entry
+    * only re-asserts "this slot is a constant", which is what the M32 pass
+    * already decided, so it can never be wrong. Genuine pointers are never
+    * listed, so pointer tracking across re-layout is untouched.
+    * Measured table sizes: Halo 67 KB · iPhoto 125 KB · Civ IV Steam 287 KB
+    * (against a 24 MB `__86x64_pcmap` in the same image).
+    *
+    * Synthesized by Archive::inject_cpin_section at Build (M64 only, idempotent).
+    * On a later reparse Parse re-resolves each slot to the blob now there (the
+    * __86x64_xrel/__86x64_abs32 contract) so Emit re-emits post-re-layout
+    * addresses, and Archive's pre-parse lift seeds ParseEnv::const_pin_slots
+    * BEFORE any Section::Parse1 so DataParser can consult it.
+    * Env kill-switch M64_NO_CONST_PIN=1 disarms the gate (the table is still
+    * emitted, so an A/B differs only in the pinned words).
+    *
+    * On-disk (little-endian; translated images live <4GB):
+    *   u32 magic = MAGIC ("cpn6")
+    *   u32 count
+    *   count * u32 slot_vmaddr     // pre-slide address of the 4-byte slot,
+    *                               // sorted ascending
+    */
+   template <Bits bits>
+   class ConstPinBlob: public SectionBlob<bits> {
+   public:
+      static constexpr uint32_t MAGIC = 0x366e7063u; /* "cpn6" */
+      struct Ent {
+         const SectionBlob<bits> *blob = nullptr; /*!< blob holding the slot */
+         std::size_t off = 0;                     /*!< slot = blob->loc.vmaddr+off */
+      };
+      std::vector<Ent> ents;
+
+      virtual std::size_t size() const override { return 8 + ents.size() * 4; }
+      virtual void Emit(Image& img, std::size_t offset) const override;
+
+      static ConstPinBlob<bits> *Create() { return new ConstPinBlob(); }
+      static SectionBlob<bits> *Parse(const Image& img, const Location& loc,
+                                      ParseEnv<bits>& env);
+      virtual ConstPinBlob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
+         throw error("ConstPinBlob is synthesized post-transform and is never transformed");
+      }
+
+   private:
+      ConstPinBlob() {}
+      ConstPinBlob(const Location& loc, ParseEnv<bits>& env): SectionBlob<bits>(loc, env) {}
+      template <Bits> friend class ConstPinBlob;
+   };
+
+   /*
     * `__DATA,__86x64_pcmap`: the original-i386 <-> translated-x86_64 instruction
     * address map the libabiconv C++ exception unwinder (eh_shim.c) needs.  The
     * translated binary carries the ORIGINAL i386 __eh_frame/__gcc_except_tab
