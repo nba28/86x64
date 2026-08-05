@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: nulljump-sidecar carbon-alias carbon-fileops nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair
+.PHONY: nulljump-sidecar carbon-alias carbon-fileops nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -486,6 +486,17 @@ carbon-fileops: $(BUILD_DIR)/99_carbon_fileops.x86_64
 # M64_NO_ZEROFILL_TARGET_GATE=1 at TRANSLATE time.
 zerofill-target-pair: $(BUILD_DIR)/99_zerofill_target_pair.i386
 	@bash zerofill_target_pair_test.sh
+# const-alias-output-image: A/B guard that the M64 RE-PARSE does not reclassify
+# an integer CONSTANT as a pointer just because its value aliases the
+# 0x10000000-based TRANSLATED image. Mirror of zerofill-target-pair: there a
+# (small,small) u16 pair looks like an address because the SOURCE image is
+# small; here any 0x10-prefixed constant looks like one because the OUTPUT image
+# is based at 0x10000000. Measured: Civ IV Steam 738, iPhoto 143, iMovie 10,
+# Halo CE 1. Unlike that guard the poison needs no patching — the aliased image
+# is the OUTPUT one, so it is a plain C initialiser. OFF arm is
+# M64_NO_CONST_PIN=1 at RE-PARSE time.
+const-alias-output-image: $(BUILD_DIR)/100_const_alias_output_image.i386
+	@bash const_alias_output_image_test.sh
 # carbon-alias: A/B guard for the classic ALIAS MANAGER. NULL-jump orphans: the
 # legacy pass emits a bridge to a native Apple deleted from 64-bit Carbon in 2009.
 # ★The load-bearing assertion is FOLLOWED_RENAME / FOLLOWED_MOVE — a stored path
