@@ -39,6 +39,13 @@
 // Env:
 //   M64_FAULT_REPORT=1   arm the handler (SIGSEGV + SIGBUS)
 //   M64_FAULT_REPORT_WORDS=N   how many 4-byte stack slots to dump (default 48)
+//   M64_FAULT_CHAIN="rbp+8,+0xfd8,+0x10"
+//                        walk a POINTER CHAIN at fault time and hexdump the end.
+//                        step 0 is <reg>[+/-off] -> deref; each later step adds
+//                        its offset to the previous VALUE and derefs again. The
+//                        wrong value is usually several hops upstream of the
+//                        faulting instruction and in no register at all.
+//   M64_FAULT_CHAIN_BYTES=N    bytes to hexdump at the chain end (default 64)
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -74,6 +81,103 @@ static int fr_image_for(uint64_t v, char *out, size_t n) {
    snprintf(out, n, "%s+0x%llx", slash ? slash + 1 : best_name,
             (unsigned long long)(v - best_base));
    return 1;
+}
+
+/* Read `n` bytes from the faulting process defensively — the address we are
+ * chasing is very often exactly the one that is unmapped. */
+static int fr_read(uint64_t addr, void *dst, size_t n) {
+   vm_size_t got = 0;
+   return vm_read_overwrite(mach_task_self(), (vm_address_t)(uintptr_t)addr,
+                            (vm_size_t)n, (vm_address_t)(uintptr_t)dst,
+                            &got) == KERN_SUCCESS && got == n;
+}
+
+/* ── M64_FAULT_CHAIN: walk a POINTER CHAIN at fault time ───────────────────────
+ * A register dump names the faulting instruction, but the value that is actually
+ * wrong is usually several dereferences upstream — e.g. Halo's audio fault reads
+ * an index as `u16 at (*(*(S+0xfd8)+0x10))[i*8]`, where S is arg0. None of S, the
+ * intermediate object, or the record array appears in any register at the fault.
+ *
+ * Spec:  M64_FAULT_CHAIN="rbp+8,+0xfd8,+0x10"
+ *   step 0 is <reg>[+/-<off>]  -> address; we print *address (a 4-byte i386 slot)
+ *   each later step adds its offset to the PREVIOUS VALUE and dereferences again
+ * After the last step we hexdump M64_FAULT_CHAIN_BYTES (default 64) at the final
+ * value, so record arrays can be inspected directly.
+ *
+ * ★It runs ONLY inside the fault handler, so it adds ZERO pre-fault overhead and
+ * cannot perturb a timing- or stack-content-sensitive heisenbug the way ordinary
+ * tracing does — which is the only reason it is usable on Halo at all.
+ * Structural: it takes a chain spec, and knows nothing about any app. */
+static uint64_t fr_reg_by_name(x86_thread_state64_t *ss, const char *n, size_t len) {
+   struct { const char *n; uint64_t v; } r[] = {
+      {"rax",ss->__rax},{"rbx",ss->__rbx},{"rcx",ss->__rcx},{"rdx",ss->__rdx},
+      {"rsi",ss->__rsi},{"rdi",ss->__rdi},{"rbp",ss->__rbp},{"rsp",ss->__rsp},
+      {"r8",ss->__r8},{"r9",ss->__r9},{"r10",ss->__r10},{"r11",ss->__r11},
+      {"r12",ss->__r12},{"r13",ss->__r13},{"r14",ss->__r14},{"r15",ss->__r15},
+      {"rip",ss->__rip},
+   };
+   for (size_t i = 0; i < sizeof r / sizeof r[0]; i++)
+      if (strlen(r[i].n) == len && strncmp(r[i].n, n, len) == 0) return r[i].v;
+   return 0;
+}
+
+static void fr_walk_chain(x86_thread_state64_t *ss, const char *spec) {
+   char buf[256];
+   snprintf(buf, sizeof buf, "%s", spec);
+   fprintf(stderr, "[fault] chain walk (M64_FAULT_CHAIN=%s):\n", spec);
+
+   uint64_t addr = 0, val = 0;
+   int step = 0;
+   for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ","), step++) {
+      while (*tok == ' ') tok++;
+      long off = 0;
+      if (step == 0) {
+         const char *p = tok;
+         size_t rl = 0;
+         while (p[rl] && p[rl] != '+' && p[rl] != '-' && p[rl] != ' ') rl++;
+         uint64_t base = fr_reg_by_name(ss, p, rl);
+         if (!base) { fprintf(stderr, "   step0: unknown register '%s'\n", tok); return; }
+         off = (p[rl] == '+' || p[rl] == '-') ? strtol(p + rl, NULL, 0) : 0;
+         addr = base + (uint64_t)off;
+         fprintf(stderr, "   step0  %.*s%+ld -> addr 0x%llx", (int)rl, p, off,
+                 (unsigned long long)addr);
+      } else {
+         off = strtol(tok, NULL, 0);
+         addr = val + (uint64_t)off;
+         fprintf(stderr, "   step%-2d %+ld -> addr 0x%llx", step, off,
+                 (unsigned long long)addr);
+      }
+      uint32_t w = 0;
+      if (!fr_read(addr, &w, sizeof w)) {
+         fprintf(stderr, "  <UNREADABLE>\n");
+         return;
+      }
+      val = w;
+      char img[256];
+      if (w && fr_image_for((uint64_t)w, img, sizeof img))
+         fprintf(stderr, "  = 0x%08x   %s\n", w, img);
+      else
+         fprintf(stderr, "  = 0x%08x\n", w);
+   }
+
+   const char *bs = getenv("M64_FAULT_CHAIN_BYTES");
+   int nb = bs ? atoi(bs) : 64;
+   if (nb <= 0 || nb > 512) nb = 64;
+   fprintf(stderr, "[fault] hexdump %d bytes at final value 0x%llx:\n",
+           nb, (unsigned long long)val);
+   for (int i = 0; i < nb; i += 16) {
+      unsigned char row[16];
+      if (!fr_read(val + (uint64_t)i, row, sizeof row)) {
+         fprintf(stderr, "   +0x%03x <unreadable>\n", i);
+         break;
+      }
+      fprintf(stderr, "   +0x%03x ", i);
+      for (int j = 0; j < 16; j++) fprintf(stderr, "%02x%s", row[j], (j % 2) ? " " : "");
+      fprintf(stderr, "  u16:");
+      for (int j = 0; j < 16; j += 2)
+         fprintf(stderr, " %u", (unsigned)(row[j] | (row[j + 1] << 8)));
+      fprintf(stderr, "\n");
+   }
 }
 
 static void fr_print_addr(const char *label, uint64_t v) {
@@ -146,6 +250,10 @@ static void fr_handler(int sig, siginfo_t *info, void *uctx) {
          else
             fprintf(stderr, "   [rsp+%3d] 0x%08x\n", i * 4, w);
       }
+
+      /* Chase the upstream object graph if the caller described it. */
+      const char *chain = getenv("M64_FAULT_CHAIN");
+      if (chain && *chain) fr_walk_chain(ss, chain);
    }
 
    fprintf(stderr, "[fault] loaded images (low-4GB, i.e. translated):\n");
