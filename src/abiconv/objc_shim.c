@@ -943,6 +943,48 @@ static int legacy_cstr_ok(uint32_t p32) {
  * it first and use it directly. Heuristic but safe: a legacy i386 object's
  * 8-byte "isa" (isa_low | next_ivar<<32) is essentially never a readable
  * high pointer whose own isa (metaclass) is also a readable high pointer. */
+/* ★class_isMetaClass() IS NOT DEFENSIVE, and this function is a PROBE.
+ *
+ * `class_isMetaClass(cls)` evaluates `cls->data()->flags`: it reads the `bits`
+ * word at objc_class+0x20, masks it with FAST_DATA_MASK to get a class_rw_t*,
+ * and reads that struct's leading flags word. libobjc assumes it was handed a
+ * real Class and checks NONE of it. So a candidate that merely has a READABLE
+ * isa chain — which is all the tests above establish — can still fault INSIDE
+ * libobjc, where we have no handler and no way to decline.
+ *
+ * MEASURED (2026-08-05, Civ IV Steam, real artifact): SIGSEGV
+ * KERN_INVALID_ADDRESS at 0x0 with frame #0 an absolute libobjc address,
+ * reached as `__InstallEventHandler.l1` -> `_86x64_unwrap_obj_arg` ->
+ * `unwrap_obj_arg` -> `unwrap_obj_arg_core` -> here. Disassembly of the
+ * deployed dylib puts the crash return address exactly one instruction after
+ * the `class_isMetaClass` call, with rdi = meta.
+ *
+ * The rule this restores is general: a HEURISTIC that asks "is this a real
+ * object?" must be incapable of crashing on a wrong guess, because every
+ * caller passes it values that are expected NOT to be objects. So walk the
+ * same chain libobjc will walk, and decline if any step is unmapped. We do NOT
+ * reinterpret the flags ourselves (their bit meanings are runtime-internal and
+ * have changed across releases) — we only prove the dereferences are safe, then
+ * let libobjc answer the actual question.
+ *
+ * Kill switch M64_NO_METACLASS_PROBE_GUARD=1 restores the unguarded call, which
+ * reproduces the crash. */
+#define OBJC_CLASS_BITS_OFF   0x20
+#define OBJC_FAST_DATA_MASK   0x00007ffffffffff8ULL
+static int metaclass_probe_safe(uint64_t cls) {
+   static int disabled = -1;
+   if (disabled < 0) { disabled = getenv("M64_NO_METACLASS_PROBE_GUARD") != NULL; }
+   if (disabled) { return 1; }                 /* A/B arm: call through unguarded */
+   /* through `bits` inclusive */
+   if (!mem_readable(cls, OBJC_CLASS_BITS_OFF + 8)) { return 0; }
+   uint64_t bits = *(const uint64_t *)(uintptr_t)(cls + OBJC_CLASS_BITS_OFF);
+   uint64_t data = bits & OBJC_FAST_DATA_MASK;
+   if (data == 0 || (data & 0x7)) { return 0; }
+   /* class_rw_t's leading flags word is what isMetaClass() actually reads. */
+   if (!mem_readable(data, 8)) { return 0; }
+   return 1;
+}
+
 static int is_real_x86_object(uint32_t p) {
    if (p == 0 || !mem_readable(p, 8)) { return 0; }
    uint64_t isa = *(const uint64_t *)(uintptr_t)p;
@@ -964,6 +1006,10 @@ static int is_real_x86_object(uint32_t p) {
     * compared meta to &___CFConstantStringClassReference — WRONG: CF's empty
     * constant string's isa is __NSCFConstantString, not that symbol.) */
    if (!mem_readable(meta, 0x30)) { return 0; }
+   /* Readable-for-0x30 is NOT "is a Class": prove the chain class_isMetaClass
+    * will dereference is mapped before handing it to libobjc. See
+    * metaclass_probe_safe. */
+   if (!metaclass_probe_safe(meta)) { return 0; }
    if (!class_isMetaClass((Class)(uintptr_t)meta)) { return 0; }
    return 1;
 }
@@ -1040,7 +1086,14 @@ static id resolve_self(uint32_t self32) {
       return obj;                                        /* tagged/low/odd: not the bug shape */
    }
    uintptr_t meta = *(const uint64_t *)isa;              /* (obj->isa)->isa: must be a metaclass */
+   /* Same non-defensive-callee hazard as in is_real_x86_object, and this is the
+    * hotter path (every dispatch): class_isMetaClass dereferences meta->bits ->
+    * class_rw_t->flags without validating either. metaclass_probe_safe proves
+    * that chain is mapped first; a candidate that fails it is exactly the
+    * malformed receiver this function exists to reject, so it takes the same
+    * drop-to-nil branch rather than crashing inside libobjc. */
    if (meta < 0x100000000ULL || (meta & 0x7) || !mem_readable(meta, 0x30) ||
+       !metaclass_probe_safe(meta) ||
        !class_isMetaClass((Class)(uintptr_t)meta)) {
       if (BRIDGE_TRACE()) {
          fprintf(stderr, "[bp] resolve_self: MALFORMED receiver self32=0x%08x obj=%p "
