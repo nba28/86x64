@@ -1120,7 +1120,22 @@ namespace MachO {
           * genuinely at-risk slots — Build has not laid the image out yet, so
           * the exact top is unknown, and an extra entry merely re-asserts a
           * verdict the M32 pass already reached, which can never be wrong.
-          * Measured cost: Halo 67 KB, iPhoto 125 KB, Civ IV Steam 287 KB. */
+          * Measured cost: Halo 67 KB, iPhoto 125 KB, Civ IV Steam 287 KB.
+          *
+          * ★THE LOWER BOUND IS ALSO WHAT MAKES THIS INCAPABLE OF REGRESSING.
+          * The M64 re-parse's pointer detection has a legitimate second job
+          * besides tracking layout: RESCUING a genuine pointer the M32 pass
+          * missed and left with its raw i386 value. Such a value is an i386
+          * address, i.e. far BELOW the M64 base — so it can never satisfy this
+          * predicate and is never pinned. The rescue path is preserved intact;
+          * the pin covers only values already in the translated address space,
+          * which no un-relocated i386 pointer can hold.
+          *
+          * Nor can a pinned word be corrupted by the other emitters: only
+          * 8-byte NonLazySymbolPointer slots get REBASE opcodes (see
+          * synthesize_dyld_info step 4), and inject_abs32_section skips
+          * pointee-less Immediates, so the runtime slide patcher never sees
+          * one either. */
          const std::size_t lo = this->vmaddr;
          auto *blob = ConstPinBlob<b>::Create();
          for (Segment<b> *seg : segments()) {
