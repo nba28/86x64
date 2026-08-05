@@ -405,6 +405,37 @@ namespace MachO {
       bool code_target_has_entry_evidence(const Image& img,
                                           std::size_t vmaddr) const;
 
+      /* STRUCTURAL function-START evidence at `vmaddr`: the bytes immediately
+       * BEFORE it end the preceding function or are inter-function filler, so
+       * `vmaddr` is not fall-through reachable. This is the missing half of
+       * code_target_has_entry_evidence, which only inspects the bytes AT the
+       * target: an ENTRY SHAPE (`55 89 e5` / adjustor thunk) says "these bytes
+       * could begin a function", while this says "and nothing runs into them",
+       * i.e. the address really is where a function BEGINS. A prologue-shaped
+       * run sitting MID-function — the false-positive class b4b2848 narrowed
+       * the field-store code-target admit against — IS fall-through reachable
+       * and fails this test.
+       *
+       * Terminator/filler suffixes recognised immediately before `vmaddr`:
+       * `ret` (C3) / `retf` (CB) / `ret imm16` (C2 iw), `jmp rel8` (EB cb) /
+       * `jmp rel32` (E9 cd) / `jmp r/m32` register form (FF E0..E7),
+       * `ud2` (0F 0B), and the `nop` (90) / `int3` (CC) alignment fillers.
+       *
+       * ★Deliberately a pure function of VALUE + IMAGE BYTES, never of parse
+       * order: it must NOT consult the sweep's blob map (vmaddr_resolver),
+       * because a field store routinely FORWARD-references its handler (Civ IV
+       * Steam: site 0x161c74 installs 0x3dd5e8) and the immediate classifier's
+       * standing contract is that classification never depends on which
+       * instruction was parsed first.
+       *
+       * Conservative in the safe direction: a genuine entry preceded by filler
+       * this list does not recognise (e.g. a multi-byte NOP ending in 0x00) is
+       * merely left unadmitted — no worse than the caller's prior behaviour.
+       * Kill-switch M64_NO_FUNCTION_START_EVIDENCE=1 makes it always true,
+       * reducing callers to entry-SHAPE-only evidence for A/B bisection. */
+      bool code_target_is_function_start(const Image& img,
+                                         std::size_t vmaddr) const;
+
       /* CODE-ENTRY gate for __DATA pointer detection (see section.cc
        * DataParser). True iff `vmaddr` lands in an
        * S_ATTR_(PURE|SOME)_INSTRUCTIONS section but carries NO function-entry

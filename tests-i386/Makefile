@@ -1190,6 +1190,42 @@ $(BUILD_DIR)/99_init_priority_code_alias.i386: $(BUILD_DIR)/99_init_priority_cod
 	   rm -f $@; exit 1; \
 	 fi
 
+# 99_stripped_fnptr_field_start: STRIP local symbols (Halo CE / Civ IV Steam
+# shape — the game's own functions carry NO nlist, so func_syms evidence is
+# unavailable and the field-store code-target admit must discriminate
+# STRUCTURALLY). Both of the fixture's markers are LOCAL labels resolved by the
+# assembler, so unlike 99_code_alias_imm_falsereloc no __text-geometry assertion
+# is needed — the trap cannot drift. Asserts only that the strip really removed
+# them (a surviving nlist would let arm A pass for the wrong reason).
+# Overrides %.i386.
+$(BUILD_DIR)/99_stripped_fnptr_field_start.i386: $(BUILD_DIR)/99_stripped_fnptr_field_start.o
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
+	strip -x $@
+	@if nm -n $@ 2>/dev/null | grep -qE '_local_handler|_mbnop_handler|_mid_alias|_page_handler'; then \
+	   echo "99_stripped_fnptr_field_start: ERROR: strip -x left a marker nlist -- trap disarmed"; \
+	   rm -f $@; exit 1; \
+	 fi
+	@# ARM D only tests the page-multiple refusal if _page_handler really is one,
+	@# and arms A/B/C only test the start rule if THEY are not page multiples
+	@# (the refusal would mask the start test). Both directions asserted here so
+	@# a layout drift fails the BUILD instead of silently disarming an arm.
+	@otool -tV -j $@ > $(BUILD_DIR)/99_stripped_fnptr_field_start.dis 2>/dev/null; \
+	 bad=0; \
+	 for pat in 0x14 0x18; do \
+	   v=$$(awk -F'[$$,]' '/movl.*\$$0x[0-9a-f]+, '$$pat'\(%ebx\)/{print $$2; exit}' \
+	        $(BUILD_DIR)/99_stripped_fnptr_field_start.dis); \
+	   if [ -n "$$v" ] && [ $$(( $$v & 0xfff )) -eq 0 ]; then \
+	     echo "99_stripped_fnptr_field_start: ERROR: handler $$v is page-aligned -- arm masked by the refusal"; bad=1; \
+	   fi; \
+	 done; \
+	 p=$$(awk -F'[$$,]' '/movl.*\$$0x[0-9a-f]+, 0x8c\(%ebx\)/{print $$2; exit}' \
+	      $(BUILD_DIR)/99_stripped_fnptr_field_start.dis); \
+	 if [ -z "$$p" ] || [ $$(( $$p & 0xfff )) -ne 0 ]; then \
+	   echo "99_stripped_fnptr_field_start: ERROR: _page_handler=$$p is NOT page-aligned -- arm D disarmed"; bad=1; \
+	 fi; \
+	 if [ $$bad = 1 ]; then rm -f $@; exit 1; fi; \
+	 echo "  99_stripped_fnptr_field_start: markers unsymboled, _page_handler=$$p page-aligned -- traps armed"
+
 # 99_code_alias_imm_falsereloc: STRIP local symbols (Civ IV Steam shape — locals-
 # stripped => imm32_code_alias_is_constant's symboled discriminator disarmed, only
 # the 55-89-e5 prologue-byte evidence remains). ASSERT the integer 0x1f90 falls
