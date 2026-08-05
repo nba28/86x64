@@ -476,6 +476,20 @@ namespace MachO {
                    env.zerofill_target_unattested(value)) {
                   break;   /* unattested zero-fill target -> constant */
                }
+               /* RECORD-FIELD gate (M32). The same (small,small) u16-pair
+                * corruption as above, but for targets that ARE mapped, where the
+                * zero-fill anchor argument does not apply and — for a __DATA
+                * target — no other discriminator exists at all. Evidence is
+                * POSITIONAL: the slot's siblings at the same record stride are
+                * the SAME FIELD of neighbouring records, so if they are plainly
+                * integers, so is this. Halo CE #35: an 8-byte record array whose
+                * recs 1 and 5 held pairs 0x00030002 / 0x00380000, rebased to
+                * 0x1003ac81 / 0x104a2000, making a u16 index the low half of a
+                * relocated pointer (proven by the index tracking ASLR). */
+               if (bits == Bits::M32 && !exec && !env.have_classic_local_relocs &&
+                   env.record_field_neighbours_are_integers(img, loc.vmaddr)) {
+                  break;   /* integer field of a record array -> constant */
+               }
                if (exec && in_objc_symbols) {
                   break;   /* objc_symtab count word aliasing __text -> constant */
                }

@@ -348,6 +348,45 @@ namespace MachO {
        * Kill switch: M64_NO_ZEROFILL_TARGET_GATE. */
       bool zerofill_target_unattested(std::size_t vmaddr) const;
 
+      /* RECORD-FIELD (neighbour/stride) gate — see section.cc DataParser.
+       *
+       * MEASURED on Halo CE (task #35). Its sound code walks an array of 8-byte
+       * records and reads a u16 index out of each. Two of those records hold
+       * (small,small) u16 PAIRS whose bytes spell an in-image address —
+       * `0x00030002` and `0x00380000` — so both were "rebased" to 0x1003ac81 /
+       * 0x104a2000, and the u16 index became the LOW HALF of a relocated
+       * pointer. Proven by ASLR: across two runs with different image bases the
+       * garbage index changed (0x6000 -> 0x2000) but implied the SAME K for
+       * P = base + K. A genuine u16 index cannot move with ASLR.
+       *
+       * ★Uncovered by every other gate: `zerofill_target_unattested` only
+       * rejects __bss/__common targets; `0x00030002` lands in __TEXT (where the
+       * code gates are deliberately disabled for __TEXT,__const because jump
+       * tables live there) and `0x00380000` lands in __DATA, which had NO
+       * discriminator at all.
+       *
+       * ★The evidence is POSITIONAL, because no value-based test can work: the
+       * image is small, so every valid address has a small high half and is
+       * byte-identical to a plausible (u16,u16) pair. But the slot is an element
+       * of an ARRAY OF FIXED-SIZE RECORDS, and its siblings at the same stride
+       * are the SAME FIELD of neighbouring records. If those are plainly
+       * integers, this one is too. The test is self-consistent in the opposite
+       * direction as well: in a genuine POINTER array the siblings are pointers,
+       * so it does not fire.
+       *
+       * ⚠Deliberately demanding, because "a lone pointer field inside a struct
+       * of ints" is a COMMON shape and must not be broken: it requires a FULL
+       * set of six siblings (+-1,2,3 strides) inside the same section, every
+       * non-zero one a non-pointer, and at least three non-zero. Zero siblings
+       * count as neutral (never as integer evidence) so a NULL-heavy pointer
+       * array cannot satisfy it. Strides below 8 are never tested, because at
+       * stride 4 the "siblings" are adjacent FIELDS of one struct rather than
+       * the same field of sibling records.
+       *
+       * Kill switch M64_NO_RECORD_FIELD_GATE=1. */
+      bool record_field_neighbours_are_integers(const Image& img,
+                                                std::size_t slot_vmaddr) const;
+
       /* CODE-INTERIOR ALIAS gate (see section.cc DataParser). True iff `vmaddr`
        * lands STRICTLY INSIDE a decoded instruction of an
        * S_ATTR_(PURE|SOME)_INSTRUCTIONS section — i.e. the section has already

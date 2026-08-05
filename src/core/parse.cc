@@ -357,6 +357,111 @@ namespace MachO {
       return false;
    }
 
+   /* RECORD-FIELD (neighbour/stride) gate. See the header for the Halo #35
+    * measurement and for why the conditions are as demanding as they are. */
+   template <Bits bits>
+   bool ParseEnv<bits>::record_field_neighbours_are_integers(
+           const Image& img, std::size_t slot_vmaddr) const {
+      static const bool disabled =
+         std::getenv("M64_NO_RECORD_FIELD_GATE") != nullptr;
+      if (disabled) { return false; }
+
+      /* ★"Is this SIBLING a pointer?" — and the naive form of that question is a
+       * TRAP, which cost me a full build+retranslate cycle to see. Asking merely
+       * "does the value land in a mapped section" answers YES for every sibling
+       * here: Halo's column holds 0x00180000 / 0x00240000 / 0x00300000, all of
+       * which alias __TEXT,__text. In a SMALL image every valid address has a
+       * small high half, so a (small,small) pair is byte-identical to a real
+       * address — the same reason no value-based test can classify the candidate
+       * itself. A gate built on that test vetoes instantly and does nothing.
+       *
+       * The question that actually discriminates is what the PASS DECIDED: those
+       * siblings were left as constants (the code gates reject a __text target
+       * with no entry evidence; 0x003c0000 was rejected as unattested zero-fill),
+       * and only 0x00380000 slipped through because it lands in __DATA,__data
+       * where no gate existed. So run the cheap existing discriminators on the
+       * sibling and treat "some gate calls it a constant" as integer evidence.
+       * Never recurses into this gate. */
+      const auto sibling_is_pointerish = [this, &img](uint32_t v) -> bool {
+         if (v == 0) { return false; }              /* neutral, handled by caller */
+         bool in_section = false, in_exec = false;
+         for (Segment<bits> *seg : archive.segments()) {
+            if (!seg->contains_vmaddr(v)) { continue; }
+            for (Section<bits> *sec : seg->sections) {
+               if (!sec->contains_vmaddr(v)) { continue; }
+               in_section = true;
+               in_exec = (sec->sect.flags & S_ATTR_PURE_INSTRUCTIONS) ||
+                         (sec->sect.flags & S_ATTR_SOME_INSTRUCTIONS);
+               break;
+            }
+            break;
+         }
+         if (!in_section) { return false; }         /* addresses nothing: integer */
+         if (zerofill_target_unattested(v)) { return false; }
+         if (cstring_interior_alias(img, v)) { return false; }
+         if (in_exec && (code_interior_alias(v) ||
+                         code_alias_is_constant(v) ||
+                         code_alias_lacks_entry_evidence(img, v))) {
+            return false;
+         }
+         return true;                               /* nothing declassifies it */
+      };
+
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(slot_vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(slot_vmaddr)) { continue; }
+            /* Needs file content to read siblings, so zero-fill is out (and is
+             * already handled by zerofill_target_unattested). */
+            if (sec->sect.offset == 0) { return false; }
+            const uint32_t stype = sec->sect.flags & SECTION_TYPE;
+            /* Sections that are BY DEFINITION arrays of pointers must never be
+             * reclassified by a neighbour argument. */
+            if (stype == S_LAZY_SYMBOL_POINTERS ||
+                stype == S_NON_LAZY_SYMBOL_POINTERS ||
+                stype == S_MOD_INIT_FUNC_POINTERS ||
+                stype == S_MOD_TERM_FUNC_POINTERS ||
+                stype == S_LITERAL_POINTERS) {
+               return false;
+            }
+
+            const std::size_t lo = sec->sect.addr;
+            const std::size_t hi = sec->sect.addr + sec->sect.size;
+
+            /* Record strides. 4 is EXCLUDED on purpose: at stride 4 the
+             * "siblings" are the adjacent FIELDS of a single struct, not the
+             * same field of sibling records, so a lone pointer between two int
+             * members would be misread as an integer. */
+            static const std::size_t strides[] =
+               { 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64 };
+            for (std::size_t stride : strides) {
+               int present = 0, nonzero_int = 0;
+               bool pointer_sibling = false;
+               for (int k = -3; k <= 3 && !pointer_sibling; ++k) {
+                  if (k == 0) { continue; }
+                  const long long a =
+                     (long long)slot_vmaddr + (long long)k * (long long)stride;
+                  if (a < (long long)lo || a + 4 > (long long)hi) { continue; }
+                  ++present;
+                  const std::size_t off =
+                     sec->sect.offset + ((std::size_t)a - sec->sect.addr);
+                  const uint32_t w = img.template at<uint32_t>(off);
+                  if (w == 0) { continue; }            /* neutral, never evidence */
+                  if (sibling_is_pointerish(w)) { pointer_sibling = true; break; }
+                  ++nonzero_int;
+               }
+               /* Demand the FULL sibling set: a partial one is what a one-off
+                * struct near a section edge looks like. */
+               if (pointer_sibling || present < 6 || nonzero_int < 3) { continue; }
+               return true;
+            }
+            return false;
+         }
+         return false;
+      }
+      return false;
+   }
+
    template <Bits bits>
    bool ParseEnv<bits>::code_interior_alias(std::size_t vmaddr) const {
       static const bool disabled =
