@@ -375,6 +375,29 @@ namespace MachO {
       static const bool no_shape =
          std::getenv("M64_NO_FIELD_FNPTR_SHAPE_EVIDENCE") != nullptr;
       if (no_shape) { return false; }
+      /* PAGE-MULTIPLE REFUSAL. Without a symbol the only evidence is structural,
+       * and structure cannot separate `obj->cap = 0x100000` from
+       * `obj->fn = &f` when a real function genuinely begins at 0x100000.
+       * MEASURED, iPhoto contains exactly that collision:
+       *     003c49e7  movl  $0x20, (%esp)
+       *     003c49ee  calll _malloc                ; obj = malloc(32)
+       *     003c49ff  movl  $0x100000, 0xc(%ebx)   ; obj->capacity = 1 MiB
+       *     003c4a06  movl  $0x100000, (%esp)      ; SAME value as the malloc size
+       *     003c4a0d  calll _malloc
+       * (the sibling ctor 0x40 bytes earlier stores 0x800 into the SAME +0xc and
+       * mallocs 0x800), while iPhoto's 0x100000 is a properly padded, genuine
+       * function entry — `retl; nop; nopl (%eax,%eax); 55 89 e5 57 56 53`.
+       * The tie-break is ASYMMETRIC RISK, the same reasoning the 4-aligned and
+       * writable-data narrowings already use: refusing a genuine fn-ptr costs a
+       * missed relocation (the status quo, and the store is inert until called),
+       * whereas admitting an integer CORRUPTS a live constant — here a malloc
+       * size. So refuse the ambiguous case: a 4 KiB-multiple value is a size /
+       * capacity / mask far more often than it is a function entry.
+       * MEASURED cost: Halo 0 refusals of 4 admits, Civ IV 0 of 349, iPhoto 2 of
+       * 42 — and both iPhoto refusals (0x100000 and 0x4000) are verified
+       * integers (0x4000 is an enum written into an out-param by a dispatch
+       * table whose neighbouring arm stores __mh_execute_header). */
+      if ((value & 0xfffU) == 0) { return false; }
       /* (2) entry SHAPE + nothing falls through into it. Both halves required:
        * the shape alone is 31de727 (regressed), the start test alone would
        * admit any post-`ret` byte run. */

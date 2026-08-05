@@ -459,6 +459,70 @@ namespace MachO {
       return false;
    }
 
+   /* Length of a canonical NOP encoding at file offset `fo`, else 0. Covers the
+    * fillers a compiler/assembler emits for inter-function alignment:
+    *   (66)* 90                       xchg ax,ax / nop
+    *   (66)* 0f 1f /0 [sib] [disp]     the multi-byte NOP family
+    *   8d 76 00 / 8d 74 26 00 / 8d b4 26 00 00 00 00   older lea-based fillers
+    * ★The multi-byte forms MATTER: `0f 1f 80 00 00 00 00` and
+    * `66 0f 1f 84 00 00 00 00 00` both END in 0x00, so a naive "is the previous
+    * byte a filler?" test misses them. MEASURED on iPhoto, that miss split ONE
+    * eight-slot handler table (installs into +0x8..+0x24 at 0x412d44..0x412d78)
+    * into 2 admitted and 6 refused purely by which NOP encoding preceded each
+    * target — arbitrary, and 32 of 42 genuine targets image-wide were lost. */
+   static std::size_t canonical_nop_len(const Image& img, std::size_t fo) {
+      const std::size_t n = img.size();
+      std::size_t p = fo, pre = 0;
+      while (p < n && img.at<uint8_t>(p) == 0x66 && pre < 4) { ++pre; ++p; }
+      if (p < n && img.at<uint8_t>(p) == 0x90) { return pre + 1; }
+      if (p + 2 < n && img.at<uint8_t>(p) == 0x0f && img.at<uint8_t>(p + 1) == 0x1f) {
+         const uint8_t modrm = img.at<uint8_t>(p + 2);
+         const uint8_t mod = modrm >> 6, rm = modrm & 0x07;
+         std::size_t len = pre + 3;
+         if (rm == 4) { len += 1; }          /* SIB */
+         if (mod == 1) { len += 1; }         /* disp8  */
+         else if (mod == 2) { len += 4; }    /* disp32 */
+         return len;
+      }
+      if (pre != 0) { return 0; }
+      if (fo + 2 < n && img.at<uint8_t>(fo) == 0x8d &&
+          img.at<uint8_t>(fo + 1) == 0x76 && img.at<uint8_t>(fo + 2) == 0x00) {
+         return 3;
+      }
+      if (fo + 3 < n && img.at<uint8_t>(fo) == 0x8d &&
+          img.at<uint8_t>(fo + 1) == 0x74 && img.at<uint8_t>(fo + 2) == 0x26 &&
+          img.at<uint8_t>(fo + 3) == 0x00) {
+         return 4;
+      }
+      if (fo + 6 < n && img.at<uint8_t>(fo) == 0x8d &&
+          img.at<uint8_t>(fo + 1) == 0xb4 && img.at<uint8_t>(fo + 2) == 0x26 &&
+          img.at<uint8_t>(fo + 3) == 0x00 && img.at<uint8_t>(fo + 4) == 0x00 &&
+          img.at<uint8_t>(fo + 5) == 0x00 && img.at<uint8_t>(fo + 6) == 0x00) {
+         return 7;
+      }
+      return 0;
+   }
+
+   /* True iff a chain of canonical NOPs tiles exactly up to `fo` — i.e. `fo` is
+    * preceded by genuine alignment PADDING, not by data or by the tail of a real
+    * instruction. Bounded to a 15-byte window (the x86 max instruction length),
+    * so this is O(1). A run of ZERO bytes is NOT a NOP chain (0x00 decodes as
+    * `add %al,(%eax)`), which is exactly what keeps the negative guards red. */
+   static bool nop_padding_ends_at(const Image& img, std::size_t fo) {
+      for (std::size_t back = 1; back <= 15; ++back) {
+         if (back > fo) { break; }
+         std::size_t p = fo - back;
+         bool ok = true;
+         while (p < fo) {
+            const std::size_t len = canonical_nop_len(img, p);
+            if (len == 0) { ok = false; break; }
+            p += len;
+         }
+         if (ok && p == fo) { return true; }
+      }
+      return false;
+   }
+
    /* See parse.hh. Structural "nothing falls through into this address" test —
     * the half code_target_has_entry_evidence cannot supply, since that one only
     * looks at the bytes AT the target. Pure function of value + image bytes;
@@ -479,7 +543,7 @@ namespace MachO {
          const uint8_t b2 = img.template at<uint8_t>(fo - 2);
          const uint8_t b3 = img.template at<uint8_t>(fo - 3);
          const uint8_t b5 = img.template at<uint8_t>(fo - 5);
-         /* (a) the preceding function RETURNED, or inter-function filler. */
+         /* (a) the preceding function RETURNED, or single-byte filler. */
          if (b1 == 0xc3 || b1 == 0xcb ||          /* ret / retf              */
              b1 == 0x90 || b1 == 0xcc) {          /* nop / int3 alignment    */
             return true;
@@ -492,7 +556,9 @@ namespace MachO {
          if (b2 == 0x0f && b1 == 0x0b) { return true; }
          /* (e) indirect tail jump `jmp r/m32`, register form (FF E0..E7). */
          if (b2 == 0xff && b1 >= 0xe0 && b1 <= 0xe7) { return true; }
-         return false;
+         /* (f) MULTI-BYTE NOP alignment padding (many such encodings end in
+          * 0x00, so they cannot be recognised from the last byte alone). */
+         return nop_padding_ends_at(img, fo);
       }
       return false;
    }
