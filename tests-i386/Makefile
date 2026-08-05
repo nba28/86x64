@@ -1167,6 +1167,24 @@ $(BUILD_DIR)/99_init_priority_code_alias.i386: $(BUILD_DIR)/99_init_priority_cod
 	   rm -f $@; exit 1; \
 	 fi
 
+# 99_stripped_fnptr_field_start: STRIP local symbols (Halo CE / Civ IV Steam
+# shape — the game's own functions carry NO nlist, so func_syms evidence is
+# unavailable and the field-store code-target admit must discriminate
+# STRUCTURALLY). Both of the fixture's markers are LOCAL labels resolved by the
+# assembler, so unlike 99_code_alias_imm_falsereloc no __text-geometry assertion
+# is needed — the trap cannot drift. Asserts only that the strip really removed
+# them (a surviving nlist would let arm A pass for the wrong reason).
+# Overrides %.i386.
+$(BUILD_DIR)/99_stripped_fnptr_field_start.i386: $(BUILD_DIR)/99_stripped_fnptr_field_start.o
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
+	strip -x $@
+	@if nm -n $@ 2>/dev/null | grep -qE ' [tT] _local_handler|_mid_alias'; then \
+	   echo "99_stripped_fnptr_field_start: ERROR: strip -x left a marker nlist -- trap disarmed"; \
+	   rm -f $@; exit 1; \
+	 else \
+	   echo "  99_stripped_fnptr_field_start: markers unsymboled -- trap armed"; \
+	 fi
+
 # 99_code_alias_imm_falsereloc: STRIP local symbols (Civ IV Steam shape — locals-
 # stripped => imm32_code_alias_is_constant's symboled discriminator disarmed, only
 # the 55-89-e5 prologue-byte evidence remains). ASSERT the integer 0x1f90 falls

@@ -296,21 +296,63 @@ namespace MachO {
 
    /* A code-target imm32 stored into a general-base FIELD (`movl $imm32,
     * disp(%reg)`) or compared against one is a fn-ptr callback install
-    * (obj->cb = &handler) ONLY on SYMBOL evidence — a func_syms nlist at the
-    * value (a real, symboled function ENTRY). The `55 89 e5` prologue-byte
-    * heuristic imm32_code_alias_is_constant also accepts is DELIBERATELY NOT
-    * used here: unlike the stack-arg ProcPtr arm (`movl $handler,(%esp)` —
-    * an ABI-shaped argument to a known registration call, where Halo's
-    * locals-stripped renderer handlers legitimately carry no symbol), a
-    * field store is overwhelmingly an INTEGER (a hash multiplier/mask/index/
-    * enum/size), and in a large __text such an integer routinely aliases a
-    * coincidental `55 89 e5` run. Relocating it corrupts the constant — the
-    * Civ IV boost type-registry rc=139 crash flipped ~15-20% -> ~100%
-    * deterministic exactly this way (guard 99_code_alias_imm_falsereloc).
-    * A genuine callback-into-field target is a defined function and thus
-    * symboled even in a locals-stripped image (globals survive `strip -x`);
-    * requiring the nlist keeps 99_fnptr_field_call's .globl handler admitted
-    * while rejecting the prologue-only integer alias. */
+    * (obj->cb = &handler). Two independent kinds of positive evidence:
+    *
+    *  1. a func_syms nlist AT the value — a real, symboled function ENTRY;
+    *  2. an entry SHAPE at the value (`55 89 e5` / adjustor thunk) AND
+    *     structural FUNCTION-START evidence (code_target_is_function_start:
+    *     nothing falls through into it).
+    *
+    * ★Why (2) exists. b4b2848 narrowed this to symbol-only after 31de727's
+    * prologue-only admit was bisected to a Civ IV regression, on the premise
+    * that "a genuine callback target is a defined function and thus symboled
+    * even in a locals-stripped image (globals survive `strip -x`)". MEASURED,
+    * that premise is FALSE, and symbol-only is not narrow but INERT:
+    *
+    *   Halo CE   : LC_DYSYMTAB nlocalsym=0, nextdefsym=236, of which 222 land
+    *               in __text and every one is a C++ COALESCED template
+    *               instantiation (__ZNSt5_Tree.., __ZN13IDirect3D_Mac6AddRefEv).
+    *               The game's own functions carry no nlist at all.
+    *   Civ IV    : 19205 defined symbols, yet of the 517 `movl $imm32,
+    *   (Steam)     disp(%reg)` sites whose imm32 lands in __text, the number
+    *               with an nlist AT the target is ZERO.
+    *
+    * So master admits NOTHING through this arm in EITHER image, and every
+    * `obj->fn = &static_handler` install ships a raw i386 code address. Halo
+    * dies on the first call through one: `movl $0x250ff8, 0x10(%ebx)` at
+    * i386 0x2532ca/0x256106 shipped verbatim into the translated dylib
+    * (0x1031e4ff/0x10321c82) -> `call *0x250FF8` -> SIGSEGV, rip=0x250FF8.
+    *
+    * ★Why (2) is safe where 31de727's prologue-only admit was not. The
+    * false-positive class b4b2848 protects against is, in its own words, an
+    * integer aliasing "an anonymous MID-FUNCTION `55 89 e5` run". Mid-function
+    * means fall-through reachable — precisely what code_target_is_function_start
+    * rejects. Census over the real images (otool linear sweep for true
+    * instruction boundaries + preceding instruction):
+    *
+    *   Halo : 207 in-__text field-store immediates; 2 carry a prologue; both
+    *          are preceded by `retl` and are the crash sites above.
+    *   Civ  : 648 in-__text field-store/field-cmp immediates across all
+    *          general-base shapes; 349 carry a prologue and ALL 349 are
+    *          preceded by ret/jmp/nop, i.e. every one is a genuine function
+    *          START. Spot-checked by disassembly: a one-shot guarded
+    *          initialiser (`cmpb $0,flag; jne; movb $1,flag`) installing 13
+    *          handlers into field +0x18 of 13 globals, targets being real
+    *          virtual stubs (`55 89 e5 31 c0 c9 c3`).
+    *          NOT ONE mid-function prologue alias exists in either image.
+    *   The adjustor-THUNK shape admits ZERO targets through this arm in both
+    *          images, so it cannot be a false-positive source here either.
+    *
+    * Net effect: Halo +2 relocations, Civ IV +349 — every one a verified
+    * function start. Guard 99_code_alias_imm_falsereloc stays RED-for-relocation
+    * because its `_marker` sits after `.space 0x40` of ZERO filler (measured:
+    * the 8 bytes before 0x1f90 are all 0x00), which is not a terminator.
+    * Guard 99_fnptr_field_call keeps its .globl handler on path (1).
+    *
+    * Kill switches: M64_NO_FIELD_FNPTR_SHAPE_EVIDENCE=1 drops arm (2) entirely
+    * (= master/b4b2848 behaviour); M64_NO_FUNCTION_START_EVIDENCE=1 makes the
+    * start test vacuous (= 31de727 prologue-only behaviour). The two give a
+    * three-way A/B over exactly the disputed axis. */
    template <Bits bits>
    static bool field_store_code_target_is_fnptr(const Image& img,
                                                 ParseEnv<bits>& env,
@@ -329,7 +371,15 @@ namespace MachO {
          break;
       }
       if (!in_code) { return false; }
-      return env.func_syms.count(value) != 0;   /* symbol-only evidence */
+      if (env.func_syms.count(value) != 0) { return true; }   /* (1) symbol */
+      static const bool no_shape =
+         std::getenv("M64_NO_FIELD_FNPTR_SHAPE_EVIDENCE") != nullptr;
+      if (no_shape) { return false; }
+      /* (2) entry SHAPE + nothing falls through into it. Both halves required:
+       * the shape alone is 31de727 (regressed), the start test alone would
+       * admit any post-`ret` byte run. */
+      return env.code_target_has_entry_evidence(img, (std::size_t) value) &&
+             env.code_target_is_function_start(img, (std::size_t) value);
    }
 
    template <Bits bits>

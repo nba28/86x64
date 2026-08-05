@@ -459,6 +459,44 @@ namespace MachO {
       return false;
    }
 
+   /* See parse.hh. Structural "nothing falls through into this address" test —
+    * the half code_target_has_entry_evidence cannot supply, since that one only
+    * looks at the bytes AT the target. Pure function of value + image bytes;
+    * MUST NOT consult vmaddr_resolver (parse-order dependence). */
+   template <Bits bits>
+   bool ParseEnv<bits>::code_target_is_function_start(const Image& img,
+                                                      std::size_t vmaddr) const {
+      static const bool disabled =
+         std::getenv("M64_NO_FUNCTION_START_EVIDENCE") != nullptr;
+      if (disabled) { return true; }
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         const std::size_t fo = vmaddr - seg->segment_command.vmaddr
+                              + seg->segment_command.fileoff;
+         /* Need 5 bytes of lookback for the longest suffix (`jmp rel32`). */
+         if (fo < 5 || fo > img.size()) { return false; }
+         const uint8_t b1 = img.template at<uint8_t>(fo - 1);
+         const uint8_t b2 = img.template at<uint8_t>(fo - 2);
+         const uint8_t b3 = img.template at<uint8_t>(fo - 3);
+         const uint8_t b5 = img.template at<uint8_t>(fo - 5);
+         /* (a) the preceding function RETURNED, or inter-function filler. */
+         if (b1 == 0xc3 || b1 == 0xcb ||          /* ret / retf              */
+             b1 == 0x90 || b1 == 0xcc) {          /* nop / int3 alignment    */
+            return true;
+         }
+         /* (b) `ret imm16` (C2 iw). */
+         if (b3 == 0xc2) { return true; }
+         /* (c) tail jump: `jmp rel8` (EB cb) / `jmp rel32` (E9 cd). */
+         if (b2 == 0xeb || b5 == 0xe9) { return true; }
+         /* (d) `ud2` (0F 0B) — a no-return call's trap tail. */
+         if (b2 == 0x0f && b1 == 0x0b) { return true; }
+         /* (e) indirect tail jump `jmp r/m32`, register form (FF E0..E7). */
+         if (b2 == 0xff && b1 >= 0xe0 && b1 <= 0xe7) { return true; }
+         return false;
+      }
+      return false;
+   }
+
    template <Bits bits>
    bool ParseEnv<bits>::code_alias_lacks_entry_evidence(const Image& img,
                                                         std::size_t vmaddr) const {
