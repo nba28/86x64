@@ -171,11 +171,8 @@ static void fsci_out(void *dst32, const void *src64)
    memcpy(d + FSCI_HEAD + 4, s + FSCI_HEAD + 8, FSCI_TAIL);
 }
 
-static void fsci_in_n(void *dst64, const void *src32, size_t n)
-{
-   for (size_t i = 0; i < n; ++i)
-      fsci_in((char *)dst64 + i * FSCI_SZ64, (const char *)src32 + i * FSCI_SZ32);
-}
+/* Only the OUT direction is ever an array: every API that takes an FSCatalogInfo
+ * as INPUT takes exactly one. */
 static void fsci_out_n(void *dst32, const void *src64, size_t n)
 {
    for (size_t i = 0; i < n; ++i)
@@ -292,15 +289,21 @@ static OSErr call_search(void *ctx_, ItemCount max, ItemCount *actual,
    FSSearchParams sp;
    memset(&sp, 0, sizeof sp);
    if (c->crit32) {
-      /* i386 FSSearchParams: Duration searchTime @0, OptionBits searchBits @4,
-       * HFSUniStr255 *searchName @8, FSCatalogInfo *searchInfo1 @12,
-       * *searchInfo2 @16 — all 4-byte slots. */
+      /* i386 FSSearchParams — SIX 4-byte slots (verified against BOTH the 10.6
+       * SDK the app was built with and the live header):
+       *   @0 Duration searchTime          @4  OptionBits searchBits
+       *   @8 UniCharCount searchNameLength @12 const UniChar *searchName
+       *  @16 FSCatalogInfo *searchInfo1   @20 FSCatalogInfo *searchInfo2
+       * `searchName` is a bare UniChar ARRAY (NOT an HFSUniStr255 — the length
+       * travels in its own field), and UniChar is layout-identical, so the
+       * caller's low-4GB buffer is handed over as-is. */
       const uint32_t *s = (const uint32_t *)i386_ptr(c->crit32);
-      sp.searchTime = (Duration)(int32_t)s[0];
-      sp.searchBits = (OptionBits)s[1];
-      sp.searchName = s[2] ? (HFSUniStr255 *)i386_ptr(s[2]) : NULL;  /* identical layout */
-      if (s[3]) { fsci_in(&c->lo, i386_ptr(s[3])); sp.searchInfo1 = &c->lo; }
-      if (s[4]) { fsci_in(&c->hi, i386_ptr(s[4])); sp.searchInfo2 = &c->hi; }
+      sp.searchTime       = (Duration)(int32_t)s[0];
+      sp.searchBits       = (OptionBits)s[1];
+      sp.searchNameLength = (UniCharCount)s[2];
+      sp.searchName       = s[3] ? (const UniChar *)i386_ptr(s[3]) : NULL;
+      if (s[4]) { fsci_in(&c->lo, i386_ptr(s[4])); sp.searchInfo1 = &c->lo; }
+      if (s[5]) { fsci_in(&c->hi, i386_ptr(s[5])); sp.searchInfo2 = &c->hi; }
    }
    return FSCatalogSearch(c->iter, &sp, max, actual, changed, which,
                           ci, refs, specs, names);
