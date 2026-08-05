@@ -366,6 +366,13 @@ namespace MachO {
          std::getenv("M64_NO_RECORD_FIELD_GATE") != nullptr;
       if (disabled) { return false; }
 
+      /* Debug probe: M64_DBG_RECFIELD=<hex slot vmaddr> traces every stride and
+       * every sibling verdict for that one slot. Inert unless set. */
+      static const char *rfdbgenv = std::getenv("M64_DBG_RECFIELD");
+      static const std::size_t rfdbgaddr =
+         rfdbgenv ? (std::size_t)strtoull(rfdbgenv, nullptr, 0) : 0;
+      const bool rfdbg = (rfdbgenv != nullptr && slot_vmaddr == rfdbgaddr);
+
       /* ★"Is this SIBLING a pointer?" — and the naive form of that question is a
        * TRAP, which cost me a full build+retranslate cycle to see. Asking merely
        * "does the value land in a mapped section" answers YES for every sibling
@@ -382,9 +389,10 @@ namespace MachO {
        * where no gate existed. So run the cheap existing discriminators on the
        * sibling and treat "some gate calls it a constant" as integer evidence.
        * Never recurses into this gate. */
-      const auto sibling_is_pointerish = [this, &img](uint32_t v) -> bool {
+      const auto sibling_is_pointerish = [this, &img, rfdbg](uint32_t v) -> bool {
          if (v == 0) { return false; }              /* neutral, handled by caller */
          bool in_section = false, in_exec = false;
+         const char *segn = "-", *secn = "-";
          for (Segment<bits> *seg : archive.segments()) {
             if (!seg->contains_vmaddr(v)) { continue; }
             for (Section<bits> *sec : seg->sections) {
@@ -392,9 +400,20 @@ namespace MachO {
                in_section = true;
                in_exec = (sec->sect.flags & S_ATTR_PURE_INSTRUCTIONS) ||
                          (sec->sect.flags & S_ATTR_SOME_INSTRUCTIONS);
+               segn = sec->sect.segname; secn = sec->sect.sectname;
                break;
             }
             break;
+         }
+         if (rfdbg) {
+            fprintf(stderr, "[recfld]   sib %#010x sect=%.16s,%.16s exec=%d "
+                    "zf=%d cstr=%d codeint=%d codeconst=%d lacksentry=%d\n",
+                    v, segn, secn, (int)in_exec,
+                    (int)zerofill_target_unattested(v),
+                    (int)cstring_interior_alias(img, v),
+                    (int)code_interior_alias(v),
+                    (int)code_alias_is_constant(v),
+                    (int)code_alias_lacks_entry_evidence(img, v));
          }
          if (!in_section) { return false; }         /* addresses nothing: integer */
          if (zerofill_target_unattested(v)) { return false; }
@@ -452,6 +471,12 @@ namespace MachO {
                }
                /* Demand the FULL sibling set: a partial one is what a one-off
                 * struct near a section edge looks like. */
+               if (rfdbg) {
+                  fprintf(stderr, "[recfld] slot=%#zx stride=%zu present=%d "
+                          "nonzero_int=%d pointer_sibling=%d\n",
+                          slot_vmaddr, stride, present, nonzero_int,
+                          (int)pointer_sibling);
+               }
                if (pointer_sibling || present < 6 || nonzero_int < 3) { continue; }
                return true;
             }
