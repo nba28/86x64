@@ -587,26 +587,19 @@ def cmd_retranslate(args):
     cmd_translate(args)
 
 
-def _sync_nulljump(dst_dir, dry_run=False):
-    """Copy libabiconv.nulljump beside a libabiconv.dylib we just installed.
-
-    static-interpose.sh resolves the NULL-jump exclusion list as
-    `dirname(libabiconv.dylib)/libabiconv.nulljump`, so a translate driven
-    against a BUNDLE-LOCAL copy silently loses the whole protection unless the
-    sidecar travels with it. MEASURED on Halo 2026-08-05: the deployed bundle
-    had 4 libabiconv.dylib and 0 libabiconv.nulljump, and its translated
-    QuickTime.framework got _ResolveAliasFile redirected into a NULL-jump bridge
-    -- a live rip=0. Same rule as syncing every co-located libabiconv copy.
-    Returns True if the sidecar was placed."""
-    src = LIBABICONV.parent / "libabiconv.nulljump"
-    if not src.exists():
-        return False
-    dst = Path(dst_dir) / "libabiconv.nulljump"
-    if dry_run:
-        print("  dry-run: cp", src, dst)
-        return True
-    shutil.copy2(src, dst)
-    return True
+# ⚠DO NOT copy libabiconv.nulljump into a deployed bundle. Two reasons, both
+# measured 2026-08-05:
+#   * it is UNNECESSARY — static-interpose runs at TRANSLATE time and `m64
+#     translate` always passes the BUILD-TREE libabiconv as -l, which sits next
+#     to the freshly generated list. No pipeline path ever passes a bundle-local
+#     copy.
+#   * it BREAKS SIGNING — a stray file at a framework's version root violates the
+#     seal: `codesign --verify --deep --strict` then fails with "a sealed
+#     resource is missing or invalid / In subcomponent: …QuickTime.framework".
+# What DOES need care is the opposite thing: a VENDORED golden framework is a
+# translated artifact frozen at whatever commit produced it, so it keeps the
+# binds it was translated with. Re-translate those when the core changes; see
+# the journal entry for Halo's stale ___ResolveAliasFile.
 
 
 def cmd_resync(args):
@@ -615,7 +608,6 @@ def cmd_resync(args):
     warn_if_build_ambiguous()
     app = Path(args.app)
     copies = list(app.rglob("libabiconv.dylib"))
-    nj = 0
     # Name the SOURCE, not just the count: "4 copies synced" is exactly the
     # reassuring message you get when you have just deployed the wrong build.
     info(f"resync libabiconv -> {len(copies)} copies in {app.name}")
@@ -627,16 +619,8 @@ def cmd_resync(args):
         shutil.copy2(LIBABICONV, c)
         subprocess.run(["codesign", "-f", "-s", "-", str(c)],
                        capture_output=True)
-        # ★The exclusion list must travel WITH the dylib — see _sync_nulljump.
-        nj += 1 if _sync_nulljump(c.parent, args.dry_run) else 0
     if not args.dry_run:
         good(f"{len(copies)} copies synced + ad-hoc signed")
-        if nj == len(copies):
-            good(f"{nj} NULL-jump exclusion list(s) synced alongside")
-        else:
-            warn(f"only {nj}/{len(copies)} copies got libabiconv.nulljump — "
-                 "translates driven against the others will interpose "
-                 "NULL-jump bridges (build the abiconv_nulljump target)")
 
 
 def _dylib_deps(macho):
@@ -1179,10 +1163,6 @@ def cmd_tree(args):
             shutil.copy2(lib, dst)
             subprocess.run(["codesign", "-f", "-s", "-", str(dst)],
                            capture_output=True)
-            # ★Carry the NULL-jump exclusion list with libabiconv (see
-            # _sync_nulljump): static-interpose looks for it beside the dylib.
-            if Path(lib).name == "libabiconv.dylib":
-                _sync_nulljump(out_dir)
         good(f"copied {len(libs)} runtime lib(s) → {out_dir.relative_to(root)}")
 
     # Equal-length path byte-patch (Source binaries build absolute module paths
