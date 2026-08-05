@@ -58,6 +58,32 @@ if ! [ "$INPATH" ]; then
     exit 1
 fi
 
+#
+# ⚠THE LIST MUST TRAVEL WITH THE DYLIB, AND ITS ABSENCE MUST BE LOUD.
+# It is resolved next to $DYLIB, so a translate driven against a BUNDLE-LOCAL
+# libabiconv copy finds nothing unless the sidecar was copied there too. This
+# used to fail SILENTLY (NULLJUMP_N=0, no diagnostic), which meant the whole
+# protection evaporated with no sign. MEASURED on Halo 2026-08-05: the deployed
+# bundle had 4 libabiconv.dylib and 0 libabiconv.nulljump, so its translated
+# QuickTime.framework got _ResolveAliasFile redirected into a NULL-jump bridge
+# and died live with rip=0. Same family as the libabiconv multi-copy gotcha.
+# Set NULLJUMP=/dev/null to disable deliberately (the guard's OFF arm does).
+NULLJUMP="${NULLJUMP:-$(dirname "$DYLIB")/libabiconv.nulljump}"
+NULLJUMP_N=0
+if [ -s "$NULLJUMP" ]; then
+    NULLJUMP_N=$(wc -l < "$NULLJUMP" | tr -d ' ')
+elif [ "$NULLJUMP" != /dev/null ]; then
+    echo "$0: WARNING: no NULL-jump exclusion list at $NULLJUMP" >&2
+    echo "$0:   every bind will be interposed, INCLUDING bridges that can only" >&2
+    echo "$0:   jump to NULL. The list is built next to libabiconv.dylib; a" >&2
+    echo "$0:   bundle-local copy needs the sidecar copied beside it." >&2
+    echo "$0:   (M64_ALLOW_NO_NULLJUMP=1 to proceed without this warning.)" >&2
+    if [ -z "${M64_ALLOW_NO_NULLJUMP:-}" ] && [ -n "${M64_STRICT_NULLJUMP:-}" ]; then
+        echo "$0: refusing to translate without it (M64_STRICT_NULLJUMP)" >&2
+        exit 1
+    fi
+fi
+
 ORD=$(macho-tool translate --load-dylib "$DYLIB_NAME" "$INPATH")
 if [[ $? != 0 ]]; then
     echo "$0: failed to translate dylib ordinal" >&2
@@ -104,11 +130,6 @@ fi
 # Hand-written shims are absent from it by construction: they implement the work
 # themselves and leave no undefined native, so quicktime_image.c and the golden
 # QuickTime surface keep their interposition.
-NULLJUMP="${NULLJUMP:-$(dirname "$DYLIB")/libabiconv.nulljump}"
-NULLJUMP_N=0
-if [ -s "$NULLJUMP" ]; then
-    NULLJUMP_N=$(wc -l < "$NULLJUMP" | tr -d ' ')
-fi
 
 # Build the set of symbols bound through the WEAK bind table (their ORIGINAL,
 # pre-rewrite names — the same form as the incoming symbol list). These need
