@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: carbon-fileops nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim
+.PHONY: zerofill-target-pair carbon-fileops nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -471,6 +471,14 @@ nulljump-probe-arch: $(BUILD_DIR)/libabiconv.dylib
 # them. OFF arm is ABICONV_FSSPEC_LEGACY=1.
 carbon-fileops: $(BUILD_DIR)/99_carbon_fileops.x86_64
 	@bash carbon_fileops_test.sh
+# zerofill-target-pair: A/B guard that the translator does not "rebase" two
+# adjacent u16 fields whose bytes spell an address into ZERO-FILL memory. Halo CE
+# died on exactly this every run: 'scen' (540,72) -> (27356,4272). The poisonous
+# value must equal a link-time address, so the script patches it into the built
+# i386 binary and translates the same bytes twice. OFF arm is
+# M64_NO_ZEROFILL_TARGET_GATE=1 at TRANSLATE time.
+zerofill-target-pair: $(BUILD_DIR)/99_zerofill_target_pair.i386
+	@bash zerofill_target_pair_test.sh
 # carbon-datetime: A/B guard for the classic Date & Time Utilities, REMOVED from
 # modern macOS. abigen still emits a bridge; the pipeline weakens the dangling
 # bind to NULL, so the classic call jumps to 0 (Halo, rip=0, 2026-08-03).
@@ -1401,6 +1409,13 @@ $(BUILD_DIR)/99_nulljump_no_shadow.i386: $(BUILD_DIR)/99_nulljump_no_shadow.o
 # which is precisely what this guard measures. Overrides %.i386.
 $(BUILD_DIR)/99_carbon_fileops.i386: $(BUILD_DIR)/99_carbon_fileops.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_zerofill_target_pair: linked with -x (strip local symbols) so the zero-fill
+# section carries NO symbol. That is the point of the fixture — the gate accepts
+# a zero-fill target ANCHORED by an object symbol and rejects one in symbol-free
+# space. Overrides %.i386.
+$(BUILD_DIR)/99_zerofill_target_pair.i386: $(BUILD_DIR)/99_zerofill_target_pair.o
+	$(LD) $(LDFLAGS_I386) -x -e _main -o $@ $<
 
 # 99_carbon_datetime: the whole family is undefined dynamic_lookup — these
 # symbols are gone from modern macOS and libabiconv exports a ___<name>

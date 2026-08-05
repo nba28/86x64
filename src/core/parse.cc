@@ -324,10 +324,6 @@ namespace MachO {
       static const bool disabled =
          std::getenv("M64_NO_ZEROFILL_TARGET_GATE") != nullptr;
       if (disabled) { return false; }
-      /* An exact nlist hit is positive evidence that an object really starts
-       * here, so honour it. func_syms holds EVERY non-stab N_SECT symbol
-       * (populated in the Symtab ctor), data symbols included. */
-      if (func_syms.count(vmaddr) != 0) { return false; }
       for (Segment<bits> *seg : archive.segments()) {
          if (!seg->contains_vmaddr(vmaddr)) { continue; }
          for (Section<bits> *sec : seg->sections) {
@@ -335,7 +331,26 @@ namespace MachO {
             const uint32_t stype = sec->sect.flags & SECTION_TYPE;
             /* Zero-fill only (__DATA,__bss and __DATA,__common). Every other
              * data target keeps the callers' existing treatment. */
-            return stype == S_ZEROFILL || stype == S_GB_ZEROFILL;
+            if (stype != S_ZEROFILL && stype != S_GB_ZEROFILL) { return false; }
+            /* ★POSITIVE-EVIDENCE TEST, the same idiom the code-entry gate uses.
+             * A genuine compile-time pointer into zero-fill space targets an
+             * OBJECT — either its start or its interior (`&freqstruct[150000]`,
+             * the shape guarded by 96_zerofill_common_interior and needed by
+             * Halo's own non-lazy slots). Such an object begins at a symbol. So
+             * demand a data symbol at or below the target WITHIN THIS SECTION:
+             * that symbol is the object the pointer is into.
+             * A (small, small) u16 pair that merely aliases zero-fill space has
+             * no such anchor — MEASURED on Halo, whose 0x0048021C / 0x005802D0
+             * both fall BELOW the lowest __common symbol (0x005B4620), i.e. in
+             * the symbol-free region, while the test fixture's interior pointer
+             * sits above its array's symbol.
+             * func_syms holds every non-stab N_SECT symbol, data included. */
+            const auto it = func_syms.upper_bound(vmaddr);   /* first > vmaddr */
+            if (it != func_syms.begin()) {
+               const std::size_t prev = *std::prev(it);
+               if (prev >= sec->sect.addr) { return false; }  /* attested */
+            }
+            return true;   /* no anchoring symbol in this section -> constant */
          }
          return false;   /* in segment but between/outside sections */
       }
