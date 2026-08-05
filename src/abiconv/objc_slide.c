@@ -1428,6 +1428,13 @@ static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
                if (strncmp(sect->sectname, "__86x64_abs32", 16) == 0) { continue; }
                if (strncmp(sect->sectname, "__86x64_pcmap", 16) == 0) { continue; }
                if (strncmp(sect->sectname, "__86x64_ehlsda", 16) == 0) { continue; }
+               /* __86x64_cpin is a table of 4-aligned intra-image __DATA/__TEXT
+                * slot vmaddrs (the M32 pass's constant verdicts, read only by
+                * macho-tool at parse time). Every entry aliases the window by
+                * construction, so the scan would "slide" the whole table. It is
+                * inert at runtime, but it is OUR bookkeeping, not the program's
+                * pointers — same rule as the four above. */
+               if (strncmp(sect->sectname, "__86x64_cpin", 16) == 0) { continue; }
                if (sect->size < 4) { continue; }
                void *base = (void *)(uintptr_t)(sect->addr + slide);
                const size_t page = 4096;

@@ -441,6 +441,61 @@ namespace MachO {
    }
 
    template <Bits bits>
+   void ConstPinBlob<bits>::Emit(Image& img, std::size_t offset) const {
+      /* Resolve each pinned slot's final vmaddr (blob locs are set during Build)
+       * and sort ascending, so the next stage's pre-parse lift can seed
+       * ParseEnv::const_pin_slots straight from the file. Same contract as
+       * Abs32Blob: a slot whose blob went away is dropped and the tail is
+       * zero-filled (the emitted count stays accurate). */
+      std::vector<uint32_t> rows;
+      rows.reserve(ents.size());
+      for (const Ent& e : ents) {
+         if (e.blob == nullptr) { continue; }
+         rows.push_back(static_cast<uint32_t>(e.blob->loc.vmaddr + e.off));
+      }
+      std::sort(rows.begin(), rows.end());
+      img.at<uint32_t>(offset + 0) = MAGIC;
+      img.at<uint32_t>(offset + 4) = static_cast<uint32_t>(rows.size());
+      std::size_t p = offset + 8;
+      for (const uint32_t r : rows) {
+         img.at<uint32_t>(p) = r;
+         p += 4;
+      }
+      const std::size_t end = offset + size();
+      for (; p < end; p += 4) { img.at<uint32_t>(p) = 0; }
+   }
+
+   template <Bits bits>
+   SectionBlob<bits> *ConstPinBlob<bits>::Parse(const Image& img, const Location& loc,
+                                                ParseEnv<bits>& env) {
+      /* One blob for the WHOLE section. Read the slot list back and RE-RESOLVE
+       * each entry to the blob currently at that vmaddr, so this build's Emit
+       * re-emits the slot's post-re-layout address instead of freezing the
+       * baked one (the __86x64_xrel/__86x64_abs32 pattern; a plain DataBlob
+       * round-trip would go stale the moment a stage shifts the layout — and,
+       * worse, DataParser would pointer-detect the table's OWN in-image entry
+       * values). The gate itself reads ParseEnv::const_pin_slots, seeded by
+       * Archive's pre-parse lift — this Parse only keeps the table alive. */
+      auto *blob = new ConstPinBlob<bits>(loc, env);
+      const uint32_t magic = img.at<uint32_t>(loc.offset + 0);
+      if (magic != MAGIC) {
+         throw error("__86x64_cpin: bad magic 0x%08x on reparse", magic);
+      }
+      const uint32_t count = img.at<uint32_t>(loc.offset + 4);
+      blob->ents.reserve(count); /* keep &ents.back() stable for deferred resolve */
+      for (uint32_t i = 0; i < count; ++i) {
+         const uint32_t slot_vmaddr =
+            img.at<uint32_t>(loc.offset + 8 + static_cast<std::size_t>(i) * 4);
+         if (slot_vmaddr == 0) { continue; } /* zero-filled tail */
+         Ent ent;
+         blob->ents.push_back(ent);
+         env.vmaddr_resolver.resolve_containing(
+            slot_vmaddr, &blob->ents.back().blob, &blob->ents.back().off);
+      }
+      return blob;
+   }
+
+   template <Bits bits>
    void PcmapBlob<bits>::Emit(Image& img, std::size_t offset) const {
       const uint32_t anchor_vmaddr =
          anchor ? static_cast<uint32_t>(anchor->loc().vmaddr) : 0;
@@ -693,6 +748,9 @@ namespace MachO {
 
    template class Abs32Blob<Bits::M32>;
    template class Abs32Blob<Bits::M64>;
+
+   template class ConstPinBlob<Bits::M32>;
+   template class ConstPinBlob<Bits::M64>;
 
    template class PcmapBlob<Bits::M32>;
    template class PcmapBlob<Bits::M64>;
