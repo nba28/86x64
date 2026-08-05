@@ -712,6 +712,26 @@ _DateToSeconds
 _LongSecondsToDate
 _LongDateToSeconds
 
+# carbon_fscatinfo_shim.c / carbon_fscatinfo_tramp.asm — the classic File
+# Manager's FSCatalogInfo family. These symbols EXIST natively; what abigen gets
+# wrong is the SHAPE. FSCatalogInfo is 144 bytes on i386 and 148 on x86_64
+# (FSPermissionInfo ends in an FSFileSecurityRef POINTER), so typeconv routes it
+# to the deep-copy path, which stages the pointee in a scratch slot of the shim
+# frame sized for exactly ONE struct. Right for the single-item calls; fatal for
+# the BULK ones, where the native callee fills `actualObjects` entries and
+# overruns the frame straight into the i386 caller's locals (measured on Civ IV:
+# 11 * 148 bytes into an 880-byte frame; the caller's two `operator new[]`
+# pointers read back NULL and it SIGSEGVs dereferencing one). abigen's field walk
+# also strides UTCDateTime by 12 (the natural size) instead of the packed 8, so
+# every date/size/valence field lands at the wrong offset even for one struct.
+_FSGetCatalogInfoBulk
+_FSCatalogSearch
+_FSGetCatalogInfo
+_FSSetCatalogInfo
+_FSCreateFileUnicode
+_FSCreateDirectoryUnicode
+_FSCreateFileAndOpenForkUnicode
+
 # BlockMove/BlockZero (carbon_memory.c) -- removed from modern macOS, so abigen's
 # bridge could only jump to NULL. Nothing else provides them, so they are
 # implemented rather than merely un-shadowed.
