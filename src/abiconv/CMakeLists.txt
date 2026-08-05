@@ -540,6 +540,14 @@ add_library(abiconv SHARED
   # Classic epoch is 1904-01-01 in LOCAL time (2082844800s before the Unix
   # epoch) — using gmtime here would silently shift every date by the timezone.
   carbon_datetime_shim.c
+  # carbon_fscatinfo_shim.c / carbon_fscatinfo_tramp.asm: ONE job — marshal
+  # FSCatalogInfo, the one classic struct whose two layouts genuinely differ
+  # (FSPermissionInfo ends in an FSFileSecurityRef POINTER: 144 bytes on i386,
+  # 148 on x86_64). typeconv's deep-copy path stages the pointee in a scratch
+  # slot sized for ONE struct, so the BULK entry points — which fill
+  # `actualObjects` entries — overrun the shim frame into the i386 caller's
+  # locals. Measured on Civ IV: 11 * 148 into an 880-byte frame.
+  carbon_fscatinfo_shim.c
   # agl_renderer_shim.c: ONE job — the AGL renderer-info ENUMERATION family.
   # aglQueryRendererInfo takes a QuickDraw GDHandle, so on 64-bit it is a dead
   # entry point (measured: NULL for every input, aglGetError()==0) and every
@@ -704,6 +712,7 @@ add_library(abiconv SHARED
   cg_display_tramp.asm
   cfstring_range_tramp.asm
   carbon_datetime_tramp.asm
+  carbon_fscatinfo_tramp.asm
   carbon_memory_tramp.asm
   carbon_alias_tramp.asm
   eh_tramp.asm
