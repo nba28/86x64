@@ -390,6 +390,35 @@ namespace MachO {
                if (!exec && (value & 3) != 0) {
                   break;   /* misaligned data-range value -> treat as constant */
                }
+               /* ZERO-FILL TARGET gate (M32, reloc-less images). The gate above
+                * accepts that a data-range hit is weak evidence and rejects the
+                * misaligned ones. A ZERO-FILL target is weaker still: the
+                * pointee has no file content to inspect, the image carries no
+                * relocation naming the slot, and in a locals-stripped image
+                * there is no symbol either — literally nothing can corroborate
+                * it. A false positive there is never inert; it rewrites a live
+                * integer.
+                * ★MEASURED (Halo CE): tag-class descriptor records carry three
+                * u16 fields at +0xa/+0xc/+0xe. In the 'scen' and 'lifi' records
+                * the PAIR at +0xc spells 0x0048021C / 0x005802D0, both landing
+                * in __DATA,__common, so both were "rebased" — (540,72) became
+                * (27356,4272) and (720,88) became (27536,4288). The 'bipd'
+                * record survived only because its pair spells 0x00780234, above
+                * the image. The consuming loop processes exactly the two
+                * corrupted records, so `base + 564` became `base - 9508`,
+                * landing in the tag block's name strings, and the deref took a
+                * wild address every run.
+                * Because the image is SMALL, every valid address has a small
+                * high half — which is exactly what makes a (small, small) u16
+                * pair look like an address, and why no value-based test can
+                * separate them. Same family as the memdisp-code-alias gate.
+                * Narrow by construction: zero-fill targets only, M32 only, and
+                * only when no local reloc table can speak authoritatively; an
+                * exact nlist hit passes as positive evidence. */
+               if (bits == Bits::M32 && !exec && !env.have_classic_local_relocs &&
+                   env.zerofill_target_unattested(value)) {
+                  break;   /* unattested zero-fill target -> constant */
+               }
                if (exec && in_objc_symbols) {
                   break;   /* objc_symtab count word aliasing __text -> constant */
                }

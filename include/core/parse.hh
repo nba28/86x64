@@ -287,6 +287,41 @@ namespace MachO {
        * non-cstring target so callers gate only this exact false-positive. */
       bool cstring_interior_alias(const Image& img, std::size_t vmaddr) const;
 
+      /* ZERO-FILL TARGET gate (see section.cc DataParser). True iff `vmaddr`
+       * lands in a ZERO-FILL section (S_ZEROFILL / S_GB_ZEROFILL, i.e.
+       * __DATA,__bss and __DATA,__common) and NO nlist symbol sits exactly
+       * there.
+       *
+       * WHY. Pointer detection in a reloc-less fixed-address i386 exec is a
+       * heuristic over 4-byte values, and a zero-fill target is the WEAKEST
+       * evidence class there is: the pointee has no file content to inspect, the
+       * image carries no relocation naming the slot, and in a locals-stripped
+       * image there is no symbol either. Nothing can corroborate it. Meanwhile a
+       * false positive is not inert — it rewrites a live integer.
+       *
+       * ★MEASURED (Halo CE, 2026-08-04): the tag-class descriptor records hold
+       * three u16 fields at +0xa/+0xc/+0xe. In the 'scen' and 'lifi' records the
+       * pair at +0xc spells 0x0048021C and 0x005802D0, both of which land in
+       * __DATA,__common — so both were "rebased", turning (540, 72) into
+       * (27356, 4272) and (720, 88) into (27536, 4288). The 'bipd' record
+       * survived only because its pair spells 0x00780234, which is ABOVE the
+       * image. The enclosing loop processes exactly the two corrupted records,
+       * so Halo died every run: `base + 564` became `base - 9508`, landing in
+       * the tag block's name strings, and the deref took a wild address.
+       *
+       * Same family as the memdisp-code-alias gate: a small-integer PAIR whose
+       * bytes happen to spell a plausible address is not a pointer. Because the
+       * image is small, EVERY valid address has a small high half — which is
+       * precisely what makes (small, small) u16 pairs look like addresses, and
+       * why no value-based test can separate them.
+       *
+       * Deliberately NARROW: zero-fill targets only, M32 only, and only when the
+       * image has no local reloc table to speak authoritatively. An exact symbol
+       * hit is honoured as positive evidence and passes. Measured population in
+       * Halo's __DATA,__data: 42 of ~5000 detected words.
+       * Kill switch: M64_NO_ZEROFILL_TARGET_GATE. */
+      bool zerofill_target_unattested(std::size_t vmaddr) const;
+
       /* CODE-INTERIOR ALIAS gate (see section.cc DataParser). True iff `vmaddr`
        * lands STRICTLY INSIDE a decoded instruction of an
        * S_ATTR_(PURE|SOME)_INSTRUCTIONS section — i.e. the section has already

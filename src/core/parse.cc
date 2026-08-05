@@ -320,6 +320,29 @@ namespace MachO {
    }
 
    template <Bits bits>
+   bool ParseEnv<bits>::zerofill_target_unattested(std::size_t vmaddr) const {
+      static const bool disabled =
+         std::getenv("M64_NO_ZEROFILL_TARGET_GATE") != nullptr;
+      if (disabled) { return false; }
+      /* An exact nlist hit is positive evidence that an object really starts
+       * here, so honour it. func_syms holds EVERY non-stab N_SECT symbol
+       * (populated in the Symtab ctor), data symbols included. */
+      if (func_syms.count(vmaddr) != 0) { return false; }
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(vmaddr)) { continue; }
+            const uint32_t stype = sec->sect.flags & SECTION_TYPE;
+            /* Zero-fill only (__DATA,__bss and __DATA,__common). Every other
+             * data target keeps the callers' existing treatment. */
+            return stype == S_ZEROFILL || stype == S_GB_ZEROFILL;
+         }
+         return false;   /* in segment but between/outside sections */
+      }
+      return false;
+   }
+
+   template <Bits bits>
    bool ParseEnv<bits>::code_interior_alias(std::size_t vmaddr) const {
       static const bool disabled =
          std::getenv("M64_NO_CODE_INTERIOR_GATE") != nullptr;
