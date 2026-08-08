@@ -1,0 +1,6 @@
+direct=42
+defined=1
+bound=1
+is_provider=1
+byname=42
+exit_code: 0

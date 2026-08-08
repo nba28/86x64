@@ -199,6 +199,100 @@ static int32_t fnptr_lookup_result(uint64_t v, const char *name) {
    return (int32_t)x64_objc_wrap(v);
 }
 
+/* ---- a bridge must DEFER to a TRANSLATED provider -------------------------
+ * ★ The MIRROR IMAGE of dlsym_shim_for's own reason to exist.
+ *
+ * An abigen legacy bridge `___X` is an i386-callable entry that marshals the
+ * i386 cdecl frame up to the x86_64 SysV ABI and `call`s a NATIVE `_X`:
+ *     ___PyInt_AsLong.l1:  mov edi,[rbp+0xc]      ; i386 stack slot -> SysV reg
+ *                          call  _PyInt_AsLong    ; 8-byte return address
+ *                          mov r11d,[rsp]; add rsp,4; jmp r11   ; i386 4-byte ret
+ * That is exactly right while a NATIVE `_X` exists. When the implementation is
+ * ITSELF TRANSLATED, the bridge is not redundant — it is WRONG. Translated code
+ * keeps the i386 convention (arguments in 4-byte stack slots, a 4-byte return
+ * address), so the bridge's native-convention call hands it registers it never
+ * reads and a return address twice the width it pops: the callee reads stack
+ * garbage as its argument and returns to a fused PC. A DOUBLE CONVERSION.
+ *
+ * MEASURED, Civilization IV (2026-08-08), SIGSEGV KERN_INVALID_ADDRESS at 0x11:
+ *     #0  ?+0x100a338c8                    (native-convention call debris)
+ *     #1  libabiconv+0x22db86  ___Py_Initialize+0x33      <- this bridge
+ * Apple removed Python 2 in macOS 12.3, so there is no native `_Py_Initialize`
+ * left; the bundle vendors our OWN TRANSLATED Python 2.6 (__TEXT vmaddr
+ * 0x10000000, `_Py_Initialize` at 0x10109e02). `Civilization IV.dylib` binds
+ * `Python/_Py_Initialize` CORRECTLY and static-interpose never touched it — the
+ * bridge is reached at RUN TIME instead, through the by-name lookup family:
+ *     Civilization IV.dylib -> ___NSLookupAndBindSymbol("_Py_Initialize")
+ *       -> ns_symbol_resolve -> dlsym_shim_for -> ___Py_Initialize
+ * and the bridge's own `<flat-namespace>/_Py_Initialize` lazy bind then flat-
+ * resolves straight back into the translated Python. dyld_info sees nothing
+ * wrong anywhere: the whole detour is minted at run time by us.
+ *
+ * THE RULE (universal, structural, keyed on nothing but Mach-O shape): when the
+ * image that DEFINES `_X` in this process is itself a TRANSLATED image, hand the
+ * i386 caller that definition directly and suppress the bridge. An image is
+ * translated iff it loads libabiconv — every artifact of the translate pipeline
+ * does, and no native system image ever does.
+ *
+ * ⚠It must NOT break the normal case. Deferral fires ONLY when a translated
+ * image in THIS PROCESS actually defines the symbol; with no such provider
+ * (every other target, and most symbols in every target) the shim is returned
+ * exactly as before. That is why the decision is made here, at run time, from
+ * the loaded image list, rather than from a build-time list: whether a
+ * translated provider exists is a property of the BUNDLE, not of libabiconv,
+ * and the same libabiconv.dylib is deployed into every one of them.
+ *
+ * Kill switch M64_NO_TRANSLATED_PROVIDER_DEFER=1 restores the double-converting
+ * behaviour so the defect can be reproduced on demand. */
+static int translated_provider_defer_disabled(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("M64_NO_TRANSLATED_PROVIDER_DEFER") ? 1 : 0; }
+   return t;
+}
+
+/* Structural test: does this loaded image carry an LC_LOAD_DYLIB naming
+ * libabiconv? Every product of the translate pipeline does (static-interpose
+ * adds the load command before rewriting binds into it); no native system image
+ * does. Reads the mapped header only — no dlopen, no file I/O. */
+static int image_is_translated(const void *base) {
+   const struct mach_header_64 *mh = (const struct mach_header_64 *)base;
+   if (mh == NULL || mh->magic != MH_MAGIC_64) { return 0; }
+   const struct load_command *lc = (const struct load_command *)(mh + 1);
+   for (uint32_t i = 0; i < mh->ncmds; i++) {
+      if (lc->cmdsize < sizeof *lc) { return 0; }   /* malformed: refuse to walk */
+      if (lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB ||
+          lc->cmd == LC_REEXPORT_DYLIB || lc->cmd == LC_LOAD_UPWARD_DYLIB) {
+         const struct dylib_command *dc = (const struct dylib_command *)lc;
+         if (dc->dylib.name.offset < dc->cmdsize) {
+            const char *nm = (const char *)lc + dc->dylib.name.offset;
+            if (strstr(nm, "libabiconv") != NULL) { return 1; }
+         }
+      }
+      lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
+   }
+   return 0;
+}
+
+/* Is `_<bare>` defined by a TRANSLATED image in this process, at an address the
+ * i386 caller can hold and call directly? Returns that address, else 0.
+ *
+ * The low-4GB requirement is not decoration: a translated definition is
+ * i386-callable ONLY because it lives where a 4-byte pointer can reach it (the
+ * vendored Python's __TEXT sits at 0x10000000). If a provider somehow landed
+ * above 4GB we could not hand it over anyway, and the shim remains the best
+ * available answer — so the gate stays shut rather than guessing. */
+static uint32_t translated_provider_for(const char *bare) {
+   if (translated_provider_defer_disabled()) { return 0; }
+   if (bare == NULL || *bare == '\0') { return 0; }
+   void *sym = dlsym(RTLD_DEFAULT, bare);
+   if (sym == NULL) { return 0; }
+   if ((uintptr_t)sym >= 0x100000000ULL) { return 0; }  /* not i386-callable */
+   Dl_info di;
+   if (!dladdr(sym, &di) || di.dli_fbase == NULL) { return 0; }
+   if (!image_is_translated(di.dli_fbase)) { return 0; }
+   return (uint32_t)(uintptr_t)sym;
+}
+
 /* Prefer libabiconv's own interpose shim when one exists for the requested
  * symbol. static-interpose binds a translated i386 import "_<name>" to the shim
  * exported as "__" + "_<name>" (PREFIX "__"); a direct i386 call thus reaches the
@@ -257,12 +351,44 @@ static uint32_t dlsym_shim_for(const char *name) {
    return (uint32_t)v;
 }
 
+/* THE by-name-lookup answer, for every member of the family (dlsym,
+ * CFBundleGetFunctionPointerForName, NSLookupAndBindSymbol/NSAddressOfSymbol).
+ * Two rules, in this order:
+ *   1. DEFER to a TRANSLATED provider. Its code already speaks the i386
+ *      convention, so the caller must reach it DIRECTLY; putting the bridge in
+ *      front of it double-converts (see translated_provider_for above).
+ *   2. otherwise PREFER libabiconv's interpose shim over a raw marshalling
+ *      thunk, which is why this family consults libabiconv at all.
+ * 0 = neither applies; the caller falls through to its own native resolution.
+ *
+ * The shim is looked up FIRST and the provider question asked only when there
+ * is a shim to suppress. With no shim the answer cannot change, so this costs
+ * nothing (no extra RTLD_DEFAULT search) and alters no existing behaviour on
+ * the overwhelming majority of names. */
+static uint32_t lookup_by_name_target(const char *name) {
+   uint32_t shimaddr = dlsym_shim_for(name);
+   if (!shimaddr) { return 0; }
+   uint32_t provider = translated_provider_for(name);
+   if (provider) {
+      if (posix_trace()) {
+         fprintf(stderr, "[posix] lookup(\"%s\") -> TRANSLATED provider @0x%x "
+                 "(suppressed libabiconv bridge @0x%x: it would double-convert "
+                 "the ABI)\n", name ? name : "(null)", provider, shimaddr);
+         fflush(stderr);
+      }
+      return provider;
+   }
+   return shimaddr;
+}
+
 int32_t shim_dlsym(uint32_t *a) {
    void *h = dl_handle(a[0]);
    const char *name = a[1] ? (const char *)(uintptr_t)a[1] : NULL;
    /* A symbol libabiconv shims must come back as the shim (correct ABI +
-    * callback reverse-wrapping), not a raw native marshalling thunk. */
-   uint32_t shimaddr = dlsym_shim_for(name);
+    * callback reverse-wrapping), not a raw native marshalling thunk — unless a
+    * TRANSLATED image already provides it, in which case the shim would
+    * double-convert and we hand back that provider instead. */
+   uint32_t shimaddr = lookup_by_name_target(name);
    if (shimaddr) {
       if (posix_trace()) {
          fprintf(stderr, "[posix] dlsym(\"%s\") -> libabiconv interpose shim "
@@ -358,7 +484,7 @@ int32_t shim_CFBundleGetFunctionPointerForName(uint32_t *a) {
    nm[0] = '\0';
    if (fname) { CFStringGetCString(fname, nm, sizeof nm, kCFStringEncodingUTF8); }
    if (nm[0] && !cfbundle_fnptr_shim_disabled()) {
-      uint32_t shimaddr = dlsym_shim_for(nm);
+      uint32_t shimaddr = lookup_by_name_target(nm);
       if (shimaddr) {
          if (posix_trace()) {
             fprintf(stderr, "[posix] CFBundleGetFunctionPointerForName(\"%s\") -> "
@@ -416,7 +542,7 @@ static os_unfair_lock g_ns_symbols_lk = OS_UNFAIR_LOCK_INIT;
 static uint32_t ns_symbol_resolve(const char *symbolName) {
    if (symbolName == NULL || symbolName[0] == '\0') { return 0; }
    const char *bare = (symbolName[0] == '_') ? symbolName + 1 : symbolName;
-   uint32_t shimaddr = dlsym_shim_for(bare);
+   uint32_t shimaddr = lookup_by_name_target(bare);
    if (shimaddr) { return shimaddr; }
    void *sym = dlsym(RTLD_DEFAULT, bare);
    if (sym == NULL) { return 0; }
