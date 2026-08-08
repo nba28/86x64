@@ -1,0 +1,7 @@
+direct=42
+defined=1
+bound=1
+is_provider=1
+byname=42
+kept_bridge=1
+exit_code: 0
