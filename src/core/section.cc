@@ -1641,6 +1641,24 @@ namespace MachO {
       return r >= XED_REG_EAX && r <= XED_REG_EDI;
    }
 
+   /* True iff this instruction actually WRITES its XED_OPERAND_REG0 operand.
+    * A memory-destination MOV (`mov [ebp-0x1c],%eax`, XED_IFORM_MOV_MEMv_GPRv)
+    * has REG0 = the SOURCE register: it is read, never written. DetectJumpTables'
+    * "this insn overwrote %reg0, so drop its stale table state" rule must not
+    * fire on such a store, or a spilled table base is killed by its own spill. */
+   static bool jt_reg0_written(const xed_decoded_inst_t *xedd) {
+      const xed_inst_t *xi = xed_decoded_inst_inst(xedd);
+      if (xi == nullptr) { return true; }   /* conservative */
+      const unsigned n = xed_inst_noperands(xi);
+      for (unsigned i = 0; i < n; ++i) {
+         const xed_operand_t *op = xed_inst_operand(xi, i);
+         if (xed_operand_name(op) == XED_OPERAND_REG0) {
+            return xed_operand_written(op);
+         }
+      }
+      return true;                          /* conservative */
+   }
+
    /* Recognise PIC relative-offset switch jump tables (see JumpTableEntry).
     * A pre-pass over the raw section bytes (the linear sweep hasn't run yet):
     * decode each instruction, track the PIC anchor, then match the dispatch
@@ -1673,6 +1691,23 @@ namespace MachO {
       std::unordered_map<xed_reg_enum_t, std::size_t> tbl_addr;  /* reg -> table base vmaddr */
       /* reg -> (table_base, anchor); anchor 0 until the `add` resolves it */
       std::unordered_map<xed_reg_enum_t, std::pair<std::size_t, std::size_t>> tbl_val;
+
+      /* Table bases SPILLED TO A FRAME SLOT. Under register pressure GCC computes
+       * the PIC table base once, parks it in a local (`mov [ebp-0x1c],%eax`) and
+       * reloads it into a DIFFERENT register at each dispatch
+       * (`mov %edi,[ebp-0x1c]; mov %eax,[%edi+%eax*4]; add %eax,%ebx; jmp *%eax`).
+       * Tracking only registers loses the base across the spill, the dispatch is
+       * never recognised, and the linear sweep then disassembles the inline table
+       * AS CODE — re-encoding e.g. the entry byte 0x53 (`pushl %ebx`) into the
+       * 7-byte x86_64 push sequence, which both destroys the entries and shifts
+       * every later one. (Civ IV "Init Python": Python 2.6 marshal r_object's
+       * 126-entry switch, table 0x9b268; the shifted read yields an entry whose
+       * low 16 bits are 0x0000, so `add %anchor` leaves the anchor's low half
+       * intact and only its high half wrong -> jump to unmapped memory, SIGBUS.)
+       * Keyed by (normalised frame base reg, displacement); invalidated whenever
+       * that slot is rewritten, the base register is redefined, or %esp moves. */
+      std::map<std::pair<int, ssize_t>, std::size_t> stack_tbl;
+      const bool jt_spill = std::getenv("M64_NO_JT_SPILL_SLOTS") == nullptr;
 
       bool prev_call0 = false;     /* previous insn was `call $+0` (e8 00000000) */
       std::size_t pend_r11 = 0;    /* value of the last `lea r11,[rip+d]` (x86_64 anchor dance) */
@@ -1751,6 +1786,7 @@ namespace MachO {
          const xed_reg_enum_t reg0 = jt_norm32(reg0raw);
 
          bool sets_state = false;
+         bool spill_write = false;   /* this insn is the tracked frame-slot spill */
 
          /* (a-i386) PIC anchor: `pop %reg` right after `call $+0`. */
          if (iform == XED_IFORM_POP_GPRv_58 && prev_call0 && jt_is_gpr32(reg0)) {
@@ -1794,6 +1830,39 @@ namespace MachO {
                   sets_state = true;
                }
             }
+         }
+         /* (b-spill) `mov [%ebp/%esp + disp],%reg` where %reg currently holds a
+          *     table base -> remember the frame SLOT as holding that base, so the
+          *     later reload into any register recovers it. A store defines no
+          *     register, so sets_state stays false (the reg0-written guard below
+          *     is what keeps %reg's own state alive across its spill). Storing
+          *     anything else to a tracked slot invalidates it. */
+         else if (jt_spill && iform == XED_IFORM_MOV_MEMv_GPRv &&
+                  xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID &&
+                  (jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)) == XED_REG_EBP ||
+                   jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)) == XED_REG_ESP)) {
+            const std::pair<int, ssize_t> key {
+               (int)jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)),
+               xed_decoded_inst_get_memory_displacement(ops, 0) };
+            auto tb = tbl_addr.find(reg0);
+            if (tb != tbl_addr.end()) { stack_tbl[key] = tb->second; }
+            else { stack_tbl.erase(key); }
+            spill_write = true;
+         }
+         /* (b-reload) `mov %reg,[%ebp/%esp + disp]` from a slot holding a spilled
+          *     table base -> %reg is a table base again. A plain (non-indexed)
+          *     frame load, so it can never be the indexed table read of case (c). */
+         else if (jt_spill && iform == XED_IFORM_MOV_GPRv_MEMv && jt_is_gpr32(reg0) &&
+                  xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID &&
+                  (jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)) == XED_REG_EBP ||
+                   jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)) == XED_REG_ESP) &&
+                  stack_tbl.count({ (int)jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)),
+                                    xed_decoded_inst_get_memory_displacement(ops, 0) })) {
+            tbl_addr[reg0] =
+               stack_tbl[{ (int)jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)),
+                           xed_decoded_inst_get_memory_displacement(ops, 0) }];
+            tbl_val.erase(reg0);
+            sets_state = true;
          }
          /* (c) mov %reg,[%tblbase + idx*scale] -> reg holds a table entry. */
          else if (iform == XED_IFORM_MOV_GPRv_MEMv && jt_is_gpr32(reg0)) {
@@ -1900,10 +1969,46 @@ namespace MachO {
          }
 
          /* Drop stale table state for a register this insn overwrote but didn't
-          * redefine (keeps the lea->mov->add->jmp chain tight). */
-         if (!sets_state && jt_is_gpr32(reg0)) {
+          * redefine (keeps the lea->mov->add->jmp chain tight). Only when the
+          * insn actually WRITES %reg0: for a memory-destination MOV, REG0 is the
+          * source operand, and erasing on it kills a table base at the very
+          * instruction that spills it (see jt_reg0_written). */
+         if (!sets_state && jt_is_gpr32(reg0) &&
+             (!jt_spill || jt_reg0_written(&xedd))) {
             tbl_addr.erase(reg0);
             tbl_val.erase(reg0);
+         }
+
+         if (jt_spill && !stack_tbl.empty()) {
+            /* A tracked frame slot dies when anything else writes it ... */
+            if (!spill_write && xed_decoded_inst_number_of_memory_operands(&xedd) > 0 &&
+                xed_decoded_inst_mem_written(&xedd, 0) &&
+                xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID) {
+               const xed_reg_enum_t mb = jt_norm32(xed_decoded_inst_get_base_reg(ops, 0));
+               if (mb == XED_REG_EBP || mb == XED_REG_ESP) {
+                  stack_tbl.erase({ (int)mb,
+                                    xed_decoded_inst_get_memory_displacement(ops, 0) });
+               }
+            }
+            /* ... when the frame pointer itself is redefined (epilogue/`leave`) ... */
+            if (iform == XED_IFORM_LEAVE ||
+                (jt_norm32(reg0raw) == XED_REG_EBP && jt_reg0_written(&xedd))) {
+               for (auto i = stack_tbl.begin(); i != stack_tbl.end(); ) {
+                  i = (i->first.first == (int)XED_REG_EBP) ? stack_tbl.erase(i)
+                                                           : std::next(i);
+               }
+            }
+            /* ... and every %esp-keyed slot dies whenever %esp moves, since the
+             * displacement is then measured from a different place. */
+            if (cat == XED_CATEGORY_PUSH || cat == XED_CATEGORY_POP ||
+                cat == XED_CATEGORY_CALL || cat == XED_CATEGORY_RET ||
+                iform == XED_IFORM_LEAVE ||
+                (jt_norm32(reg0raw) == XED_REG_ESP && jt_reg0_written(&xedd))) {
+               for (auto i = stack_tbl.begin(); i != stack_tbl.end(); ) {
+                  i = (i->first.first == (int)XED_REG_ESP) ? stack_tbl.erase(i)
+                                                           : std::next(i);
+               }
+            }
          }
 
          /* Anchor lifetime: clear on RET / system transitions; a real CALL
@@ -1914,6 +2019,7 @@ namespace MachO {
          if (cat == XED_CATEGORY_RET || cat == XED_CATEGORY_INTERRUPT ||
              cat == XED_CATEGORY_SYSCALL || cat == XED_CATEGORY_SYSRET) {
             anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
+            stack_tbl.clear();
          } else if (cat == XED_CATEGORY_CALL && !is_pic_call0) {
             anchors.erase(XED_REG_EAX);
             anchors.erase(XED_REG_ECX);
