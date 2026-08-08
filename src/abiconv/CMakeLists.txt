@@ -467,6 +467,12 @@ add_library(abiconv SHARED
   cb_bridge.c
   iokit_shim.c
   carbon_memory.c
+  # mp_memory_shim.c: ONE job — Carbon Multiprocessing Services' MEMORY
+  # allocators (MPAllocateAligned/MPAllocate/MPFree/MPGetAllocatedBlockSize) on
+  # the low-4GB heap. abigen's generic void*-return rule was minting an 8-byte
+  # PROXY ARENA HANDLE for their >4GB native pointer, so the app received a
+  # handle where it asked for an N-byte buffer. See the file header.
+  mp_memory_shim.c
   rm_shim.c
   carbon_component.c
   cg_function_shim.c
@@ -714,6 +720,7 @@ add_library(abiconv SHARED
   carbon_datetime_tramp.asm
   carbon_fscatinfo_tramp.asm
   carbon_memory_tramp.asm
+  mp_memory_tramp.asm
   carbon_alias_tramp.asm
   eh_tramp.asm
   dyld_stub_binder.asm

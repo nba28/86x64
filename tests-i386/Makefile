@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair
+.PHONY: jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -554,6 +554,17 @@ fscatinfo-bulk: $(BUILD_DIR)/99_fscatinfo_bulk.x86_64
 # side and fails if the arms do not differ.
 csmem-handle: $(BUILD_DIR)/99_csmem_handle_family.x86_64
 	@bash csmem_handle_test.sh
+# mp-allocate-buffer: A/B guard for Carbon Multiprocessing Services' allocator.
+# MPAllocateAligned returns LogicalAddress = `typedef void *`, so abigen's
+# generic void*-return rule wrapped its >4GB native pointer into an 8-byte PROXY
+# ARENA HANDLE -- the caller asked for N bytes and got an arena slot. MEASURED on
+# Halo CE (2026-08-08): consecutive 64KB requests came back 8 BYTES APART, Halo
+# wrote audio data over the live handle table, and the memset bridge unwrapped
+# the "buffer" back through the arena to 0 -> SIGSEGV writing to 0x0. The ON side
+# is the main-suite fixture 99_mp_allocate_buffer; this adds the
+# M64_NO_MP_LOW_HEAP=1 side and fails if the arms do not differ.
+mp-allocate-buffer: $(BUILD_DIR)/99_mp_allocate_buffer.x86_64
+	@bash mp_allocate_buffer_test.sh
 # focus-ring: canary guard for the legacy focus-ring contract (audit verdict:
 # no compat needed — pins WHY). (A) OS side: NSSetFocusRingStyle(NSFocusRingOnly)
 # + fill still draws headlessly, leaves the shape interior unpainted, and the
@@ -1545,6 +1556,14 @@ $(BUILD_DIR)/99_fscatinfo_bulk.i386: $(BUILD_DIR)/99_fscatinfo_bulk.o
 # ___CSMem<name> trampoline for each (carbon_memory_tramp.asm), so
 # static-interpose binds them at translate time. Overrides %.i386.
 $(BUILD_DIR)/99_csmem_handle_family.i386: $(BUILD_DIR)/99_csmem_handle_family.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_mp_allocate_buffer: the MP Services allocators are undefined dynamic_lookup
+# for the same reason as the CSMem family -- MPAllocateAligned/MPAllocate/MPFree/
+# MPGetAllocatedBlockSize are not in the i386 sysroot, libabiconv exports a
+# ___MP<name> trampoline for each (mp_memory_tramp.asm) and static-interpose
+# binds them at translate time. Overrides %.i386.
+$(BUILD_DIR)/99_mp_allocate_buffer.i386: $(BUILD_DIR)/99_mp_allocate_buffer.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +

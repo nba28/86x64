@@ -777,3 +777,7 @@ _ResolveAliasFileWithMountFlagsNoUI
 _MatchAlias
 _MatchAliasNoUI
 _FSMatchAliasNoUI
+_MPAllocateAligned
+_MPAllocate
+_MPFree
+_MPGetAllocatedBlockSize
