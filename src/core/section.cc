@@ -476,20 +476,6 @@ namespace MachO {
                    env.zerofill_target_unattested(value)) {
                   break;   /* unattested zero-fill target -> constant */
                }
-               /* RECORD-FIELD gate (M32). The same (small,small) u16-pair
-                * corruption as above, but for targets that ARE mapped, where the
-                * zero-fill anchor argument does not apply and — for a __DATA
-                * target — no other discriminator exists at all. Evidence is
-                * POSITIONAL: the slot's siblings at the same record stride are
-                * the SAME FIELD of neighbouring records, so if they are plainly
-                * integers, so is this. Halo CE #35: an 8-byte record array whose
-                * recs 1 and 5 held pairs 0x00030002 / 0x00380000, rebased to
-                * 0x1003ac81 / 0x104a2000, making a u16 index the low half of a
-                * relocated pointer (proven by the index tracking ASLR). */
-               if (bits == Bits::M32 && !exec && !env.have_classic_local_relocs &&
-                   env.record_field_neighbours_are_integers(img, loc.vmaddr)) {
-                  break;   /* integer field of a record array -> constant */
-               }
                if (exec && in_objc_symbols) {
                   break;   /* objc_symtab count word aliasing __text -> constant */
                }
@@ -596,6 +582,46 @@ namespace MachO {
                if (exec && bits == Bits::M32 && !is_text_const_sect &&
                    env.code_alias_lacks_entry_evidence(img, value)) {
                   break;   /* mid-function alias, no entry evidence -> constant */
+               }
+               /* RECORD-FIELD gate (M32) — the LAST heuristic, deliberately, so
+                * it only ever sees the words every cheaper discriminator has
+                * already waved through.
+                *
+                * Same (small,small) u16-pair corruption as the zero-fill gate
+                * above, but for targets that ARE mapped, where the zero-fill
+                * anchor argument does not apply. Two blind spots, both MEASURED
+                * on Halo CE (#35), both in ONE 8-byte record array:
+                *   - a __DATA,__data target (0x00380000) — no discriminator
+                *     existed for mapped data targets at all;
+                *   - a __TEXT,__text target (0x00030002) held in a slot that
+                *     lives in __TEXT,__const, where the func-entry and
+                *     code-entry gates are DELIBERATELY disarmed (switch jump
+                *     tables live there and target unsymboled basic-block
+                *     heads), leaving only code_interior_alias — which passes
+                *     this value because it happens to be a decoded instruction
+                *     BOUNDARY.
+                * Both were rebased to 0x104a2000 / 0x1003ac81, making a u16
+                * index the low half of a relocated pointer; proven by the index
+                * tracking ASLR across runs and by an i386-vs-translated diff.
+                *
+                * ★The evidence is POSITIONAL, which is exactly what separates a
+                * record array in __TEXT,__const from the switch jump table that
+                * disarmed the entry gate: a jump table is a contiguous run of
+                * code pointers, so its slots' stride-siblings are pointers too
+                * and the gate stays silent. See
+                * ParseEnv::record_field_neighbours_are_integers.
+                *
+                * For a CODE target, additionally demand that the target carries
+                * no positive function-entry evidence — the same positive test
+                * the code-entry gate uses. So this never demotes a word that
+                * points at a symbol, a `55 89 e5` prologue or a C++ adjustor
+                * thunk; it re-arms that gate for __TEXT,__const only where the
+                * positional evidence says "record array", never for a value
+                * that looks like a real function entry. */
+               if (bits == Bits::M32 && !env.have_classic_local_relocs &&
+                   (!exec || !env.code_target_has_entry_evidence(img, value)) &&
+                   env.record_field_neighbours_are_integers(img, loc.vmaddr)) {
+                  break;   /* integer field of a record array -> constant */
                }
                /* CLASSIC-RELOC AUTHORITATIVE GATE (M32 classic images). A
                 * slidable classic image's genuine absolute internal pointers

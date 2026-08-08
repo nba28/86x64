@@ -366,6 +366,13 @@ namespace MachO {
          std::getenv("M64_NO_RECORD_FIELD_GATE") != nullptr;
       if (disabled) { return false; }
 
+      /* Debug probe: M64_DBG_RECFIELD=<hex slot vmaddr> traces every stride and
+       * every sibling verdict for that one slot. Inert unless set. */
+      static const char *rfdbgenv = std::getenv("M64_DBG_RECFIELD");
+      static const std::size_t rfdbgaddr =
+         rfdbgenv ? (std::size_t)strtoull(rfdbgenv, nullptr, 0) : 0;
+      const bool rfdbg = (rfdbgenv != nullptr && slot_vmaddr == rfdbgaddr);
+
       /* ★"Is this SIBLING a pointer?" — and the naive form of that question is a
        * TRAP, which cost me a full build+retranslate cycle to see. Asking merely
        * "does the value land in a mapped section" answers YES for every sibling
@@ -376,15 +383,33 @@ namespace MachO {
        * itself. A gate built on that test vetoes instantly and does nothing.
        *
        * The question that actually discriminates is what the PASS DECIDED: those
-       * siblings were left as constants (the code gates reject a __text target
-       * with no entry evidence; 0x003c0000 was rejected as unattested zero-fill),
-       * and only 0x00380000 slipped through because it lands in __DATA,__data
-       * where no gate existed. So run the cheap existing discriminators on the
-       * sibling and treat "some gate calls it a constant" as integer evidence.
-       * Never recurses into this gate. */
-      const auto sibling_is_pointerish = [this, &img](uint32_t v) -> bool {
+       * siblings were left as constants (0x00030002 / 0x00070002 / 0x00060002 /
+       * 0x00050001 all land STRICTLY INSIDE a decoded instruction; 0x003c0000
+       * was rejected as unattested zero-fill), and only 0x00380000 slipped
+       * through because it lands in __DATA,__data where no gate existed. So run
+       * the existing discriminators on the sibling and treat "a gate calls it a
+       * constant" as integer evidence. Never recurses into this gate.
+       *
+       * ★★ONLY THE EXACT, STRUCTURAL DISCRIMINATORS MAY BE USED HERE, and this
+       * is MEASURED, not a matter of taste. The first version also accepted
+       * `code_alias_lacks_entry_evidence` / `code_alias_is_constant` as
+       * declassifying a sibling — and those are precisely the heuristics that a
+       * switch JUMP TABLE is deliberately exempted from, because its entries
+       * target basic-block heads which have no symbol and no prologue. So every
+       * entry of every jump table declassified every other entry, the gate fired
+       * on the whole table, and the ON-vs-OFF blast radius was 8721 words on
+       * Halo alone — 7889 of them in __TEXT,__const, i.e. real code pointers
+       * demoted wholesale (a contiguous run 0x79da, 0x78fc, 0x7908, 0x7914,
+       * 0x7920 ... left holding i386 addresses). With only the exact tests the
+       * radius is the two defective Halo records and nothing else, because a
+       * jump-table entry IS an instruction boundary, so `code_interior_alias`
+       * refuses to declassify it and `pointer_sibling` vetoes — which is exactly
+       * the separation between a record array and a jump table that this gate
+       * exists to draw. */
+      const auto sibling_is_pointerish = [this, &img, rfdbg](uint32_t v) -> bool {
          if (v == 0) { return false; }              /* neutral, handled by caller */
          bool in_section = false, in_exec = false;
+         const char *segn = "-", *secn = "-";
          for (Segment<bits> *seg : archive.segments()) {
             if (!seg->contains_vmaddr(v)) { continue; }
             for (Section<bits> *sec : seg->sections) {
@@ -392,18 +417,25 @@ namespace MachO {
                in_section = true;
                in_exec = (sec->sect.flags & S_ATTR_PURE_INSTRUCTIONS) ||
                          (sec->sect.flags & S_ATTR_SOME_INSTRUCTIONS);
+               segn = sec->sect.segname; secn = sec->sect.sectname;
                break;
             }
             break;
          }
+         if (rfdbg) {
+            fprintf(stderr, "[recfld]   sib %#010x sect=%.16s,%.16s exec=%d "
+                    "zf=%d cstr=%d codeint=%d codeconst=%d lacksentry=%d\n",
+                    v, segn, secn, (int)in_exec,
+                    (int)zerofill_target_unattested(v),
+                    (int)cstring_interior_alias(img, v),
+                    (int)code_interior_alias(v),
+                    (int)code_alias_is_constant(v),
+                    (int)code_alias_lacks_entry_evidence(img, v));
+         }
          if (!in_section) { return false; }         /* addresses nothing: integer */
          if (zerofill_target_unattested(v)) { return false; }
          if (cstring_interior_alias(img, v)) { return false; }
-         if (in_exec && (code_interior_alias(v) ||
-                         code_alias_is_constant(v) ||
-                         code_alias_lacks_entry_evidence(img, v))) {
-            return false;
-         }
+         if (in_exec && code_interior_alias(v)) { return false; }
          return true;                               /* nothing declassifies it */
       };
 
@@ -434,10 +466,27 @@ namespace MachO {
              * members would be misread as an integer. */
             static const std::size_t strides[] =
                { 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64 };
+            /* ★★ONE HYPOTHESIS ONLY. The first version tried all twelve strides
+             * and accepted if ANY of them looked integer-ish — twelve chances to
+             * be wrong, and in a 110KB __const section a run of six unrelated
+             * non-pointer words at some stride is not a coincidence, it is a
+             * certainty. MEASURED on Halo: the switch jump table at 0x341540
+             * (0x00018dd6, one of a dense cluster 0x18da8..0x18dd6) is correctly
+             * VETOED at stride 8 — `pointer_sibling=1`, its true neighbours are
+             * code pointers — and was then wrongly ACCEPTED at stride 64, where
+             * the "siblings" are 0x7fffffff sentinels belonging to a completely
+             * different table. That one bug accounted for most of a 1264-word
+             * blast radius.
+             *
+             * A record array has exactly ONE stride, so testing many is fishing.
+             * Take the TIGHTEST hypothesis the data supports — the smallest
+             * stride that has a complete sibling set — and let its verdict be
+             * final. Failing to fire on a genuine stride-16 array whose stride-8
+             * view contains a pointer is the safe direction to be wrong in. */
             for (std::size_t stride : strides) {
-               int present = 0, nonzero_int = 0;
+               int present = 0, aliasing_int = 0;
                bool pointer_sibling = false;
-               for (int k = -3; k <= 3 && !pointer_sibling; ++k) {
+               for (int k = -3; k <= 3; ++k) {
                   if (k == 0) { continue; }
                   const long long a =
                      (long long)slot_vmaddr + (long long)k * (long long)stride;
@@ -446,14 +495,56 @@ namespace MachO {
                   const std::size_t off =
                      sec->sect.offset + ((std::size_t)a - sec->sect.addr);
                   const uint32_t w = img.template at<uint32_t>(off);
+                  /* ★★ONLY AN ADDRESS-SHAPED SIBLING IS EVIDENCE. This is the
+                   * "same FIELD of neighbouring RECORDS" requirement done
+                   * properly, and the stride-4 exclusion is only a special case
+                   * of it. We do not know the true record stride, so the stride
+                   * under test may be a DIVISOR of it — and then this set is the
+                   * neighbouring FIELDS of one record, which proves nothing
+                   * about our field.
+                   *
+                   * A sibling that ALIASES a mapped section and was nonetheless
+                   * proven constant is evidence: it says "this column holds
+                   * values that look like addresses but are not". A sibling that
+                   * is 0, a small count, or a float addresses nothing, so it
+                   * cannot be the same field as an address-shaped candidate —
+                   * it is a sign the stride is wrong. Those are NEUTRAL, exactly
+                   * like the zeros the original rule already excluded.
+                   *
+                   * ★MEASURED on Quinn, which is precisely the divisor shape: an
+                   * array of 32-byte records {CFStringRef, 0, 1, float, float,
+                   * float, float, ptr} at 0xb4300, 0xb4320, 0xb4340 ... At
+                   * stride 8 the siblings of the CFStringRef field are that
+                   * record's OWN 0 / 1 / 0x41300000 / 0x40800000 — three nonzero
+                   * "integers", exactly meeting the old bar — so the gate fired
+                   * and demoted 7 genuine CFString pointers into
+                   * __DATA,__cfstring. Requiring address-shaped evidence drops
+                   * that to zero while Halo's column (0x00050001, 0x00070002,
+                   * 0x00060002 — all aliasing __TEXT,__text, all proven
+                   * mid-instruction) still supplies four. */
                   if (w == 0) { continue; }            /* neutral, never evidence */
-                  if (sibling_is_pointerish(w)) { pointer_sibling = true; break; }
-                  ++nonzero_int;
+                  bool in_section = false;
+                  for (Segment<bits> *s2 : archive.segments()) {
+                     if (!s2->contains_vmaddr(w)) { continue; }
+                     for (Section<bits> *c2 : s2->sections) {
+                        if (c2->contains_vmaddr(w)) { in_section = true; break; }
+                     }
+                     break;
+                  }
+                  if (!in_section) { continue; }       /* not address-shaped */
+                  if (sibling_is_pointerish(w)) { pointer_sibling = true; continue; }
+                  ++aliasing_int;
                }
                /* Demand the FULL sibling set: a partial one is what a one-off
                 * struct near a section edge looks like. */
-               if (pointer_sibling || present < 6 || nonzero_int < 3) { continue; }
-               return true;
+               if (rfdbg) {
+                  fprintf(stderr, "[recfld] slot=%#zx stride=%zu present=%d "
+                          "aliasing_int=%d pointer_sibling=%d%s\n",
+                          slot_vmaddr, stride, present, aliasing_int,
+                          (int)pointer_sibling, present < 6 ? "" : "  <- DECIDES");
+               }
+               if (present < 6) { continue; }   /* not a usable hypothesis yet */
+               return !pointer_sibling && aliasing_int >= 3;
             }
             return false;
          }
