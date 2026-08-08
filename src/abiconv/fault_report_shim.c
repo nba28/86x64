@@ -55,25 +55,152 @@
 #include <stdint.h>
 #include <mach/mach.h>
 #include <mach-o/dyld.h>
+#include <mach-o/loader.h>
 #include <sys/ucontext.h>
+#include <unistd.h>
+#include <errno.h>
 
 static struct sigaction g_prev_segv, g_prev_bus;
 static int g_words = 48;
 
-/* Resolve an address to "<image>+0xOFF" using the dyld image table. dladdr()
- * only knows symbols and is useless for a translated image with a stripped
- * symbol table, but the image BASE is always known, and base+offset is exactly
- * what an offline disassembler wants. */
-static int fr_image_for(uint64_t v, char *out, size_t n) {
+/* ── THE IMAGE TABLE MUST BE A SNAPSHOT, NOT A LIVE DYLD QUERY ─────────────────
+ * fr_image_for() used to call `_dyld_image_count` / `_dyld_get_image_header` /
+ * `_dyld_get_image_name` — none of them async-signal-safe, all of them touching
+ * dyld's own state — for rip, rsp, rbp AND for every one of the 48 stack slots
+ * AND again for the loaded-image listing: ~51 re-entries into dyld per fault,
+ * from inside a signal handler. In this project that is a pointed risk rather
+ * than a theoretical one: the fault class this reporter exists for is raised
+ * from inside a LAZY BIND (a bridge's `call` through an unbound stub runs
+ * through dyld), so the handler can be entered with dyld mid-operation and the
+ * very first symbolisation asks it a question.
+ *
+ * THE RULE, the same one objc_shim.c's mem_readable() / metaclass_probe_safe()
+ * already follow: A PROBE MUST NEVER CRASH. Whatever a diagnostic touches at
+ * fault time must be data it captured BEFORE the fault. The image table is
+ * therefore snapshotted outside signal context — once when the reporter arms,
+ * and thereafter from dyld's own add-image callback — and the handler reads
+ * nothing but that snapshot. Zero dyld calls, zero locks.
+ *
+ * Names come from the image's own LC_ID_DYLIB, a pure header walk over already
+ * mapped memory, so the add-image path needs no dyld call either. fr_arm_paths()
+ * then upgrades them to full filesystem paths at arm time, where calling dyld is
+ * perfectly safe and the extra context is worth having.
+ *
+ * ⚠HONEST LIMIT, recorded so nobody re-derives it: I could NOT synthesise a
+ * context in which the live `_dyld_*` calls actually fail. Faulting inside a
+ * dlopen'd initializer, inside a dyld add-image callback, and with another
+ * thread holding the loader lock across a 3s initializer ALL produced complete
+ * reports with the live path. dyld4's legacy accessors appear not to contend
+ * there. So this is async-signal-safety hardening, NOT a fix for an observed
+ * failure — and it is deliberately NOT what fault_report_once_test.sh asserts.
+ * (I did at one point believe the reporter re-faulted inside its own dladdr and
+ * masked the original fault; that was a misreading of the multi-copy chain
+ * below, and it is wrong. See fr_install.)
+ *
+ * Kill switch M64_FAULT_REPORT_UNSAFE_SYMS=1 restores the live-dyld lookup. */
+#define FR_MAX_IMAGES 1024
+#define FR_NAME_MAX   192
+typedef struct { uint64_t base; char name[FR_NAME_MAX]; } fr_img;
+static fr_img g_imgs[FR_MAX_IMAGES];
+/* sig_atomic_t + "publish the count LAST": the handler may read this while an
+ * add-image callback is mid-append, so an entry is only visible once fully
+ * written. Appending is the only mutation and entries are never moved. */
+static volatile sig_atomic_t g_nimgs;
+static int g_unsafe_syms;          /* kill switch, read once at arm time */
+
+/* Copy keeping the TAIL, not the head. ⚠MEASURED on the real Civ artifact: a
+ * head-truncating copy silently destroys the answer. Bundle paths are long —
+ * ".../steamapps/common/Sid Meier's Civilization IV 34440/Civilization IV.app/
+ * Contents/MacOS/libabiconv.dylib" — so a head-first cut at FR_NAME_MAX landed
+ * mid-path and the basename after the last surviving '/' came out as
+ * "Civilization I". Every stack slot was then attributed to the wrong image
+ * with a right-looking offset: worse than no name, because it reads as a fact.
+ * The tail is the identifying part, so keep that and mark the cut. */
+static void fr_str_copy(char *dst, size_t n, const char *src) {
+   if (!src || n == 0) { if (n) dst[0] = '\0'; return; }
+   size_t len = strlen(src);
+   if (len < n) { memcpy(dst, src, len + 1); return; }
+   dst[0] = '~';                                  /* visibly truncated */
+   memcpy(dst + 1, src + len - (n - 2), n - 2);
+   dst[n - 1] = '\0';
+}
+
+/* The image's own name, straight out of its LC_ID_DYLIB. Header walk only — no
+ * dyld, no allocation, safe from any context including an add-image callback. */
+static void fr_name_from_header(const struct mach_header *mh, char *out, size_t n) {
+   out[0] = '\0';
+   if (!mh) return;
+   const struct mach_header_64 *h = (const struct mach_header_64 *)mh;
+   if (h->magic != MH_MAGIC_64) { fr_str_copy(out, n, "<image>"); return; }
+   if (h->filetype == MH_EXECUTE) { fr_str_copy(out, n, "<main-executable>"); return; }
+   const struct load_command *lc = (const struct load_command *)(h + 1);
+   for (uint32_t i = 0; i < h->ncmds; i++) {
+      if (lc->cmdsize < sizeof *lc) break;
+      if (lc->cmd == LC_ID_DYLIB) {
+         const struct dylib_command *dc = (const struct dylib_command *)lc;
+         if (dc->dylib.name.offset < dc->cmdsize) {
+            const char *p = (const char *)lc + dc->dylib.name.offset;
+            const char *slash = strrchr(p, '/');
+            fr_str_copy(out, n, slash ? slash + 1 : p);
+            return;
+         }
+      }
+      lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
+   }
+   fr_str_copy(out, n, "<image>");
+}
+
+/* dyld add-image callback. Runs in ordinary context (dyld calls it for every
+ * already-loaded image at registration, then once per later load), so the
+ * snapshot stays current without the handler ever asking dyld anything. */
+static void fr_add_image(const struct mach_header *mh, intptr_t slide) {
+   (void)slide;
+   int n = (int)g_nimgs;
+   if (!mh || n >= FR_MAX_IMAGES) return;
+   g_imgs[n].base = (uint64_t)(uintptr_t)mh;
+   fr_name_from_header(mh, g_imgs[n].name, FR_NAME_MAX);
+   g_nimgs = n + 1;                    /* publish only once fully written */
+}
+
+/* Upgrade the snapshot's names to full paths. Arm time only — NEVER from the
+ * handler; this is the call that must not happen at fault time. */
+static void fr_arm_paths(void) {
    uint32_t cnt = _dyld_image_count();
-   uint64_t best_base = 0;
-   const char *best_name = NULL;
    for (uint32_t i = 0; i < cnt; i++) {
       const struct mach_header *mh = _dyld_get_image_header(i);
-      if (!mh) continue;
+      const char *nm = _dyld_get_image_name(i);
+      if (!mh || !nm) continue;
       uint64_t base = (uint64_t)(uintptr_t)mh;
-      if (v >= base && v - base < 0x40000000ULL) {   /* within 1GB of a base */
-         if (base > best_base) { best_base = base; best_name = _dyld_get_image_name(i); }
+      for (int k = 0; k < (int)g_nimgs; k++)
+         if (g_imgs[k].base == base) { fr_str_copy(g_imgs[k].name, FR_NAME_MAX, nm); break; }
+   }
+}
+
+/* Resolve an address to "<image>+0xOFF". dladdr() only knows symbols and is
+ * useless for a translated image with a stripped symbol table, but the image
+ * BASE is always known, and base+offset is exactly what an offline disassembler
+ * wants. Reads ONLY the pre-fault snapshot (see the note above). */
+static int fr_image_for(uint64_t v, char *out, size_t n) {
+   uint64_t best_base = 0;
+   const char *best_name = NULL;
+
+   if (g_unsafe_syms) {
+      /* KILL SWITCH — the pre-fix behaviour: ask dyld live, from inside a signal
+       * handler, while dyld may hold its own lock. Reproduces the masking. */
+      uint32_t cnt = _dyld_image_count();
+      for (uint32_t i = 0; i < cnt; i++) {
+         const struct mach_header *mh = _dyld_get_image_header(i);
+         if (!mh) continue;
+         uint64_t base = (uint64_t)(uintptr_t)mh;
+         if (v >= base && v - base < 0x40000000ULL)
+            if (base > best_base) { best_base = base; best_name = _dyld_get_image_name(i); }
+      }
+   } else {
+      int cnt = (int)g_nimgs;
+      for (int i = 0; i < cnt; i++) {
+         uint64_t base = g_imgs[i].base;
+         if (v >= base && v - base < 0x40000000ULL)
+            if (base > best_base) { best_base = base; best_name = g_imgs[i].name; }
       }
    }
    if (!best_name) return 0;
@@ -188,9 +315,38 @@ static void fr_print_addr(const char *label, uint64_t v) {
       fprintf(stderr, "   %-6s = 0x%016llx\n", label, (unsigned long long)v);
 }
 
+/* ── NESTED-FAULT GUARD ───────────────────────────────────────────────────────
+ * SA_NODEFER means a fault raised INSIDE this handler re-enters it. That is
+ * deliberate (a wedged handler must still die) but it made the failure silent:
+ * on Civ the handler recursed three times and the process aborted with the
+ * ORIGINAL fault never printed — a masking bug, not just a crash.
+ *
+ * A second entry now degrades instead of recursing: one async-signal-safe line
+ * naming the nested fault, then straight to the default disposition. Whatever
+ * the first pass already wrote survives, so a partial report beats no report.
+ * write(2) rather than fprintf: stdio takes a lock we may already hold. */
+static volatile sig_atomic_t g_depth;
+
+static void fr_write_lit(const char *s, size_t n) {
+   ssize_t r; do { r = write(2, s, n); } while (r < 0 && errno == EINTR);
+}
+
 static void fr_handler(int sig, siginfo_t *info, void *uctx) {
    ucontext_t *uc = (ucontext_t *)uctx;
    void *fault = info ? info->si_addr : NULL;
+
+   if (g_depth) {
+      static const char m[] =
+         "\n[fault] * NESTED FAULT INSIDE THE REPORTER - degrading; the report\n"
+         "[fault]   above is truncated but is the ORIGINAL fault. (If this fires\n"
+         "[fault]   without M64_FAULT_REPORT_UNSAFE_SYMS=1, something the handler\n"
+         "[fault]   touches is not fault-safe -- fix that, do not chase the app.)\n";
+      fr_write_lit(m, sizeof m - 1);
+      signal(sig, SIG_DFL);
+      raise(sig);
+      return;
+   }
+   g_depth = 1;
 
    fprintf(stderr, "\n[fault] ================ FATAL FAULT ================\n");
    fprintf(stderr, "[fault] signal=%d (%s)  si_code=%d  fault addr=%p\n",
@@ -257,16 +413,24 @@ static void fr_handler(int sig, siginfo_t *info, void *uctx) {
    }
 
    fprintf(stderr, "[fault] loaded images (low-4GB, i.e. translated):\n");
-   {
-      uint32_t cnt = _dyld_image_count();
+   if (g_unsafe_syms) {
+      uint32_t cnt = _dyld_image_count();          /* kill switch: live dyld */
       for (uint32_t i = 0; i < cnt; i++) {
          const struct mach_header *mh = _dyld_get_image_header(i);
          if (!mh || (uint64_t)(uintptr_t)mh >= 0x100000000ULL) continue;
          fprintf(stderr, "   base=0x%08llx  %s\n",
                  (unsigned long long)(uintptr_t)mh, _dyld_get_image_name(i));
       }
+   } else {
+      int cnt = (int)g_nimgs;                      /* the pre-fault snapshot */
+      for (int i = 0; i < cnt; i++) {
+         if (g_imgs[i].base >= 0x100000000ULL) continue;
+         fprintf(stderr, "   base=0x%08llx  %s\n",
+                 (unsigned long long)g_imgs[i].base, g_imgs[i].name);
+      }
    }
    fprintf(stderr, "[fault] ================ END ================\n");
+   g_depth = 0;
 
 chain:
    fflush(stderr);
@@ -293,6 +457,55 @@ static void fr_install(void) {
    if (!getenv("M64_FAULT_REPORT")) return;
    const char *w = getenv("M64_FAULT_REPORT_WORDS");
    if (w) { int n = atoi(w); if (n > 0 && n <= 4096) g_words = n; }
+   g_unsafe_syms = getenv("M64_FAULT_REPORT_UNSAFE_SYMS") ? 1 : 0;
+
+   /* ── INSTALL ONCE PER PROCESS, NOT ONCE PER libabiconv COPY ────────────────
+    * ★ MEASURED on Civilization IV 2026-08-08. A deployed bundle carries MANY
+    * co-located libabiconv copies (38 in Civ's; THREE of them actually get
+    * loaded: MacOS/, QuickTime.framework/, Python.framework/). Each copy has its
+    * own constructor and its own statics, so each armed the reporter and each
+    * saved the PREVIOUS handler — which was the previous copy's fr_handler. The
+    * chain-to-previous at the end of fr_handler then walked that stack:
+    *     [fault] armed: ... x3
+    *     [fault] ==== FATAL FAULT ====  x3, byte-identical, ONE distinct rip
+    * i.e. the same fault reported three times, and the process's real
+    * disposition only reached after three full passes.
+    *
+    * ⚠I first read those three `fr_handler` frames in the .ips as the reporter
+    * RE-FAULTING inside its own symbolisation and masking the original fault.
+    * That was wrong: the reports are complete and identical, and the extra
+    * frames are this chain, not recursion. Recording it because the wrong
+    * reading sent me looking for a crash in the wrong tool. Same family as
+    * the libabiconv multi-copy gotcha.
+    *
+    * Structural detection: if the handler already installed for SIGSEGV lives in
+    * an image whose name contains "libabiconv", a sibling copy got here first —
+    * leave its handler alone and install nothing. Keyed on Mach-O identity, not
+    * on a count, a path, or an app. Kill switch M64_FAULT_REPORT_MULTI_INSTALL=1
+    * restores the per-copy install so the duplication can be reproduced. */
+   if (!getenv("M64_FAULT_REPORT_MULTI_INSTALL")) {
+      struct sigaction cur;
+      memset(&cur, 0, sizeof cur);
+      if (sigaction(SIGSEGV, NULL, &cur) == 0) {
+         void *h = (cur.sa_flags & SA_SIGINFO) ? (void *)cur.sa_sigaction
+                                               : (void *)cur.sa_handler;
+         Dl_info di;
+         if (h && h != (void *)SIG_DFL && h != (void *)SIG_IGN &&
+             dladdr(h, &di) && di.dli_fname && strstr(di.dli_fname, "libabiconv")) {
+            fprintf(stderr, "[fault] already armed by %s — this libabiconv copy "
+                            "stands down (one reporter per process)\n", di.dli_fname);
+            fflush(stderr);
+            return;
+         }
+      }
+   }
+
+   /* Capture the image table BEFORE arming. _dyld_register_func_for_add_image
+    * calls back once for every image already loaded and then on each later load,
+    * so this both seeds and maintains the snapshot; fr_arm_paths upgrades the
+    * header-derived names to full paths while we are still in normal context. */
+   _dyld_register_func_for_add_image(fr_add_image);
+   fr_arm_paths();
 
    struct sigaction sa;
    memset(&sa, 0, sizeof(sa));
