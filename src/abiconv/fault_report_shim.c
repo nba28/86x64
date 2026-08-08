@@ -64,42 +64,42 @@ static struct sigaction g_prev_segv, g_prev_bus;
 static int g_words = 48;
 
 /* ── THE IMAGE TABLE MUST BE A SNAPSHOT, NOT A LIVE DYLD QUERY ─────────────────
- * ★ MEASURED 2026-08-08 on Civilization IV: arming this reporter DESTROYED the
- * very report it exists to produce. The crash symbolized as
- *     #4 libabiconv+0x28ef85  fr_handler
- *     #5 libabiconv+0x28ef2a  fr_handler
- *     #6 libabiconv+0x28ef2a  fr_handler        <- nested THREE deep
- * and the innermost fault was inside `dyld4::APIs::dladdr`. The ORIGINAL fault
- * was never printed. Without M64_FAULT_REPORT the same binary reports its real
- * signature instead — i.e. the tool was worse than useless: it replaced the
- * evidence with evidence about itself.
+ * fr_image_for() used to call `_dyld_image_count` / `_dyld_get_image_header` /
+ * `_dyld_get_image_name` — none of them async-signal-safe, all of them touching
+ * dyld's own state — for rip, rsp, rbp AND for every one of the 48 stack slots
+ * AND again for the loaded-image listing: ~51 re-entries into dyld per fault,
+ * from inside a signal handler. In this project that is a pointed risk rather
+ * than a theoretical one: the fault class this reporter exists for is raised
+ * from inside a LAZY BIND (a bridge's `call` through an unbound stub runs
+ * through dyld), so the handler can be entered with dyld mid-operation and the
+ * very first symbolisation asks it a question.
  *
- * WHY. `_dyld_image_count` / `_dyld_get_image_header` / `_dyld_get_image_name`
- * are NOT async-signal-safe: they take dyld's own lock. fr_image_for() called
- * them for rip, rsp, rbp AND for every one of the 48 stack slots AND again for
- * the loaded-image listing — ~51 re-entries into dyld per fault. That is merely
- * unsound in general, but it is FATAL for the fault class this project cares
- * about most: a translated image's lazy bind runs THROUGH dyld, so a fault
- * raised from inside a bind (a bridge's `call` through an unbound lazy stub is
- * exactly that) enters the handler with dyld's lock already held, and the very
- * first symbolisation re-enters it recursively.
- *
- * THE RULE, and it is the same one objc_shim.c's mem_readable() /
- * metaclass_probe_safe() already follow: A PROBE MUST NEVER CRASH. Whatever a
- * diagnostic touches at fault time must be data it captured BEFORE the fault.
- * So the image table is snapshotted outside signal context — once when the
- * reporter arms, and thereafter from dyld's own add-image callback — and the
- * handler reads nothing but that snapshot. Zero dyld calls, zero locks.
+ * THE RULE, the same one objc_shim.c's mem_readable() / metaclass_probe_safe()
+ * already follow: A PROBE MUST NEVER CRASH. Whatever a diagnostic touches at
+ * fault time must be data it captured BEFORE the fault. The image table is
+ * therefore snapshotted outside signal context — once when the reporter arms,
+ * and thereafter from dyld's own add-image callback — and the handler reads
+ * nothing but that snapshot. Zero dyld calls, zero locks.
  *
  * Names come from the image's own LC_ID_DYLIB, a pure header walk over already
  * mapped memory, so the add-image path needs no dyld call either. fr_arm_paths()
  * then upgrades them to full filesystem paths at arm time, where calling dyld is
  * perfectly safe and the extra context is worth having.
  *
- * Kill switch M64_FAULT_REPORT_UNSAFE_SYMS=1 restores the live-dyld lookup, so
- * the masking can be reproduced on demand. */
+ * ⚠HONEST LIMIT, recorded so nobody re-derives it: I could NOT synthesise a
+ * context in which the live `_dyld_*` calls actually fail. Faulting inside a
+ * dlopen'd initializer, inside a dyld add-image callback, and with another
+ * thread holding the loader lock across a 3s initializer ALL produced complete
+ * reports with the live path. dyld4's legacy accessors appear not to contend
+ * there. So this is async-signal-safety hardening, NOT a fix for an observed
+ * failure — and it is deliberately NOT what fault_report_once_test.sh asserts.
+ * (I did at one point believe the reporter re-faulted inside its own dladdr and
+ * masked the original fault; that was a misreading of the multi-copy chain
+ * below, and it is wrong. See fr_install.)
+ *
+ * Kill switch M64_FAULT_REPORT_UNSAFE_SYMS=1 restores the live-dyld lookup. */
 #define FR_MAX_IMAGES 1024
-#define FR_NAME_MAX   112
+#define FR_NAME_MAX   192
 typedef struct { uint64_t base; char name[FR_NAME_MAX]; } fr_img;
 static fr_img g_imgs[FR_MAX_IMAGES];
 /* sig_atomic_t + "publish the count LAST": the handler may read this while an
@@ -108,11 +108,21 @@ static fr_img g_imgs[FR_MAX_IMAGES];
 static volatile sig_atomic_t g_nimgs;
 static int g_unsafe_syms;          /* kill switch, read once at arm time */
 
+/* Copy keeping the TAIL, not the head. ⚠MEASURED on the real Civ artifact: a
+ * head-truncating copy silently destroys the answer. Bundle paths are long —
+ * ".../steamapps/common/Sid Meier's Civilization IV 34440/Civilization IV.app/
+ * Contents/MacOS/libabiconv.dylib" — so a head-first cut at FR_NAME_MAX landed
+ * mid-path and the basename after the last surviving '/' came out as
+ * "Civilization I". Every stack slot was then attributed to the wrong image
+ * with a right-looking offset: worse than no name, because it reads as a fact.
+ * The tail is the identifying part, so keep that and mark the cut. */
 static void fr_str_copy(char *dst, size_t n, const char *src) {
-   size_t i = 0;
-   if (!src) { dst[0] = '\0'; return; }
-   for (; src[i] && i + 1 < n; i++) dst[i] = src[i];
-   dst[i] = '\0';
+   if (!src || n == 0) { if (n) dst[0] = '\0'; return; }
+   size_t len = strlen(src);
+   if (len < n) { memcpy(dst, src, len + 1); return; }
+   dst[0] = '~';                                  /* visibly truncated */
+   memcpy(dst + 1, src + len - (n - 2), n - 2);
+   dst[n - 1] = '\0';
 }
 
 /* The image's own name, straight out of its LC_ID_DYLIB. Header walk only — no
