@@ -93,5 +93,21 @@ int main(void)
    }
    printf("byname=%d\n", r);
 
-   exit(r == 42 && p == (void *)PyInt_AsLong ? 0 : 1);
+   /* ★ THE NORMAL CASE MUST SURVIVE, and it is asserted in the SAME PROCESS in
+    * which deferral just fired. `tolower` has a libabiconv bridge (___tolower)
+    * and NO translated provider, so the by-name lookup must still hand back the
+    * bridge and that bridge must still work. If the deferral had been written
+    * as a blanket "stop bridging", this line would break — and every target
+    * that depends on the legacy-shim mechanism with it. Both arms must print 1:
+    * the fix is invisible here BY CONSTRUCTION, which is the point. */
+   NSSymbol ts = NSLookupAndBindSymbol("_tolower");
+   void *tp = ts ? NSAddressOfSymbol(ts) : 0;
+   int kept = 0;
+   if (tp) {
+      int (*tf)(int) = (int (*)(int))tp;
+      kept = (tf('A') == 'a' && tf('z') == 'z');
+   }
+   printf("kept_bridge=%d\n", kept);
+
+   exit(r == 42 && p == (void *)PyInt_AsLong && kept ? 0 : 1);
 }

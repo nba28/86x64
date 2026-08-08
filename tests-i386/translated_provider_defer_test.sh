@@ -97,6 +97,19 @@ else
     fail=1
 fi
 
+# ── THE NORMAL CASE, asserted in BOTH arms and in the same process as the
+# deferral: `tolower` has a libabiconv bridge and NO translated provider, so the
+# by-name lookup must still return that bridge and the bridge must still work.
+# This is the guard against "fixing" the defect by blanket-disabling bridges —
+# which would break the entire legacy-shim mechanism every other target rests on.
+for arm in "ON:$on_out" "OFF:$off_out"; do
+    if [ "${arm#*kept_bridge=1}" = "${arm}" ]; then
+        echo "  ${arm%%:*}: a symbol with NO translated provider LOST its bridge —"
+        echo "        the deferral is over-firing and the normal case is broken"
+        fail=1
+    fi
+done
+
 # The two arms MUST differ, or the guard is inert whatever it asserts.
 if [ "$on_out" = "$off_out" ]; then
     echo "  both arms identical — the kill switch has no effect"
