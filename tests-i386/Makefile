@@ -486,7 +486,6 @@ carbon-fileops: $(BUILD_DIR)/99_carbon_fileops.x86_64
 # M64_NO_ZEROFILL_TARGET_GATE=1 at TRANSLATE time.
 zerofill-target-pair: $(BUILD_DIR)/99_zerofill_target_pair.i386
 	@bash zerofill_target_pair_test.sh
-<<<<<<< HEAD
 # jt-spill-slot: A/B guard that a PIC relative-offset switch jump table whose
 # TABLE BASE IS SPILLED TO A FRAME SLOT is still recognised and relocated.
 # DetectJumpTables tracked the base only through registers, lost it across the
@@ -497,8 +496,6 @@ zerofill-target-pair: $(BUILD_DIR)/99_zerofill_target_pair.i386
 # stay correct in BOTH arms. OFF arm is M64_NO_JT_SPILL_SLOTS=1 at TRANSLATE time.
 jt-spill-slot: $(BUILD_DIR)/99_jt_spill_slot.i386 $(BUILD_DIR)/libabiconv.dylib
 	@bash jt_spill_slot_test.sh
-||||||| 2bbe461
-=======
 # record-field-pair: A/B guard for the SAME u16-pair defect when the address the
 # pair spells is MAPPED, so the zero-fill anchor argument above does not apply —
 # a __DATA,__data target (no discriminator existed) and a __TEXT,__text target
@@ -511,7 +508,6 @@ jt-spill-slot: $(BUILD_DIR)/99_jt_spill_slot.i386 $(BUILD_DIR)/libabiconv.dylib
 # M64_NO_RECORD_FIELD_GATE=1 at TRANSLATE time.
 record-field-pair: $(BUILD_DIR)/99_record_field_pair.i386
 	@bash record_field_pair_test.sh
->>>>>>> worktree-agent-abed19346830e1eb6
 # const-alias-output-image: A/B guard that the M64 RE-PARSE does not reclassify
 # an integer CONSTANT as a pointer just because its value aliases the
 # 0x10000000-based TRANSLATED image. Mirror of zerofill-target-pair: there a
