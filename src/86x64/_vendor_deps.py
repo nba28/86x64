@@ -195,6 +195,110 @@ def search_sources(kind, name, sources):
     return None
 
 
+def _archs_of(path):
+    """Architectures in a Mach-O, or () if it is not one."""
+    try:
+        out = subprocess.run(["lipo", "-info", str(path)],
+                             capture_output=True, text=True).stdout
+    except Exception:
+        return ()
+    if "architecture:" in out:                       # "Non-fat file: X is architecture: i386"
+        return (out.rsplit("architecture:", 1)[1].strip(),)
+    if "are:" in out:
+        return tuple(out.rsplit("are:", 1)[1].split())
+    return ()
+
+
+def links_our_runtime(path):
+    """True iff this Mach-O loads libabiconv, i.e. it is one of OUR translated
+    artifacts rather than a stock native binary."""
+    try:
+        out = subprocess.run(["otool", "-L", str(path)],
+                             capture_output=True, text=True).stdout
+    except Exception:
+        return False
+    return "libabiconv" in out
+
+
+def bundle_is_translated(app):
+    """True iff the bundle already contains translated (libabiconv-linked)
+    binaries — i.e. the consumer lives in our i386-derived ABI world. Checked
+    against the bundle's OWN code, not against any vendored dependency."""
+    for sub in ("Contents/MacOS", "Contents/Frameworks", "Contents/PlugIns"):
+        d = Path(app) / sub
+        if not d.is_dir():
+            continue
+        for p in d.rglob("*"):
+            if not p.is_file() or p.is_symlink():
+                continue
+            if p.name.startswith("libabiconv"):
+                continue                              # the runtime itself proves nothing
+            try:
+                if p.stat().st_size < 4096:
+                    continue
+            except OSError:
+                continue
+            if links_our_runtime(p):
+                return True
+    return False
+
+
+def _donor_binary(kind, src):
+    """The Mach-O to judge a donor by: the framework's current-version binary,
+    or the dylib itself."""
+    if kind != "framework":
+        return src
+    name = src.name[:-len(".framework")]
+    for cand in (src / name,
+                 src / "Versions" / "Current" / name):
+        if cand.is_file():
+            return cand
+    vers = src / "Versions"
+    if vers.is_dir():
+        for v in sorted(vers.iterdir(), reverse=True):
+            cand = v / name
+            if cand.is_file():
+                return cand
+    return None
+
+
+def donor_arch_mismatch(kind, src, app_is_translated):
+    """★A DONOR MUST MATCH THE CONSUMER'S ABI WORLD.
+
+    MEASURED 2026-08-05 (Civ IV): Civ links /System/Library/Frameworks/
+    Python.framework/Versions/2.6/Python by ABSOLUTE path. Apple removed Python 2
+    in macOS 12.3, so the dependency became unresolvable and this function's
+    caller happily satisfied it from ~/projects/Library/Frameworks/iLife11/
+    Python.framework — which is **x86_64-ONLY**. That donated a NATIVE
+    interpreter into a TRANSLATED i386-world app: the translated extension
+    modules (wx/_core_.so links libabiconv, 122 undefined _Py* symbols) bound
+    into a CPython whose PyObject layout differs from the one their INLINED
+    Py_INCREF/Py_TYPE macros assume. Civ died at "Init Python" and the cause was
+    invisible for a long time because the vendor step said nothing at all.
+
+    The rule, stated structurally: when the consuming bundle contains
+    translated i386-derived binaries, a donor is acceptable only if it either
+    (a) still carries an i386 slice, so it CAN be translated, or
+    (b) is already one of our translated artifacts (it links libabiconv).
+    A native-x86_64-only donor is correct only for a native consumer.
+
+    Returns a reason string when the donor is unusable, else None."""
+    if not app_is_translated:
+        return None                                   # native consumer: anything goes
+    binp = _donor_binary(kind, src)
+    if binp is None:
+        return None                                   # nothing to judge; leave as-is
+    archs = _archs_of(binp)
+    if not archs:
+        return None
+    if "i386" in archs:
+        return None                                   # translatable
+    if links_our_runtime(binp):
+        return None                                   # already ours
+    return (f"donor is {'/'.join(archs)} with no i386 slice and does not link "
+            f"libabiconv, but this bundle contains TRANSLATED i386 binaries")
+
+
 def framework_binary(fwdir):
     """The current-version Mach-O inside a copied <Name>.framework dir."""
     name = fwdir.name[:-len(".framework")]
@@ -214,6 +318,12 @@ def framework_binary(fwdir):
 def vendor(app, sources, dry, native=DEFAULT_NATIVE):
     bfw = app / "Contents/Frameworks"
     bfw.mkdir(parents=True, exist_ok=True)
+
+    # Which ABI world is the CONSUMER in? Decides whether a native-only donor is
+    # acceptable. Probed once from the bundle's own binaries — see
+    # donor_arch_mismatch for why a silent mismatch is so expensive.
+    app_translated = bundle_is_translated(app)
+    mismatches = []
 
     def is_bundled(kind, name):
         return (bfw / f"{name}.framework").is_dir() if kind == "framework" \
@@ -250,6 +360,21 @@ def vendor(app, sources, dry, native=DEFAULT_NATIVE):
         if src is None:
             return False
         handled.add((kind, name))
+        # ★ABI-WORLD CHECK. Donating a native-x86_64-only framework into a
+        # bundle of TRANSLATED i386 binaries is never correct and used to fail
+        # SILENTLY — see donor_arch_mismatch for the Civ IV / Python 2.6 case it
+        # cost us. Refuse loudly and name the donor, so the fix (supply a donor
+        # with an i386 slice, or pre-translate it) is obvious. Override with
+        # M64_ALLOW_ARCH_MISMATCH=1.
+        bad = donor_arch_mismatch(kind, src, app_translated)
+        if bad and not os.environ.get("M64_ALLOW_ARCH_MISMATCH"):
+            warn(f"REFUSING to vendor {src.name}: {bad}")
+            warn(f"    donor: {src}")
+            warn(f"    supply a donor carrying an i386 slice (it will be "
+                 f"translated), or pre-translate it; set "
+                 f"M64_ALLOW_ARCH_MISMATCH=1 to override")
+            mismatches.append(src.name)
+            return False
         dst = bfw / src.name
         info(f"vendor {src.name}  <- {src}")
         if dry:
@@ -368,6 +493,14 @@ def vendor(app, sources, dry, native=DEFAULT_NATIVE):
     info(f"vendored {len(vendored)} framework(s)/dylib(s) into {app.name}")
     for v in vendored:
         good(v)
+    if mismatches:
+        # Loud on purpose, and repeated at the END where it cannot scroll past:
+        # the dependency is now MISSING, which is a better failure than a
+        # wrong-ABI donor that loads and then corrupts everything downstream.
+        warn(f"{len(mismatches)} donor(s) REFUSED on an ABI-world mismatch: "
+             f"{', '.join(mismatches)}")
+        warn(f"    this bundle contains TRANSLATED i386 binaries, so a "
+             f"native-x86_64-only donor cannot satisfy it")
     if unresolved:
         warn(f"{len(unresolved)} app-private dependency(ies) not found in any "
              f"source root {[str(s) for s in sources]} — pass --source:")
