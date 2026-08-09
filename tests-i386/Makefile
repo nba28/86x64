@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once
+.PHONY: translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer mp-task-spawn fault-report-once
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -580,6 +580,16 @@ csmem-handle: $(BUILD_DIR)/99_csmem_handle_family.x86_64
 # M64_NO_MP_LOW_HEAP=1 side and fails if the arms do not differ.
 mp-allocate-buffer: $(BUILD_DIR)/99_mp_allocate_buffer.x86_64
 	@bash mp_allocate_buffer_test.sh
+# mp-task-spawn: PROBE (not a two-arm guard -- there is no fix behind it). It
+# records a measured NEGATIVE result for Halo #42: an i386 caller going through
+# our bridges CAN create an MP queue/semaphore/event and an MP TASK, the task
+# entry really executes via the _x64_cb_wrap reverse trampoline with its
+# parameter intact, and that holds for default and 64KB/512KB/1MB stack sizes.
+# Keeping it runnable means the day MP tasking DOES break, we find out here
+# instead of inside a hanging app. Halo's main-menu freeze is therefore NOT a
+# generic MP Services bridge defect.
+mp-task-spawn: $(BUILD_DIR)/99_mp_task_spawn.x86_64
+	@./$(BUILD_DIR)/99_mp_task_spawn.x86_64
 # focus-ring: canary guard for the legacy focus-ring contract (audit verdict:
 # no compat needed — pins WHY). (A) OS side: NSSetFocusRingStyle(NSFocusRingOnly)
 # + fill still draws headlessly, leaves the shape interior unpainted, and the
@@ -1589,6 +1599,13 @@ $(BUILD_DIR)/99_translated_provider_defer.i386: $(BUILD_DIR)/99_translated_provi
 # ___MP<name> trampoline for each (mp_memory_tramp.asm) and static-interpose
 # binds them at translate time. Overrides %.i386.
 $(BUILD_DIR)/99_mp_allocate_buffer.i386: $(BUILD_DIR)/99_mp_allocate_buffer.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_mp_task_spawn: same reason as 99_mp_allocate_buffer -- the MP Services task
+# and synchronisation entry points are not in the i386 sysroot; libabiconv
+# exports a ___MP<name> bridge for each and static-interpose binds them at
+# translate time. Overrides %.i386.
+$(BUILD_DIR)/99_mp_task_spawn.i386: $(BUILD_DIR)/99_mp_task_spawn.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +
