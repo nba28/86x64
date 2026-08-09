@@ -331,6 +331,90 @@ static void fr_write_lit(const char *s, size_t n) {
    ssize_t r; do { r = write(2, s, n); } while (r < 0 && errno == EINTR);
 }
 
+/* ── dladdr CALL RING ──────────────────────────────────────────────────────────
+ * WHY. Civ IV dies with SIGSEGV `fault addr=0x56` inside what symbolizes as
+ * `dyld4::APIs::dladdr+635`, and the register shape says the ARGUMENT is bad,
+ * not dyld: the faulting access is `[rbx+8]` with `rbx=0x4e` (0x4e+8 = 0x56),
+ * and `rsi=8` — `dladdr(const void *addr, Dl_info *info)` takes `info` in rsi.
+ * An `info` of 8, or an `addr` of 0x4e, would produce exactly this. What is
+ * missing is WHO passed it.
+ *
+ * ⚠WHY NOT fprintf PER CALL, and why not lldb. MEASURED 2026-08-09: this bug is
+ * a RACE. Unhosted it reproduces 11 times out of 11; under lldb it does not
+ * reproduce at all (0 of 2 runs) and the app instead runs FURTHER than it ever
+ * has — past the launcher into the intro movie, still alive at 240s. Anything
+ * that serialises threads hides it. A write(2)/fprintf on every dladdr is such a
+ * thing, and it would fail in the worst way: a clean run that looks like proof.
+ *
+ * So the call path does NO I/O and takes NO lock — one relaxed atomic increment
+ * and three stores into a power-of-two ring. The ring is dumped from the fault
+ * handler, which already symbolizes from the pre-fault image snapshot (task #40)
+ * and so is itself safe. `__builtin_return_address(0)` is a REAL caller, not a
+ * nearest-preceding-symbol guess — the distinction that has cost this session
+ * two detours.
+ *
+ * ★If the ring is EMPTY at the fault, the crashing dladdr is not ours, and
+ * `dladdr+635` was a nearest-symbol answer for some inlined dyld internal. The
+ * interpose settles the question either way.
+ *
+ * Kill switch: recording is OFF unless M64_TRACE_DLADDR=1 (the dump also needs
+ * M64_FAULT_REPORT=1, since the fault handler is what prints it). */
+#define DR_RING 512                       /* power of two: index masks cheaply */
+typedef struct { const void *addr; const void *info; const void *ret; } dr_ent;
+static dr_ent g_dr[DR_RING];
+static volatile long g_dr_seq;            /* total calls; & (DR_RING-1) = slot */
+static int g_trace_dladdr;
+static int (*g_real_dladdr)(const void *, Dl_info *);
+
+/* libabiconv's OWN definition of dladdr. A definition inside this image wins for
+ * every call site inside this image, so it catches all of our candidate callers
+ * (dlsym_shim_for, nslot_repair.c, import_repair.c, lazy_bind.c) without editing
+ * any of them — and anything else that reaches it. Forwards to the real one via
+ * RTLD_NEXT, resolved once. */
+int dladdr(const void *addr, Dl_info *info) {
+   if (g_trace_dladdr) {
+      long i = __atomic_fetch_add(&g_dr_seq, 1, __ATOMIC_RELAXED);
+      dr_ent *e = &g_dr[(unsigned long)i & (DR_RING - 1)];
+      e->addr = addr;
+      e->info = info;
+      e->ret  = __builtin_return_address(0);
+   }
+   int (*real)(const void *, Dl_info *) = g_real_dladdr;
+   if (!real) {
+      real = (int (*)(const void *, Dl_info *))dlsym(RTLD_NEXT, "dladdr");
+      g_real_dladdr = real;
+      if (!real) { return 0; }
+   }
+   return real(addr, info);
+}
+
+/* Dump the ring newest-first. Called only from the fault handler. */
+static void fr_dump_dladdr_ring(void) {
+   if (!g_trace_dladdr) { return; }
+   long seq = g_dr_seq;
+   fprintf(stderr, "[fault] dladdr ring (%ld calls total, newest first):\n", seq);
+   if (seq == 0) {
+      fprintf(stderr, "   EMPTY — no dladdr call came through libabiconv, so the\n"
+                      "   faulting one is NOT ours (and 'dladdr+635' was a nearest\n"
+                      "   preceding symbol, not the real function).\n");
+      return;
+   }
+   long n = seq < DR_RING ? seq : DR_RING;
+   if (n > 24) { n = 24; }
+   for (long k = 1; k <= n; k++) {
+      dr_ent *e = &g_dr[(unsigned long)(seq - k) & (DR_RING - 1)];
+      char img[256];
+      const char *where = fr_image_for((uint64_t)(uintptr_t)e->ret, img, sizeof img)
+                          ? img : "?";
+      /* ★ Flag the shape we are hunting: a Dl_info* or addr small enough to be
+       * an integer rather than a pointer is the bad argument. */
+      const char *bad = ((uintptr_t)e->info < 0x10000 || (uintptr_t)e->addr < 0x10000)
+                        ? "   <<< NOT A POINTER" : "";
+      fprintf(stderr, "   -%-2ld addr=%-18p info=%-18p  from %s%s\n",
+              k, e->addr, e->info, where, bad);
+   }
+}
+
 static void fr_handler(int sig, siginfo_t *info, void *uctx) {
    ucontext_t *uc = (ucontext_t *)uctx;
    void *fault = info ? info->si_addr : NULL;
@@ -412,6 +496,7 @@ static void fr_handler(int sig, siginfo_t *info, void *uctx) {
       if (chain && *chain) fr_walk_chain(ss, chain);
    }
 
+   fr_dump_dladdr_ring();
    fprintf(stderr, "[fault] loaded images (low-4GB, i.e. translated):\n");
    if (g_unsafe_syms) {
       uint32_t cnt = _dyld_image_count();          /* kill switch: live dyld */
@@ -458,6 +543,7 @@ static void fr_install(void) {
    const char *w = getenv("M64_FAULT_REPORT_WORDS");
    if (w) { int n = atoi(w); if (n > 0 && n <= 4096) g_words = n; }
    g_unsafe_syms = getenv("M64_FAULT_REPORT_UNSAFE_SYMS") ? 1 : 0;
+   g_trace_dladdr = getenv("M64_TRACE_DLADDR") ? 1 : 0;
 
    /* ── INSTALL ONCE PER PROCESS, NOT ONCE PER libabiconv COPY ────────────────
     * ★ MEASURED on Civilization IV 2026-08-08. A deployed bundle carries MANY
