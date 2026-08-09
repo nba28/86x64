@@ -145,6 +145,16 @@ static void fire_callback(uint32_t chan, uint16_t cmd, int16_t p1, uint32_t p2) 
 }
 
 /* AudioQueue completion callback (runs on the queue's internal thread). */
+/* Kill switch for the AudioQueue lock-ordering fix: 1 restores the original
+ * order (blocking AudioQueue call made WHILE holding c->lk), which deadlocks
+ * the caller against aq_output_cb. That is the OFF arm of the guard — it must
+ * genuinely reproduce the hang, so it is a real behaviour switch, not a log. */
+static int snd_lock_fix_disabled(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("M64_NO_SND_LOCK_FIX") ? 1 : 0; }
+   return t;
+}
+
 static void aq_output_cb(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf) {
    struct snd_ch *c = (struct snd_ch *)ud;
    uint16_t cmd = 0; int16_t p1 = 0; uint32_t p2 = 0; int fire = 0;
@@ -163,7 +173,13 @@ static void aq_output_cb(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf) {
 static int ensure_queue(struct snd_ch *c, const AudioStreamBasicDescription *fmt) {
    if (c->aq && c->fmt_valid && memcmp(&c->fmt, fmt, sizeof *fmt) == 0)
       return 0;                       /* already the right format */
-   if (c->aq) { AudioQueueDispose(c->aq, true); c->aq = NULL; c->fmt_valid = 0; c->running = 0; c->inflight = 0; }
+   /* ASYNCHRONOUS dispose on purpose: this runs with c->lk HELD (see the
+    * function comment), and a synchronous dispose blocks on pending callbacks
+    * while aq_output_cb is waiting for that very lock — the deadlock documented
+    * in do_command. Async dispose does not wait, so it cannot deadlock. A late
+    * callback from the old queue is harmless: it still targets this same live
+    * channel and its inflight decrement is guarded by `> 0`. */
+   if (c->aq) { AudioQueueDispose(c->aq, false); c->aq = NULL; c->fmt_valid = 0; c->running = 0; c->inflight = 0; }
    AudioQueueRef q = NULL;
    OSStatus st = AudioQueueNewOutput(fmt, aq_output_cb, c, NULL, NULL, 0, &q);
    if (st != noErr || !q) { TR("AudioQueueNewOutput failed st=%d (no device?)\n", (int)st); return -1; }
@@ -274,16 +290,51 @@ static uint32_t do_command(uint32_t chan, uint32_t cmd32) {
    case snd_getRateMultiplierCmd:
       if (p2) *(uint32_t *)i386_ptr(p2) = (uint32_t)(c->rate_mult * 65536.0);
       break;
-   case snd_quietCmd:                       /* stop immediately, drop queue */
+   /* ★DEADLOCK RULE: AudioQueueReset, AudioQueueStop(...,true) and
+    * AudioQueueDispose(...,true) all BLOCK until every pending buffer callback
+    * has completed (AQ::API::Queue::AwaitAllPendingCallbacks). Our callback,
+    * aq_output_cb, takes c->lk on entry. Calling any of them WHILE HOLDING
+    * c->lk therefore deadlocks the caller against its own callback: the caller
+    * holds the lock and waits for the callback to drain; the callback waits for
+    * the lock. Nothing times out — the thread is parked forever.
+    *
+    * MEASURED, Halo (2026-08-10): pressing Return on a main-menu item plays the
+    * confirm sound, which issues snd_flushCmd. 3364 of 3364 samples had the
+    * MAIN THREAD in shim_SndDoImmediate -> do_command -> AudioQueueReset ->
+    * AwaitAllPendingCallbacks -> pthread_cond_wait. The menu never advanced
+    * because the app was wedged inside the click sound, which is also why the
+    * game read as "frozen" while still rendering.
+    *
+    * The fix everywhere below: mutate our own state UNDER the lock, snapshot
+    * the queue handle, RELEASE the lock, then make the blocking call. The
+    * callback can then run to completion and the blocking call returns.
+    * Kill switch M64_NO_SND_LOCK_FIX=1 restores the deadlocking order. */
+   case snd_quietCmd: {                     /* stop immediately, drop queue */
       pthread_mutex_lock(&c->lk);
-      if (c->aq) { AudioQueueStop(c->aq, true); c->running = 0; c->paused = 0; c->inflight = 0; }
-      pthread_mutex_unlock(&c->lk);
+      AudioQueueRef q = c->aq;
+      c->running = 0; c->paused = 0; c->inflight = 0;
+      if (snd_lock_fix_disabled()) {
+         if (q) AudioQueueStop(q, true);
+         pthread_mutex_unlock(&c->lk);
+      } else {
+         pthread_mutex_unlock(&c->lk);
+         if (q) AudioQueueStop(q, true);
+      }
       break;
-   case snd_flushCmd:                       /* drop queued (not-yet-played) buffers */
+   }
+   case snd_flushCmd: {                     /* drop queued (not-yet-played) buffers */
       pthread_mutex_lock(&c->lk);
-      if (c->aq) { AudioQueueReset(c->aq); c->inflight = 0; }
-      pthread_mutex_unlock(&c->lk);
+      AudioQueueRef q = c->aq;
+      c->inflight = 0;
+      if (snd_lock_fix_disabled()) {
+         if (q) AudioQueueReset(q);
+         pthread_mutex_unlock(&c->lk);
+      } else {
+         pthread_mutex_unlock(&c->lk);
+         if (q) AudioQueueReset(q);
+      }
       break;
+   }
    case snd_pauseCmd:
       pthread_mutex_lock(&c->lk);
       if (c->aq && c->running && !c->paused) { AudioQueuePause(c->aq); c->paused = 1; }
@@ -415,9 +466,16 @@ uint32_t shim_SndDisposeChannel(uint32_t *args) {
    while (*pp) { if ((*pp)->chan == chan) { c = *pp; *pp = c->next; break; } pp = &(*pp)->next; }
    pthread_mutex_unlock(&g_reg);
    if (c) {
+      /* Same deadlock rule as do_command: both of these block on pending
+       * callbacks, and aq_output_cb takes c->lk. Detach the queue under the
+       * lock, then tear it down without it. The synchronous dispose still
+       * completes before we destroy the mutex and free the channel, so the
+       * callback can never outlive its userdata. */
       pthread_mutex_lock(&c->lk);
-      if (c->aq) { AudioQueueStop(c->aq, true); AudioQueueDispose(c->aq, true); c->aq = NULL; }
+      AudioQueueRef q = c->aq;
+      c->aq = NULL; c->running = 0; c->paused = 0; c->inflight = 0;
       pthread_mutex_unlock(&c->lk);
+      if (q) { AudioQueueStop(q, true); AudioQueueDispose(q, true); }
       pthread_mutex_destroy(&c->lk);
       free(c);
    }
