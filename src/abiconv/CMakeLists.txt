@@ -655,6 +655,9 @@ add_library(abiconv SHARED
   mlte_shim.c
   fmgr_shim.c
   osutil_shim.c
+  # shared substrate for classic INPUT geometry (port origin) and mouse-button
+  # state; used by GetMouse, GlobalToLocal/LocalToGlobal and StillDown/WaitMouseUp
+  classic_input_coords.c
   tec_shim.c
   py_shim.c
   quicktime_movie_shim.c

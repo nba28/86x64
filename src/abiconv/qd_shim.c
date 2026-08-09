@@ -25,12 +25,36 @@ typedef struct { int16_t top, left, bottom, right; } QDRect;
 typedef struct { uint8_t pat[8]; } QDPattern;
 typedef struct { int16_t ascent, descent, widMax, leading; } QDFontInfo;
 
-// ---- Coordinate conversion: with a top-left origin port, local == global at
-// origin (0,0); the common offscreen case. (Origin-aware conversion lives on
-// the port in qd_gworld.c; these degenerate to identity, the correct behavior
-// when the port origin is unset.)
-void shim_GlobalToLocal(uint32_t *args) { (void)args; }
-void shim_LocalToGlobal(uint32_t *args) { (void)args; }
+// ---- Coordinate conversion ----
+// ★These were identity no-ops, correct ONLY while the port origin is (0,0) —
+// the offscreen GWorld case they were written for. For a real on-screen window
+// (inset by its title bar and by wherever the user put it) the identity is
+// wrong, and an app that converts a global mouse point to local coordinates to
+// hit-test its own UI gets a screen point back and finds the pointer inside
+// nothing. Now origin-aware via the shared substrate; when no window can be
+// measured ci_content_origin reports failure and these degrade to the previous
+// identity behaviour, which is right for an unset port origin.
+// See classic_input_coords.c.
+typedef struct { int16_t v, h; } QDPointCC;
+extern int ci_content_origin(int16_t *ox, int16_t *oy);   // classic_input_coords.c
+
+void shim_GlobalToLocal(uint32_t *args) {
+    QDPointCC *pt = (QDPointCC *)PTR(0);
+    if (!pt) return;
+    int16_t ox = 0, oy = 0;
+    if (!ci_content_origin(&ox, &oy)) return;
+    pt->h = (int16_t)(pt->h - ox);
+    pt->v = (int16_t)(pt->v - oy);
+}
+
+void shim_LocalToGlobal(uint32_t *args) {
+    QDPointCC *pt = (QDPointCC *)PTR(0);
+    if (!pt) return;
+    int16_t ox = 0, oy = 0;
+    if (!ci_content_origin(&ox, &oy)) return;
+    pt->h = (int16_t)(pt->h + ox);
+    pt->v = (int16_t)(pt->v + oy);
+}
 
 // ---- Random-seed setter: no live QDGlobals to mutate.
 void shim_SetQDGlobalsRandomSeed(uint32_t *a) { (void)a; }

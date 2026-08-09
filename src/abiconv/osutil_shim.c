@@ -62,13 +62,23 @@ void shim_GetDateTime(uint32_t *args) {
 
 // ---- GetGlobalMouse / GetMouse: current cursor position via CoreGraphics ----
 // (CGEventCreate/CGEventGetLocation resolve from the x86_64 shared cache; declared locally to
-// keep this file header-light.) With no GrafPort, local == global, so both return the global
-// position. Falls back to (0,0) only if the event snapshot is unavailable.
+// keep this file header-light.)
+//
+// ★These two are NOT the same call. GetGlobalMouse reports SCREEN coordinates;
+// GetMouse reports coordinates LOCAL TO THE CURRENT PORT. They were previously
+// implemented identically (both global), which is correct only while the port
+// origin is (0,0) — true offscreen, FALSE for a real on-screen window, which is
+// inset by its title bar and by wherever the user placed it. An app that
+// hit-tests its own menu with GetMouse then compares a screen point against
+// window-local item rects and finds the pointer inside nothing: the cursor
+// moves perfectly and nothing is clickable. See classic_input_coords.c.
 typedef struct __CGEvent *CGEventRef;
 typedef struct { double x, y; } CG_Point;
 extern CGEventRef CGEventCreate(void *source);
 extern CG_Point   CGEventGetLocation(CGEventRef event);
 extern void       CFRelease(const void *cf);
+
+extern int ci_content_origin(int16_t *ox, int16_t *oy);   // classic_input_coords.c
 
 static void fill_mouse(QDPoint *pt) {
     if (!pt) return;
@@ -82,7 +92,20 @@ static void fill_mouse(QDPoint *pt) {
     }
 }
 void shim_GetGlobalMouse(uint32_t *args) { fill_mouse((QDPoint *)PTR(0)); }
-void shim_GetMouse(uint32_t *args)       { fill_mouse((QDPoint *)PTR(0)); }
+
+void shim_GetMouse(uint32_t *args) {
+    QDPoint *pt = (QDPoint *)PTR(0);
+    fill_mouse(pt);
+    if (!pt) return;
+    // Subtract the current port's origin. When no window can be measured this
+    // is a no-op and GetMouse degrades to the previous global-position
+    // behaviour, which is the correct answer for an origin-(0,0) port.
+    int16_t ox = 0, oy = 0;
+    if (ci_content_origin(&ox, &oy)) {
+        pt->h = (int16_t)(pt->h - ox);
+        pt->v = (int16_t)(pt->v - oy);
+    }
+}
 
 // ---- ReadLocation: the classic PRAM geographic location ----
 // void ReadLocation(MachineLocation *loc) — reads the machine's latitude/

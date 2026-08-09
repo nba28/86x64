@@ -111,8 +111,22 @@ uint32_t shim_DragGrayRgn(uint32_t *args) { (void)args; return 0; }
 
 // ---- Event Manager (3) ----
 uint32_t shim_GetNextEvent(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_StillDown(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_WaitMouseUp(uint32_t *args) { (void)args; return 0; }
+// ---- StillDown / WaitMouseUp: REAL mouse-button state ----
+// ★These were `return 0` ("button is not down"), swept in with the genuinely
+// dead List Manager no-ops below. They are NOT dead surface: the classic click
+// idiom is `if (Button()) { while (StillDown()) { track } }` and then act on
+// release, so a permanently-false StillDown collapses every press-track-release
+// and nothing is ever clicked. Now answered from the real event source — and
+// from the COMBINED SESSION state, so synthesised clicks in an automated run
+// are visible too. See classic_input_coords.c.
+extern int ci_button_is_down(void);   // classic_input_coords.c
+
+uint32_t shim_StillDown(uint32_t *args) { (void)args; return (uint32_t)ci_button_is_down(); }
+
+// WaitMouseUp is StillDown plus consuming the pending mouse-up. We have no
+// classic event queue to remove the event from, so the button state IS the
+// whole answer here; the consume step is a no-op rather than a wrong one.
+uint32_t shim_WaitMouseUp(uint32_t *args) { (void)args; return (uint32_t)ci_button_is_down(); }
 
 // ---- List Manager (22) ----
 uint32_t shim_CreateCustomList(uint32_t *args) { (void)args; return 0; }
