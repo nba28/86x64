@@ -37,12 +37,36 @@ if pgrep -x Halo >/dev/null; then
   exit 1
 fi
 
+ASSETS="${OUT%.log}.assets.log"
+HERE="$(cd "$(dirname "$0")" && pwd)"
+
 echo "Logging to: $OUT"
+echo "Asset snapshot: $ASSETS"
 echo "Click Play in the settings dialog, let the main menu sit ~20s, then quit Halo."
 echo
 
+# Auto-snapshot the asset probe once the engine is past the settings dialog.
+# MEASURED: no .map file is open at the dialog stage — the asset cache is only
+# opened after Play — so "a .map appeared" is a reliable signal that the engine
+# initialised, and its ABSENCE after the timeout is itself the answer (the open
+# failed and 0xc3ee4 silently disabled the cache). Pure lsof polling: it never
+# signals or stops Halo, so it is safe against the any-observer heisenbug.
+(
+  for _ in $(seq 1 90); do
+    pid=$(pgrep -x Halo | head -1) || true
+    [ -z "${pid:-}" ] && { sleep 1; continue; }
+    if lsof -p "$pid" 2>/dev/null | grep -qi '\.map'; then break; fi
+    sleep 1
+  done
+  sleep 3
+  bash "$HERE/halo-asset-probe.sh" >"$ASSETS" 2>&1
+) &
+WATCHER=$!
+
 ABICONV_SND_TRACE=1 ABICONV_SND_DSPROBE=1 \
   "$APP/Contents/MacOS/Halo" >"$OUT" 2>&1
+
+wait "$WATCHER" 2>/dev/null || true
 
 echo
 echo "===== summary ====="
@@ -50,9 +74,16 @@ printf 'SndNewChannel        %s\n' "$(grep -c 'SndNewChannel'  "$OUT")"
 printf 'buffers enqueued     %s\n' "$(grep -c '^\[snd\] enqueue ' "$OUT")"
 printf 'silent windows       %s\n' "$(grep -c 'SILENT BUFFER'  "$OUT")"
 echo
-echo "--- whole-buffer probe (the answer) ---"
+echo "--- whole-buffer probe ---"
 if ! grep -q 'dsprobe' "$OUT"; then
   echo "no dsprobe lines — Halo never reached the music (did the menu come up?)"
 else
-  grep 'dsprobe' "$OUT" | sort -u | head -20
+  grep 'dsprobe' "$OUT" | sort -u | head -8
+fi
+echo
+echo "--- asset probe: was sounds.map ever opened and READ? ---"
+if [ -s "$ASSETS" ]; then
+  sed -n '/== .map assets/,/^$/p' "$ASSETS"
+else
+  echo "no asset snapshot (watcher never saw the engine open a .map)"
 fi
