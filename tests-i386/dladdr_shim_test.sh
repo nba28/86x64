@@ -38,6 +38,33 @@ LIBABICONV=../build/src/abiconv/libabiconv.dylib
 
 [ -x "$BIN" ] || { echo "dladdr-shim: SKIP (no $BIN — needs the i386 sysroot)"; exit 0; }
 
+# ── STALENESS IS THE FAILURE MODE THAT ALMOST LANDED THIS FIX UNVERIFIED ──────
+# `make dladdr-shim` passed twice, for two people, against a fixture binary built
+# before the shim existed. A guard that can pass against a stale artifact is
+# worse than no guard: it certifies the thing it never exercised. So refuse to
+# report anything if the binary is older than either the runtime it links or the
+# source it was built from. (The Makefile dependency exists; this is the check
+# that does not depend on the dependency being right.)
+for newer in "$LIBABICONV" src/99_dladdr_shim.c; do
+    if [ -e "$newer" ] && [ "$newer" -nt "$BIN" ]; then
+        echo "dladdr-shim: FAIL — $BIN is STALE (older than $newer)."
+        echo "  It was NOT rebuilt against the current libabiconv, so any result"
+        echo "  below would describe a binary that no longer exists. Rebuild:"
+        echo "     rm -f build/99_dladdr_shim.* && make build/99_dladdr_shim.x86_64"
+        exit 1
+    fi
+done
+
+# The shim has to be REACHABLE, not merely present. If libabiconv carries no
+# ___dladdr then static-interpose had nothing to redirect to, both arms run the
+# same unshimmed path, and the guard would be inert rather than failing.
+if ! nm -gU "$LIBABICONV" 2>/dev/null | grep -q " T ___dladdr$"; then
+    echo "dladdr-shim: FAIL — libabiconv exports no ___dladdr trampoline, so"
+    echo "  nothing can route to the shim. Is MTSHIM ___dladdr wired in"
+    echo "  maptable_tramp.asm, and was libabiconv rebuilt?"
+    exit 1
+fi
+
 fail=0
 on_out="$("$BIN" 2>&1)";                              on_rc=$?
 off_out="$(M64_NO_DLADDR_MARSHAL=1 "$BIN" 2>&1)";     off_rc=$?
@@ -46,15 +73,17 @@ echo "$on_out"  | sed 's/^/  ON  /'
 echo "$off_out" | sed 's/^/  OFF /'
 
 if [ "$on_rc" = 0 ] && [ "${on_out#*fname_ok=1}" != "$on_out" ] \
+                    && [ "${on_out#*saddr_ok=1}" != "$on_out" ] \
                     && [ "${on_out#*fbase_ok=1}" != "$on_out" ]; then
     echo "  ON  (marshalled):  Dl_info came back with a real low-4GB image base"
     echo "                     and a readable path string                       OK"
 else
-    echo "  ON  : expected ret/fbase_ok/fname_ok all 1 and exit 0, got exit $on_rc"
+    echo "  ON  : expected ret/saddr_ok/fbase_ok/fname_ok all 1 and exit 0, got exit $on_rc"
     fail=1
 fi
 
-if [ "$off_rc" != 0 ] && [ "${off_out#*fname_ok=1}" = "$off_out" ]; then
+if [ "$off_rc" != 0 ] && [ "${off_out#*saddr_ok=1}" = "$off_out" ] \
+                      && [ "${off_out#*fname_ok=1}" = "$off_out" ]; then
     echo "  OFF (unmarshalled): the native 32-byte record smeared over the i386"
     echo "                      16-byte struct — the defect reproduces          OK"
 else

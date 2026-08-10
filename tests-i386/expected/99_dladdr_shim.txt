@@ -1,4 +1,5 @@
 ret=1
+saddr_ok=1
 fbase_ok=1
 fname_ok=1
 exit_code: 0

@@ -63,23 +63,35 @@ int main(void)
    int r = dladdr((const void *)&marker, &di);
    printf("ret=%d\n", r != 0 ? 1 : 0);
 
-   /* A genuine image base is a real mapped load address: at or below the
-    * function we asked about, and no lower than 16MB. ⚠The lower bound is the
-    * load-bearing half. Without it the OFF arm PASSES intermittently, because
-    * the slot it actually holds -- the HIGH half of a >4GB char* -- is a small
-    * integer like 1 or 0x7ff8, which is trivially "<= &marker" too. Measured:
-    * the first version of this check was green in both arms. A discriminator
-    * has to be one the broken arm cannot satisfy by luck. */
-   int fbase_ok = (di.dli_fbase >= 0x1000000u &&
-                   di.dli_fbase <= (unsigned int)(unsigned long)&marker);
+   /* ★THE DISCRIMINATOR: dli_saddr. dladdr sets it to the address of the symbol
+    * it resolved, so correct marshalling makes it EXACTLY &marker. In the
+    * unmarshalled record that slot (+12) holds the HIGH half of the native
+    * dli_fbase, and this image is mapped in the low 4GB, so it is 0.
+    * Deterministic, deref-free, and independent of where we happen to load.
+    *
+    * ⚠Two earlier versions of this check were WRONG, both in the direction that
+    * makes a guard lie:
+    *   - "fbase != 0 && fbase <= &marker" was satisfied by the broken arm too
+    *     (that slot holds a small integer like 1 or 0x7ff8), so BOTH arms passed;
+    *   - adding "fbase >= 0x1000000" then broke the CORRECT arm, because this
+    *     fixture actually loads near 0x5d0000, well under 16MB. Both arms failed.
+    * An absolute-address bound was the wrong idea twice. Compare against a value
+    * the test already knows instead. */
+   int saddr_ok = (di.dli_saddr == (unsigned int)(unsigned long)&marker);
+   printf("saddr_ok=%d\n", saddr_ok);
+
+   /* A real image base is non-zero and at or below the symbol it contains. */
+   int fbase_ok = (di.dli_fbase != 0 && di.dli_fbase <= di.dli_saddr && saddr_ok);
    printf("fbase_ok=%d\n", fbase_ok);
 
+   /* Gated on saddr_ok so the broken arm never dereferences the truncated low
+    * half of a native char* — that would just crash, which proves less. */
    int fname_ok = 0;
-   if (fbase_ok && di.dli_fname != 0) {
+   if (saddr_ok && di.dli_fname != 0) {
       const char *p = (const char *)(unsigned long)di.dli_fname;
       fname_ok = strlen(p) > 0 ? 1 : 0;
    }
    printf("fname_ok=%d\n", fname_ok);
 
-   exit((r != 0 && fbase_ok && fname_ok) ? 0 : 1);
+   exit((r != 0 && saddr_ok && fbase_ok && fname_ok) ? 0 : 1);
 }
