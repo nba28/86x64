@@ -143,6 +143,12 @@
 	MTSHIM	___dlsym,                     _shim_dlsym
 	MTSHIM	___dlclose,                   _shim_dlclose
 	MTSHIM	___dlerror,                   _shim_dlerror
+	;; dladdr completes the family. Dl_info is FOUR POINTERS: 16 bytes on
+	;; i386, 32 on x86_64, so this one also has to convert the RECORD, not
+	;; just the call. Civ IV: translated Python calls dladdr during Python
+	;; start-up; with no shim it reached native dladdr, which read rdi/rsi
+	;; garbage (rsi=8 as the Dl_info*) and faulted at 0x56.
+	MTSHIM	___dladdr,                    _shim_dladdr
 
 	;; classic NeXT dyld NSSymbol lookup API — the pre-dlopen dynamic loader
 	;; old Mac ports use as their dlsym ("_"+name probe/bind/address idiom).

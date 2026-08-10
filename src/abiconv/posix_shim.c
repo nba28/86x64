@@ -411,6 +411,78 @@ int32_t shim_dlsym(uint32_t *a) {
    return fnptr_lookup_result((uint64_t)(uintptr_t)sym, name);
 }
 
+/* ---- dladdr ---------------------------------------------------------------
+ * ★ MEASURED on Civilization IV 2026-08-09/10. The dl* family was shimmed for
+ * dlopen/dlsym/dlclose/dlerror and NOT for dladdr, so static-interpose had no
+ * `___dladdr` to redirect to and the translated bind stayed on NATIVE libSystem.
+ * The translated i386 `call dladdr` puts its arguments in 4-byte STACK slots;
+ * native dladdr reads them from %rdi/%rsi. Under lldb, at the fault:
+ *     frame #0  dyld`dyld4::APIs::dladdr + 635
+ *     ->  movq 0x8(%rbx), %rcx      rbx = 0x4e   (0x4e + 8 = 0x56 = fault addr)
+ *         rdi = 0x8aee8378 (a stack address, read as `addr`)
+ *         rsi = 0x8        (read as `Dl_info *`)
+ * CPython 2.6 calls dladdr during interpreter start-up, so this landed inside
+ * Py_Initialize and looked for a long time like a Python-bridge defect. It is
+ * not: it is the plain "no shim -> native call with the i386 ABI" family, the
+ * same one documented above for dlopen/dlsym and for the NSSymbol trio.
+ *
+ * It presents as a RACE (11 of 11 unhosted runs, intermittent under a debugger)
+ * because the native callee reads whatever happens to be in %rdi/%rsi, and
+ * whether that garbage is an unmapped pointer depends on stack contents and
+ * scheduling.
+ *
+ * ⚠NOT a pass-through. `Dl_info` is FOUR POINTER FIELDS, so it is 16 bytes on
+ * i386 and 32 on x86_64:
+ *     i386   +0 dli_fname  +4 dli_fbase  +8 dli_sname  +12 dli_saddr
+ *     x86_64 +0 dli_fname  +8 dli_fbase +16 dli_sname  +24 dli_saddr
+ * Handing the caller's 16-byte buffer to native dladdr would both overrun it by
+ * 16 bytes and leave every field at the wrong offset. The shim calls native
+ * dladdr into a NATIVE Dl_info and writes back four 4-byte slots, bouncing the
+ * two strings into low-4GB (the same x64_objc_bounce_cstr path shim_dlerror
+ * uses) and wrapping any >4GB base/symbol address as an arena handle.
+ *
+ * Kill switch M64_NO_DLADDR_MARSHAL=1 skips the layout conversion and copies the
+ * native record verbatim, which is the deterministic half of the defect (the
+ * caller then reads dli_fbase out of the high half of dli_fname). */
+static int dladdr_marshal_disabled(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("M64_NO_DLADDR_MARSHAL") ? 1 : 0; }
+   return t;
+}
+
+/* An i386 slot can hold a low-4GB pointer as-is; anything above needs the arena
+ * handle, exactly as fnptr_lookup_result does for DATA. */
+static uint32_t dladdr_slot(const void *p) {
+   uint64_t v = (uint64_t)(uintptr_t)p;
+   if (v == 0) { return 0; }
+   if (v < 0x100000000ULL) { return (uint32_t)v; }
+   return x64_objc_wrap(v);
+}
+
+int32_t shim_dladdr(uint32_t *a) {
+   const void *addr = (const void *)(uintptr_t)a[0];
+   uint32_t   *out  = a[1] ? (uint32_t *)(uintptr_t)a[1] : NULL;
+   Dl_info info;
+   memset(&info, 0, sizeof info);
+   int r = dladdr(addr, &info);
+   if (posix_trace()) {
+      fprintf(stderr, "[posix] dladdr(%p, i386 Dl_info@0x%x) = %d  fname=%s\n",
+              addr, a[1], r, (r && info.dli_fname) ? info.dli_fname : "(none)");
+      fflush(stderr);
+   }
+   if (!out) { return (int32_t)r; }
+   if (dladdr_marshal_disabled()) {
+      memcpy(out, &info, sizeof info);       /* KILL SWITCH: unmarshalled */
+      return (int32_t)r;
+   }
+   if (!r) { out[0] = out[1] = out[2] = out[3] = 0; return 0; }
+   out[0] = info.dli_fname ? x64_objc_bounce_cstr(info.dli_fname) : 0;
+   out[1] = dladdr_slot(info.dli_fbase);
+   out[2] = info.dli_sname ? x64_objc_bounce_cstr(info.dli_sname) : 0;
+   out[3] = dladdr_slot(info.dli_saddr);
+   return (int32_t)r;
+}
+
 int32_t shim_dlclose(uint32_t *a) {
    void *h = dl_handle(a[0]);
    return (int32_t)dlclose(h);

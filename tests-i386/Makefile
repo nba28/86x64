@@ -486,6 +486,13 @@ translated-provider-defer: $(BUILD_DIR)/99_translated_provider_defer.x86_64
 # Self-contained native x86_64; no i386 sysroot.
 fault-report-once: $(LIBABICONV)
 	@bash fault_report_once_test.sh
+# dladdr-shim: the dl* family was shimmed for dlopen/dlsym/dlclose/dlerror and NOT
+# dladdr, so a translated _dladdr bind stayed on native libSystem and the i386
+# caller's stack args were read from rdi/rsi (Civ IV: rsi=8 as the Dl_info*,
+# fault at 0x56 inside dyld). Dl_info is 16 bytes on i386 vs 32 on x86_64, so the
+# RECORD needs converting too.
+dladdr-shim: $(BUILD_DIR)/99_dladdr_shim.x86_64
+	@bash dladdr_shim_test.sh
 # carbon-fileops: A/B guard for the classic File Manager WRITE path — the calls a
 # classic app uses to SAVE. NULL-jump orphans: the legacy pass emits a bridge to a
 # native that has never existed on x86_64 (checked against the real Mojave 10.14
@@ -1609,6 +1616,12 @@ $(BUILD_DIR)/99_csmem_handle_family.i386: $(BUILD_DIR)/99_csmem_handle_family.o
 # Overrides %.i386.
 $(BUILD_DIR)/99_translated_provider_defer.i386: $(BUILD_DIR)/99_translated_provider_defer.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -export_dynamic -e _main -o $@ $<
+
+# 99_dladdr_shim: dladdr is absent from the i386 sysroot's link surface here, so
+# `undefined dynamic_lookup` lets static-interpose bind it to libabiconv's
+# ___dladdr at translate time -- the route the translated Python takes.
+$(BUILD_DIR)/99_dladdr_shim.i386: $(BUILD_DIR)/99_dladdr_shim.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 # 99_mp_allocate_buffer: the MP Services allocators are undefined dynamic_lookup
 # for the same reason as the CSMem family -- MPAllocateAligned/MPAllocate/MPFree/
 # MPGetAllocatedBlockSize are not in the i386 sysroot, libabiconv exports a
