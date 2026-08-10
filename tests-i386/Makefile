@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order
+.PHONY: translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order classic-input-coords
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -594,6 +594,18 @@ mp-allocate-buffer: $(BUILD_DIR)/99_mp_allocate_buffer.x86_64
 # by the script's watchdog.
 snd-lock-order: $(BUILD_DIR)/99_snd_lock_order.x86_64
 	@bash snd_lock_order_test.sh
+# classic-input-coords: A/B guard for the classic GLOBAL-vs-LOCAL coordinate
+# contract. GetMouse is defined against the CURRENT PORT and GetGlobalMouse
+# against the SCREEN, with GlobalToLocal/LocalToGlobal converting between them;
+# our old stubs answered GLOBAL to both and made both conversions identity
+# no-ops -- correct only for an origin-(0,0) offscreen port. On a real window an
+# app that hit-tests its own menu with GetMouse compares a SCREEN point against
+# WINDOW-LOCAL item rects and finds the pointer inside nothing: the cursor moves
+# and nothing is clickable. The fixture makes a real Carbon window at a non-zero
+# position and asserts both arms positively. It briefly SHOWS that window, so do
+# not run the suite while a GUI target is under live test.
+classic-input-coords: $(BUILD_DIR)/99_classic_input_coords.x86_64
+	@bash classic_input_coords_test.sh
 # focus-ring: canary guard for the legacy focus-ring contract (audit verdict:
 # no compat needed — pins WHY). (A) OS side: NSSetFocusRingStyle(NSFocusRingOnly)
 # + fill still draws headlessly, leaves the shape interior unpainted, and the
@@ -1610,6 +1622,11 @@ $(BUILD_DIR)/99_mp_allocate_buffer.i386: $(BUILD_DIR)/99_mp_allocate_buffer.o
 # (maptable_tramp.asm) and static-interpose binds them at translate time.
 # Overrides %.i386.
 $(BUILD_DIR)/99_snd_lock_order.i386: $(BUILD_DIR)/99_snd_lock_order.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+# 99_classic_input_coords: the Window Manager and the classic QuickDraw coord
+# calls are not in the i386 sysroot; libabiconv exports a ___<name> trampoline
+# for each and static-interpose binds them at translate time. Overrides %.i386.
+$(BUILD_DIR)/99_classic_input_coords.i386: $(BUILD_DIR)/99_classic_input_coords.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # Translate i386 → x86_64 via the full pipeline: rebasify + transform +
