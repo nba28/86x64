@@ -251,6 +251,64 @@ static void enqueue_sound(struct snd_ch *c, uint32_t hdr32) {
          d.samplePtr, peak, peak == 0 ? "  <-- SILENT BUFFER" : "");
    }
 
+   /* WHOLE-BUFFER probe (ABICONV_SND_DSPROBE=1, trace only).
+    *
+    * The per-enqueue peak above measures only the window we are about to hand
+    * to the queue. If every window is silent, that is consistent with two very
+    * different worlds: the producer never wrote ANYWHERE (defect upstream of
+    * us), or it wrote somewhere else and our cursor arithmetic is reading a
+    * silent region (defect OURS). Peaking the ENTIRE backing buffer separates
+    * them, and the answer is decisive either way.
+    *
+    * Layout, decoded from the i386 original's DirectSound-on-Sound-Manager
+    * shim: the SoundHeader we were handed is embedded in the app's buffer
+    * object at +0x44, so dsbuf = hdr32 - 0x44, with base @+0x38, size @+0x40
+    * and the play cursor @+0x98.
+    *
+    * The identity base + play == samplePtr IS the layout proof — it can only
+    * hold if all three fields are what we think they are — so the probe
+    * refuses to report unless it holds and the declared size covers the
+    * window. A guessed layout that silently reported a peak would be worse
+    * than no probe at all. */
+   if (snd_trace() && getenv("ABICONV_SND_DSPROBE")) {
+      uint32_t dsbuf = hdr32 - 0x44;
+      const uint8_t *db = (const uint8_t *)i386_ptr(dsbuf);
+      uint32_t base = 0, bsize = 0, play = 0;
+      if (db) {
+         base  = *(const uint32_t *)(db + 0x38);
+         bsize = *(const uint32_t *)(db + 0x40);
+         play  = *(const uint32_t *)(db + 0x98);
+      }
+      if (!db || !base || base + play != d.samplePtr || bsize < nbytes) {
+         TR("dsprobe: layout NOT confirmed (dsbuf=0x%x base=0x%x size=%u play=%u "
+            "samplePtr=0x%x) — declining to report\n",
+            dsbuf, base, bsize, play, d.samplePtr);
+      } else {
+         const uint8_t *whole = (const uint8_t *)i386_ptr(base);
+         uint32_t wpeak = 0, first_nz = 0xffffffffu;
+         if (d.bits == 16) {
+            uint32_t n = bsize / 2;
+            const int16_t *s16 = (const int16_t *)whole;
+            for (uint32_t i = 0; i < n; i++) {
+               int32_t v = s16[i]; if (v < 0) v = -v;
+               if ((uint32_t)v > wpeak) { wpeak = (uint32_t)v;
+                  if (first_nz == 0xffffffffu) first_nz = i * 2; }
+            }
+         } else {
+            for (uint32_t i = 0; i < bsize; i++) {
+               int32_t v = (int32_t)whole[i] - (d.is_signed ? 0 : 128);
+               if (v < 0) v = -v;
+               if ((uint32_t)v > wpeak) { wpeak = (uint32_t)v;
+                  if (first_nz == 0xffffffffu) first_nz = i; }
+            }
+         }
+         TR("dsprobe: base=0x%x size=%u play=%u whole_peak=%u first_nz=%d  %s\n",
+            base, bsize, play, wpeak, (int)first_nz,
+            wpeak == 0 ? "<-- ENTIRE BUFFER IS ZERO: the producer never wrote"
+                       : "<-- buffer HAS audio: our cursor is reading a silent region");
+      }
+   }
+
    pthread_mutex_lock(&c->lk);
    if (ensure_queue(c, &fmt) != 0) { pthread_mutex_unlock(&c->lk); return; }
    AudioQueueBufferRef buf = NULL;
