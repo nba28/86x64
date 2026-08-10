@@ -226,8 +226,30 @@ static void enqueue_sound(struct snd_ch *c, uint32_t hdr32) {
 
    AudioStreamBasicDescription fmt;
    desc_to_asbd(c, &d, &fmt);
-   TR("enqueue rate=%.1f ch=%u bits=%u %s nbytes=%u ptr=0x%x\n",
-      fmt.mSampleRate, d.channels, d.bits, d.is_signed ? "S" : "U", nbytes, d.samplePtr);
+   /* Trace-only: peak amplitude of the PCM we are about to hand to the queue.
+    * Distinguishes "the pipeline works but we are enqueueing SILENCE" (bad
+    * sample pointer / wrong decode) from "real audio goes out and is inaudible
+    * for some other reason". Costs nothing unless tracing is on. */
+   if (snd_trace()) {
+      uint32_t peak = 0;
+      if (d.bits == 16) {
+         uint32_t n = nbytes / 2;
+         const int16_t *s16 = (const int16_t *)samples;
+         for (uint32_t i = 0; i < n; i++) {
+            int32_t v = s16[i]; if (v < 0) v = -v;
+            if ((uint32_t)v > peak) peak = (uint32_t)v;
+         }
+      } else {
+         for (uint32_t i = 0; i < nbytes; i++) {
+            int32_t v = (int32_t)samples[i] - (d.is_signed ? 0 : 128);
+            if (v < 0) v = -v;
+            if ((uint32_t)v > peak) peak = (uint32_t)v;
+         }
+      }
+      TR("enqueue rate=%.1f ch=%u bits=%u %s nbytes=%u ptr=0x%x peak=%u%s\n",
+         fmt.mSampleRate, d.channels, d.bits, d.is_signed ? "S" : "U", nbytes,
+         d.samplePtr, peak, peak == 0 ? "  <-- SILENT BUFFER" : "");
+   }
 
    pthread_mutex_lock(&c->lk);
    if (ensure_queue(c, &fmt) != 0) { pthread_mutex_unlock(&c->lk); return; }
