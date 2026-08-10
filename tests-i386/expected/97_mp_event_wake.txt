@@ -1,0 +1,13 @@
+create_rc=0
+id_nonzero=1
+poll_unsignalled_rc=-29296
+poll_unsignalled=TIMEOUT_OK
+set_rc=0
+poll_after_set_rc=0
+poll_after_set=SIGNALLED_OK
+poll_reconsumed_rc=-29296
+poll_reconsumed=TIMEOUT_OK
+poll_flags_rc=0
+poll_flags_val=42
+done=1
+exit_code: 0

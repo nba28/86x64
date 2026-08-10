@@ -1657,6 +1657,12 @@ $(BUILD_DIR)/99_snd_lock_order.i386: $(BUILD_DIR)/99_snd_lock_order.o
 # libabiconv's ___Snd<name> trampolines (maptable_tramp.asm). Overrides %.i386.
 $(BUILD_DIR)/98_snd_status_layout.i386: $(BUILD_DIR)/98_snd_status_layout.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+# 97_mp_event_wake: MP Services is not in the i386 sysroot -- MPCreateEvent /
+# MPSetEvent / MPWaitForEvent / MPDeleteEvent are undefined dynamic_lookup
+# imports bound at translate time by static-interpose to libabiconv's ___MP<name>
+# bridges, exactly like 99_mp_allocate_buffer. Overrides %.i386.
+$(BUILD_DIR)/97_mp_event_wake.i386: $(BUILD_DIR)/97_mp_event_wake.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 # 99_classic_input_coords: the Window Manager and the classic QuickDraw coord
 # calls are not in the i386 sysroot; libabiconv exports a ___<name> trampoline
 # for each and static-interpose binds them at translate time. Overrides %.i386.
