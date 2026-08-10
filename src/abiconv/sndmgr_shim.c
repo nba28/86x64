@@ -462,20 +462,81 @@ uint32_t shim_SndPlay(uint32_t *args) {
    return SND_NO_ERR;
 }
 
+/* ---- SCStatus, the authoritative layout ------------------------------------
+ * CarbonSound.framework/Headers/Sound.h (10.6 SDK):
+ *
+ *   UnsignedFixed scStartTime;         @0
+ *   UnsignedFixed scEndTime;           @4
+ *   UnsignedFixed scCurrentTime;       @8
+ *   Boolean       scChannelBusy;       @12
+ *   Boolean       scChannelDisposed;   @13
+ *   Boolean       scChannelPaused;     @14
+ *   Boolean       scUnused;            @15
+ *   unsigned long scChannelAttributes; @16
+ *   long          scCPULoad;           @20
+ *                                      == 24 bytes
+ *
+ * ★TWO RULES THIS ENCODES, both universal:
+ *  1. The busy/paused flags live at @12/@14, NOT at the end of the record. A
+ *     shim that writes them anywhere else leaves scChannelBusy permanently 0,
+ *     and every classic "spin until the channel drains" / "find a free voice"
+ *     loop then believes every channel is idle forever.
+ *  2. `theLength` is the caller's declared buffer size and is a HARD BOUND. A
+ *     shim must never write past it — the caller's SCStatus is usually a stack
+ *     local, so an overrun corrupts its frame. Clamping to theLength makes the
+ *     overrun impossible for any record size, present or future, instead of
+ *     merely fixing today's constant. */
+#define SC_STATUS_SIZE  24
+#define SC_ST_BUSY      12
+#define SC_ST_DISPOSED  13
+#define SC_ST_PAUSED    14
+
+/* Kill switch for the SCStatus layout fix: 1 restores the original behaviour
+ * (a fixed 28-byte clear with the flags written at @24/@26), which both
+ * overruns a 24-byte caller record by 4 bytes AND leaves scChannelBusy@12
+ * permanently 0. That is the OFF arm of the guard — a real behaviour switch,
+ * not a log. */
+static int snd_status_fix_disabled(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("M64_NO_SND_STATUS_FIX") ? 1 : 0; }
+   return t;
+}
+
 // SndChannelStatus(chan, short theLength, SCStatusPtr theStatus): report a real
 // busy/idle status from the AudioQueue instead of stack garbage.
 uint32_t shim_SndChannelStatus(uint32_t *args) {
    uint32_t chan = args[0];
-   void *st = PTR(2);
+   int16_t  want = (int16_t)(uint16_t)(args[1] & 0xFFFFu);   /* theLength */
+   uint8_t *st   = (uint8_t *)PTR(2);
    if (!st) return SND_NO_ERR;
-   memset(st, 0, 28);                          /* SCStatus is 28 bytes */
+
+   if (snd_status_fix_disabled()) {            /* OFF arm: the original defect */
+      memset(st, 0, 28);
+      struct snd_ch *b = chan_lookup(chan);
+      if (b) {
+         pthread_mutex_lock(&b->lk);
+         st[24] = (b->inflight > 0 && !b->paused) ? 1 : 0;
+         st[26] = b->paused ? 1 : 0;
+         pthread_mutex_unlock(&b->lk);
+      }
+      return SND_NO_ERR;
+   }
+
+   /* Clamp to what the caller declared: never touch a byte it did not offer.
+    * A caller that asks for less than the full record (legal — the classic API
+    * lets you request a prefix) simply gets the prefix. */
+   uint32_t n = (want <= 0) ? 0 : (uint32_t)want;
+   if (n > SC_STATUS_SIZE) { n = SC_STATUS_SIZE; }
+   memset(st, 0, n);
+
    struct snd_ch *c = chan_lookup(chan);
    if (c) {
       pthread_mutex_lock(&c->lk);
-      /* SCStatus.scChannelBusy @24 (Boolean); scChannelPaused @26 */
-      ((uint8_t *)st)[24] = (c->inflight > 0 && !c->paused) ? 1 : 0;
-      ((uint8_t *)st)[26] = c->paused ? 1 : 0;
+      int busy   = (c->inflight > 0 && !c->paused);
+      int paused = c->paused;
       pthread_mutex_unlock(&c->lk);
+      if (n > SC_ST_BUSY)   { st[SC_ST_BUSY]   = busy   ? 1 : 0; }
+      if (n > SC_ST_PAUSED) { st[SC_ST_PAUSED] = paused ? 1 : 0; }
    }
    return SND_NO_ERR;
 }

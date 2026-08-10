@@ -55,9 +55,10 @@ extern short SndDisposeChannel(void *chan, unsigned char quietNow);
 #define bufferCmd  81
 #define sampledSynth 5
 
-/* SCStatus is 28 bytes; scChannelBusy is the Boolean at @24. */
-#define SCSTATUS_SIZE   28
-#define SCSTATUS_BUSY   24
+/* SCStatus (CarbonSound/Sound.h) is 24 bytes and scChannelBusy is the Boolean
+ * at @12 — see 98_snd_status_layout, which guards that layout directly. */
+#define SCSTATUS_SIZE   24
+#define SCSTATUS_BUSY   12
 
 #define RATE   22050u
 #define NSAMP  22050u          /* one second per buffer */
