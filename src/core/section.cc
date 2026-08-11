@@ -562,6 +562,23 @@ namespace MachO {
                if (exec && bits == Bits::M32 && env.code_interior_alias(value)) {
                   break;   /* mid-INSTRUCTION alias -> constant */
                }
+               /* JUMP-TABLE COHESION gate (M32). The func-entry and code-entry
+                * gates below/above are deliberately disarmed for __TEXT-
+                * resident data because switch jump tables live in
+                * __TEXT,__const and target unsymboled basic-block heads. That
+                * leaves only the interior gate above, so an integer aliasing an
+                * exact instruction BOUNDARY passes everything and is rebased.
+                * A jump table is a RUN of valid code targets; an integer table
+                * is not. An immediate neighbour that itself aliases code at a
+                * NON-boundary proves this run is not a table (see
+                * ParseEnv::code_alias_run_contradicted for the full argument
+                * and the Halo #45 measurement). Placed here, after the interior
+                * gate, so it only ever judges words every cheaper
+                * discriminator already waved through. */
+               if (exec && bits == Bits::M32 &&
+                   env.code_alias_run_contradicted(img, loc, value)) {
+                  break;   /* neighbour contradicts a jump table -> constant */
+               }
                /* CODE-ENTRY gate (M32, locals-STRIPPED images). The boundary
                 * gate above only catches values that are not instruction
                 * starts at all. A data constant can easily alias a perfectly
