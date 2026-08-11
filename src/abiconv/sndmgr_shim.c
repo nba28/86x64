@@ -245,7 +245,21 @@ static void desc_to_asbd(const struct snd_ch *c, const snd_pcm_desc *d,
 
 #define VOICE_ARRAY_TRANS 0x10C291E0u   /* 0x592920 + (0x10aee4c0 - 0x457c00) */
 #define VOICE_STRIDE      1612u
-#define VOICE_SCAN_MAX    256u
+/* ★HARD BOUND — the section end, not a guess.
+ * The array lives in __DATA,__common: i386 0x457c00 + 0x15cf10, translated
+ * 0x10aee4c0 + 0x15cf10 = 0x10c4b3d0. From the array base that leaves
+ * (0x10c4b3d0 - 0x10C291E0) / 1612 = 86 whole records.
+ * ⚠The first version of this probe scanned a flat 256 records and therefore
+ * walked 272912 bytes PAST the end of __common into unmapped memory — an
+ * out-of-bounds read in a DIAGNOSTIC, i.e. exactly the thing that must never
+ * destabilise the target. Halo took an EXC_BAD_ACCESS on the run that carried
+ * it. I cannot prove that read was the fault (the .ips frame #0 resolves to no
+ * loaded image, and the address did not match this region), but an unbounded
+ * scan is indefensible whatever the crash turns out to be, so it is bounded by
+ * construction now: the loop cannot step outside the section under any input.
+ * Observed voices are 27 and 30, so 86 is ample headroom. */
+#define VOICE_COMMON_END  0x10c4b3d0u   /* 0x10aee4c0 + 0x15cf10 */
+#define VOICE_SCAN_MAX    86u
 #define VOICE_OFF_DSBUF   0x650
 #define VOICE_OFF_WROFF   0x84
 #define VOICE_OFF_WREND   0x88
@@ -279,8 +293,12 @@ static void snd_voice_probe(uint32_t dsbuf, uint32_t ringsize) {
    if (!have) { TR("voiceprobe: no Halo.dylib image — declining\n"); return; }
    const uint8_t *arr = (const uint8_t *)(VOICE_ARRAY_TRANS + slide);
 
+   const uint8_t *arr_end = (const uint8_t *)(VOICE_COMMON_END + slide);
    for (uint32_t i = 0; i < VOICE_SCAN_MAX; i++) {
       const uint8_t *R = arr + (size_t)i * VOICE_STRIDE;
+      /* Belt and braces: never read a record that is not wholly inside the
+       * section, even if the constants above are ever edited inconsistently. */
+      if (R + VOICE_STRIDE > arr_end) { break; }
       uint32_t owner = *(const uint32_t *)(R + VOICE_OFF_DSBUF);
       if (owner != dsbuf) { continue; }          /* ★the structural gate */
 
