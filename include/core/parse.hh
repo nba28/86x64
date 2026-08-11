@@ -422,6 +422,59 @@ namespace MachO {
        * M64_NO_CODE_INTERIOR_GATE=1 disarms it (A/B regression harness). */
       bool code_interior_alias(std::size_t vmaddr) const;
 
+      /* JUMP-TABLE COHESION gate (M32, __TEXT-resident data).
+       *
+       * WHY THIS EXISTS. The two strongest code-alias gates —
+       * code_alias_is_constant (function-entry) and
+       * code_alias_lacks_entry_evidence (code-entry) — are DELIBERATELY
+       * disarmed for __TEXT-resident data sections, because switch jump tables
+       * live in __TEXT,__const and target MID-function basic-block heads that
+       * carry neither an nlist nor a `55 89 e5` prologue. Demanding entry
+       * evidence there would reject every real switch table. That leaves only
+       * code_interior_alias, which catches a code-aliasing integer solely when
+       * it lands strictly INSIDE a decoded instruction. An integer that happens
+       * to alias an exact instruction BOUNDARY passes every gate and is
+       * silently rebased.
+       *
+       * ★MEASURED (Halo CE, #45): the audio engine's sample-rate table
+       * { 22050, 44100 } in __TEXT,__const. Both values alias __text
+       * (0x00005622 / 0x0000AC44); 22050 also sits on a real instruction
+       * boundary, so it was rewritten to 0x1000573c while 44100 — mid-
+       * instruction, caught by code_interior_alias — was left alone. The mixer
+       * computes its ring size as channels * rateTable[idx] * 6 (2*44100*6 =
+       * 529200, exactly the measured DirectSound ring), so the corrupted entry
+       * makes that arithmetic overflow, IDirectSoundBuffer::Lock rejects the
+       * request with E_INVALIDARG, and the mixer takes its silent-skip branch:
+       * the ring is never written and the game plays 7432 consecutive buffers
+       * of pure silence with a perfectly healthy play cursor.
+       * ⚠The #35 record-field gate does not cover it: that one discriminates
+       * (small,small) u16 PAIRS packed in one word, whereas this is a u32 pair
+       * of individually plausible values.
+       *
+       * THE DISCRIMINATOR, structural and value-free: a jump table is a RUN in
+       * which EVERY entry is a valid code target. An integer table is not. So a
+       * neighbouring word in the same aligned run that is itself a code-
+       * ALIASING value which code_interior_alias rejects is positive proof that
+       * this run is not a jump table — no real jump table can contain a
+       * mid-instruction target.
+       *
+       * Deliberately CONSERVATIVE, so it cannot re-break switch tables:
+       * demote only when an immediate neighbour CONTRADICTS (in-range, aliasing
+       * an instructions section, non-boundary) and NEITHER immediate neighbour
+       * CORROBORATES (aliases an instructions section at a real boundary). A
+       * genuine table entry adjacent to a stray integer keeps its other
+       * neighbour as corroboration and survives; a lone code pointer whose
+       * neighbours are zero or out-of-range sees no contradiction and survives.
+       *
+       * Kill switch M64_NO_JT_COHESION=1 disarms it (A/B regression harness). */
+      bool code_alias_run_contradicted(const Image& img, const Location& loc,
+                                       std::size_t value) const;
+
+      /* True iff `vmaddr` lands in a section carrying decoded instructions.
+       * The "does this value alias code at all" half of the cohesion test,
+       * separate from the boundary question code_interior_alias answers. */
+      bool vmaddr_in_instructions_sect(std::size_t vmaddr) const;
+
       /* POSITIVE function-ENTRY evidence at `vmaddr`, without needing local
        * symbols. True iff either
        *   - an nlist symbol sits exactly AT `vmaddr` (func_syms; GLOBAL text

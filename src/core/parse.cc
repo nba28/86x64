@@ -601,6 +601,57 @@ namespace MachO {
       return false;
    }
 
+   /* True iff `vmaddr` lands inside a section carrying decoded instructions.
+    * The "does this value even alias code" half of the cohesion test, kept
+    * separate from the boundary question that code_interior_alias answers. */
+   template <Bits bits>
+   bool ParseEnv<bits>::vmaddr_in_instructions_sect(std::size_t vmaddr) const {
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(vmaddr)) { continue; }
+            return (sec->sect.flags &
+                    (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) != 0;
+         }
+         return false;
+      }
+      return false;
+   }
+
+   template <Bits bits>
+   bool ParseEnv<bits>::code_alias_run_contradicted(const Image& img,
+                                                    const Location& loc,
+                                                    std::size_t value) const {
+      static const bool disabled = std::getenv("M64_NO_JT_COHESION") != nullptr;
+      if (disabled) { return false; }
+      if (current_section == nullptr) { return false; }
+      /* Only meaningful for a value that aliases code at a real boundary — the
+       * exact case every other gate waves through. */
+      if (!vmaddr_in_instructions_sect(value) || code_interior_alias(value)) {
+         return false;
+      }
+      const auto& cs = current_section->sect;
+      const std::size_t sect_lo = cs.addr;
+      const std::size_t sect_hi = cs.addr + cs.size;
+
+      bool contradicted = false, corroborated = false;
+      for (int delta : {-4, +4}) {
+         const std::size_t nb_vm = (std::size_t)((std::ptrdiff_t)loc.vmaddr + delta);
+         /* Stay strictly inside the section the slot lives in: a word beyond it
+          * belongs to a different object and says nothing about this run. */
+         if (nb_vm < sect_lo || nb_vm + 4 > sect_hi) { continue; }
+         const std::size_t nb_off = (std::size_t)((std::ptrdiff_t)loc.offset + delta);
+         const std::size_t nb = (std::size_t)img.at<uint32_t>(nb_off);
+         if (!vmaddr_in_instructions_sect(nb)) { continue; }   /* says nothing */
+         if (code_interior_alias(nb)) {
+            contradicted = true;   /* a non-boundary: this run is not a table */
+         } else {
+            corroborated = true;   /* a real boundary: consistent with a table */
+         }
+      }
+      return contradicted && !corroborated;
+   }
+
    template <Bits bits>
    bool ParseEnv<bits>::code_target_has_entry_evidence(const Image& img,
                                                        std::size_t vmaddr) const {
