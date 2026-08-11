@@ -283,13 +283,46 @@ static void snd_voice_probe(uint32_t dsbuf, uint32_t ringsize) {
       const uint8_t *R = arr + (size_t)i * VOICE_STRIDE;
       uint32_t owner = *(const uint32_t *)(R + VOICE_OFF_DSBUF);
       if (owner != dsbuf) { continue; }          /* ★the structural gate */
-      uint32_t wroff  = *(const uint32_t *)(R + VOICE_OFF_WROFF);
-      uint32_t wrend  = *(const uint32_t *)(R + VOICE_OFF_WREND);
-      uint32_t source = *(const uint32_t *)(R + VOICE_OFF_SOURCE);
-      TR("voiceprobe: ring=%u voice=%u wr_off=%u wr_end=%d source=0x%x  %s\n",
-         ringsize, i, wroff, (int)wrend, source,
-         source == 0 ? "<-- SOURCE IS NULL: the mixer skips this voice entirely"
-                     : "<-- source present: the voice has data, the write is lost later");
+
+      /* Per-enqueue one-liner: only the two fields whose MEANING is established
+       * by the mixer caller's own arithmetic (0x24bb92: dwBytes = play -
+       * [esi+0x78]; 0x24bbb8: [esi+0x78] = play), i.e. R+0x84 is the voice's
+       * rolling write offset. Everything else is dumped raw below rather than
+       * named. */
+      TR("voiceprobe: ring=%u voice=%u wr_off=%u\n",
+         ringsize, i, *(const uint32_t *)(R + VOICE_OFF_WROFF));
+
+      /* ★RAW WINDOW, once per distinct ring size. Why raw: my first pass
+       * NAMED R+0x94 "source" and the control falsified it — the AUDIBLE voice
+       * reads 0 there, so that field cannot be what gates playback. The lesson
+       * is that a hand-decoded offset is a hypothesis, and printing it under a
+       * confident name invites the same mistake twice. So dump the window and
+       * let the DIFF between the audible class (ring 264600) and the silent one
+       * (ring 529200) name the field. Any candidate must DIFFER between the two
+       * classes — that is now a permanent acceptance test, not a nicety.
+       * One dump per ring size keeps a 3000-line run readable. */
+      static uint32_t dumped[8];
+      static int ndumped;
+      int seen = 0;
+      for (int k = 0; k < ndumped; k++) { if (dumped[k] == ringsize) { seen = 1; } }
+      if (!seen && ndumped < (int)(sizeof dumped / sizeof *dumped)) {
+         dumped[ndumped++] = ringsize;
+         TR("voicedump: ===== ring=%u voice=%u dsbuf=0x%x =====\n",
+            ringsize, i, dsbuf);
+         for (uint32_t off = 0; off < 0xB0; off += 0x10) {
+            const uint32_t *w = (const uint32_t *)(R + off);
+            TR("voicedump: ring=%u R+0x%02x: %08x %08x %08x %08x\n",
+               ringsize, off, w[0], w[1], w[2], w[3]);
+         }
+         /* The two words the mixer caller keys its branch selection on, kept
+          * adjacent for the eye: byte R+0x15 selects the branch family and the
+          * word at R+0x0c is the voice STATE the "is it finished" routine at
+          * 0x2482ac steps 2 -> 1 -> 0. Named as HYPOTHESES only. */
+         TR("voicedump: ring=%u state_hyp(R+0x0c,u16)=%u mode_hyp(R+0x15,u8)=%u "
+            "latch_hyp(R+0x90)=%d\n", ringsize,
+            *(const uint16_t *)(R + 0x0c), *(const uint8_t *)(R + 0x15),
+            (int)*(const int32_t *)(R + 0x90));
+      }
       return;
    }
    TR("voiceprobe: ring=%u no voice record owns dsbuf=0x%x (scanned %u) — "
