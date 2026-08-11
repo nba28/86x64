@@ -624,7 +624,10 @@ snd-status-layout: $(BUILD_DIR)/98_snd_status_layout.x86_64
 # the sample-rate table {22050, 44100} became {0x1000573c, 44100}, overflowing
 # the mixer's ring-size arithmetic so IDirectSoundBuffer::Lock returned
 # E_INVALIDARG and the mixer silently skipped -- 7432 buffers of pure silence.
-jt-cohesion: $(BUILD_DIR)/96_jt_cohesion.x86_64
+# ★The gate runs at TRANSLATE time, so the script translates BOTH arms itself
+# (an .x86_64 already built cannot be A/B'd by an env var at run time). It only
+# needs the .i386 from the normal rule.
+jt-cohesion: $(BUILD_DIR)/96_jt_cohesion.i386
 	@bash jt_cohesion_test.sh
 # classic-input-coords: A/B guard for the classic GLOBAL-vs-LOCAL coordinate
 # contract. GetMouse is defined against the CURRENT PORT and GetGlobalMouse

@@ -630,6 +630,15 @@ namespace MachO {
       if (!vmaddr_in_instructions_sect(value) || code_interior_alias(value)) {
          return false;
       }
+      /* LAST-RESORT ONLY. Never speak about a value that carries POSITIVE
+       * function-entry evidence (an nlist at the address, an i386 `55 89 e5`
+       * prologue, or a C++ adjustor-thunk entry shape): that is a genuine code
+       * pointer whatever its neighbours look like, and a vtable slot or
+       * fn-ptr-table entry that happens to sit next to an integer must not be
+       * demoted. This confines the gate to exactly the blind spot it was
+       * written for — a code-aliasing word with NO positive evidence, which is
+       * all __TEXT,__const leaves behind once the entry gates are excluded. */
+      if (code_target_has_entry_evidence(img, value)) { return false; }
       const auto& cs = current_section->sect;
       const std::size_t sect_lo = cs.addr;
       const std::size_t sect_hi = cs.addr + cs.size;
