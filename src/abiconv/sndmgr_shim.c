@@ -208,6 +208,94 @@ static void desc_to_asbd(const struct snd_ch *c, const snd_pcm_desc *d,
    a->mFormatFlags = fl;
 }
 
+/* ---- RUN B: the app's per-VOICE record, for the 44100-vs-22050 split -------
+ *
+ * ⚠⚠DIAGNOSTIC ONLY, AND APP-SPECIFIC. Unlike everything else in this file
+ * this reads HARDCODED addresses decoded from ONE binary (Halo CE). It must
+ * never ship enabled, never influence behaviour, and never be treated as a
+ * normal probe. It exists to answer one question that no general instrument
+ * can reach, and it is triple-gated: ABICONV_SND_TRACE + ABICONV_SND_DSPROBE +
+ * ABICONV_SND_VOICEPROBE, all three required.
+ *
+ * THE QUESTION. After the __TEXT,__const cohesion fix, Halo's 22050 Hz voices
+ * play (370 audible buffers, ring 264600 = 2*22050*6) while every 44100 Hz
+ * buffer is still silent (4914/4914, ring 529200 = 2*44100*6). rateTable[1]
+ * was never corrupted, so that ring size is CORRECT and the mixer's Lock size
+ * arithmetic on that path should be sound. The mixer has a second silent path:
+ *
+ *     0x248db2:  eax = [R+0x94];  if (!eax) skip this voice
+ *
+ * i.e. a voice whose SOURCE-DATA pointer is null contributes nothing and the
+ * ring stays zero. This reports that pointer for the voice that owns the ring
+ * we were just handed, so "the music voice has no source" and "the music voice
+ * has a source but nothing writes" separate in a single run.
+ *
+ * LAYOUT (i386 original): per-voice records at 0x592920, stride 1612;
+ *   R+0x650 the IDirectSoundBuffer*, R+0x84 write offset, R+0x88 write end
+ *   (-1 = idle), R+0x94 the source-data pointer.
+ * The translated image rebases per section: __common 0x457c00 -> 0x10aee4c0,
+ * delta 0x106968C0, so the array lands at 0x10C291E0 + the runtime image slide.
+ *
+ * ★STRUCTURAL GATE, non-negotiable: a record is only believed when
+ * *(u32*)(R+0x650) == dsbuf. That identity is to this probe what
+ * base + play == samplePtr is to the whole-buffer probe — without it a
+ * hardcoded address is a guess, and a guess that printed numbers would be worse
+ * than no probe. If no record matches, say so and report nothing else. */
+#include <mach-o/dyld.h>
+
+#define VOICE_ARRAY_TRANS 0x10C291E0u   /* 0x592920 + (0x10aee4c0 - 0x457c00) */
+#define VOICE_STRIDE      1612u
+#define VOICE_SCAN_MAX    256u
+#define VOICE_OFF_DSBUF   0x650
+#define VOICE_OFF_WROFF   0x84
+#define VOICE_OFF_WREND   0x88
+#define VOICE_OFF_SOURCE  0x94
+
+/* Slide of the image whose name ends in "Halo.dylib", or 0 if absent. Resolved
+ * once. Structural (a name suffix), not a path, so a moved bundle still works. */
+static intptr_t halo_image_slide(int *found) {
+   static int done = 0, ok = 0;
+   static intptr_t slide = 0;
+   if (!done) {
+      uint32_t n = _dyld_image_count();
+      for (uint32_t i = 0; i < n; i++) {
+         const char *nm = _dyld_get_image_name(i);
+         if (!nm) { continue; }
+         size_t l = strlen(nm);
+         if (l >= 10 && strcmp(nm + l - 10, "Halo.dylib") == 0) {
+            slide = _dyld_get_image_vmaddr_slide(i); ok = 1; break;
+         }
+      }
+      done = 1;
+   }
+   if (found) { *found = ok; }
+   return slide;
+}
+
+static void snd_voice_probe(uint32_t dsbuf, uint32_t ringsize) {
+   if (!getenv("ABICONV_SND_VOICEPROBE")) { return; }
+   int have = 0;
+   intptr_t slide = halo_image_slide(&have);
+   if (!have) { TR("voiceprobe: no Halo.dylib image — declining\n"); return; }
+   const uint8_t *arr = (const uint8_t *)(VOICE_ARRAY_TRANS + slide);
+
+   for (uint32_t i = 0; i < VOICE_SCAN_MAX; i++) {
+      const uint8_t *R = arr + (size_t)i * VOICE_STRIDE;
+      uint32_t owner = *(const uint32_t *)(R + VOICE_OFF_DSBUF);
+      if (owner != dsbuf) { continue; }          /* ★the structural gate */
+      uint32_t wroff  = *(const uint32_t *)(R + VOICE_OFF_WROFF);
+      uint32_t wrend  = *(const uint32_t *)(R + VOICE_OFF_WREND);
+      uint32_t source = *(const uint32_t *)(R + VOICE_OFF_SOURCE);
+      TR("voiceprobe: ring=%u voice=%u wr_off=%u wr_end=%d source=0x%x  %s\n",
+         ringsize, i, wroff, (int)wrend, source,
+         source == 0 ? "<-- SOURCE IS NULL: the mixer skips this voice entirely"
+                     : "<-- source present: the voice has data, the write is lost later");
+      return;
+   }
+   TR("voiceprobe: ring=%u no voice record owns dsbuf=0x%x (scanned %u) — "
+      "declining to report\n", ringsize, dsbuf, VOICE_SCAN_MAX);
+}
+
 /* Follow a SoundHeader pointer, decode it, and enqueue its PCM on the channel.
  * hdr32 = i386 address of the SoundHeader. Returns 0 (played or gracefully
  * skipped) — never an error, so a missing device / unsupported codec can't abort
@@ -306,6 +394,7 @@ static void enqueue_sound(struct snd_ch *c, uint32_t hdr32) {
             base, bsize, play, wpeak, (int)first_nz,
             wpeak == 0 ? "<-- ENTIRE BUFFER IS ZERO: the producer never wrote"
                        : "<-- buffer HAS audio: our cursor is reading a silent region");
+         snd_voice_probe(dsbuf, bsize);
       }
    }
 
