@@ -141,18 +141,32 @@ else
   echo "  ⚠if f15 is 0 for EVERY voice above, that re-confirms R+0x15 is inert"
   echo "   and the answer must lie in the state column."
 fi
-if grep -q 'voiceforce:' "$OUT"; then
+# Report the experiment whenever it was REQUESTED, not only when it fired — a
+# run that crashed before the music voice reached state 2 is INCONCLUSIVE, and
+# silently omitting the section made that look like a null result.
+if [ -n "$FORCE" ] || grep -q 'voiceforce:' "$OUT"; then
   echo
   echo "--- ★FORCED-STREAM experiment (this run MUTATED Halo) ---"
-  grep 'voiceforce:' "$OUT" | sed 's/^/  /'
-  a=$(grep 'rate=44100' "$OUT" | grep -vc SILENT)
-  echo "  => 44100 Hz AUDIBLE buffers this run: $a"
-  if [ "$a" -gt 0 ]; then
-    echo "  ★MUSIC PLAYED. 0x24b934 IS the stream feeder; the open question becomes"
-    echo "   who was supposed to arm R+0x15."
+  if ! grep -q 'voiceforce:' "$OUT"; then
+    echo "  ⚠DID NOT FIRE — no voice ever reached state 2, so the write was never"
+    echo "   executed. Almost always an early crash (check the exit status above)."
+    echo "   INCONCLUSIVE: this says nothing about 0x24b934. Re-run."
+    s=$(grep -c 'voicestate: voice=30 ' "$OUT")
+    echo "   voice 30 state samples this run: $s (a healthy run reaches 1->2)"
   else
-    echo "  no change: 0x24b934 is NOT the feeder (or not the only blocker)."
-    echo "   The feeder is somewhere we have not looked."
+    grep 'voiceforce:' "$OUT" | sed 's/^/  /'
+    a=$(grep 'rate=44100' "$OUT" | grep -vc SILENT)
+    n=$(grep -c 'rate=44100' "$OUT")
+    echo "  => 44100 Hz buffers this run: $n, of which AUDIBLE: $a"
+    if [ "$n" -lt 100 ]; then
+      echo "  ⚠only $n music buffers — the run was too short to conclude either way."
+    elif [ "$a" -gt 0 ]; then
+      echo "  ★MUSIC PLAYED. 0x24b934 IS the stream feeder; the open question becomes"
+      echo "   who was supposed to arm R+0x15."
+    else
+      echo "  no change: 0x24b934 is NOT the feeder (or not the only blocker)."
+      echo "   The feeder is somewhere we have not looked."
+    fi
   fi
 fi
 echo
