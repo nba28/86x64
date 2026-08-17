@@ -1,0 +1,4 @@
+corrupt-vtable  ok
+real-cast       ok
+must-fail       ok
+exit_code: 0

@@ -843,6 +843,21 @@ static void do_dyncast(uint32_t ti, int32_t src2dst, int access_path,
    }
 }
 
+/* A vtable-chain read that faulted: fail the cast, and say so ONCE. Silence
+ * would hide a genuine defect (a stale or corrupt object pointer is worth
+ * knowing about); a line per call would drown the log, since whatever produced
+ * one bad pointer usually produces many. */
+static uint32_t rtti_unreadable(uint32_t addr) {
+   static int warned;
+   if (!warned) {
+      warned = 1;
+      fprintf(stderr, "[rtti] __dynamic_cast: unreadable vtable chain at %#x — "
+              "failing the cast (further occurrences silent)\n", addr);
+      fflush(stderr);
+   }
+   return 0;
+}
+
 /* void* __dynamic_cast(const void* sub, const __class_type_info* src,
  *                      const __class_type_info* dst, ptrdiff_t src2dst).
  * i386 frame: sub[0] src[1] dst[2] src2dst[3]. */
@@ -853,10 +868,49 @@ uint32_t shim_dynamic_cast(uint32_t *a) {
    int32_t  src2dst  = (int32_t)a[3];
    if (!src_ptr) return 0;
 
-   uint32_t vtable = ld32(src_ptr);
-   if (!vtable) return 0;
-   int32_t  off_to_top = ld32s(vtable - 8);          /* i386 vtable_prefix */
-   uint32_t whole_type = ld32(vtable - 4);
+   /* ★FAULT-SAFE ENTRY READS. These three loads are the boundary between us and
+    * pointers the TARGET supplies, and they were raw: only NULL was rejected, so
+    * any garbage `src_ptr` (or an object whose first word is not a vtable) took
+    * the whole process down inside ld32/ld32s.
+    *
+    * MEASURED (Halo, 2026-08-17, Halo-2026-08-17-235241.ips): SIGSEGV,
+    * KERN_INVALID_ADDRESS at 0x3c290c28, rip inside `_ld32s` called from
+    * `shim_dynamic_cast` — i.e. `ld32s(vtable - 8)` with vtable = 0x3c290c30.
+    * ⚠The .ips BACKTRACE was useless (frame #0 unresolvable, another frame with
+    * imageOffset 0xFFFFFFFFFFFFFFFF); only resolving `rip` against usedImages
+    * identified it. Intermittent, ~1 launch in 3, which smells like the object
+    * being freed or reallocated while a cast is in flight.
+    *
+    * Returning 0 is not a workaround, it is the CONTRACT: __dynamic_cast may
+    * return NULL for a failed cast, a cast through a corrupt vtable is already
+    * undefined behaviour in the target, and faulting inside a shim is strictly
+    * worse than reporting the failure. It is also exactly what this function
+    * already does twelve lines below for a typeinfo it cannot recognise: "fail
+    * the cast rather than risk a wild read". The trigger is STRUCTURAL —
+    * unreadable memory — not an app or a value.
+    *
+    * Kill switch M64_NO_RTTI_SAFE_READ=1 restores the raw loads so the guard
+    * can A/B it. */
+   uint32_t vtable, whole_type; int32_t off_to_top;
+   {
+      static int raw = -1;
+      if (raw < 0) raw = getenv("M64_NO_RTTI_SAFE_READ") != NULL;
+      uint32_t t;
+      if (raw) {
+         vtable = ld32(src_ptr);
+         if (!vtable) return 0;
+         off_to_top = ld32s(vtable - 8);
+         whole_type = ld32(vtable - 4);
+      } else {
+         if (!cxx_diag_read32(src_ptr, &vtable)) return rtti_unreadable(src_ptr);
+         if (!vtable) return 0;
+         if (vtable < 8) return rtti_unreadable(vtable);
+         if (!cxx_diag_read32(vtable - 8, &t)) return rtti_unreadable(vtable - 8);
+         off_to_top = (int32_t)t;
+         if (!cxx_diag_read32(vtable - 4, &whole_type))
+            return rtti_unreadable(vtable - 4);
+      }
+   }
    uint32_t whole_ptr  = (uint32_t)((int32_t)src_ptr + off_to_top);
 
    if (cxx_rtti_trace()) {
