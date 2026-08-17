@@ -1,0 +1,119 @@
+/* halo-gl-texprobe.c — DIAGNOSTIC-ONLY: log every texture upload and the
+ * pixel-store state in force when it happens.
+ *
+ * WHY A SEPARATE DYLIB. Per the one-shim-one-job rule this does not belong in
+ * libabiconv: it is a temporary instrument for ONE question, and it must be
+ * removable by deleting a file and dropping an env var. It is inserted with
+ * DYLD_INSERT_LIBRARIES and interposes the real GL entry points, which works
+ * because the abigen bridge `___glTexSubImage2D` reaches OpenGL through an
+ * ordinary symbol stub — so this needs no cooperation from the shim layer and
+ * no rebuild of anything else.
+ *
+ * THE QUESTION. Halo's ANIMATED menu background textures render as a DIAGONAL
+ * SHEAR while pre-rendered stills, the logo and all text are correct. A shear is
+ * the signature of a ROW-PITCH mismatch: rows written assuming pitch P into a
+ * surface of pitch P' displace row n by n*(P-P'). The candidates are
+ *   (a) wrong width/height/format reaching glTex(Sub)Image2D,
+ *   (b) a GL_UNPACK_* pixel-store setting that is wrong or never applied,
+ *   (c) correct GL parameters but data laid out wrong by a mistranslated
+ *       decode/copy loop upstream — in which case (a) and (b) look perfect.
+ * Logging the arguments AND the unpack state separates (a)/(b) from (c) in one
+ * run, which is the whole point: (c) needs a completely different hunt.
+ *
+ * ⚠It also matters that the pre-rendered stills are the CONTROL. If the broken
+ * and working textures come through the same call with the same unpack state,
+ * that is itself the finding.
+ *
+ * Build + run:  bash src/86x64/halo-gl-texprobe.sh
+ */
+#include <OpenGL/gl.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+
+static FILE *out;
+static int   budget = 400;   /* a menu re-uploads constantly; keep it readable */
+
+static void tp_open(void) {
+   if (out) return;
+   const char *p = getenv("HALO_TEXPROBE_LOG");
+   out = p ? fopen(p, "w") : stderr;
+   if (!out) out = stderr;
+}
+
+/* The pixel-store state that decides how a row is walked. If any of these is
+ * unexpected, the shear is explained without looking at the data at all. */
+static void tp_unpack(char *buf, size_t n) {
+   GLint row = -1, align = -1, skipp = -1, skipr = -1;
+   glGetIntegerv(GL_UNPACK_ROW_LENGTH,  &row);
+   glGetIntegerv(GL_UNPACK_ALIGNMENT,   &align);
+   glGetIntegerv(GL_UNPACK_SKIP_PIXELS, &skipp);
+   glGetIntegerv(GL_UNPACK_SKIP_ROWS,   &skipr);
+   snprintf(buf, n, "unpack{row_len=%d align=%d skip_px=%d skip_rows=%d}",
+            row, align, skipp, skipr);
+}
+
+/* Announce at load. Without this, an empty log is ambiguous: it could mean the
+ * uploads bypass these symbols (interesting) or that DYLD_INSERT_LIBRARIES was
+ * ignored because of library validation (not interesting, and a different fix).
+ * A probe that cannot tell those apart wastes a launch. */
+__attribute__((constructor)) static void tp_hello(void) {
+   tp_open();
+   fprintf(out, "[tex] probe loaded (interposing TexImage2D/TexSubImage2D/"
+                "CompressedTexImage2D/PixelStorei)\n");
+   fflush(out);
+}
+
+static const char *fmt_name(GLenum f) {
+   switch (f) {
+      case GL_RGBA: return "RGBA"; case GL_RGB: return "RGB";
+      case GL_BGRA: return "BGRA"; case GL_LUMINANCE: return "LUM";
+      case GL_LUMINANCE_ALPHA: return "LUM_A"; case GL_ALPHA: return "ALPHA";
+      default: return "?";
+   }
+}
+
+#define TP_LOG(...) do { tp_open(); if (budget > 0) { budget--; \
+   fprintf(out, __VA_ARGS__); fflush(out); } } while (0)
+
+static void tp_teximage2d(GLenum t, GLint l, GLint ifmt, GLsizei w, GLsizei h,
+                          GLint b, GLenum f, GLenum ty, const GLvoid *px) {
+   char u[160] = "";
+   if (budget > 0) tp_unpack(u, sizeof u);   /* glGetIntegerv is a sync point */
+   TP_LOG("[tex] TexImage2D    lvl=%d ifmt=%#x %dx%d border=%d fmt=%#x(%s) type=%#x px=%p %s\n",
+          l, ifmt, w, h, b, f, fmt_name(f), ty, px, u);
+   glTexImage2D(t, l, ifmt, w, h, b, f, ty, px);
+}
+
+static void tp_texsubimage2d(GLenum t, GLint l, GLint x, GLint y, GLsizei w,
+                             GLsizei h, GLenum f, GLenum ty, const GLvoid *px) {
+   char u[160] = "";
+   if (budget > 0) tp_unpack(u, sizeof u);
+   TP_LOG("[tex] TexSubImage2D lvl=%d at(%d,%d) %dx%d fmt=%#x(%s) type=%#x px=%p %s\n",
+          l, x, y, w, h, f, fmt_name(f), ty, px, u);
+   glTexSubImage2D(t, l, x, y, w, h, f, ty, px);
+}
+
+static void tp_compressed_teximage2d(GLenum t, GLint l, GLenum ifmt, GLsizei w,
+                                     GLsizei h, GLint b, GLsizei sz,
+                                     const GLvoid *px) {
+   /* Compressed uploads carry their own implied pitch, so a shear here would
+    * mean the BLOCK layout is wrong rather than the row length. Worth telling
+    * apart, hence a distinct line. */
+   TP_LOG("[tex] CompressedTexImage2D lvl=%d ifmt=%#x %dx%d border=%d bytes=%d px=%p\n",
+          l, ifmt, w, h, b, sz, px);
+   glCompressedTexImage2D(t, l, ifmt, w, h, b, sz, px);
+}
+
+static void tp_pixelstorei(GLenum pname, GLint param) {
+   TP_LOG("[tex] PixelStorei    pname=%#x param=%d\n", pname, param);
+   glPixelStorei(pname, param);
+}
+
+__attribute__((used)) static struct { const void *repl, *orig; }
+interposers[] __attribute__((section("__DATA,__interpose"))) = {
+   { (const void *)tp_teximage2d,            (const void *)glTexImage2D },
+   { (const void *)tp_texsubimage2d,         (const void *)glTexSubImage2D },
+   { (const void *)tp_compressed_teximage2d, (const void *)glCompressedTexImage2D },
+   { (const void *)tp_pixelstorei,           (const void *)glPixelStorei },
+};
