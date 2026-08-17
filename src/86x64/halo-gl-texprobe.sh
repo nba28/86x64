@@ -92,6 +92,21 @@ echo "--- distinct unpack state AT UPLOAD TIME ---"
 grep -oE 'unpack\{[^}]*\}' "$LOG" | sort | uniq -c | sort -rn | head -8
 
 echo
+echo "--- ★VERTEX ARRAY SETUPS (the current suspect) ---"
+if ! grep -q '^\[geo\]' "$LOG"; then
+  echo "  none seen. If the menu still drew, the 3D path does not use client"
+  echo "  vertex arrays — look at VBOs (glBufferData) or immediate mode instead."
+else
+  grep '^\[geo\]' "$LOG" | sed 's/^/  /'
+  echo
+  echo "  READ THE STRIDES. For an interleaved vertex the stride must equal the"
+  echo "  struct size, and every array sharing that struct must report the SAME"
+  echo "  stride. A stride that disagrees with its neighbours, or is 0 where the"
+  echo "  data is interleaved, walks the buffer at the wrong step and drags each"
+  echo "  successive vertex further off — which is exactly the smearing seen."
+fi
+
+echo
 echo "--- distinct upload geometries (size/format) ---"
 grep -oE 'TexSubImage2D lvl=[0-9-]+ at\([0-9-]+,[0-9-]+\) [0-9]+x[0-9]+ fmt=[^ ]+' "$LOG" \
   | sed 's/at([0-9-]*,[0-9-]*)/at(..)/' | sort | uniq -c | sort -rn | head -10

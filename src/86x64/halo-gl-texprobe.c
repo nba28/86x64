@@ -1,5 +1,21 @@
-/* halo-gl-texprobe.c — DIAGNOSTIC-ONLY: log every texture upload and the
- * pixel-store state in force when it happens.
+/* halo-gl-texprobe.c — DIAGNOSTIC-ONLY instrument for Halo's broken menu
+ * rendering. Started as a texture probe; now also covers VERTEX ARRAYS, because
+ * the texture question came back answered and pointed elsewhere.
+ *
+ * ★WHAT THE FIRST TWO RUNS SETTLED (keep, so nobody re-runs them):
+ *   - texture geometry and byte counts are EXACT (every DXT1 blob equals
+ *     w*h/2), formats are valid S3TC, GL_UNPACK_ROW_LENGTH=0, align=4 — so a
+ *     pixel-store or geometry shear is impossible. Candidates (a) and (b) dead.
+ *   - forcing GL_UNPACK_CLIENT_STORAGE_APPLE to 0 changed NOTHING on screen, so
+ *     APPLE_client_storage is EXONERATED too.
+ *   - and the tester's description is "glitching 3D OBJECTS", not flat sheared
+ *     images. The menu background is a 3D scene; the pre-rendered stills that
+ *     render correctly are the ones that never go through the 3D pipeline.
+ * ⇒ The textures were never the problem. Smeared, streaking triangles are what
+ *   you get when vertices land at the WRONG POSITIONS — and the classic cause
+ *   is a wrong ARRAY STRIDE, which walks the vertex buffer at the wrong step
+ *   and drags each successive vertex further off. Same bug family as a texture
+ *   pitch, different array.
  *
  * WHY A SEPARATE DYLIB. Per the one-shim-one-job rule this does not belong in
  * libabiconv: it is a temporary instrument for ONE question, and it must be
@@ -167,10 +183,75 @@ static void tp_pixelstorei(GLenum pname, GLint param) {
    glPixelStorei(pname, param);
 }
 
+/* ---- vertex arrays: the stride is the suspect --------------------------
+ * Draw calls fire thousands of times a second, so log DISTINCT setups only:
+ * whatever is wrong will be wrong in every frame, and one line per distinct
+ * (size,type,stride) is the whole signal. */
+static int seen_before(unsigned key) {
+   static unsigned seen[64]; static int n;
+   for (int i = 0; i < n; i++) if (seen[i] == key) return 1;
+   if (n < 64) seen[n++] = key;
+   return 0;
+}
+
+static void tp_vertexpointer(GLint size, GLenum type, GLsizei stride,
+                             const GLvoid *p) {
+   if (!seen_before(0x10000000u ^ (unsigned)(size*131 + type*17 + stride)))
+      TP_LOG("[geo] VertexPointer   size=%d type=%#x stride=%d ptr=%p\n",
+             size, type, stride, p);
+   glVertexPointer(size, type, stride, p);
+}
+static void tp_texcoordpointer(GLint size, GLenum type, GLsizei stride,
+                               const GLvoid *p) {
+   if (!seen_before(0x20000000u ^ (unsigned)(size*131 + type*17 + stride)))
+      TP_LOG("[geo] TexCoordPointer size=%d type=%#x stride=%d ptr=%p\n",
+             size, type, stride, p);
+   glTexCoordPointer(size, type, stride, p);
+}
+static void tp_colorpointer(GLint size, GLenum type, GLsizei stride,
+                            const GLvoid *p) {
+   if (!seen_before(0x30000000u ^ (unsigned)(size*131 + type*17 + stride)))
+      TP_LOG("[geo] ColorPointer    size=%d type=%#x stride=%d ptr=%p\n",
+             size, type, stride, p);
+   glColorPointer(size, type, stride, p);
+}
+static void tp_normalpointer(GLenum type, GLsizei stride, const GLvoid *p) {
+   if (!seen_before(0x40000000u ^ (unsigned)(type*17 + stride)))
+      TP_LOG("[geo] NormalPointer   type=%#x stride=%d ptr=%p\n",
+             type, stride, p);
+   glNormalPointer(type, stride, p);
+}
+static void tp_drawelements(GLenum mode, GLsizei count, GLenum type,
+                            const GLvoid *idx) {
+   if (!seen_before(0x50000000u ^ (unsigned)(mode*7 + type)))
+      TP_LOG("[geo] DrawElements    mode=%#x count=%d idxtype=%#x\n",
+             mode, count, type);
+   glDrawElements(mode, count, type, idx);
+}
+static void tp_drawarrays(GLenum mode, GLint first, GLsizei count) {
+   if (!seen_before(0x60000000u ^ (unsigned)mode))
+      TP_LOG("[geo] DrawArrays      mode=%#x first=%d count=%d\n",
+             mode, first, count);
+   glDrawArrays(mode, first, count);
+}
+static void tp_interleavedarrays(GLenum fmt, GLsizei stride, const GLvoid *p) {
+   if (!seen_before(0x70000000u ^ (unsigned)(fmt*13 + stride)))
+      TP_LOG("[geo] InterleavedArrays fmt=%#x stride=%d ptr=%p\n",
+             fmt, stride, p);
+   glInterleavedArrays(fmt, stride, p);
+}
+
 __attribute__((used)) static struct { const void *repl, *orig; }
 interposers[] __attribute__((section("__DATA,__interpose"))) = {
    { (const void *)tp_teximage2d,            (const void *)glTexImage2D },
    { (const void *)tp_texsubimage2d,         (const void *)glTexSubImage2D },
    { (const void *)tp_compressed_teximage2d, (const void *)glCompressedTexImage2D },
    { (const void *)tp_pixelstorei,           (const void *)glPixelStorei },
+   { (const void *)tp_vertexpointer,         (const void *)glVertexPointer },
+   { (const void *)tp_texcoordpointer,       (const void *)glTexCoordPointer },
+   { (const void *)tp_colorpointer,          (const void *)glColorPointer },
+   { (const void *)tp_normalpointer,         (const void *)glNormalPointer },
+   { (const void *)tp_drawelements,          (const void *)glDrawElements },
+   { (const void *)tp_drawarrays,            (const void *)glDrawArrays },
+   { (const void *)tp_interleavedarrays,     (const void *)glInterleavedArrays },
 };
