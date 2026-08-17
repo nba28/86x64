@@ -58,12 +58,22 @@ dis=$(otool -tV "$I386" 2>/dev/null)
 #   (ii)  an epilogue restore `movl -0xc(%ebp),%ebx` AFTER it,
 #   (iii) an indirect `jmpl *%eax` dispatch, with the anchored load UNDER TEST
 #         sitting after the restore and reached by no direct branch.
-save_at=$(printf '%s\n' "$dis" | awk '/movl[ \t]+%ebx, -0xc\(%ebp\)/{print strtonum("0x"$1); exit}')
-pop_at=$(printf  '%s\n' "$dis" | awk '/popl[ \t]+%ebx/{print strtonum("0x"$1); exit}')
-rest_at=$(printf '%s\n' "$dis" | awk '/movl[ \t]+-0xc\(%ebp\), %ebx/{print strtonum("0x"$1); exit}')
-jmpi_at=$(printf '%s\n' "$dis" | awk '/jmpl[ \t]+\*%eax/{print strtonum("0x"$1); exit}')
+# ⚠ strtonum() is a GAWK extension: macOS ships BSD awk, which answers
+# "calling undefined function strtonum" and yields an EMPTY address for every
+# probe below — so the precondition block failed unconditionally and this guard
+# could never render a verdict on the machine it ships to. awk therefore only
+# MATCHES (its regex engine does handle \t); bash does the hex conversion.
+addr_of() {   # first matching instruction's address, DECIMAL; empty if no match
+   local hex
+   hex=$(printf '%s\n' "$dis" | awk "$1"' {print $1; exit}')
+   [ -n "$hex" ] && printf '%d' "$((16#$hex))"
+}
+save_at=$(addr_of '/movl[ \t]+%ebx, -0xc\(%ebp\)/')
+pop_at=$(addr_of  '/popl[ \t]+%ebx/')
+rest_at=$(addr_of '/movl[ \t]+-0xc\(%ebp\), %ebx/')
+jmpi_at=$(addr_of '/jmpl[ \t]+\*%eax/')
 # the anchored load under test: `movl <disp32>(%ebx), %eax`
-load_at=$(printf '%s\n' "$dis" | awk '/movl[ \t]+0x[0-9a-f]+\(%ebx\), %eax/{print strtonum("0x"$1); exit}')
+load_at=$(addr_of '/movl[ \t]+0x[0-9a-f]+\(%ebx\), %eax/')
 # no direct branch may target it — otherwise branch_anchor_snap would rescue it
 # and the OFF arm would silently pass.
 load_hex=$(printf '%x' "${load_at:-0}")
