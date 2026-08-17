@@ -46,6 +46,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <dlfcn.h>
 
 static FILE *out;
 static int   budget = 400;   /* a menu re-uploads constantly; keep it readable */
@@ -187,6 +188,53 @@ static void tp_pixelstorei(GLenum pname, GLint param) {
  * Draw calls fire thousands of times a second, so log DISTINCT setups only:
  * whatever is wrong will be wrong in every frame, and one line per distinct
  * (size,type,stride) is the whole signal. */
+/* ★STRIDE OVERRIDE + CALLER LOCALISATION.
+ *
+ * MEASURED: VertexPointer/NormalPointer/TexCoordPointer all report
+ * stride=1481 while their POINTERS are perfectly spaced +0/+12/+24 — a
+ * 32-byte interleaved vertex (pos3f, normal3f, uv2f). 1481 is not just wrong,
+ * it is ODD: invalid for GL_FLOAT arrays under any layout. Each successive
+ * vertex is fetched 1481 bytes on instead of 32, which is exactly the smear.
+ *
+ * The abigen bridge is exonerated: it marshals positionally (edx <- arg2) and
+ * size/type/ptr all arrive correct, so Halo really does pass 1481.
+ *
+ * HALO_TEXPROBE_STRIDE=32 substitutes a sane stride. If the scene then draws
+ * correctly, the diagnosis is proved end to end and 32 is confirmed as the
+ * right value. This is a DIAGNOSTIC, not the fix — the fix belongs wherever
+ * 1481 is computed.
+ *
+ * We also resolve the caller once via dladdr, to turn "somewhere in Halo" into
+ * a Halo.dylib+offset that can actually be disassembled. */
+static void tp_whocalled(const char *what) {
+   static int done;
+   if (done) return;
+   done = 1;
+   void *r0 = __builtin_return_address(0);
+   Dl_info i0;
+   if (dladdr(r0, &i0) && i0.dli_fname)
+      TP_LOG("[geo] caller of %s: ret=%p in %s (+0x%lx) sym=%s\n", what, r0,
+             i0.dli_fname, (unsigned long)((char *)r0 - (char *)i0.dli_fbase),
+             i0.dli_sname ? i0.dli_sname : "-");
+   else
+      TP_LOG("[geo] caller of %s: ret=%p (unresolved)\n", what, r0);
+}
+
+static GLsizei tp_stride(GLsizei s) {
+   static int over = -2;
+   if (over == -2) {
+      const char *e = getenv("HALO_TEXPROBE_STRIDE");
+      over = e ? atoi(e) : -1;
+   }
+   if (over > 0 && s != over) {
+      static int said;
+      if (!said) { said = 1;
+         TP_LOG("[geo] STRIDE OVERRIDE %d -> %d (experiment)\n", s, over); }
+      return over;
+   }
+   return s;
+}
+
 static int seen_before(unsigned key) {
    static unsigned seen[64]; static int n;
    for (int i = 0; i < n; i++) if (seen[i] == key) return 1;
@@ -199,27 +247,28 @@ static void tp_vertexpointer(GLint size, GLenum type, GLsizei stride,
    if (!seen_before(0x10000000u ^ (unsigned)(size*131 + type*17 + stride)))
       TP_LOG("[geo] VertexPointer   size=%d type=%#x stride=%d ptr=%p\n",
              size, type, stride, p);
-   glVertexPointer(size, type, stride, p);
+   tp_whocalled("glVertexPointer");
+   glVertexPointer(size, type, tp_stride(stride), p);
 }
 static void tp_texcoordpointer(GLint size, GLenum type, GLsizei stride,
                                const GLvoid *p) {
    if (!seen_before(0x20000000u ^ (unsigned)(size*131 + type*17 + stride)))
       TP_LOG("[geo] TexCoordPointer size=%d type=%#x stride=%d ptr=%p\n",
              size, type, stride, p);
-   glTexCoordPointer(size, type, stride, p);
+   glTexCoordPointer(size, type, tp_stride(stride), p);
 }
 static void tp_colorpointer(GLint size, GLenum type, GLsizei stride,
                             const GLvoid *p) {
    if (!seen_before(0x30000000u ^ (unsigned)(size*131 + type*17 + stride)))
       TP_LOG("[geo] ColorPointer    size=%d type=%#x stride=%d ptr=%p\n",
              size, type, stride, p);
-   glColorPointer(size, type, stride, p);
+   glColorPointer(size, type, tp_stride(stride), p);
 }
 static void tp_normalpointer(GLenum type, GLsizei stride, const GLvoid *p) {
    if (!seen_before(0x40000000u ^ (unsigned)(type*17 + stride)))
       TP_LOG("[geo] NormalPointer   type=%#x stride=%d ptr=%p\n",
              type, stride, p);
-   glNormalPointer(type, stride, p);
+   glNormalPointer(type, tp_stride(stride), p);
 }
 static void tp_drawelements(GLenum mode, GLsizei count, GLenum type,
                             const GLvoid *idx) {

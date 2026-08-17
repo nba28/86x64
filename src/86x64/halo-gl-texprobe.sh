@@ -30,6 +30,11 @@ APP="${HALO_APP:-$HOME/projects/translations/Apps64/Halo.app}"
 # --no-client-storage: force GL_UNPACK_CLIENT_STORAGE_APPLE off. This RUN IS A
 # VISUAL TEST — the answer is on the screen, not in the log.
 NOCS=""
+STRIDE=""
+if [ "${1:-}" = "--stride" ]; then
+  STRIDE="HALO_TEXPROBE_STRIDE=${2:-32}"; shift 2
+  echo "★ experiment: forcing vertex stride to ${STRIDE#*=} — WATCH THE 3D BACKGROUND."
+fi
 if [ "${1:-}" = "--no-client-storage" ]; then
   NOCS="HALO_TEXPROBE_NO_CLIENT_STORAGE=1"; shift
   echo "★ experiment: forcing GL_UNPACK_CLIENT_STORAGE_APPLE=0 — WATCH THE BACKGROUND."
@@ -55,7 +60,7 @@ echo "Click Play, let the MAIN MENU sit ~15s so the animated background uploads,
 echo "then quit Halo."
 
 env DYLD_INSERT_LIBRARIES="$DYLIB" HALO_TEXPROBE_LOG="$LOG" \
-    HALO_TEXPROBE_DUMP="$DUMPDIR" $NOCS \
+    HALO_TEXPROBE_DUMP="$DUMPDIR" $NOCS $STRIDE \
   "$APP/Contents/MacOS/Halo" >/dev/null 2>&1
 
 echo
@@ -107,6 +112,15 @@ else
 fi
 
 echo
+if grep -q 'STRIDE OVERRIDE' "$LOG"; then
+  echo
+  echo "--- ★stride experiment ---"
+  grep 'STRIDE OVERRIDE' "$LOG" | sed 's/^/  /'
+  echo "  VERDICT IS VISUAL: 3D background correct -> the stride IS the bug and"
+  echo "  the substituted value is right. Still smeared -> stride is not the"
+  echo "  whole story (or the true stride differs)."
+fi
+
 echo "--- distinct upload geometries (size/format) ---"
 grep -oE 'TexSubImage2D lvl=[0-9-]+ at\([0-9-]+,[0-9-]+\) [0-9]+x[0-9]+ fmt=[^ ]+' "$LOG" \
   | sed 's/at([0-9-]*,[0-9-]*)/at(..)/' | sort | uniq -c | sort -rn | head -10
