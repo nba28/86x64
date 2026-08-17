@@ -105,7 +105,35 @@ static void tp_compressed_teximage2d(GLenum t, GLint l, GLenum ifmt, GLsizei w,
    glCompressedTexImage2D(t, l, ifmt, w, h, b, sz, px);
 }
 
+/* ★THE EXPERIMENT (HALO_TEXPROBE_NO_CLIENT_STORAGE=1).
+ *
+ * Every one of Halo's PixelStorei calls is GL_UNPACK_CLIENT_STORAGE_APPLE
+ * (0x85b2), set to 1 — 92 times in the measured run. That extension tells the
+ * driver NOT to copy the texture: it keeps a pointer into the application's own
+ * memory and reads it later, on the app's promise that the buffer stays alive
+ * and unmodified at a layout the driver can use directly.
+ *
+ * That promise is exactly the kind a TRANSLATED process may not keep. The data
+ * lives in the i386 low-4GB shadow, reached through our mapping of
+ * bitmaps.map; if its alignment, lifetime or backing differs from what the
+ * driver assumes when it reads client memory directly, the result is corrupt
+ * texels while every GL PARAMETER stays perfectly correct — which is precisely
+ * what we measured (byte counts exact, geometry exact, unpack state default).
+ *
+ * Forcing the flag to 0 makes GL copy the data at call time instead. If the
+ * textures then render correctly, client storage is the cause and the fix is a
+ * real one; if they still shear, the extension is exonerated and the defect is
+ * in the bytes themselves. Either way one look at the screen decides it. */
 static void tp_pixelstorei(GLenum pname, GLint param) {
+   static int force_off = -1;
+   if (force_off < 0)
+      force_off = getenv("HALO_TEXPROBE_NO_CLIENT_STORAGE") != NULL;
+   if (force_off && pname == GL_UNPACK_CLIENT_STORAGE_APPLE && param != 0) {
+      TP_LOG("[tex] PixelStorei    pname=%#x param=%d -> FORCED 0 (experiment)\n",
+             pname, param);
+      glPixelStorei(pname, 0);
+      return;
+   }
    TP_LOG("[tex] PixelStorei    pname=%#x param=%d\n", pname, param);
    glPixelStorei(pname, param);
 }

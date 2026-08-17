@@ -27,6 +27,13 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP="${HALO_APP:-$HOME/projects/translations/Apps64/Halo.app}"
+# --no-client-storage: force GL_UNPACK_CLIENT_STORAGE_APPLE off. This RUN IS A
+# VISUAL TEST — the answer is on the screen, not in the log.
+NOCS=""
+if [ "${1:-}" = "--no-client-storage" ]; then
+  NOCS="HALO_TEXPROBE_NO_CLIENT_STORAGE=1"; shift
+  echo "★ experiment: forcing GL_UNPACK_CLIENT_STORAGE_APPLE=0 — WATCH THE BACKGROUND."
+fi
 LOG="${1:-/tmp/halo-texprobe.log}"
 DYLIB="${TMPDIR:-/tmp}/halo-texprobe.dylib"
 
@@ -44,7 +51,7 @@ echo "Logging to: $LOG"
 echo "Click Play, let the MAIN MENU sit ~15s so the animated background uploads,"
 echo "then quit Halo."
 
-DYLD_INSERT_LIBRARIES="$DYLIB" HALO_TEXPROBE_LOG="$LOG" \
+env DYLD_INSERT_LIBRARIES="$DYLIB" HALO_TEXPROBE_LOG="$LOG" $NOCS \
   "$APP/Contents/MacOS/Halo" >/dev/null 2>&1
 
 echo
@@ -88,6 +95,15 @@ grep -oE 'TexImage2D    lvl=[0-9-]+ ifmt=[^ ]+ [0-9]+x[0-9]+' "$LOG" \
   | sort | uniq -c | sort -rn | head -10
 
 echo
+if grep -q 'FORCED 0' "$LOG"; then
+  echo
+  echo "--- ★client-storage experiment ---"
+  printf '  forced off on %s call(s). THE VERDICT IS VISUAL:\n' \
+    "$(grep -c 'FORCED 0' "$LOG")"
+  echo "    background now CORRECT  -> APPLE_client_storage is the cause"
+  echo "    background still SHEARED-> extension exonerated; the bytes are wrong"
+fi
+
 echo "--- VERDICT HINT ---"
 bad=$(grep -oE 'unpack\{row_len=[0-9-]+' "$LOG" | grep -vc 'row_len=0')
 if [ "$bad" -gt 0 ]; then
