@@ -1002,6 +1002,29 @@ namespace MachO {
        * anchor too. Keyed by (base_reg, disp) of the frame slot. */
       std::map<std::pair<xed_reg_enum_t, ssize_t>, std::size_t> anchor_slots;
 
+      /* Frame slots holding a register's FUNCTION-ENTRY value — the callee-save
+       * store a prologue emits BEFORE the PIC anchor exists:
+       *
+       *     push %ebp; mov %esp,%ebp; sub $N,%esp
+       *     mov  %ebx,-0xc(%ebp)          <- entry save, %ebx not yet an anchor
+       *     call $+0 ; pop %ebx           <- anchor established here
+       *     ...
+       *     mov  -0xc(%ebp),%ebx          <- EPILOGUE RESTORE (see below)
+       *
+       * `pre_anchor_saves` collects candidate saves seen since the last anchor
+       * pop / function boundary; the pop promotes them to `entry_save_slots`
+       * (a save can only be an ENTRY save if it precedes the anchor — after the
+       * pop the register may legitimately be re-purposed and re-spilled, and
+       * such a slot must keep the ordinary "reload = redefinition" semantics).
+       * Any later store to a promoted slot demotes it: it no longer holds the
+       * entry value. Cleared with `anchors` at a function-boundary RET. */
+      std::map<std::pair<xed_reg_enum_t, ssize_t>, xed_reg_enum_t>
+         pre_anchor_saves, entry_save_slots;
+      /* Kill switch: restore the pre-fix behaviour (an epilogue restore erases
+       * the anchor) so the guard can A/B the gate at TRANSLATE time. */
+      const bool entry_save_gate =
+         std::getenv("M64_NO_PIC_ANCHOR_ENTRY_SAVE") == nullptr;
+
       /* Forward branch targets we've seen but not yet reached in the
        * linear walk. Used to recognize "mid-function" RETs: if there's
        * pending forward-branch flow that hasn't been resolved by visiting
@@ -1134,6 +1157,8 @@ namespace MachO {
              * almost certainly don't survive past it. */
             anchors.clear();
             anchor_slots.clear();
+            entry_save_slots.clear();
+            pre_anchor_saves.clear();
             prev_inst = nullptr;
             continue;
          }
@@ -1207,6 +1232,11 @@ namespace MachO {
                 * the documented spill/reload-into-another-reg case is
                 * unaffected.) */
                anchor_slots.clear();
+               /* The stores cleared above are exactly the function's ENTRY
+                * saves — promote them so the epilogue restore is recognisable
+                * (see entry_save_slots). */
+               entry_save_slots = pre_anchor_saves;
+               pre_anchor_saves.clear();
                anchors[reg] = inst->loc.vmaddr;
                is_anchor_pop = true;
             }
@@ -1460,10 +1490,21 @@ namespace MachO {
                   const xed_reg_enum_t src =
                      xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
                   auto a = anchors.find(src);
+                  /* Any store to a slot invalidates its ENTRY-save status: the
+                   * slot no longer holds the register's function-entry value. */
+                  entry_save_slots.erase(slot);
                   if (a != anchors.end()) {
                      anchor_slots[slot] = a->second;   /* slot now holds anchor */
+                     pre_anchor_saves.erase(slot);
                   } else {
                      anchor_slots.erase(slot);          /* overwritten -> not anchor */
+                     /* Candidate entry save. Only promoted if an anchor pop
+                      * follows (i.e. this store was in the prologue). */
+                     if (src >= XED_REG_EAX && src <= XED_REG_EDI) {
+                        pre_anchor_saves[slot] = src;
+                     } else {
+                        pre_anchor_saves.erase(slot);
+                     }
                   }
                } else if (iform == XED_IFORM_MOV_GPRv_MEMv) {
                   /* load slot -> reg */
@@ -1471,8 +1512,52 @@ namespace MachO {
                   const xed_reg_enum_t dst =
                      xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
                   if (dst >= XED_REG_EAX && dst <= XED_REG_EDI) {
+                     auto es = entry_save_slots.find(slot);
+                     const bool entry_restore =
+                        entry_save_gate &&
+                        es != entry_save_slots.end() && es->second == dst &&
+                        /* Only a CALLEE-SAVED i386 SysV register is restored
+                         * from its entry save; EAX/ECX/EDX are caller-saved and
+                         * never carry an entry value across the function. */
+                        (dst == XED_REG_EBX || dst == XED_REG_ESI ||
+                         dst == XED_REG_EDI);
                      if (s != anchor_slots.end()) {
                         anchors[dst] = s->second;    /* reload of a spilled anchor */
+                     } else if (entry_restore) {
+                        /* EPILOGUE RESTORE of the callee-saved PIC register from
+                         * the very slot the PROLOGUE saved it into. At RUNTIME
+                         * this really does end the anchor's life — but the walk
+                         * is LINEAR, not a CFG traversal, and an epilogue sits
+                         * lexically BEFORE every basic block that the function
+                         * only reaches by a branch taken earlier. Erasing here
+                         * therefore disarms the rewrite for all of them, and
+                         * they keep their stale i386 displacements.
+                         *
+                         * branch_anchor_snap repairs that for blocks reached by
+                         * a DIRECT forward branch, but it is keyed on branch
+                         * displacements — so it cannot see a block reached only
+                         * through an INDIRECT `jmp %reg` PIC switch dispatch.
+                         * That combination (entry save + early epilogue +
+                         * jump-table case bodies) leaves the anchor
+                         * unrecoverable (Civ IV "Init Python": Python 2.6
+                         * `PyString_Format`-class helper at i386 0x96fd1 — its
+                         * post-epilogue case body's `movl 0x51033(%ebx),%eax`
+                         * kept the raw i386 GOT displacement, so at runtime
+                         * translated_anchor + i386_disp landed 0x1d87 into
+                         * __TEXT,__cstring and the following `movl (%eax),%eax`
+                         * dereferenced the ASCII "e AS" -> SIGSEGV at
+                         * 0x53412065).
+                         *
+                         * Keeping the anchor is the correct linear-walk
+                         * approximation, and matches what step (3) already does
+                         * for the register-only form of the same restore.
+                         * Structural trigger: a prologue store of THIS register
+                         * to THIS slot, seen BEFORE the anchor pop. A register
+                         * genuinely re-purposed mid-function is loaded from an
+                         * argument/temporary slot with no matching pre-anchor
+                         * save (Portal 2 CVProfile ctor: `mov 0x8(%ebp),%esi` =
+                         * `this`, a positive-displacement ARGUMENT slot) and
+                         * still erases below. */
                      } else {
                         /* Loading NON-anchor data (e.g. a function argument
                          * `mov %esi, 0x8(%ebp)` = `this`) into the register
@@ -1635,6 +1720,8 @@ namespace MachO {
             if (pending_forward_targets.empty()) {
                anchors.clear();
                anchor_slots.clear();
+               entry_save_slots.clear();
+               pre_anchor_saves.clear();
             }
          } else if ((cat == XED_CATEGORY_INTERRUPT &&
                      xed_decoded_inst_get_iclass(&xedd) != XED_ICLASS_INT3) ||
@@ -1642,6 +1729,8 @@ namespace MachO {
                     cat == XED_CATEGORY_SYSRET) {
             anchors.clear();
             anchor_slots.clear();
+            entry_save_slots.clear();
+            pre_anchor_saves.clear();
          } else if (cat == XED_CATEGORY_CALL && !is_pic_call_zero) {
             anchors.erase(XED_REG_EAX);
             anchors.erase(XED_REG_ECX);
