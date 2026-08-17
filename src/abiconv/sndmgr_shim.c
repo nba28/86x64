@@ -264,6 +264,9 @@ static void desc_to_asbd(const struct snd_ch *c, const snd_pcm_desc *d,
 #define VOICE_OFF_WROFF   0x84
 #define VOICE_OFF_WREND   0x88
 #define VOICE_OFF_SOURCE  0x94
+#define VOICE_OFF_STATE   0x0c   /* u16 — see snd_voice_state_sweep */
+#define VOICE_OFF_F14     0x14   /* u8, adjacent flag: 0x24b8de sets 1, 0x24a605 sets 0 */
+#define VOICE_OFF_MODE    0x15   /* u8 — the FALSIFIED "one-shot vs stream" byte */
 
 /* Slide of the image whose name ends in "Halo.dylib", or 0 if absent. Resolved
  * once. Structural (a name suffix), not a path, so a moved bundle still works. */
@@ -286,6 +289,65 @@ static intptr_t halo_image_slide(int *found) {
    return slide;
 }
 
+/* ★STATE-TRANSITION SWEEP (task #46, 2026-08-17).
+ *
+ * WHY A SWEEP AND NOT ANOTHER DUMPED FIELD. `word[R+0x0c]` was already being
+ * dumped (as state_hyp) — but ONCE, at the first enqueue for a given ring size,
+ * for the single record that owns that ring. Both restrictions defeat the
+ * question:
+ *   - it is a STATE, not a constant. The "is it finished" query at 0x2482ac
+ *     early-outs the moment it reads 0 (`0x2482e7 cmpw $0x0,0xc(%eax)`), and
+ *     the mix path at 0x24c333 proceeds ONLY while it is non-zero. What matters
+ *     is its value over TIME, not at one arbitrary moment.
+ *   - the SILENT music voice is precisely the one that never owns a ring we are
+ *     handed, so an owner-only probe structurally cannot see it. Sweeping every
+ *     record is the only way it appears at all.
+ *
+ * WHY `word[R+0x0c]` IS THE GATE. At 0x24c333 the mixer does
+ *     cmpw $0x0, 0xc(%ecx)   ; jne PROCEED
+ *     cmpb $0x1, 0x9(%esi)   ; jne BAIL          (esi = R+0xc, so byte R+0x15)
+ * and that second test can never succeed: `R+0x15` has exactly four writers in
+ * the whole sound subsystem — 0x249af7, 0x24a623, 0x24b8ec, 0x24c208 — and all
+ * four store $0x0. (Verified on the i386 ORIGINAL, so it is not a translation
+ * artifact; no 0x15(%reg) store, and no wider store covers the byte.) The
+ * effective mix condition is therefore exactly `word[R+0x0c] != 0`, and the
+ * older "armed one-shot but configured as a stream, so make R+0x15 non-zero"
+ * reading is dead.
+ *
+ * Logs only on CHANGE, so a long run stays readable, and reuses the same
+ * section-end bound as the owner scan — it cannot step outside __common.
+ * R+0x88 rides along because 0x2482ee (`cmpl $-0x1,0x7c(%esi)`, esi = R+0xc,
+ * so R+0x88) makes the SAME query report not-playing when it is -1, and the
+ * silent voice was measured at -1. */
+static void snd_voice_state_sweep(const uint8_t *arr, const uint8_t *arr_end,
+                                  uint32_t ringsize) {
+   static uint16_t last_state[VOICE_SCAN_MAX];
+   static uint8_t  last_f14[VOICE_SCAN_MAX], last_f15[VOICE_SCAN_MAX];
+   static uint8_t  seen[VOICE_SCAN_MAX];
+   for (uint32_t i = 0; i < VOICE_SCAN_MAX; i++) {
+      const uint8_t *R = arr + (size_t)i * VOICE_STRIDE;
+      if (R + VOICE_STRIDE > arr_end) { break; }
+      uint16_t st  = *(const uint16_t *)(R + VOICE_OFF_STATE);
+      uint8_t  f14 = *(const uint8_t  *)(R + VOICE_OFF_F14);
+      uint8_t  f15 = *(const uint8_t  *)(R + VOICE_OFF_MODE);
+      if (seen[i] && st == last_state[i] &&
+          f14 == last_f14[i] && f15 == last_f15[i]) { continue; }
+      if (!seen[i]) {
+         TR("voicestate: voice=%u FIRST state(R+0x0c)=%u f14=%u f15=%u "
+            "wr_end(R+0x88)=%d dsbuf=0x%x ring=%u\n", i, st, f14, f15,
+            (int)*(const int32_t *)(R + VOICE_OFF_WREND),
+            *(const uint32_t *)(R + VOICE_OFF_DSBUF), ringsize);
+      } else {
+         TR("voicestate: voice=%u state(R+0x0c) %u->%u f14 %u->%u f15 %u->%u "
+            "wr_end(R+0x88)=%d dsbuf=0x%x ring=%u\n", i,
+            last_state[i], st, last_f14[i], f14, last_f15[i], f15,
+            (int)*(const int32_t *)(R + VOICE_OFF_WREND),
+            *(const uint32_t *)(R + VOICE_OFF_DSBUF), ringsize);
+      }
+      last_state[i] = st; last_f14[i] = f14; last_f15[i] = f15; seen[i] = 1;
+   }
+}
+
 static void snd_voice_probe(uint32_t dsbuf, uint32_t ringsize) {
    if (!getenv("ABICONV_SND_VOICEPROBE")) { return; }
    int have = 0;
@@ -294,6 +356,10 @@ static void snd_voice_probe(uint32_t dsbuf, uint32_t ringsize) {
    const uint8_t *arr = (const uint8_t *)(VOICE_ARRAY_TRANS + slide);
 
    const uint8_t *arr_end = (const uint8_t *)(VOICE_COMMON_END + slide);
+
+   /* Before the owner scan, and unconditionally: the voice we most need to see
+    * is the one that never owns the ring we were handed. */
+   snd_voice_state_sweep(arr, arr_end, ringsize);
    for (uint32_t i = 0; i < VOICE_SCAN_MAX; i++) {
       const uint8_t *R = arr + (size_t)i * VOICE_STRIDE;
       /* Belt and braces: never read a record that is not wholly inside the
