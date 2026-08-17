@@ -30,6 +30,16 @@
 set -u
 
 APP="${HALO_APP:-$HOME/projects/translations/Apps64/Halo.app}"
+
+# --force-stream arms the ONE diagnostic that MUTATES Halo: it sets R+0x15 = 1
+# on the state-2 (streaming) voice, which is the gate on 0x24b934's entire
+# mixing payload. Opt-in and separate from the read-only probes, because a
+# perturbing run is not a measuring run — never leave it on for a baseline.
+FORCE=""
+if [ "${1:-}" = "--force-stream" ]; then
+  FORCE="ABICONV_SND_FORCE_STREAM_MODE=1"; shift
+  echo "⚠ --force-stream: this run MUTATES Halo's voice state (diagnostic)."
+fi
 OUT="${1:-/tmp/halo-audio-probe.log}"
 
 if pgrep -x Halo >/dev/null; then
@@ -63,7 +73,7 @@ echo
 ) &
 WATCHER=$!
 
-ABICONV_SND_TRACE=1 ABICONV_SND_DSPROBE=1 ABICONV_SND_VOICEPROBE=1 \
+env ABICONV_SND_TRACE=1 ABICONV_SND_DSPROBE=1 ABICONV_SND_VOICEPROBE=1 $FORCE \
   "$APP/Contents/MacOS/Halo" >"$OUT" 2>&1
 
 wait "$WATCHER" 2>/dev/null || true
@@ -130,6 +140,20 @@ else
   done
   echo "  ⚠if f15 is 0 for EVERY voice above, that re-confirms R+0x15 is inert"
   echo "   and the answer must lie in the state column."
+fi
+if grep -q 'voiceforce:' "$OUT"; then
+  echo
+  echo "--- ★FORCED-STREAM experiment (this run MUTATED Halo) ---"
+  grep 'voiceforce:' "$OUT" | sed 's/^/  /'
+  a=$(grep 'rate=44100' "$OUT" | grep -vc SILENT)
+  echo "  => 44100 Hz AUDIBLE buffers this run: $a"
+  if [ "$a" -gt 0 ]; then
+    echo "  ★MUSIC PLAYED. 0x24b934 IS the stream feeder; the open question becomes"
+    echo "   who was supposed to arm R+0x15."
+  else
+    echo "  no change: 0x24b934 is NOT the feeder (or not the only blocker)."
+    echo "   The feeder is somewhere we have not looked."
+  fi
 fi
 echo
 echo "--- asset probe: was sounds.map ever opened and READ? ---"

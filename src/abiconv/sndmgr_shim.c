@@ -330,6 +330,44 @@ static void snd_voice_state_sweep(const uint8_t *arr, const uint8_t *arr_end,
       uint16_t st  = *(const uint16_t *)(R + VOICE_OFF_STATE);
       uint8_t  f14 = *(const uint8_t  *)(R + VOICE_OFF_F14);
       uint8_t  f15 = *(const uint8_t  *)(R + VOICE_OFF_MODE);
+
+      /* ★DIAGNOSTIC WRITE — FOURTH gate, off by default, and the only place in
+       * this file that MUTATES the target. It exists to settle one fork.
+       *
+       * MEASURED: the music voice parks at state 2 (= stream; the SFX voices
+       * mix at state 1), Halo calls Play(0,0,DSBPLAY_LOOPING) on its buffer and
+       * gives it a real source at R+0x94 — then never feeds it. Meanwhile
+       * 0x24b934's ENTIRE mixing payload (the calls at 0x24bbb3, 0x24bbf4,
+       * 0x24bc26) sits behind `testb; je 0x24bc48` on R+0x15, and R+0x15 is
+       * never non-zero: four writers, all $0x0, on the i386 ORIGINAL, and
+       * f15 == 0 on all 86 voices for a whole run.
+       *
+       * A routine whose payload can never execute is anomalous, and there are
+       * exactly two readings:
+       *   (a) 0x24b934 is dead code in the shipped game, and the real stream
+       *       feeder is somewhere we have not looked;
+       *   (b) something arms R+0x15 that neither the static scan nor the run
+       *       has caught.
+       * Forcing the byte on the STATE-2 voice separates them in ONE run: music
+       * appears => (b), the feeder is 0x24b934 and the question becomes who was
+       * meant to arm it; nothing changes => (a).
+       *
+       * Confined to state == 2 so the audible one-shot voices are never
+       * touched — they are the control, and perturbing them would destroy it.
+       * ⚠This writes Halo's state from the AudioQueue callback thread, so it is
+       * racy by construction and can destabilise the target. That is acceptable
+       * for a gated one-shot experiment on a game we can relaunch, and for
+       * nothing else. DELETE with the rest of the probes when #46 closes. */
+      if (st == 2 && f15 == 0 && getenv("ABICONV_SND_FORCE_STREAM_MODE")) {
+         static uint8_t forced[VOICE_SCAN_MAX];
+         *(uint8_t *)(uintptr_t)(R + VOICE_OFF_MODE) = 1;
+         if (!forced[i]) {
+            forced[i] = 1;
+            TR("voiceforce: voice=%u state=2 — FORCED R+0x15 0->1 to arm "
+               "0x24b934's mixing payload (diagnostic)\n", i);
+         }
+         f15 = 1;
+      }
       if (seen[i] && st == last_state[i] &&
           f14 == last_f14[i] && f15 == last_f15[i]) { continue; }
       if (!seen[i]) {
