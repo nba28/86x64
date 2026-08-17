@@ -105,6 +105,33 @@ else
   grep -c "no voice record owns" "$OUT" | sed 's/^/  declined (no matching record): /'
 fi
 echo
+# ★THE #46 QUESTION (2026-08-17). The mix gate at 0x24c333 reduces to
+# `word[R+0x0c] != 0`: the `cmpb $0x1, R+0x15` fallback beneath it can never
+# fire, because R+0x15 has four writers in the whole sound subsystem and all
+# four store $0x0 (verified on the i386 ORIGINAL). So the state field, sampled
+# OVER TIME and for EVERY voice — not just the one owning the ring we were
+# handed — is what should separate the audible 22050 class from the silent
+# 44100 one. Print the per-voice trajectory, not just a count: a state that
+# reaches 0 and stays there is the whole hypothesis.
+echo "--- voice STATE trajectories (word[R+0x0c]; 0 = mixer refuses the voice) ---"
+if ! grep -q 'voicestate:' "$OUT"; then
+  echo "  no voicestate lines — probe not deployed, or Halo never enqueued"
+  echo "  (deploy with: m64 resync ~/projects/translations/Apps64/Halo.app)"
+else
+  for v in $(grep -o 'voicestate: voice=[0-9]*' "$OUT" | grep -o '[0-9]*$' | sort -un); do
+    printf '  voice=%-3s %s\n' "$v" \
+      "$(grep "voicestate: voice=$v " "$OUT" \
+         | grep -oE 'state\(R\+0x0c\)[= ][0-9]*(->[0-9]+)?' \
+         | sed 's/.*[= ]//' | tr '\n' ' ')"
+    printf '        f15(R+0x15)=%s ; wr_end(R+0x88)=%s ; rings=%s\n' \
+      "$(grep "voicestate: voice=$v " "$OUT" | grep -oE 'f15[= ][0-9]+(->[0-9]+)?' | sed 's/^f15[= ]//' | sort -u | tr '\n' ' ')" \
+      "$(grep "voicestate: voice=$v " "$OUT" | grep -o 'wr_end(R+0x88)=-\?[0-9]*' | sed 's/.*=//' | sort -u | tr '\n' ' ')" \
+      "$(grep "voicestate: voice=$v " "$OUT" | grep -o 'ring=[0-9]*' | sed 's/ring=//' | sort -u | tr '\n' ' ')"
+  done
+  echo "  ⚠if f15 is 0 for EVERY voice above, that re-confirms R+0x15 is inert"
+  echo "   and the answer must lie in the state column."
+fi
+echo
 echo "--- asset probe: was sounds.map ever opened and READ? ---"
 if [ -s "$ASSETS" ]; then
   sed -n '/== .map assets/,/^$/p' "$ASSETS"
