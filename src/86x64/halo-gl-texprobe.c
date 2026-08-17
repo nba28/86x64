@@ -94,9 +94,38 @@ static void tp_texsubimage2d(GLenum t, GLint l, GLint x, GLint y, GLsizei w,
    glTexSubImage2D(t, l, x, y, w, h, f, ty, px);
 }
 
+/* ★OBJECTIVE CAPTURE (HALO_TEXPROBE_DUMP=<dir>).
+ *
+ * The client-storage experiment's verdict is VISUAL, which means it depends on
+ * a human describing a screen. We can do better: dump the exact bytes Halo
+ * hands to GL and decode them OFFLINE. If the blob decodes to a coherent image
+ * at the declared dimensions, the data Halo produced is correct and the
+ * corruption is downstream (driver / client storage). If the blob is ALREADY
+ * sheared, the defect is upstream in translated Halo code and no GL-side change
+ * can fix it. That is candidate (c), settled without anyone squinting at a
+ * menu.
+ *
+ * Only level 0 and only the first few, since a mip chain adds nothing here and
+ * the top level is the one large enough to see structure in. */
+static void tp_dump(GLint l, GLenum ifmt, GLsizei w, GLsizei h, GLsizei sz,
+                    const GLvoid *px) {
+   static int n;
+   const char *dir = getenv("HALO_TEXPROBE_DUMP");
+   if (!dir || l != 0 || n >= 6 || !px || sz <= 0) return;
+   char path[1024];
+   snprintf(path, sizeof path, "%s/tex%d_%dx%d_fmt%x.dxt", dir, n, w, h, ifmt);
+   FILE *f = fopen(path, "wb");
+   if (!f) return;
+   fwrite(px, 1, (size_t)sz, f);
+   fclose(f);
+   TP_LOG("[tex] DUMPED %s (%d bytes)\n", path, sz);
+   n++;
+}
+
 static void tp_compressed_teximage2d(GLenum t, GLint l, GLenum ifmt, GLsizei w,
                                      GLsizei h, GLint b, GLsizei sz,
                                      const GLvoid *px) {
+   tp_dump(l, ifmt, w, h, sz, px);
    /* Compressed uploads carry their own implied pitch, so a shear here would
     * mean the BLOCK layout is wrong rather than the row length. Worth telling
     * apart, hence a distinct line. */

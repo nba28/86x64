@@ -34,6 +34,9 @@ if [ "${1:-}" = "--no-client-storage" ]; then
   NOCS="HALO_TEXPROBE_NO_CLIENT_STORAGE=1"; shift
   echo "★ experiment: forcing GL_UNPACK_CLIENT_STORAGE_APPLE=0 — WATCH THE BACKGROUND."
 fi
+DUMPDIR="${HALO_TEXPROBE_DUMP:-/tmp/halo-texdump}"
+mkdir -p "$DUMPDIR"
+rm -f "$DUMPDIR"/*.dxt
 LOG="${1:-/tmp/halo-texprobe.log}"
 DYLIB="${TMPDIR:-/tmp}/halo-texprobe.dylib"
 
@@ -51,7 +54,8 @@ echo "Logging to: $LOG"
 echo "Click Play, let the MAIN MENU sit ~15s so the animated background uploads,"
 echo "then quit Halo."
 
-env DYLD_INSERT_LIBRARIES="$DYLIB" HALO_TEXPROBE_LOG="$LOG" $NOCS \
+env DYLD_INSERT_LIBRARIES="$DYLIB" HALO_TEXPROBE_LOG="$LOG" \
+    HALO_TEXPROBE_DUMP="$DUMPDIR" $NOCS \
   "$APP/Contents/MacOS/Halo" >/dev/null 2>&1
 
 echo
@@ -102,6 +106,13 @@ if grep -q 'FORCED 0' "$LOG"; then
     "$(grep -c 'FORCED 0' "$LOG")"
   echo "    background now CORRECT  -> APPLE_client_storage is the cause"
   echo "    background still SHEARED-> extension exonerated; the bytes are wrong"
+fi
+
+if ls "$DUMPDIR"/*.dxt >/dev/null 2>&1; then
+  echo
+  echo "--- captured texture blobs (decode them offline, no eyeballs needed) ---"
+  ls -la "$DUMPDIR"/*.dxt | awk '{print "  "$5" bytes  "$NF}'
+  echo "  decode: python3 src/86x64/dxt-decode.py $DUMPDIR/*.dxt"
 fi
 
 echo "--- VERDICT HINT ---"
