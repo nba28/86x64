@@ -63,7 +63,7 @@ echo
 ) &
 WATCHER=$!
 
-ABICONV_SND_TRACE=1 ABICONV_SND_DSPROBE=1 \
+ABICONV_SND_TRACE=1 ABICONV_SND_DSPROBE=1 ABICONV_SND_VOICEPROBE=1 \
   "$APP/Contents/MacOS/Halo" >"$OUT" 2>&1
 
 wait "$WATCHER" 2>/dev/null || true
@@ -79,6 +79,30 @@ if ! grep -q 'dsprobe' "$OUT"; then
   echo "no dsprobe lines — Halo never reached the music (did the menu come up?)"
 else
   grep 'dsprobe' "$OUT" | sort -u | head -8
+fi
+echo
+echo "--- silence split by SAMPLE RATE (22050 = SFX, 44100 = music) ---"
+for r in 22050 44100; do
+  t=$(grep -c "rate=$r" "$OUT"); s=$(grep "rate=$r" "$OUT" | grep -c SILENT)
+  printf '  %-6s Hz : %5s buffers, %5s silent, %5s audible\n' "$r" "$t" "$s" "$((t-s))"
+done
+echo
+echo "--- per-VOICE record (264600 = the CONTROL, 529200 = the music) ---"
+# Report each ring class SEPARATELY. A plain `sort -u | head` sorts 264600
+# before 529200 and silently truncates the music away — which is exactly the
+# class the run exists to measure. Never let one class hide the other.
+if ! grep -q 'voiceprobe' "$OUT"; then
+  echo "  no voiceprobe lines — Halo never reached the music"
+else
+  for r in 264600 529200; do
+    n=$(grep -c "voiceprobe: ring=$r" "$OUT")
+    printf '  ring=%-7s %5s lines; distinct source=%s ; distinct wr_end=%s\n' \
+      "$r" "$n" \
+      "$(grep "voiceprobe: ring=$r" "$OUT" | grep -o 'source=0x[0-9a-f]*' | sort -u | tr '\n' ' ')" \
+      "$(grep "voiceprobe: ring=$r" "$OUT" | grep -o 'wr_end=-\?[0-9]*' | sort -u | tr '\n' ' ')"
+  done
+  echo "  (wr_end=-1 means the voice is IDLE)"
+  grep -c "no voice record owns" "$OUT" | sed 's/^/  declined (no matching record): /'
 fi
 echo
 echo "--- asset probe: was sounds.map ever opened and READ? ---"
