@@ -1232,6 +1232,12 @@ _x64_exc_longjmp:
 	;; Overriding here also removes it from the abigen consider set.
 	;; See carbon_event_appdown.c.
 	MTSHIM	___SendEventToEventTarget,           _shim_SendEventToEventTarget
+	;; SetWindowBounds: a RESIZE of a Carbon window is FATAL on modern macOS
+	;; (NSCGSPanic in -[NSCGSWindow _createContext]); a MOVE is safe. Bisected
+	;; in cg_display_fullscreen_shim.c. Halo resizes its window to the chosen
+	;; resolution after its settings dialog and dies. See
+	;; carbon_window_resize_guard.c.
+	MTSHIM	___SetWindowBounds,                  _shim_SetWindowBounds
 	MTSHIM	___WaitMouseUp,                      _shim_WaitMouseUp
 	MTSHIM	___CreateCustomList,                 _shim_CreateCustomList
 	MTSHIM	___GetListCellSize,                  _shim_GetListCellSize
