@@ -71,6 +71,8 @@ extern WindowRef FrontWindow(void);
 extern WindowRef ActiveNonFloatingWindow(void);
 extern OSStatus  GetWindowBounds(WindowRef w, WindowRegionCode r, Rect *b);
 extern Boolean   IsWindowVisible(WindowRef w);
+extern EventTargetRef GetUserFocusEventTarget(void);
+extern EventTargetRef GetWindowEventTarget(WindowRef w);
 
 static FILE *g_log;
 static pthread_mutex_t g_lk = PTHREAD_MUTEX_INITIALIZER;
@@ -229,6 +231,23 @@ static OSStatus ep_InstallEventHandler(EventTargetRef target, EventHandlerUPP h,
       EP("[ev] (further InstallEventHandler calls counted, not printed)\n");
    }
    if (g_nh < EP_MAX_H) { g_h[g_nh].upp = h; g_h[g_nh].tgt = target; g_nh++; }
+   /* WHICH target is this? A handler installed on a target that is not in the
+    * dispatch chain for the clicked window can never fire, however healthy the
+    * rest of the plumbing looks. Named, not guessed. */
+   if (n_install <= 24) {
+      EventTargetRef app = GetApplicationEventTarget();
+      EventTargetRef disp = GetEventDispatcherTarget();
+      EventTargetRef focus = GetUserFocusEventTarget();
+      WindowRef fw = FrontWindow();
+      EventTargetRef win = fw ? GetWindowEventTarget(fw) : NULL;
+      EP("[ev]   target %p is: %s%s%s%s\n", (void *)target,
+         target == app   ? "APPLICATION " : "",
+         target == disp  ? "DISPATCHER "  : "",
+         target == focus ? "USERFOCUS "   : "",
+         target == win   ? "FRONT-WINDOW " :
+            (target != app && target != disp && target != focus)
+               ? "(none of app/dispatcher/focus/front-window)" : "");
+   }
    /* Wrap every MOUSE-class handler, whoever installs it, so the log shows who
     * actually consumes a click. Forwards faithfully; the app's own userData is
     * handed back unchanged. */
@@ -481,9 +500,13 @@ static void ep_atexit(void) {
 /* The run ends with the app being KILLED, so atexit never fires and every
  * counter is lost - which is exactly what happened on the first good run.
  * Catch the terminating signals, print, then let the default action proceed. */
+static void (*ep_prev[4])(int);
 static void ep_sig(int sig) {
    EP("\n[ev] (terminated by signal %d)\n", sig);
    ep_atexit();
+   void (*prev)(int) = (sig == SIGTERM) ? ep_prev[0]
+                     : (sig == SIGINT)  ? ep_prev[1] : ep_prev[2];
+   if (prev && prev != SIG_DFL && prev != SIG_IGN) { prev(sig); }
    signal(sig, SIG_DFL);
    raise(sig);
 }
@@ -491,9 +514,9 @@ static void ep_sig(int sig) {
 __attribute__((constructor))
 static void ep_reg(void) {
    atexit(ep_atexit);
-   signal(SIGTERM, ep_sig);
-   signal(SIGINT, ep_sig);
-   signal(SIGHUP, ep_sig);
+   ep_prev[0] = signal(SIGTERM, ep_sig);
+   ep_prev[1] = signal(SIGINT, ep_sig);
+   ep_prev[2] = signal(SIGHUP, ep_sig);
 }
 
 __attribute__((used)) static struct { const void *repl, *orig; }

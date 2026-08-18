@@ -82,7 +82,7 @@ echo
 # ABICONV_INPUT_TRACE also on: the classic Button/GetCurrentEventButtonState
 # counters land in Halo's own stderr ($OUT.app) and answer, in the SAME run,
 # whether that path is polled at all and whether it ever sees a press.
-env DYLD_INSERT_LIBRARIES="$DYLIB" HALO_EVENT_LOG="$OUT" ABICONV_INPUT_TRACE=1 \
+env DYLD_INSERT_LIBRARIES="$DYLIB" HALO_EVENT_LOG="$OUT" ABICONV_INPUT_TRACE=1 ABICONV_KEYS_TRACE=1 \
   "$APP/Contents/MacOS/Halo" >"$OUT.app" 2>&1
 
 echo
@@ -111,7 +111,17 @@ else
   echo "  no [input] lines — the classic button path was never called at all"
 fi
 echo
-echo "--- keyboard (report: ENTER on a menu item does nothing either) ---"
+echo "--- GetKeys polling (does Halo read the keyboard this way at all?) ---"
+if grep -q '^\[keys\]' "$OUT.app" 2>/dev/null; then
+  grep -E '^\[keys\]' "$OUT.app" | tail -8 | sed 's/^/  /'
+else
+  echo "  no [keys] lines — GetKeys was never called"
+fi
+echo
+echo "--- which target are Halo's handlers on? ---"
+grep -E 'target 0x[0-9a-f]* is:' "$OUT" | head -6 | sed 's/^/  /'
+echo
+echo "--- keyboard EVENTS (report: ENTER on a menu item does nothing either) ---"
 grep -E 'KEY kind=|KEYBOARD events' "$OUT" | head -14 | sed 's/^/  /'
 echo
 echo "--- where the chain breaks ---"

@@ -58,6 +58,31 @@ static uint64_t uptime_ms(void) {
    return dns / 1000000ULL;
 }
 
+/* ---- diagnostic counters (ABICONV_KEYS_TRACE) -------------------------------
+ * Halo's main menu moves its HIGHLIGHT and plays its sound, but neither a click
+ * nor RETURN activates anything. Carbon delivers the RETURN key events (traced:
+ * keycode 36, char 0x0d, both down and up) yet Halo installs NO raw-key handler
+ * for them - so if it reads the keyboard at all, it reads it HERE, by polling.
+ * Whether this call is polled, and whether it ever reports a key as down, is
+ * therefore a load-bearing fact and not a detail. Counting it costs nothing and
+ * distinguishes "polled thousands of times, always empty" (our bug) from "never
+ * called" (Halo reads input somewhere else entirely). */
+static unsigned long gk_calls, gk_nonempty, gk_return_down;
+
+static void gk_summary(void) {
+   if (!getenv("ABICONV_KEYS_TRACE")) { return; }
+   fprintf(stderr, "[keys] ===== summary =====\n");
+   fprintf(stderr, "[keys] GetKeys calls=%lu  map-nonempty=%lu  RETURN(36)-down=%lu\n",
+           gk_calls, gk_nonempty, gk_return_down);
+   if (gk_calls && !gk_nonempty) {
+      fprintf(stderr, "[keys] ⚠polled %lu times and the keymap was ALWAYS EMPTY - "
+              "native GetKeys is not reporting keyboard state\n", gk_calls);
+   } else if (!gk_calls) {
+      fprintf(stderr, "[keys] GetKeys was never called - the app does not poll "
+              "the keyboard this way\n");
+   }
+}
+
 /* void GetKeys(KeyMap keys);  i386 frame: keys[0] = KeyMap ptr (16 bytes). */
 uint32_t shim_GetKeys(uint32_t *a) {
    uint8_t *km = (uint8_t *)(uintptr_t)a[0];   /* i386 KeyMap, low-4GB, usable */
@@ -66,6 +91,29 @@ uint32_t shim_GetKeys(uint32_t *a) {
    getkeys_fn gk = native_getkeys();
    if (gk) gk(km);                              /* real keyboard state ... */
    else    memset(km, 0, 16);                   /* ... or a clean empty map */
+
+   if (getenv("ABICONV_KEYS_TRACE")) {
+      static int reg;
+      if (!reg) { reg = 1; atexit(gk_summary); }
+      gk_calls++;
+      int any = 0;
+      for (int i = 0; i < 16; i++) { if (km[i]) { any = 1; break; } }
+      if (any) { gk_nonempty++; }
+      /* keycode 36 = Return, in the same bit order this file already uses */
+      if (km[36 >> 3] & (uint8_t)(1u << (36 & 7))) {
+         if (gk_return_down++ < 5) {
+            fprintf(stderr, "[keys] GetKeys reports RETURN(36) DOWN "
+                    "(call #%lu)\n", gk_calls);
+         }
+      }
+      if (gk_calls <= 3 || (any && gk_nonempty <= 5)) {
+         fprintf(stderr, "[keys] GetKeys #%lu map=%02x%02x%02x%02x%02x%02x%02x%02x"
+                 "%02x%02x%02x%02x%02x%02x%02x%02x%s\n", gk_calls,
+                 km[0],km[1],km[2],km[3],km[4],km[5],km[6],km[7],
+                 km[8],km[9],km[10],km[11],km[12],km[13],km[14],km[15],
+                 any ? "  (a key IS down)" : "");
+      }
+   }
 
    const char *hold = getenv("ABICONV_HOLD_KEYS");
    if (!hold || !*hold) return 0;               /* default: transparent */

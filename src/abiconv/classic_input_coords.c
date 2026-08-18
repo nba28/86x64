@@ -190,7 +190,19 @@ static void ci_summary(void) {
    }
 }
 
-static void ci_sig(int sig) { ci_summary(); signal(sig, SIG_DFL); raise(sig); }
+/* ⚠CHAIN, do not replace. Two separate diagnostics both install a SIGTERM
+ * handler; whichever registers last wins and the other's summary is silently
+ * lost - which is exactly what happened to the event probe's counters on the
+ * run before this one. Keep the previous handler and call it. */
+static void (*ci_prev_term)(int);
+static void (*ci_prev_int)(int);
+static void ci_sig(int sig) {
+   ci_summary();
+   void (*prev)(int) = (sig == SIGINT) ? ci_prev_int : ci_prev_term;
+   if (prev && prev != SIG_DFL && prev != SIG_IGN) { prev(sig); }
+   signal(sig, SIG_DFL);
+   raise(sig);
+}
 
 static void ci_report(const char *who, uint32_t nat, uint32_t cg) {
    if (!ci_trace()) { return; }
@@ -198,8 +210,8 @@ static void ci_report(const char *who, uint32_t nat, uint32_t cg) {
    if (!reg) {
       reg = 1;
       atexit(ci_summary);
-      signal(SIGTERM, ci_sig);
-      signal(SIGINT, ci_sig);
+      ci_prev_term = signal(SIGTERM, ci_sig);
+      ci_prev_int  = signal(SIGINT, ci_sig);
    }
    static unsigned long ncalls[2];
    static uint32_t last[2] = { 0xffffffffu, 0xffffffffu };
