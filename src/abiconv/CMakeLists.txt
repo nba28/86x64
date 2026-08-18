@@ -661,6 +661,7 @@ add_library(abiconv SHARED
   # shared substrate for classic INPUT geometry (port origin) and mouse-button
   # state; used by GetMouse, GlobalToLocal/LocalToGlobal and StillDown/WaitMouseUp
   classic_input_coords.c
+  carbon_event_appdown.c
   tec_shim.c
   py_shim.c
   quicktime_movie_shim.c

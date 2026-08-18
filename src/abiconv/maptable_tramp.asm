@@ -1224,6 +1224,14 @@ _x64_exc_longjmp:
 	;; consider set. See classic_input_coords.c.
 	MTSHIM	___Button,                           _shim_Button
 	MTSHIM	___GetCurrentEventButtonState,       _shim_GetCurrentEventButtonState
+	;; SendEventToEventTarget: on modern macOS the DISPATCHER consumes a
+	;; mouse-DOWN that every window handler declined, so it never propagates
+	;; up to the APPLICATION target where a classic app installs its mouse
+	;; handler. Measured on Halo CE: 11 declines, 0 claims, and the app
+	;; target saw zero DOWNs while UP/MOVED/DRAGGED arrived normally.
+	;; Overriding here also removes it from the abigen consider set.
+	;; See carbon_event_appdown.c.
+	MTSHIM	___SendEventToEventTarget,           _shim_SendEventToEventTarget
 	MTSHIM	___WaitMouseUp,                      _shim_WaitMouseUp
 	MTSHIM	___CreateCustomList,                 _shim_CreateCustomList
 	MTSHIM	___GetListCellSize,                  _shim_GetListCellSize
