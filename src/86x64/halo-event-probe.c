@@ -619,14 +619,22 @@ static OSStatus ep_MPCreateQueue(MPQueueID *q) {
  * called at all, so account per ID: waits, timeouts, and signals. The decisive
  * comparison is a single row -- an ID with waits>0, timeouts=waits, signals=0
  * -- and the row next to it that works is the built-in control. */
-#define EP_MAXSEM 32
+/* 256, not 32. MEASURED: Halo creates 58 semaphores. With a 32-entry table the
+ * ledger silently stopped counting past the 32nd — every row honestly reported
+ * timeouts=0 while 17 waits were timing out on a semaphore that had no row at
+ * all. An instrument that drops the very thing it was built to find, and says
+ * nothing, is worse than no instrument: it reads as evidence of absence. So the
+ * table is wide enough for the measured population, AND overflow is now counted
+ * and shouted about rather than returning -1 into silence. */
+#define EP_MAXSEM 256
 static struct { MPSemaphoreID id; unsigned long wait, tmo, sig; int mx, in; }
    sem_tab[EP_MAXSEM];
 static int n_sem;
+static unsigned long n_sem_overflow;
 
 static int sem_slot(MPSemaphoreID id) {
    for (int i = 0; i < n_sem; i++) { if (sem_tab[i].id == id) { return i; } }
-   if (n_sem >= EP_MAXSEM) { return -1; }
+   if (n_sem >= EP_MAXSEM) { n_sem_overflow++; return -1; }
    sem_tab[n_sem].id = id;
    sem_tab[n_sem].mx = sem_tab[n_sem].in = -1;
    return n_sem++;
@@ -674,9 +682,16 @@ static OSStatus ep_MPWaitOnSemaphore(MPSemaphoreID sm, Duration to) {
       if (r == kMPTimeoutErr) { sem_tab[i].tmo++; }
    }
    mp_report("MPWaitOnSemaphore", to, r, ep_now() - t0);
-   if (r == kMPTimeoutErr && i >= 0 && sem_tab[i].tmo <= 3) {
-      EP("[mp]    ^ that timeout was on semaphore id=%p (signalled %lu times "
-         "so far)\n", (void *)sm, sem_tab[i].sig);
+   if (r == kMPTimeoutErr) {
+      /* Print the identity on the first few timeouts even if the table had no
+       * room, so a full table can never again turn a timeout into silence. */
+      static unsigned long shown;
+      if (shown < 6) {
+         shown++;
+         EP("[mp]    ^ TIMEOUT was on semaphore id=%p (signalled %lu times so "
+            "far)%s\n", (void *)sm, i >= 0 ? sem_tab[i].sig : 0UL,
+            i >= 0 ? "" : "   [no ledger slot: table full]");
+      }
    }
    return r;
 }
@@ -711,6 +726,9 @@ static void ep_atexit(void) {
    }
    EP("[mp] MP waits                  : %lu  (%lu blocked >0.10s, worst %.3fs)\n",
       n_mp_wait, n_mp_slow, mp_slowest);
+   EP("[mp] semaphores tracked        : %d%s\n", n_sem,
+      n_sem_overflow ? "   <-- ⚠TABLE OVERFLOWED: counts below are INCOMPLETE"
+                     : "");
    for (int i = 0; i < n_sem; i++) {
       if (sem_tab[i].wait == 0 && sem_tab[i].sig == 0) { continue; }
       const int starved = sem_tab[i].wait > 0 && sem_tab[i].tmo == sem_tab[i].wait;

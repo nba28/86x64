@@ -153,6 +153,9 @@ if grep -q '^\[mp\]' "$OUT"; then
   echo "  --- ★per-SEMAPHORE ledger (who is starved?) ---"
   if grep -q '^\[mp\] sem ' "$OUT"; then
     grep '^\[mp\] sem ' "$OUT" | sed 's/^/  /'
+    grep -q 'TABLE OVERFLOWED' "$OUT" && \
+      echo "  ⚠the ledger overflowed — counts above are INCOMPLETE, do not conclude from them"
+    grep 'TIMEOUT was on semaphore' "$OUT" | head -6 | sed 's/^/  /'
     grep -q 'STARVED' "$OUT" && \
       echo "  ⇒ a semaphore is waited on and never signalled: find who was supposed to signal it"
   else
