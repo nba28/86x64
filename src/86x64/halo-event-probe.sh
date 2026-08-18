@@ -155,7 +155,7 @@ if grep -q '^\[mp\]' "$OUT"; then
     grep '^\[mp\] sem ' "$OUT" | sed 's/^/  /'
     grep -q 'TABLE OVERFLOWED' "$OUT" && \
       echo "  ⚠the ledger overflowed — counts above are INCOMPLETE, do not conclude from them"
-    grep 'TIMEOUT was on semaphore' "$OUT" | head -6 | sed 's/^/  /'
+    grep -A1 'TIMEOUT on sem' "$OUT" | head -14 | sed 's/^/  /'
     grep -q 'STARVED' "$OUT" && \
       echo "  ⇒ a semaphore is waited on and never signalled: find who was supposed to signal it"
     grep -q 'CONTENDED' "$OUT" && {
@@ -166,6 +166,14 @@ if grep -q '^\[mp\]' "$OUT"; then
   else
     echo "  (no semaphore rows)"
   fi
+  echo "  --- ★TIMELINE: do the timeouts land ON the selection changes? ---"
+  # The freeze is reported per selection change, so the decisive question is not
+  # how many timeouts there are but WHEN. Interleave keypresses and timeouts on
+  # one process-relative clock: if each arrow/Return is followed within a
+  # fraction of a second by a 500 ms timeout, that IS the freeze. If they are
+  # uncorrelated, the timeouts are background noise and the freeze is elsewhere.
+  grep -hE '^\[(ev|mp)\] t= *[0-9]' "$OUT" | sort -k2 -n | head -40 | sed 's/^/  /'
+  echo "  (a KEY line followed closely by a TIMEOUT line = the freeze you feel)"
   echo "  --- waits that BLOCKED ---"
   grep 'BLOCKED' "$OUT" | head -8 | sed 's/^/  /'
   [ "$(grep -c 'BLOCKED' "$OUT")" = "0" ] && echo "  (none — MP waits are not the stall)"

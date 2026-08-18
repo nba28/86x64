@@ -176,6 +176,17 @@ static struct wrapctx g_w[EP_MAX_W];
 static int g_nw;
 static unsigned long n_sys_mousedown;
 
+/* Process-relative seconds, so a timeout and a keypress can be laid side by
+ * side on one timeline. Absolute times are useless for correlation by eye. */
+static double ep_t0;
+static double ep_now(void);
+static double ep_rel(void) {
+   /* Lazy zero: the clock helper is defined below this point and constructor
+    * order is not worth depending on for a timestamp. */
+   if (ep_t0 == 0.0) { ep_t0 = ep_now(); }
+   return ep_now() - ep_t0;
+}
+
 static double ep_now(void) {
    struct timeval tv; gettimeofday(&tv, NULL);
    return (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
@@ -348,7 +359,7 @@ static OSStatus ep_ReceiveNextEvent(ItemCount n, const EventTypeSpec *types,
                               sizeof code, NULL, &code);
             GetEventParameter(*out, kEventParamKeyMacCharCodes, typeChar, NULL,
                               sizeof ch, NULL, &ch);
-            EP("[ev] ReceiveNextEvent  KEY kind=%u code=%u char=0x%02x%s\n",
+            EP("[ev] t=%8.3f KEY kind=%u code=%u char=0x%02x%s\n", ep_rel(),
                (unsigned)ki, (unsigned)code, (unsigned char)ch,
                (code == 36 || code == 76) ? "   <-- RETURN/ENTER" : "");
          }
@@ -628,8 +639,63 @@ static OSStatus ep_MPCreateQueue(MPQueueID *q) {
  * and shouted about rather than returning -1 into silence. */
 #define EP_MAXSEM 256
 static struct { MPSemaphoreID id; unsigned long wait, tmo, sig; int mx, in;
-                double held_since; pthread_t holder; double max_hold; }
+                double max_hold; }
    sem_tab[EP_MAXSEM];
+
+/* ★ WHY A PER-(SEMAPHORE,THREAD) TABLE AND NOT ONE SLOT PER SEMAPHORE.
+ *
+ * The single-slot version produced maxhold = 0.502 / 0.501 / 0.501 on three
+ * different semaphores -- all within a millisecond of the 500 ms timeout, which
+ * is the signature of an artifact, not of three independent slow sections. The
+ * attribution lines gave the mechanism away: waiter == holder on every one. A
+ * thread acquired, and its OWN later timed-out wait was then measured against
+ * that open acquire, so the 0.501 s I was reporting as "hold time" was just the
+ * timeout being counted inside the interval.
+ *
+ * Holds are per THREAD, so the bookkeeping has to be too: several distinct
+ * threads use these semaphores concurrently, and one slot per semaphore cannot
+ * represent that. With a (sem, thread) key, "who holds it while someone else
+ * times out" becomes a real lookup -- an OPEN hold belonging to a DIFFERENT
+ * thread -- instead of a guess. */
+#define EP_MAXHOLD 128
+static struct { MPSemaphoreID id; pthread_t th; double since; int live; }
+   hold_tab[EP_MAXHOLD];
+static unsigned long n_hold_overflow;
+
+static void hold_open(MPSemaphoreID id, pthread_t th) {
+   for (int i = 0; i < EP_MAXHOLD; i++) {
+      if (!hold_tab[i].live) {
+         hold_tab[i].id = id; hold_tab[i].th = th;
+         hold_tab[i].since = ep_now(); hold_tab[i].live = 1;
+         return;
+      }
+   }
+   n_hold_overflow++;
+}
+/* Close this thread's own hold on id, returning how long it was held. */
+static double hold_close(MPSemaphoreID id, pthread_t th) {
+   for (int i = 0; i < EP_MAXHOLD; i++) {
+      if (hold_tab[i].live && hold_tab[i].id == id &&
+          pthread_equal(hold_tab[i].th, th)) {
+         const double h = ep_now() - hold_tab[i].since;
+         hold_tab[i].live = 0;
+         return h;
+      }
+   }
+   return -1.0;  /* signalled without a matching acquire: not a mutex use */
+}
+/* The question a timeout actually poses: is anyone ELSE inside right now? */
+static int hold_other(MPSemaphoreID id, pthread_t self, pthread_t *who,
+                      double *held) {
+   for (int i = 0; i < EP_MAXHOLD; i++) {
+      if (hold_tab[i].live && hold_tab[i].id == id &&
+          !pthread_equal(hold_tab[i].th, self)) {
+         *who = hold_tab[i].th; *held = ep_now() - hold_tab[i].since;
+         return 1;
+      }
+   }
+   return 0;
+}
 static int n_sem;
 static unsigned long n_sem_overflow;
 
@@ -660,11 +726,8 @@ static OSStatus ep_MPSignalSemaphore(MPSemaphoreID sm) {
       /* Release: close out the hold that the matching successful wait opened.
        * max=1/init=1 and waits==signals is mutex behaviour, so wait/signal
        * really do bracket a critical section. */
-      if (sem_tab[i].held_since > 0.0) {
-         const double h = ep_now() - sem_tab[i].held_since;
-         if (h > sem_tab[i].max_hold) { sem_tab[i].max_hold = h; }
-         sem_tab[i].held_since = 0.0;
-      }
+      const double h = hold_close(sm, pthread_self());
+      if (h > sem_tab[i].max_hold) { sem_tab[i].max_hold = h; }
    }
    if (i >= 0 && sem_tab[i].sig <= 2) {
       EP("[mp] MPSignalSemaphore(id=%p) -> %d\n", (void *)sm, (int)r);
@@ -691,10 +754,7 @@ static OSStatus ep_MPWaitOnSemaphore(MPSemaphoreID sm, Duration to) {
    if (i >= 0) {
       sem_tab[i].wait++;
       if (r == kMPTimeoutErr) { sem_tab[i].tmo++; }
-      else if (r == noErr) {  /* acquired: this thread now holds it */
-         sem_tab[i].held_since = ep_now();
-         sem_tab[i].holder     = pthread_self();
-      }
+      else if (r == noErr) { hold_open(sm, pthread_self()); }
    }
    mp_report("MPWaitOnSemaphore", to, r, ep_now() - t0);
    if (r == kMPTimeoutErr) {
@@ -707,12 +767,21 @@ static OSStatus ep_MPWaitOnSemaphore(MPSemaphoreID sm, Duration to) {
           * semaphore is being released properly, so a timeout means somebody
           * sat in the critical section for longer than half a second. Who, and
           * for how long, is the actual question. */
-         const double held = (i >= 0 && sem_tab[i].held_since > 0.0)
-                                ? ep_now() - sem_tab[i].held_since : -1.0;
-         EP("[mp]    ^ TIMEOUT on sem id=%p; waiter=%p holder=%p held=%.3fs%s\n",
-            (void *)sm, (void *)pthread_self(),
-            i >= 0 ? (void *)sem_tab[i].holder : NULL, held,
-            i >= 0 ? "" : "   [no ledger slot: table full]");
+         pthread_t who = 0; double held = 0.0;
+         const int busy = hold_other(sm, pthread_self(), &who, &held);
+         EP("[mp] t=%8.3f ^ TIMEOUT on sem id=%p waiter=%p -> %s\n",
+            ep_rel(), (void *)sm, (void *)pthread_self(),
+            busy ? "SOMEONE ELSE IS INSIDE" : "NOBODY HOLDS IT");
+         if (busy) {
+            EP("[mp]              holder=%p has been inside %.3fs\n",
+               (void *)who, held);
+         } else {
+            /* Nobody inside and the wait still failed: the deadline did not
+             * expire because of contention at all, and a lock nobody holds
+             * that still cannot be taken is a different bug entirely. */
+            EP("[mp]              ⇒ not contention: no thread was in the "
+               "critical section when this wait expired\n");
+         }
       }
    }
    return r;
