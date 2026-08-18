@@ -627,7 +627,8 @@ static OSStatus ep_MPCreateQueue(MPQueueID *q) {
  * table is wide enough for the measured population, AND overflow is now counted
  * and shouted about rather than returning -1 into silence. */
 #define EP_MAXSEM 256
-static struct { MPSemaphoreID id; unsigned long wait, tmo, sig; int mx, in; }
+static struct { MPSemaphoreID id; unsigned long wait, tmo, sig; int mx, in;
+                double held_since; pthread_t holder; double max_hold; }
    sem_tab[EP_MAXSEM];
 static int n_sem;
 static unsigned long n_sem_overflow;
@@ -654,7 +655,17 @@ static OSStatus ep_MPCreateSemaphore(MPSemaphoreCount mx, MPSemaphoreCount in,
 static OSStatus ep_MPSignalSemaphore(MPSemaphoreID sm) {
    const OSStatus r = MPSignalSemaphore(sm);
    const int i = sem_slot(sm);
-   if (i >= 0) { sem_tab[i].sig++; }
+   if (i >= 0) {
+      sem_tab[i].sig++;
+      /* Release: close out the hold that the matching successful wait opened.
+       * max=1/init=1 and waits==signals is mutex behaviour, so wait/signal
+       * really do bracket a critical section. */
+      if (sem_tab[i].held_since > 0.0) {
+         const double h = ep_now() - sem_tab[i].held_since;
+         if (h > sem_tab[i].max_hold) { sem_tab[i].max_hold = h; }
+         sem_tab[i].held_since = 0.0;
+      }
+   }
    if (i >= 0 && sem_tab[i].sig <= 2) {
       EP("[mp] MPSignalSemaphore(id=%p) -> %d\n", (void *)sm, (int)r);
    }
@@ -680,6 +691,10 @@ static OSStatus ep_MPWaitOnSemaphore(MPSemaphoreID sm, Duration to) {
    if (i >= 0) {
       sem_tab[i].wait++;
       if (r == kMPTimeoutErr) { sem_tab[i].tmo++; }
+      else if (r == noErr) {  /* acquired: this thread now holds it */
+         sem_tab[i].held_since = ep_now();
+         sem_tab[i].holder     = pthread_self();
+      }
    }
    mp_report("MPWaitOnSemaphore", to, r, ep_now() - t0);
    if (r == kMPTimeoutErr) {
@@ -688,8 +703,15 @@ static OSStatus ep_MPWaitOnSemaphore(MPSemaphoreID sm, Duration to) {
       static unsigned long shown;
       if (shown < 6) {
          shown++;
-         EP("[mp]    ^ TIMEOUT was on semaphore id=%p (signalled %lu times so "
-            "far)%s\n", (void *)sm, i >= 0 ? sem_tab[i].sig : 0UL,
+         /* ★ Name the HOLDER, not just the victim. waits==signals says the
+          * semaphore is being released properly, so a timeout means somebody
+          * sat in the critical section for longer than half a second. Who, and
+          * for how long, is the actual question. */
+         const double held = (i >= 0 && sem_tab[i].held_since > 0.0)
+                                ? ep_now() - sem_tab[i].held_since : -1.0;
+         EP("[mp]    ^ TIMEOUT on sem id=%p; waiter=%p holder=%p held=%.3fs%s\n",
+            (void *)sm, (void *)pthread_self(),
+            i >= 0 ? (void *)sem_tab[i].holder : NULL, held,
             i >= 0 ? "" : "   [no ledger slot: table full]");
       }
    }
@@ -732,15 +754,23 @@ static void ep_atexit(void) {
    for (int i = 0; i < n_sem; i++) {
       if (sem_tab[i].wait == 0 && sem_tab[i].sig == 0) { continue; }
       const int starved = sem_tab[i].wait > 0 && sem_tab[i].tmo == sem_tab[i].wait;
-      EP("[mp] sem %p max=%d init=%d: waits=%lu timeouts=%lu signals=%lu%s\n",
+      EP("[mp] sem %p max=%d init=%d: waits=%lu timeouts=%lu signals=%lu "
+         "maxhold=%.3fs%s\n",
          (void *)sem_tab[i].id, sem_tab[i].mx, sem_tab[i].in, sem_tab[i].wait,
-         sem_tab[i].tmo, sem_tab[i].sig,
+         sem_tab[i].tmo, sem_tab[i].sig, sem_tab[i].max_hold,
          starved ? (sem_tab[i].sig == 0
                        ? "   <-- STARVED: every wait timed out and NOBODY EVER "
                          "SIGNALLED IT"
                        : "   <-- every wait timed out despite signals: the "
                          "signals are not reaching the waiter")
-                 : "");
+                 /* MEASURED: signals==waits with a FEW timeouts. The lock is
+                  * released correctly, so nothing is starved -- somebody just
+                  * sits in the critical section past the 500 ms deadline. The
+                  * semaphore is the victim; maxhold names the real suspect. */
+                 : (sem_tab[i].tmo > 0
+                       ? "   <-- CONTENDED: released properly, but a holder "
+                         "runs past the deadline (see maxhold)"
+                       : ""));
    }
    if (n_mp_slow) {
       EP("[mp] ⚠MP waits ARE stalling - that is the freeze, and a menu action "

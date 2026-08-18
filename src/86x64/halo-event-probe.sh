@@ -158,6 +158,11 @@ if grep -q '^\[mp\]' "$OUT"; then
     grep 'TIMEOUT was on semaphore' "$OUT" | head -6 | sed 's/^/  /'
     grep -q 'STARVED' "$OUT" && \
       echo "  ⇒ a semaphore is waited on and never signalled: find who was supposed to signal it"
+    grep -q 'CONTENDED' "$OUT" && {
+      echo "  ⇒ NOT starvation: signals match waits, so the lock is released properly."
+      echo "    A holder is running past the 500 ms deadline — 'maxhold' is how long,"
+      echo "    and the holder= thread on the TIMEOUT lines is who. Compare that thread"
+      echo "    against the WORKER ENTERED thread ids above: main thread or worker?"; }
   else
     echo "  (no semaphore rows)"
   fi
