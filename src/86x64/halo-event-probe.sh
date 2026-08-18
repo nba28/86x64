@@ -150,6 +150,14 @@ if grep -q '^\[mp\]' "$OUT"; then
     echo "  (no worker lines — MPCreateTask was never called)"
   fi
   grep '>>> WORKER' "$OUT" | head -8 | sed 's/^/  /'
+  echo "  --- ★per-SEMAPHORE ledger (who is starved?) ---"
+  if grep -q '^\[mp\] sem ' "$OUT"; then
+    grep '^\[mp\] sem ' "$OUT" | sed 's/^/  /'
+    grep -q 'STARVED' "$OUT" && \
+      echo "  ⇒ a semaphore is waited on and never signalled: find who was supposed to signal it"
+  else
+    echo "  (no semaphore rows)"
+  fi
   echo "  --- waits that BLOCKED ---"
   grep 'BLOCKED' "$OUT" | head -8 | sed 's/^/  /'
   [ "$(grep -c 'BLOCKED' "$OUT")" = "0" ] && echo "  (none — MP waits are not the stall)"

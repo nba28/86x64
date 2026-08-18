@@ -606,11 +606,50 @@ static OSStatus ep_MPCreateQueue(MPQueueID *q) {
    EP("[mp] MPCreateQueue -> %d (id=%p)\n", (int)r, q ? (void *)*q : NULL);
    return r;
 }
+/* ★ PER-SEMAPHORE LEDGER.
+ *
+ * MEASURED: every MPWaitOnSemaphore with a 500 ms timeout returned -29296
+ * (kMPTimeoutErr) -- 17 for 17, not one success -- while every wait with a
+ * 10 s timeout returned 0 promptly. That is not "the machine is slow"; that is
+ * one particular semaphore that NOBODY EVER SIGNALS, next to another that is
+ * signalled fine. Two 500 ms timeouts back to back is the ~1 s freeze the tester sees
+ * per selection change.
+ *
+ * The aggregate cannot say which semaphore, or whether the signal side is being
+ * called at all, so account per ID: waits, timeouts, and signals. The decisive
+ * comparison is a single row -- an ID with waits>0, timeouts=waits, signals=0
+ * -- and the row next to it that works is the built-in control. */
+#define EP_MAXSEM 32
+static struct { MPSemaphoreID id; unsigned long wait, tmo, sig; int mx, in; }
+   sem_tab[EP_MAXSEM];
+static int n_sem;
+
+static int sem_slot(MPSemaphoreID id) {
+   for (int i = 0; i < n_sem; i++) { if (sem_tab[i].id == id) { return i; } }
+   if (n_sem >= EP_MAXSEM) { return -1; }
+   sem_tab[n_sem].id = id;
+   sem_tab[n_sem].mx = sem_tab[n_sem].in = -1;
+   return n_sem++;
+}
+
 static OSStatus ep_MPCreateSemaphore(MPSemaphoreCount mx, MPSemaphoreCount in,
                                      MPSemaphoreID *sm) {
    const OSStatus r = MPCreateSemaphore(mx, in, sm);
-   EP("[mp] MPCreateSemaphore(max=%u init=%u) -> %d\n", (unsigned)mx,
-      (unsigned)in, (int)r);
+   if (r == noErr && sm) {
+      const int i = sem_slot(*sm);
+      if (i >= 0) { sem_tab[i].mx = (int)mx; sem_tab[i].in = (int)in; }
+   }
+   EP("[mp] MPCreateSemaphore(max=%u init=%u) -> %d (id=%p)\n", (unsigned)mx,
+      (unsigned)in, (int)r, sm ? (void *)*sm : NULL);
+   return r;
+}
+static OSStatus ep_MPSignalSemaphore(MPSemaphoreID sm) {
+   const OSStatus r = MPSignalSemaphore(sm);
+   const int i = sem_slot(sm);
+   if (i >= 0) { sem_tab[i].sig++; }
+   if (i >= 0 && sem_tab[i].sig <= 2) {
+      EP("[mp] MPSignalSemaphore(id=%p) -> %d\n", (void *)sm, (int)r);
+   }
    return r;
 }
 static OSStatus ep_MPWaitForEvent(MPEventID ev, MPEventFlags *fl, Duration to) {
@@ -629,7 +668,16 @@ static OSStatus ep_MPWaitOnQueue(MPQueueID q, void **a, void **b, void **c,
 static OSStatus ep_MPWaitOnSemaphore(MPSemaphoreID sm, Duration to) {
    const double t0 = ep_now();
    const OSStatus r = MPWaitOnSemaphore(sm, to);
+   const int i = sem_slot(sm);
+   if (i >= 0) {
+      sem_tab[i].wait++;
+      if (r == kMPTimeoutErr) { sem_tab[i].tmo++; }
+   }
    mp_report("MPWaitOnSemaphore", to, r, ep_now() - t0);
+   if (r == kMPTimeoutErr && i >= 0 && sem_tab[i].tmo <= 3) {
+      EP("[mp]    ^ that timeout was on semaphore id=%p (signalled %lu times "
+         "so far)\n", (void *)sm, sem_tab[i].sig);
+   }
    return r;
 }
 
@@ -651,13 +699,31 @@ static void ep_atexit(void) {
          n_task_enter[i] == 0
             ? "   <-- NEVER RAN: the task was created but its entry point was "
               "never reached"
+            /* A long-lived worker loops until quit, so "entered and never
+             * returned" is ALSO what a perfectly healthy game worker looks
+             * like. Do not call it a defect on this evidence -- whether it is
+             * alive or wedged is settled by the semaphore ledger below, not
+             * here. */
             : (n_task_enter[i] > n_task_return[i]
-                  ? "   <-- ENTERED AND DID NOT RETURN: it is stuck inside the "
-                    "translated callback"
+                  ? "   (still inside: normal for a worker loop, or wedged -- "
+                    "the semaphore ledger tells them apart)"
                   : ""));
    }
    EP("[mp] MP waits                  : %lu  (%lu blocked >0.10s, worst %.3fs)\n",
       n_mp_wait, n_mp_slow, mp_slowest);
+   for (int i = 0; i < n_sem; i++) {
+      if (sem_tab[i].wait == 0 && sem_tab[i].sig == 0) { continue; }
+      const int starved = sem_tab[i].wait > 0 && sem_tab[i].tmo == sem_tab[i].wait;
+      EP("[mp] sem %p max=%d init=%d: waits=%lu timeouts=%lu signals=%lu%s\n",
+         (void *)sem_tab[i].id, sem_tab[i].mx, sem_tab[i].in, sem_tab[i].wait,
+         sem_tab[i].tmo, sem_tab[i].sig,
+         starved ? (sem_tab[i].sig == 0
+                       ? "   <-- STARVED: every wait timed out and NOBODY EVER "
+                         "SIGNALLED IT"
+                       : "   <-- every wait timed out despite signals: the "
+                         "signals are not reaching the waiter")
+                 : "");
+   }
    if (n_mp_slow) {
       EP("[mp] ⚠MP waits ARE stalling - that is the freeze, and a menu action "
          "that waits the same way would silently do nothing\n");
@@ -710,6 +776,7 @@ ep_interposers[] __attribute__((section("__DATA,__interpose"))) = {
    { (const void *)ep_MPCreateEvent,          (const void *)MPCreateEvent },
    { (const void *)ep_MPCreateQueue,          (const void *)MPCreateQueue },
    { (const void *)ep_MPCreateSemaphore,      (const void *)MPCreateSemaphore },
+   { (const void *)ep_MPSignalSemaphore,      (const void *)MPSignalSemaphore },
    { (const void *)ep_MPWaitForEvent,         (const void *)MPWaitForEvent },
    { (const void *)ep_MPWaitOnQueue,          (const void *)MPWaitOnQueue },
    { (const void *)ep_MPWaitOnSemaphore,      (const void *)MPWaitOnSemaphore },
