@@ -1,0 +1,8 @@
+frexp mantissa*1000=750 exp=4
+ldexp=12
+pow=1024
+exp0=1 log1=0
+sin0=0 cos0=1000 atan0=0
+rint=2 floor=9
+all libm mixed-class args OK
+exit_code: 0

@@ -1217,6 +1217,14 @@ $(BUILD_DIR)/96_zerofill_common_interior.o: $(SRC_DIR)/96_zerofill_common_interi
 $(BUILD_DIR)/24_libm_float_return.o: $(SRC_DIR)/24_libm_float_return.c | $(BUILD_DIR)
 	$(CC_I386) -fno-builtin -c $< -o $@
 
+# 25_libm_mixed_class_args: same -fno-builtin reason as 24. This one covers the
+# shapes 24 structurally cannot -- arguments spanning BOTH x86_64 classes
+# (double + int) and an INTEGER OUT-PARAM (frexp's int*), where a bridge that
+# assigns registers positionally rather than by class silently corrupts every
+# result.
+$(BUILD_DIR)/25_libm_mixed_class_args.o: $(SRC_DIR)/25_libm_mixed_class_args.c | $(BUILD_DIR)
+	$(CC_I386) -fno-builtin -c $< -o $@
+
 # 35_pthread_cond_handshake: the i386 SL sysroot ships no <pthread.h>, so compile
 # against the host SDK headers under -arch i386 (correct i386 struct sizes +
 # PTHREAD_MUTEX_RECURSIVE); the link still resolves pthread to the SL i386
