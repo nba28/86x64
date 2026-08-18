@@ -28,12 +28,29 @@
  *
  * THE RULE, and why it is not simply "always forward": a DOWN the dispatcher
  * legitimately consumed — window chrome, a live control, a tracking loop — must
- * NOT be delivered twice. The trigger is therefore structural and precise: we
- * forward only a DOWN that the APPLICATION TARGET NEVER SAW. A sentinel handler
- * on that target records every EventRef that reaches it; after the dispatcher
- * returns, an EventRef the sentinel never recorded is one that was consumed on
- * the way, and only that one is re-sent. On a system where propagation works,
- * the sentinel sees the event and we do nothing at all.
+ * NOT be delivered twice.
+ *
+ * ⚠MY FIRST RULE WAS WRONG, AND IT CRASHED THE APP. It forwarded any DOWN that
+ * "the APPLICATION TARGET NEVER SAW", using that as a proxy for "nobody handled
+ * it". Those are not the same thing: a click consumed by a REAL CONTROL — a
+ * button in a settings dialog — also never reaches the application target. So
+ * every dialog click was forwarded to the app's own handler, which for a game is
+ * its in-game input handler, and Halo acted on a phantom click while a modal
+ * dialog was up. It resized a window to bounds AppKit could not realise and
+ * NSCGSPanic'd (SIGILL) before the main menu — a crash my change introduced.
+ *
+ * The proxy has to be the actual question: DID A VIEW OWN THIS CLICK? Ask the
+ * toolbox directly. HIViewGetViewForMouseEvent hit-tests the event against the
+ * window's view hierarchy; if it names a view other than the content root, a
+ * real control owns the click and the app-level handler must never see it. Only
+ * a click that lands on bare window content — which is all a game window has —
+ * is forwarded. The sentinel check is kept on top of that, so a system where
+ * propagation works is still left completely alone.
+ *
+ * When the hit test cannot be resolved we DO NOT forward. The failure modes are
+ * not symmetric: not forwarding reproduces the old "click does nothing", which
+ * is inert and recoverable, while forwarding wrongly injects a phantom click
+ * into a live app — and that is what took the app down.
  *
  * Universal: triggers on the shape (a classic app dispatching mouse events to
  * the dispatcher while holding its handlers on the application target), not on
@@ -57,7 +74,7 @@ static const void     *ad_seen[AD_RING];
 static int             ad_seen_i;
 static EventHandlerRef ad_sentinel;
 static int             ad_installed;
-static unsigned long   ad_fwd, ad_skipped;
+static unsigned long   ad_fwd, ad_skipped, ad_onview;
 
 static int ad_disabled(void) {
    static int t = -1;
@@ -109,6 +126,41 @@ static void ad_ensure_sentinel(void) {
                        1, t, NULL, &ad_sentinel);
 }
 
+/* These are still present in HIToolbox but were dropped from the modern public
+ * headers, so declare what we call rather than guessing at replacements. */
+extern short     FindWindow(Point, WindowRef *);
+extern HIViewRef HIViewGetRoot(WindowRef);
+extern HIViewRef HIViewGetSuperview(HIViewRef);
+extern OSStatus  HIViewGetViewForMouseEvent(HIViewRef, EventRef, HIViewRef *);
+
+/* Did a real view/control own this click? Conservative by construction: any
+ * uncertainty answers YES (a view owns it), which suppresses forwarding.
+ *
+ * Depth is the test, and it needs no header constant: a Carbon window nests
+ * root -> content -> controls, so the root and its content child ARE the bare
+ * window content — all a game window ever has — and anything DEEPER is a real
+ * control that legitimately consumed the click. */
+static int ad_view_owns_click(EventRef e) {
+   WindowRef w = NULL;
+   if (GetEventParameter(e, kEventParamWindowRef, typeWindowRef, NULL,
+                         sizeof w, NULL, &w) != noErr || !w) {
+      Point where;
+      if (GetEventParameter(e, kEventParamMouseLocation, typeQDPoint, NULL,
+                            sizeof where, NULL, &where) != noErr) {
+         return 1;                      /* cannot tell -> do not forward */
+      }
+      if (FindWindow(where, &w) == 0 || !w) { return 1; }
+   }
+   HIViewRef root = HIViewGetRoot(w);
+   if (!root) { return 1; }
+   HIViewRef hit = NULL;
+   if (HIViewGetViewForMouseEvent(root, e, &hit) != noErr || !hit) {
+      return 0;   /* the toolbox found no view at all: bare content */
+   }
+   if (hit == root) { return 0; }
+   return !(HIViewGetSuperview(hit) == root);
+}
+
 /* Opaque Carbon refs are minted by HIToolbox in the 64-bit heap — the event
  * targets observed on this app sit at 0x6000_0xxxxxxx — so a translated app
  * cannot be holding raw pointers in its 32-bit slots: it holds ARENA HANDLES,
@@ -136,14 +188,20 @@ uint32_t shim_SendEventToEventTarget(uint32_t *args) {
       if (ad_was_seen((const void *)e)) {
          /* Propagation worked here; touching it would double-deliver. */
          ad_skipped++;
+      } else if (ad_view_owns_click(e)) {
+         /* A real control took it — forwarding would be a phantom click. */
+         ad_onview++;
+         if (ad_trace()) {
+            fprintf(stderr, "[appdown] a VIEW owns this click; not forwarding\n");
+         }
       } else {
          /* Re-send the SAME EventRef so location, modifiers and click count
           * survive intact rather than being reconstructed from parameters. */
          const OSStatus fr = SendEventToEventTarget(e, GetApplicationEventTarget());
          ad_fwd++;
          if (ad_trace()) {
-            fprintf(stderr, "[appdown] dispatcher consumed a mouse-DOWN; "
-                            "re-sent to APPLICATION -> %d\n", (int)fr);
+            fprintf(stderr, "[appdown] dispatcher consumed a mouse-DOWN on bare "
+                            "window content; re-sent to APPLICATION -> %d\n", (int)fr);
          }
       }
    }
@@ -153,6 +211,6 @@ uint32_t shim_SendEventToEventTarget(uint32_t *args) {
 __attribute__((destructor))
 static void ad_summary(void) {
    if (!ad_trace()) { return; }
-   fprintf(stderr, "[appdown] forwarded=%lu already-delivered=%lu\n",
-           ad_fwd, ad_skipped);
+   fprintf(stderr, "[appdown] forwarded=%lu already-delivered=%lu "
+                   "owned-by-a-view=%lu\n", ad_fwd, ad_skipped, ad_onview);
 }

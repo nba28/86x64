@@ -619,6 +619,25 @@ def cmd_resync(args):
         shutil.copy2(LIBABICONV, c)
         subprocess.run(["codesign", "-f", "-s", "-", str(c)],
                        capture_output=True)
+        # ⚠A FRAMEWORK SEALS ITS CONTENTS. Replacing a libabiconv copy INSIDE
+        # Foo.framework/Versions/A invalidates the FRAMEWORK's signature, not
+        # just this file's, and signing the copy alone leaves the framework
+        # binary sealed against contents that no longer match. dyld then refuses
+        # the whole bundle at launch ("code signature does not cover entire file
+        # up to signature") while resync has already printed a cheerful
+        # "N copies synced". Re-sign the enclosing framework binary, and say so
+        # when that fails instead of hiding it.
+        vdir = c.parent
+        if vdir.name == "A" and vdir.parent.name == "Versions":
+            fw = vdir.parent.parent                      # Foo.framework
+            fwbin = vdir / fw.name.replace(".framework", "")
+            if fwbin.is_file():
+                cs = subprocess.run(["codesign", "-f", "-s", "-", str(fwbin)],
+                                    capture_output=True, text=True)
+                if cs.returncode != 0:
+                    warn(f"codesign FAILED for {fwbin.name}: "
+                         f"{cs.stderr.strip().splitlines()[-1:]} -- the bundle "
+                         f"will NOT launch until this is resolved")
     if not args.dry_run:
         good(f"{len(copies)} copies synced + ad-hoc signed")
 
