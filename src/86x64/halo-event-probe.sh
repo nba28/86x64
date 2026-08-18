@@ -32,6 +32,45 @@ clang -arch x86_64 -dynamiclib -O1 -Wall -Wno-deprecated-declarations \
       -framework Carbon -o "$DYLIB" "$HERE/halo-event-probe.c" || {
   echo "probe build FAILED" >&2; exit 1; }
 
+# --- SELF-TEST BEFORE SPENDING A HUMAN RUN -------------------------------
+# The first version of this probe reached Carbon with dlsym(RTLD_NEXT,...),
+# which returned the probe's OWN replacement: every call re-entered itself,
+# 10800 log lines with ZERO completions, stack overflow, and it took Halo down.
+# It also *looked* like a finding ("Halo installs 10800 handlers") until the
+# missing return lines gave it away. A probe is a measuring instrument and gets
+# calibrated before use: this runs it against a trivial Carbon program first and
+# REFUSES to launch Halo unless one call produces exactly one entry and one
+# return.
+SELF="${TMPDIR:-/tmp}/halo-event-selftest"
+cat > "$SELF.c" <<'CEOF'
+#include <Carbon/Carbon.h>
+#include <stdio.h>
+static OSStatus h(EventHandlerCallRef r, EventRef e, void *u) {
+   (void)r; (void)e; (void)u; return eventNotHandledErr;
+}
+int main(void) {
+   EventTypeSpec t = { kEventClassCommand, kEventCommandProcess };
+   EventHandlerRef ref = NULL;
+   InstallEventHandler(GetApplicationEventTarget(), NewEventHandlerUPP(h),
+                       1, &t, NULL, &ref);
+   return 0;
+}
+CEOF
+clang -arch x86_64 -Wno-deprecated-declarations -framework Carbon \
+      -o "$SELF" "$SELF.c" 2>/dev/null || { echo "self-test build FAILED" >&2; exit 1; }
+if ! DYLD_INSERT_LIBRARIES="$DYLIB" HALO_EVENT_LOG="$SELF.log" "$SELF" 2>/dev/null; then
+  echo "SELF-TEST CRASHED — not launching Halo." >&2; exit 1
+fi
+ent=$(grep -c 'InstallEventHandler #1 target' "$SELF.log" 2>/dev/null); ent=${ent:-0}
+ret=$(grep -c 'InstallEventHandler #1 ->'     "$SELF.log" 2>/dev/null); ret=${ret:-0}
+if [ "$ent" != "1" ] || [ "$ret" != "1" ]; then
+  echo "SELF-TEST FAILED: $ent entries / $ret returns for ONE call." >&2
+  echo "  The call-through is not reaching Carbon (it is recursing, or the" >&2
+  echo "  interpose table is inert). NOT launching Halo." >&2
+  exit 1
+fi
+echo "self-test: 1 call -> 1 entry, 1 return; interposition live  OK"
+
 echo "Logging to: $OUT"
 echo
 echo "Click Play, then at the main menu:"

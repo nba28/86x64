@@ -35,6 +35,18 @@
  * The mouse-location parameter is decoded and printed for exactly that last
  * reason: if the click coordinates disagree with where the pointer visibly is,
  * the hit-test cannot succeed no matter how well the plumbing works.
+ *
+ * ⚠HOW TO CALL THROUGH, AND HOW NOT TO. The first version of this file reached
+ * the real Carbon function with dlsym(RTLD_NEXT, "InstallEventHandler"). That
+ * returned THIS FILE'S OWN replacement, so every call re-entered itself: 10800
+ * identical log lines, ZERO completions, stack overflow, Abort trap 6 — and it
+ * looked exactly like "Halo installs 10800 handlers" until the missing return
+ * lines gave it away. With __DATA,__interpose the correct call-through is the
+ * ORDINARY NAMED CALL: dyld rewrites the bindings of OTHER images, not those of
+ * the interposing image itself, so a direct `InstallEventHandler(...)` here
+ * reaches the real one. That is the same pattern halo-gl-texprobe.c uses.
+ * A re-entry seatbelt below makes a future mistake of this kind lose logging
+ * instead of taking the app down.
  */
 #include <Carbon/Carbon.h>
 #include <dlfcn.h>
@@ -64,6 +76,28 @@ static void EP(const char *fmt, ...) {
    va_end(ap);
 }
 
+/* Re-entry seatbelt. Depth should never exceed 1; if it ever does, the
+ * call-through is recursing and we bail out with a benign value rather than
+ * overflowing the stack. Losing a probe is acceptable; crashing the target the
+ * probe exists to observe is not. */
+static __thread int g_depth;
+static int g_recursed;
+
+static int ep_enter(const char *who) {
+   if (g_depth > 2) {
+      if (!g_recursed) {
+         g_recursed = 1;
+         fprintf(stderr, "[ev] ⚠RECURSION in %s - the call-through is reaching "
+                 "this probe instead of Carbon. Logging disabled; the app is "
+                 "NOT being taken down.\n", who);
+      }
+      return 0;
+   }
+   g_depth++;
+   return 1;
+}
+static void ep_leave(void) { if (g_depth > 0) { g_depth--; } }
+
 static void fourcc(char out[5], UInt32 v) {
    out[0] = (char)(v >> 24); out[1] = (char)(v >> 16);
    out[2] = (char)(v >> 8);  out[3] = (char)v; out[4] = 0;
@@ -85,29 +119,37 @@ static int g_nh;
 static OSStatus ep_InstallEventHandler(EventTargetRef target, EventHandlerUPP h,
                                        ItemCount n, const EventTypeSpec *types,
                                        void *ud, EventHandlerRef *out) {
+   if (!ep_enter("InstallEventHandler")) {
+      return InstallEventHandler(target, h, n, types, ud, out);
+   }
    n_install++;
-   char c[5], k[5];
-   for (ItemCount i = 0; i < n && i < 12; i++) {
-      fourcc(c, types[i].eventClass);
-      EP("[ev] InstallEventHandler  target=%p upp=%p  type[%lu] class='%s' kind=%u\n",
-         (void *)target, (void *)h, (unsigned long)i, c, (unsigned)types[i].eventKind);
-      (void)k;
+   /* Capped: a genuine flood must stay readable, and an UNBOUNDED log is how
+    * the recursion above disguised itself as a finding. */
+   if (n_install <= 24) {
+      char c[5];
+      for (ItemCount i = 0; i < n && i < 12; i++) {
+         fourcc(c, types[i].eventClass);
+         EP("[ev] InstallEventHandler #%lu target=%p upp=%p type[%lu] "
+            "class='%s' kind=%u\n", n_install, (void *)target, (void *)h,
+            (unsigned long)i, c, (unsigned)types[i].eventKind);
+      }
+   } else if (n_install == 25) {
+      EP("[ev] (further InstallEventHandler calls counted, not printed)\n");
    }
    if (g_nh < EP_MAX_H) { g_h[g_nh].upp = h; g_h[g_nh].tgt = target; g_nh++; }
-   OSStatus (*orig)(EventTargetRef, EventHandlerUPP, ItemCount,
-                    const EventTypeSpec *, void *, EventHandlerRef *) =
-      dlsym(RTLD_NEXT, "InstallEventHandler");
-   OSStatus r = orig ? orig(target, h, n, types, ud, out) : -1;
-   EP("[ev] InstallEventHandler -> %d  (%lu total)\n", (int)r, n_install);
+   const OSStatus r = InstallEventHandler(target, h, n, types, ud, out);
+   if (n_install <= 24) { EP("[ev] InstallEventHandler #%lu -> %d\n", n_install, (int)r); }
+   ep_leave();
    return r;
 }
 
 static OSStatus ep_ReceiveNextEvent(ItemCount n, const EventTypeSpec *types,
                                     EventTimeout to, Boolean pull,
                                     EventRef *out) {
-   OSStatus (*orig)(ItemCount, const EventTypeSpec *, EventTimeout, Boolean,
-                    EventRef *) = dlsym(RTLD_NEXT, "ReceiveNextEvent");
-   OSStatus r = orig ? orig(n, types, to, pull, out) : -1;
+   if (!ep_enter("ReceiveNextEvent")) {
+      return ReceiveNextEvent(n, types, to, pull, out);
+   }
+   const OSStatus r = ReceiveNextEvent(n, types, to, pull, out);
    n_recv++;
    if (r == noErr && out && *out) {
       const UInt32 cl = GetEventClass(*out), ki = GetEventKind(*out);
@@ -130,6 +172,7 @@ static OSStatus ep_ReceiveNextEvent(ItemCount n, const EventTypeSpec *types,
          n_other++;
       }
    }
+   ep_leave();
    return r;
 }
 
@@ -137,9 +180,10 @@ static OSStatus ep_SendEventToEventTarget(EventRef e, EventTargetRef t) {
    const UInt32 cl = e ? GetEventClass(e) : 0, ki = e ? GetEventKind(e) : 0;
    const int interesting = (cl == kEventClassMouse &&
                             (ki == kEventMouseDown || ki == kEventMouseUp));
-   OSStatus (*orig)(EventRef, EventTargetRef) =
-      dlsym(RTLD_NEXT, "SendEventToEventTarget");
-   OSStatus r = orig ? orig(e, t) : -1;
+   if (!ep_enter("SendEventToEventTarget")) {
+      return SendEventToEventTarget(e, t);
+   }
+   const OSStatus r = SendEventToEventTarget(e, t);
    n_send++;
    if (interesting) {
       char c[5]; fourcc(c, cl);
@@ -147,6 +191,7 @@ static OSStatus ep_SendEventToEventTarget(EventRef e, EventTargetRef t) {
          c, (unsigned)ki, (void *)t, (int)r,
          r == eventNotHandledErr ? "  (eventNotHandledErr - NOBODY CLAIMED IT)" : "");
    }
+   ep_leave();
    return r;
 }
 
@@ -161,18 +206,16 @@ static OSStatus ep_CallNextEventHandler(EventHandlerCallRef ref, EventRef e) {
       EP("[ev] CallNextEventHandler on a MOUSE DOWN - the app's handler IS "
          "running (#%lu)\n", n_handler_mousedown);
    }
-   OSStatus (*orig)(EventHandlerCallRef, EventRef) =
-      dlsym(RTLD_NEXT, "CallNextEventHandler");
-   return orig ? orig(ref, e) : -1;
+   return CallNextEventHandler(ref, e);
 }
 
 static OSStatus ep_GetEventParameter(EventRef e, EventParamName name,
                                      EventParamType want, EventParamType *got,
                                      ByteCount sz, ByteCount *outsz, void *buf) {
-   OSStatus (*orig)(EventRef, EventParamName, EventParamType, EventParamType *,
-                    ByteCount, ByteCount *, void *) =
-      dlsym(RTLD_NEXT, "GetEventParameter");
-   OSStatus r = orig ? orig(e, name, want, got, sz, outsz, buf) : -1;
+   if (!ep_enter("GetEventParameter")) {
+      return GetEventParameter(e, name, want, got, sz, outsz, buf);
+   }
+   const OSStatus r = GetEventParameter(e, name, want, got, sz, outsz, buf);
    n_getparam++;
    /* Only the mouse-location reads, and only on a button event: this is the
     * number a hit-test depends on, and the reason to print it is that highlight
@@ -193,6 +236,7 @@ static OSStatus ep_GetEventParameter(EventRef e, EventParamName name,
          }
       }
    }
+   ep_leave();
    return r;
 }
 
@@ -206,6 +250,9 @@ static void ep_atexit(void) {
    EP("[ev] mouse UP   received       : %lu\n", n_mouseup);
    EP("[ev] mouse MOVED received      : %lu\n", n_mousemoved);
    EP("[ev] app handler ran on a down : %lu\n", n_handler_mousedown);
+   if (g_recursed) {
+      EP("[ev] ⚠THE PROBE RECURSED - treat every count above as unreliable.\n");
+   }
 }
 
 __attribute__((constructor))
