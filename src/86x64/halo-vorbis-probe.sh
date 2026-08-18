@@ -32,6 +32,7 @@ set -u
 
 APP="${HALO_APP:-$HOME/projects/translations/Apps64/Halo.app}"
 OGG="${HALO_VORBIS_OGG:-/tmp/halo-music.ogg}"
+VARIANTS="${HALO_VORBIS_VARIANTS:-1}"
 DELAY="${HALO_VORBIS_DELAY:-12}"
 OUT="${1:-/tmp/halo-vorbis-probe.log}"
 
@@ -47,6 +48,30 @@ if [ ! -s "$OGG" ]; then
 fi
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
+
+# --- build the single-variable variants -----------------------------------
+# Each differs from the control in exactly ONE respect, so a difference in the
+# decoder's verdict names that respect. ffmpeg is the CONTROL DECODER: a variant
+# it refuses is not evidence about our translation, so any variant that must be
+# openable is checked against it before the run.
+LIST="$OGG"
+if [ "$VARIANTS" = "1" ]; then
+  SPLIT=/tmp/halo-music-split.ogg
+  BADCRC=/tmp/halo-music-badcrc.ogg
+  HDRS=/tmp/halo-music-hdrs.ogg
+  python3 "$HERE/ogg-repage.py" "$OGG" "$SPLIT"  --split-headers >/dev/null || exit 1
+  python3 "$HERE/ogg-repage.py" "$OGG" "$BADCRC" --break-crc     >/dev/null || exit 1
+  python3 "$HERE/ogg-repage.py" "$OGG" "$HDRS"   --headers-only  >/dev/null || exit 1
+  if command -v ffmpeg >/dev/null && ! ffmpeg -v error -i "$SPLIT" -f s16le -y /dev/null 2>/dev/null; then
+    echo "ABORT: ffmpeg refuses the --split-headers variant, so it is not a" >&2
+    echo "  valid stream and a failure on it would prove nothing." >&2
+    exit 1
+  fi
+  LIST="$OGG:$SPLIT:$BADCRC:$HDRS"
+  echo "variants  : split-headers (no packet spans a page) | break-crc | headers-only"
+  echo "            split-headers is CONFIRMED decodable by ffmpeg"
+fi
+
 echo "bitstream : $OGG ($(stat -f%z "$OGG") bytes)"
 if [ -f "$HERE/ogg-stream-check.py" ]; then
   python3 "$HERE/ogg-stream-check.py" "$OGG" 2>/dev/null | head -6 | sed 's/^/  /'
@@ -59,7 +84,7 @@ echo "the sound path a chance to run too. Quit Halo once you see '--- done ---'"
 echo "or after ~40s."
 echo
 
-env ABICONV_VORBIS_SELFTEST="$OGG" \
+env ABICONV_VORBIS_SELFTEST="$LIST" \
     ABICONV_VORBIS_SELFTEST_DELAY="$DELAY" \
   "$APP/Contents/MacOS/Halo" >"$OUT" 2>&1
 
@@ -83,28 +108,41 @@ if grep -q 'DECLINED' "$OUT"; then
   echo "  evidence about libVorbis."
   exit 0
 fi
-rc=$(grep -o 'ov_open_callbacks -> -\?[0-9]*' "$OUT" | head -1 | awk '{print $3}')
-case "${rc:-}" in
-  0)    echo "  ★ov_open SUCCEEDED here but fails inside Halo ⇒ the bitstream and the"
-        echo "   decoder are both fine, and the defect is in HOW HALO CALLS IT —"
-        echo "   its datasource contents, its timing, or its state. Compare the"
-        echo "   ds line above with the cursorprobe's src= fields." ;;
-  -128) echo "  OV_EREAD ⇒ a read callback failed. Part 1 says whether read works"
-        echo "   in isolation; if it does, the failure is state-dependent." ;;
-  -132) echo "  OV_ENOTVORBIS ⇒ the sync layer never found a vorbis ident. With a"
-        echo "   BOS page at offset 0 and 0 CRC failures, that points at libogg's"
-        echo "   PAGE SYNC — ogg_sync_pageseek / the CRC recompute — not at the"
-        echo "   codec. Note how many bytes were consumed: a multiple of 8500"
-        echo "   (CHUNKSIZE) means it kept refilling and never matched a page." ;;
-  -133) echo "  OV_EBADHEADER ⇒ pages WERE found and unpacked; the failure is in"
-        echo "   header parsing (oggpack / vorbis_synthesis_headerin), i.e. past"
-        echo "   the sync layer. That exonerates libogg." ;;
-  -134) echo "  OV_EVERSION ⇒ the ident packet parsed but its version field read"
-        echo "   wrong — a bit-unpacking (oggpack) defect, very narrow." ;;
-  "")   echo "  ov_open never reported — read the raw log; the probe may have"
-        echo "   crashed partway (each line is flushed, so what printed is real)." ;;
-  *)    echo "  See the decoded name above; any negative code localises the"
-        echo "   failure to one subsystem." ;;
+ctl=$(grep -o "halo-music.ogg  *ov_open -> *-\?[0-9]*" "$OUT" | head -1 | awk '{print $NF}')
+spl=$(grep -o "halo-music-split.ogg  *ov_open -> *-\?[0-9]*" "$OUT" | head -1 | awk '{print $NF}')
+bad=$(grep -o "halo-music-badcrc.ogg  *ov_open -> *-\?[0-9]*" "$OUT" | head -1 | awk '{print $NF}')
+echo "  control (as Halo sees it) : ${ctl:-?}"
+echo "  split-headers             : ${spl:-?}"
+echo "  break-crc                 : ${bad:-?}"
+echo
+if [ -n "${ctl:-}" ] && [ -n "${spl:-}" ]; then
+  if [ "$ctl" != "0" ] && [ "$spl" = "0" ]; then
+    echo "  ★★DECISIVE: the ONLY difference between those two streams is that the"
+    echo "   4140-byte setup header spans a page boundary in the control and does"
+    echo "   not in the variant. Same audio, same pages, same CRCs, and ffmpeg"
+    echo "   decodes both. ⇒ MULTI-PAGE PACKET REASSEMBLY is broken —"
+    echo "   ogg_stream_packetout / the 255-byte lacing continuation in libogg."
+  elif [ "$ctl" = "$spl" ]; then
+    echo "  Both fail identically ⇒ page SPANNING is NOT the variable. The fault"
+    echo "  is upstream of packet reassembly (sync/page acceptance) or downstream"
+    echo "  in the codec's header parse."
+  fi
+fi
+if [ -n "${bad:-}" ] && [ -n "${ctl:-}" ]; then
+  if [ "$bad" = "$ctl" ]; then
+    echo "  break-crc behaves the SAME as the control ⇒ the page checksum is not"
+    echo "  discriminating (21 deliberately corrupt CRCs changed nothing)."
+  else
+    echo "  break-crc differs from the control ⇒ CRC verification IS live, and"
+    echo "  the control's checksums are being accepted."
+  fi
+fi
+echo
+case "${ctl:-}" in
+  -132) echo "  OV_ENOTVORBIS ⇒ the sync layer never yielded a vorbis ident." ;;
+  -133) echo "  OV_EBADHEADER ⇒ pages were found; the failure is at or after"
+        echo "   packet reassembly / header parse, not at page sync." ;;
+  -128) echo "  OV_EREAD ⇒ a read callback failed (part 1 says whether in isolation)." ;;
 esac
 echo
 echo "  ⚠Part 1 first: if READ or SEEK is already wrong in isolation, that is"

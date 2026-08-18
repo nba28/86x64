@@ -266,7 +266,136 @@ static void dump_ds(const char *tag, const struct halo_ds *ds) {
 }
 
 /* ---- the run ------------------------------------------------------------ */
-static void run_selftest(const char *path) {
+
+/* Part 1: the four callbacks, in isolation. If one of these is wrong, part 2's
+ * error code is a consequence and not a clue. */
+static void probe_callbacks(uint8_t *buf, uint32_t len, struct halo_ds *ds) {
+   VS("--- part 1: callbacks called directly ---\n");
+   memset(ds, 0, sizeof *ds);
+   ds->base = (uint32_t)(uintptr_t)buf;
+   ds->len  = len;
+   const uint32_t ds32 = (uint32_t)(uintptr_t)ds;
+   uint32_t w[4];
+
+   w[0] = ds32;
+   int32_t t0 = call32(g_tell, 1, w);
+   VS("  tell(ds)            -> %d   %s\n", t0, t0 == 0 ? "OK" : "⚠expected 0");
+
+   uint8_t *rb = (uint8_t *)malloc(64);
+   if (!rb || !lo32(rb, "read buffer")) { return; }
+   memset(rb, 0, 64);
+   w[0] = (uint32_t)(uintptr_t)rb; w[1] = 1; w[2] = 4; w[3] = ds32;
+   int32_t nr = call32(g_read, 4, w);
+   VS("  read(buf,1,4,ds)    -> %d   got '%c%c%c%c'   %s\n", nr,
+      rb[0] ? rb[0] : '?', rb[1] ? rb[1] : '?', rb[2] ? rb[2] : '?',
+      rb[3] ? rb[3] : '?',
+      (nr == 4 && memcmp(rb, "OggS", 4) == 0) ? "OK" : "⚠the READ callback is wrong");
+   free(rb);
+
+   /* _ov_open1 calls seek(f,0,SEEK_CUR) before parsing a single header, and
+    * ogg_int64_t arrives as TWO stack words. */
+   w[0] = ds32; w[1] = 0; w[2] = 0; w[3] = 1;
+   int32_t sc = call32(g_seek, 4, w);
+   VS("  seek(ds,0,SEEK_CUR) -> %d   %s\n", sc,
+      sc == 0 ? "OK (seekable)" : "⚠non-zero: the stream would be marked UNSEEKABLE");
+
+   w[0] = ds32; w[1] = 0; w[2] = 0; w[3] = 2;
+   int32_t se = call32(g_seek, 4, w);
+   w[0] = ds32;
+   int32_t te = call32(g_tell, 1, w);
+   VS("  seek(ds,0,SEEK_END) -> %d   then tell -> %d (len=%u)   %s\n",
+      se, te, len, (te == (int32_t)len) ? "OK" : "⚠END/tell disagree with the length");
+
+   w[0] = ds32; w[1] = 0; w[2] = 0; w[3] = 0;
+   VS("  seek(ds,0,SEEK_SET) -> %d\n", call32(g_seek, 4, w));
+
+   /* A 64-bit offset that does not fit in 32 bits: if the high word is dropped
+    * anywhere in the bridge this is accepted instead of refused. */
+   w[0] = ds32; w[1] = 0; w[2] = 1; w[3] = 0;
+   int32_t sh = call32(g_seek, 4, w);
+   VS("  seek(ds,2^32,SET)   -> %d   %s\n", sh,
+      sh != 0 ? "OK (refused, so the HIGH word survives)"
+              : "⚠ACCEPTED - the 64-bit offset's high word is being LOST");
+}
+
+/* Part 2: ov_open_callbacks on one bitstream. Returns its result. */
+static int32_t probe_open(const char *label, uint8_t *buf, uint32_t len,
+                          struct halo_ds *ds) {
+   memset(ds, 0, sizeof *ds);
+   ds->base = (uint32_t)(uintptr_t)buf;
+   ds->len  = len;
+   const uint32_t ds32 = (uint32_t)(uintptr_t)ds;
+
+   /* sizeof(OggVorbis_File) is 0x2c0, derived BY CONSTRUCTION: Halo's two vf
+    * slots sit at state+8 and state+0x2c8 with the success flag at state+0x588,
+    * so they are adjacent and 0x2c0 apart. Over-allocate anyway - it costs
+    * nothing, and a struct bigger than we think would corrupt the heap. */
+   uint32_t *vf = (uint32_t *)malloc(4096);
+   if (!vf || !lo32(vf, "OggVorbis_File")) { return 1; }
+   memset(vf, 0, 4096);
+
+   uint32_t a[8];
+   a[0] = ds32; a[1] = (uint32_t)(uintptr_t)vf; a[2] = 0; a[3] = 0;
+   a[4] = (uint32_t)g_read; a[5] = (uint32_t)g_seek;
+   a[6] = (uint32_t)g_close; a[7] = (uint32_t)g_tell;
+
+   const int32_t rc = call32(g_ovopen, 8, a);
+   VS("  %-10s ov_open -> %-5d %s\n", label, rc, ov_err(rc));
+   VS("             consumed %u of %u bytes (eof=%u)%s\n",
+      ds->pos, len, ds->eof,
+      ds->pos == 0 ? "  <-- NOTHING read: it failed before the first read" : "");
+   if (len > 0 && ds->pos > 8500) {
+      VS("             ⚠that is %u chunk(s) of 8500; a correct decoder needs the "
+         "headers only\n", (ds->pos + 8499) / 8500);
+   }
+   if (ds->base == 0) {
+      VS("             the CLOSE callback ran (it zeroes base) -> the failure "
+         "was past ogg_sync_init\n");
+   }
+   int allzero = 1;
+   for (int i = 0; i < 24; i++) { if (vf[i]) { allzero = 0; break; } }
+   if (rc != 0 && allzero) {
+      VS("             OggVorbis_File all zero -> ov_clear() ran (expected)\n");
+   } else if (vf[0] == ds32) {
+      VS("             vf (layout CORROBORATED by word0==datasource): "
+         "seekable=%u offset=%u:%u end=%u:%u\n", vf[1], vf[3], vf[2], vf[5], vf[4]);
+      VS("             oy: data=0x%08x storage=%d fill=%d returned=%d "
+         "unsynced=%d headerbytes=%d bodybytes=%d\n",
+         vf[6], (int32_t)vf[7], (int32_t)vf[8], (int32_t)vf[9],
+         (int32_t)vf[10], (int32_t)vf[11], (int32_t)vf[12]);
+   } else if (!allzero) {
+      VS("             vf word0=0x%08x != datasource 0x%08x - layout NOT "
+         "corroborated, raw only\n", vf[0], ds32);
+   }
+   free(vf);
+   return rc;
+}
+
+/* Load one file into low-4GB memory. Returns NULL and explains on failure. */
+static uint8_t *load_low(const char *path, uint32_t *out_len) {
+   int fd = open(path, O_RDONLY);
+   if (fd < 0) { VS("  %s: cannot open - SKIPPED\n", path); return NULL; }
+   off_t sz = lseek(fd, 0, SEEK_END);
+   lseek(fd, 0, SEEK_SET);
+   if (sz <= 0 || sz > 64 * 1024 * 1024) {
+      VS("  %s: implausible size %lld - SKIPPED\n", path, (long long)sz);
+      close(fd); return NULL;
+   }
+   uint8_t *b = (uint8_t *)malloc((size_t)sz);
+   if (!b || !lo32(b, "bitstream buffer")) { close(fd); return NULL; }
+   if (read(fd, b, (size_t)sz) != (ssize_t)sz) {
+      VS("  %s: short read - SKIPPED\n", path); close(fd); free(b); return NULL;
+   }
+   close(fd);
+   *out_len = (uint32_t)sz;
+   return b;
+}
+
+/* `paths` is a colon-separated list. The FIRST is the control (the bitstream
+ * Halo itself hands the decoder) and is the only one part 1 runs on; the rest
+ * are single-variable VARIANTS whose whole purpose is to differ from it in one
+ * respect, so what matters is how their result differs from the control's. */
+static void run_selftest(const char *paths) {
    const char *err = pcmap_load();
    if (err) { VS("DECLINED: %s\n", err); return; }
    if ((err = resolve_targets()) != NULL) {
@@ -279,157 +408,42 @@ static void run_selftest(const char *path) {
       (unsigned long long)g_seek, (unsigned long long)g_close,
       (unsigned long long)g_tell);
 
-   /* --- load the bitstream into low-4GB memory --- */
-   int fd = open(path, O_RDONLY);
-   if (fd < 0) { VS("DECLINED: cannot open %s\n", path); return; }
-   off_t sz = lseek(fd, 0, SEEK_END);
-   lseek(fd, 0, SEEK_SET);
-   if (sz <= 0 || sz > 64 * 1024 * 1024) {
-      VS("DECLINED: %s has implausible size %lld\n", path, (long long)sz);
-      close(fd); return;
-   }
-   uint8_t *buf = (uint8_t *)malloc((size_t)sz);
-   if (!buf || !lo32(buf, "bitstream buffer")) { close(fd); return; }
-   if (read(fd, buf, (size_t)sz) != (ssize_t)sz) {
-      VS("DECLINED: short read of %s\n", path); close(fd); free(buf); return;
-   }
-   close(fd);
-   VS("bitstream %s: %lld bytes, first8=%.4s%02x%02x%02x%02x\n",
-      path, (long long)sz, (const char *)buf, buf[4], buf[5], buf[6], buf[7]);
-   /* The BOS flag is what licenses "a decoder may open this"; `OggS` alone
-    * does NOT -- a mid-stream fragment also begins with OggS. */
-   VS("page0: version=%u header_type=0x%02x%s\n", buf[4], buf[5],
-      (buf[5] & 0x02) ? "  (BOS set - a legal stream start)"
-                      : "  ⚠BOS NOT SET - ov_open would be right to refuse");
-
    void *stk = malloc(VS_STACK_SZ);
-   if (!stk || !lo32(stk, "i386 stack")) { free(buf); return; }
+   if (!stk || !lo32(stk, "i386 stack")) { return; }
    g_stack_top = ((uint64_t)(uintptr_t)stk + VS_STACK_SZ) & ~0xfULL;
 
    struct halo_ds *ds = (struct halo_ds *)malloc(sizeof *ds);
-   if (!ds || !lo32(ds, "datasource")) { free(buf); free(stk); return; }
+   if (!ds || !lo32(ds, "datasource")) { free(stk); return; }
 
-   /* ---------- PART 1: the callbacks, in isolation ---------- */
-   VS("--- part 1: callbacks called directly ---\n");
-   memset(ds, 0, sizeof *ds);
-   ds->base = (uint32_t)(uintptr_t)buf;
-   ds->len  = (uint32_t)sz;
-   const uint32_t ds32 = (uint32_t)(uintptr_t)ds;
-
-   uint32_t w[4];
-   w[0] = ds32;
-   int32_t t0 = call32(g_tell, 1, w);
-   VS("  tell(ds)            -> %d   %s\n", t0,
-      t0 == 0 ? "OK" : "⚠expected 0 at pos=0");
-
-   uint8_t *rb = (uint8_t *)malloc(64);
-   if (!rb || !lo32(rb, "read buffer")) { free(buf); free(stk); free(ds); return; }
-   memset(rb, 0, 64);
-   w[0] = (uint32_t)(uintptr_t)rb; w[1] = 1; w[2] = 4; w[3] = ds32;
-   int32_t nr = call32(g_read, 4, w);
-   VS("  read(buf,1,4,ds)    -> %d   got '%c%c%c%c'   %s\n", nr,
-      rb[0] ? rb[0] : '?', rb[1] ? rb[1] : '?', rb[2] ? rb[2] : '?',
-      rb[3] ? rb[3] : '?',
-      (nr == 4 && memcmp(rb, "OggS", 4) == 0) ? "OK"
-         : "⚠the READ callback is wrong - that alone would sink ov_open");
-   dump_ds("after rd", ds);
-
-   /* SEEK is the structural suspect: ogg_int64_t arrives as TWO stack words,
-    * and _ov_open1 calls seek(f,0,SEEK_CUR) before anything else -- if that
-    * misbehaves, seekability is misjudged before a single header is parsed. */
-   w[0] = ds32; w[1] = 0; w[2] = 0; w[3] = 1 /*SEEK_CUR*/;
-   int32_t sc = call32(g_seek, 4, w);
-   VS("  seek(ds,0,SEEK_CUR) -> %d   %s\n", sc,
-      sc == 0 ? "OK (seekable)" : "⚠non-zero: _ov_open1 would mark the stream UNSEEKABLE");
-   dump_ds("after cur", ds);
-
-   w[0] = ds32; w[1] = 0; w[2] = 0; w[3] = 2 /*SEEK_END*/;
-   int32_t se = call32(g_seek, 4, w);
-   w[0] = ds32;
-   int32_t te = call32(g_tell, 1, w);
-   VS("  seek(ds,0,SEEK_END) -> %d   then tell -> %d (len=%lld)   %s\n",
-      se, te, (long long)sz,
-      (te == (int32_t)sz) ? "OK" : "⚠END/tell disagree with the real length");
-
-   w[0] = ds32; w[1] = 0; w[2] = 0; w[3] = 0 /*SEEK_SET*/;
-   int32_t ss = call32(g_seek, 4, w);
-   VS("  seek(ds,0,SEEK_SET) -> %d\n", ss);
-   dump_ds("after set", ds);
-
-   /* A 64-bit offset that does NOT fit in 32 bits: if the high word is
-    * dropped anywhere in the bridge, this is accepted instead of refused. */
-   w[0] = ds32; w[1] = 0; w[2] = 1 /*offset = 2^32*/; w[3] = 0;
-   int32_t sh = call32(g_seek, 4, w);
-   VS("  seek(ds,2^32,SET)   -> %d   %s\n", sh,
-      sh != 0 ? "OK (refused, so the HIGH word survives the call)"
-              : "⚠ACCEPTED - the 64-bit offset's high word is being LOST");
-
-   /* ---------- PART 2: the real thing ---------- */
-   VS("--- part 2: ov_open_callbacks on the same bitstream ---\n");
-   for (int attempt = 1; attempt <= 2; attempt++) {
-      memset(ds, 0, sizeof *ds);
-      ds->base = (uint32_t)(uintptr_t)buf;
-      ds->len  = (uint32_t)sz;
-
-      /* sizeof(OggVorbis_File) is 0x2c0, derived by CONSTRUCTION: Halo's two
-       * slots live at state+8 and state+0x2c8 and the ov_open success flag at
-       * state+0x588, so the slots are adjacent and 0x2c0 apart. Allocate more
-       * than that anyway - an over-allocation costs nothing, and a struct
-       * bigger than we think would otherwise corrupt the heap. */
-      uint32_t *vf = (uint32_t *)malloc(4096);
-      if (!vf || !lo32(vf, "OggVorbis_File")) { break; }
-      memset(vf, 0, 4096);
-
-      uint32_t a[8];
-      a[0] = ds32;                     /* datasource */
-      a[1] = (uint32_t)(uintptr_t)vf;  /* vf         */
-      a[2] = 0;                        /* initial    */
-      a[3] = 0;                        /* ibytes     */
-      a[4] = (uint32_t)g_read;
-      a[5] = (uint32_t)g_seek;
-      a[6] = (uint32_t)g_close;
-      a[7] = (uint32_t)g_tell;
-
-      const int32_t rc = call32(g_ovopen, 8, a);
-      VS("  attempt %d: ov_open_callbacks -> %d  %s\n",
-         attempt, rc, ov_err(rc));
-      dump_ds("after", ds);
-      VS("  consumed %u of %lld bytes%s\n", ds->pos, (long long)sz,
-         ds->pos == 0 ? "  <-- NOTHING was read: it failed before the first read"
-                      : "");
-      if (ds->base == 0) {
-         VS("  the CLOSE callback ran (it zeroes base) - so the failure was "
-            "past ogg_sync_init, inside header fetch\n");
+   char list[2048];
+   snprintf(list, sizeof list, "%s", paths);
+   int first = 1, n = 0;
+   char *save = NULL;
+   for (char *tok = strtok_r(list, ":", &save); tok;
+        tok = strtok_r(NULL, ":", &save)) {
+      uint32_t len = 0;
+      uint8_t *buf = load_low(tok, &len);
+      if (!buf) { continue; }
+      const char *base = strrchr(tok, '/');
+      base = base ? base + 1 : tok;
+      VS("bitstream %s: %u bytes, page0 header_type=0x%02x%s\n",
+         base, len, len > 5 ? buf[5] : 0,
+         (len > 5 && (buf[5] & 0x02)) ? "  (BOS - a legal stream start)"
+                                      : "  ⚠BOS NOT SET");
+      if (first) {
+         probe_callbacks(buf, len, ds);
+         VS("--- part 2: ov_open_callbacks, control then variants ---\n");
       }
-
-      /* Post-mortem. libvorbisfile 1.0's ov_clear memsets the whole struct on
-       * a failed open, so ALL-ZERO IS THE EXPECTED OUTCOME here and says the
-       * cleanup path ran -- it is not evidence about the layout. We only
-       * interpret fields when word 0 still holds the datasource we passed,
-       * which is the one anchor that corroborates the layout. */
-      int allzero = 1;
-      for (int i = 0; i < 24; i++) { if (vf[i]) { allzero = 0; break; } }
-      if (allzero) {
-         VS("  OggVorbis_File: all zero -> ov_clear() ran (expected on failure)\n");
-      } else if (vf[0] == ds32) {
-         VS("  OggVorbis_File (layout CORROBORATED by word0==datasource):\n");
-         VS("    seekable=%u  offset=%u:%u  end=%u:%u\n",
-            vf[1], vf[3], vf[2], vf[5], vf[4]);
-         VS("    oy: data=0x%08x storage=%d fill=%d returned=%d "
-            "unsynced=%d headerbytes=%d bodybytes=%d\n",
-            vf[6], (int32_t)vf[7], (int32_t)vf[8], (int32_t)vf[9],
-            (int32_t)vf[10], (int32_t)vf[11], (int32_t)vf[12]);
-      } else {
-         VS("  OggVorbis_File: word0=0x%08x != datasource 0x%08x - layout NOT "
-            "corroborated, dumping raw only\n", vf[0], ds32);
-      }
-      char hex[16 * 9 + 1]; int o = 0;
-      for (int i = 0; i < 16; i++) { o += snprintf(hex + o, sizeof hex - o, "%08x ", vf[i]); }
-      VS("  vf[0..15]: %s\n", hex);
-      free(vf);
+      /* the control runs twice: a differing pair would mean the result is not
+       * deterministic, and every comparison below would be meaningless */
+      probe_open(base, buf, len, ds);
+      if (first) { probe_open("(repeat)", buf, len, ds); first = 0; }
+      free(buf);
+      n++;
    }
+   if (n == 0) { VS("no bitstream could be loaded - nothing was measured\n"); }
    VS("--- done ---\n");
-   free(ds); free(stk); free(buf);
+   free(ds); free(stk);
 }
 
 static void *selftest_thread(void *arg) {
@@ -451,7 +465,7 @@ __attribute__((constructor))
 static void vorbis_selftest_init(void) {
    const char *p = getenv("ABICONV_VORBIS_SELFTEST");
    if (!p || !*p) { return; }         /* ships inert */
-   static char path[1024];
+   static char path[2048];
    snprintf(path, sizeof path, "%s", p);
    pthread_t th;
    if (pthread_create(&th, NULL, selftest_thread, path) == 0) {
