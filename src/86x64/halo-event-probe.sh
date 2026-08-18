@@ -201,6 +201,18 @@ echo
 echo "--- keyboard EVENTS (report: ENTER on a menu item does nothing either) ---"
 grep -E 'KEY kind=|KEYBOARD events' "$OUT" | head -14 | sed 's/^/  /'
 echo
+echo "--- ★per-HANDLER breakdown: registered vs actually received ---"
+if grep -q 'handler #.*registered\[' "$OUT"; then
+  grep 'handler #.*registered\[' "$OUT" | sed 's/^/  /'
+  grep -q 'NEVER got one' "$OUT" && {
+    echo "  ⇒ a handler registered for mouse-DOWN never received one. Compare the"
+    echo "    SendEventToEventTarget target above: if Halo dispatches to the"
+    echo "    DISPATCHER and the window handlers all DECLINE, the event should"
+    echo "    have propagated up to the APPLICATION target where that handler is."; }
+else
+  echo "  (no per-handler lines — probe predates this breakdown)"
+fi
+echo
 echo "--- where the chain breaks ---"
 inst=$(grep -c 'InstallEventHandler #[0-9]* target' "$OUT" 2>/dev/null); inst=${inst:-0}
 down=$(sed -n 's/.*mouse DOWN received *: *//p' "$OUT" | tail -1); down=${down:-0}

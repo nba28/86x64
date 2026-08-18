@@ -169,6 +169,11 @@ struct wrapctx {
    EventHandlerUPP orig;
    void           *ud;
    int             is_halo;
+   unsigned long   kind_n[16];   /* mouse-class kinds seen (index 0 = non-mouse) */
+   unsigned long   kind_other;
+   UInt32          reg_class[8]; /* what this handler actually REGISTERED for */
+   UInt32          reg_kind[8];
+   int             reg_n;
    int             idx;
 };
 #define EP_MAX_W 16
@@ -192,11 +197,29 @@ static double ep_now(void) {
    return (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
 }
 
+/* ★ PER-HANDLER, PER-KIND accounting.
+ *
+ * The aggregate "HALO'S handler entered: 158 (on mouse-down: 0)" cannot
+ * distinguish two completely different worlds, and they need different fixes:
+ *   (a) Halo has TWO mouse handlers, and the 158 all belong to a moved-handler
+ *       while its mouseDown handler is simply never called -> a DELIVERY bug;
+ *   (b) the 158 landed on the handler registered for kEventMouseDown, i.e. it
+ *       is being invoked with kinds it never asked for -> a REGISTRATION bug in
+ *       how the EventTypeSpec array crosses our ABI boundary.
+ * Both produce the same aggregate. Only a per-handler breakdown separates them,
+ * and (b) would be OUR defect while (a) is Halo's own routing. */
+#define EP_MAXKIND 16
+static void wrap_note(struct wrapctx *w, UInt32 ki) {
+   if (ki < EP_MAXKIND) { w->kind_n[ki]++; }
+   else                 { w->kind_other++; }
+}
+
 static OSStatus ep_wrap(EventHandlerCallRef ref, EventRef e, void *ud) {
    struct wrapctx *w = (struct wrapctx *)ud;
    const UInt32 cl = e ? GetEventClass(e) : 0, ki = e ? GetEventKind(e) : 0;
    const int is_down = (cl == kEventClassMouse && ki == kEventMouseDown);
    char c[5]; fourcc(c, cl);
+   wrap_note(w, cl == kEventClassMouse ? ki : 0);
    if (is_down) {
       if (w->is_halo) { n_halo_handler++; n_halo_mousedown++; }
       else            { n_sys_mousedown++; }
@@ -276,6 +299,11 @@ static OSStatus ep_InstallEventHandler(EventTargetRef target, EventHandlerUPP h,
        * in the shared cache. That is the discriminator, and it is structural. */
       w->is_halo = ((uintptr_t)h >> 32) == 0;
       w->idx = ++g_nw;
+      for (ItemCount i = 0; i < n && w->reg_n < 8; i++) {
+         w->reg_class[w->reg_n] = types[i].eventClass;
+         w->reg_kind[w->reg_n]  = types[i].eventKind;
+         w->reg_n++;
+      }
       use = NewEventHandlerUPP(ep_wrap);
       use_ud = w;
       EP("[ev] (wrapping MOUSE handler #%d: %s upp=%p)\n", w->idx,
@@ -382,8 +410,21 @@ static OSStatus ep_SendEventToEventTarget(EventRef e, EventTargetRef t) {
    n_send++;
    if (interesting) {
       char c[5]; fourcc(c, cl);
-      EP("[ev] SendEventToEventTarget class='%s' kind=%u target=%p -> %d%s\n",
-         c, (unsigned)ki, (void *)t, (int)r,
+      /* NAME the target. Halo installs its mouse handlers on the APPLICATION
+       * target, so whether it dispatches to the DISPATCHER (which routes and
+       * then propagates up to the application) or somewhere else decides
+       * whether its own handler can ever be reached. A bare pointer cannot
+       * answer that, and the two cases need opposite fixes. */
+      EventTargetRef app  = GetApplicationEventTarget();
+      EventTargetRef disp = GetEventDispatcherTarget();
+      EventTargetRef ufoc = GetUserFocusEventTarget();
+      WindowRef      fw   = ActiveNonFloatingWindow();
+      EventTargetRef fwt  = fw ? GetWindowEventTarget(fw) : NULL;
+      EP("[ev] SendEventToEventTarget class='%s' kind=%u target=%p [%s] -> %d%s\n",
+         c, (unsigned)ki, (void *)t,
+         t == app ? "APPLICATION" : t == disp ? "DISPATCHER"
+            : t == ufoc ? "USERFOCUS" : t == fwt ? "FRONT-WINDOW" : "OTHER",
+         (int)r,
          r == eventNotHandledErr ? "  (eventNotHandledErr - NOBODY CLAIMED IT)" : "");
    }
    ep_leave();
@@ -854,6 +895,31 @@ static void ep_atexit(void) {
    EP("[ev] app handler ran on a down : %lu\n", n_handler_mousedown);
    EP("[ev] HALO'S handler entered     : %lu  (on mouse-down: %lu)\n",
       n_halo_handler, n_halo_mousedown);
+   for (int i = 0; i < g_nw; i++) {
+      struct wrapctx *w = &g_w[i];
+      char reg[128]; int o = 0; reg[0] = 0;
+      for (int k = 0; k < w->reg_n && o < 100; k++) {
+         char c[5]; fourcc(c, w->reg_class[k]);
+         o += snprintf(reg + o, sizeof reg - o, "%s'%s'/%u",
+                       k ? "," : "", c, (unsigned)w->reg_kind[k]);
+      }
+      char got[160]; int g = 0; got[0] = 0;
+      for (UInt32 k = 1; k < EP_MAXKIND && g < 130; k++) {
+         if (w->kind_n[k]) {
+            g += snprintf(got + g, sizeof got - g, "%skind%u=%lu",
+                          g ? " " : "", (unsigned)k, w->kind_n[k]);
+         }
+      }
+      if (w->kind_n[0]) {
+         g += snprintf(got + g, sizeof got - g, "%snon-mouse=%lu",
+                       g ? " " : "", w->kind_n[0]);
+      }
+      EP("[ev]   handler #%d %-6s registered[%s] got[%s]%s\n", w->idx,
+         w->is_halo ? "HALO" : "SYSTEM", reg, g ? got : "NOTHING",
+         (w->is_halo && w->reg_n && w->reg_kind[0] == kEventMouseDown
+          && w->kind_n[kEventMouseDown] == 0)
+            ? "   <-- registered for mouse-DOWN and NEVER got one" : "");
+   }
    EP("[ev] SYSTEM handler on mouse-down: %lu\n", n_sys_mousedown);
    EP("[ev] ConvertEventRefToEventRecord: %lu (%lu returned FALSE)\n",
       n_convert, n_convert_fail);
