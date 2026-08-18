@@ -104,6 +104,16 @@ echo
 sed -n '/===== summary/,$p' "$OUT"
 
 echo
+echo "--- ★Multiprocessing: does a worker wait STALL? (report: ~1s freeze per selection) ---"
+if grep -q '^\[mp\]' "$OUT"; then
+  grep -E '^\[mp\] (MPCreate|MP waits|MPCreateTask calls|⚠)' "$OUT" | head -14 | sed 's/^/  /'
+  echo "  --- waits that BLOCKED ---"
+  grep 'BLOCKED' "$OUT" | head -8 | sed 's/^/  /'
+  [ "$(grep -c 'BLOCKED' "$OUT")" = "0" ] && echo "  (none — MP waits are not the stall)"
+else
+  echo "  no [mp] lines — Halo never used Multiprocessing Services this run"
+fi
+echo
 echo "--- classic button-state path (from Halo's stderr) ---"
 if grep -q '^\[input\]' "$OUT.app" 2>/dev/null; then
   grep -E '^\[input\] (=====|Button |GetCurrentEventButtonState |⚠)' "$OUT.app" | sed 's/^/  /'

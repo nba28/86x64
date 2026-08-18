@@ -475,6 +475,104 @@ static Boolean ep_WaitNextEvent(EventMask mask, EventRecord *out,
    return r;
 }
 
+/* ---------------------------------------------------------------------------
+ * MULTIPROCESSING SERVICES.
+ *
+ * ★Report: "every time I select a different main menu item, whether with keyboard
+ * or mouse, Halo freezes for about a second (the moving backdrop stops)."
+ *
+ * A ~1s stall on a UI action that should be instant is the signature of a WAIT
+ * TIMING OUT, and Halo imports the whole MP family: MPCreateTask, MPCreateQueue,
+ * MPCreateSemaphore, MPCreateEvent, MPSetEvent, MPWaitForEvent, MPWaitOnQueue,
+ * MPWaitOnSemaphore. That suggests ONE cause for BOTH symptoms: if worker tasks
+ * never run (MPCreateTask failing) or their completion is never signalled, then
+ * every operation that hands work to a worker and waits blocks until its
+ * timeout — the highlight change stalls for the timeout and then continues, and
+ * the ACTIVATION waits for a result that never arrives and quietly does nothing.
+ *
+ * Multiprocessing Services is ancient even by Carbon standards, so "does it
+ * still work at all on this OS" is a real question and not a rhetorical one.
+ * Every create is logged with its result and every wait is TIMED, because a
+ * wait that returns the right code after a second is just as broken as one that
+ * fails, and only the clock tells them apart.
+ *
+ * Duration is SInt32 milliseconds when positive and MICROSECONDS when negative
+ * (kDurationMicrosecond = -1), so the raw value is printed as well as its
+ * meaning — a sign or scale error there turns a 1 ms wait into a 1 s freeze,
+ * which is precisely the reported symptom.
+ */
+/* Signatures come from CarbonCore/Multiprocessing.h, which is still present. */
+static unsigned long n_mp_task, n_mp_task_fail, n_mp_wait, n_mp_slow;
+static double        mp_slowest;
+
+static void mp_dur(char *out, size_t n, Duration d) {
+   if (d == 0)           snprintf(out, n, "0 (immediate)");
+   else if (d == 0x7fffffff) snprintf(out, n, "forever");
+   else if (d < 0)       snprintf(out, n, "%d us", -d);
+   else                  snprintf(out, n, "%d ms", d);
+}
+
+/* One reporter for all the waits: log the first few, and ALWAYS log a wait that
+ * blocked long enough for a human to see it. */
+static void mp_report(const char *who, Duration timeout, OSStatus r, double dt) {
+   n_mp_wait++;
+   const int slow = dt > 0.10;
+   if (slow) { n_mp_slow++; if (dt > mp_slowest) { mp_slowest = dt; } }
+   if (n_mp_wait <= 6 || slow) {
+      char d[32]; mp_dur(d, sizeof d, timeout);
+      EP("[mp] %-18s timeout=%-14s -> %-6d after %.3fs%s\n",
+         who, d, (int)r, dt,
+         slow ? "   <-- BLOCKED (a stall a human would notice)" : "");
+   }
+}
+
+static OSStatus ep_MPCreateTask(TaskProc e, void *p, ByteCount ss, MPQueueID nq,
+                                void *t1, void *t2, MPTaskOptions o,
+                                MPTaskID *task) {
+   const OSStatus r = MPCreateTask(e, p, ss, nq, t1, t2, o, task);
+   n_mp_task++;
+   if (r != noErr) { n_mp_task_fail++; }
+   EP("[mp] MPCreateTask entry=%p stack=%lu -> %d%s\n", (void *)e, (unsigned long)ss,
+      (int)r, r == noErr ? "" : "   <-- FAILED: this worker will never run");
+   return r;
+}
+static OSStatus ep_MPCreateEvent(MPEventID *ev) {
+   const OSStatus r = MPCreateEvent(ev);
+   EP("[mp] MPCreateEvent -> %d (id=%p)\n", (int)r, ev ? (void *)*ev : NULL);
+   return r;
+}
+static OSStatus ep_MPCreateQueue(MPQueueID *q) {
+   const OSStatus r = MPCreateQueue(q);
+   EP("[mp] MPCreateQueue -> %d (id=%p)\n", (int)r, q ? (void *)*q : NULL);
+   return r;
+}
+static OSStatus ep_MPCreateSemaphore(MPSemaphoreCount mx, MPSemaphoreCount in,
+                                     MPSemaphoreID *sm) {
+   const OSStatus r = MPCreateSemaphore(mx, in, sm);
+   EP("[mp] MPCreateSemaphore(max=%u init=%u) -> %d\n", (unsigned)mx,
+      (unsigned)in, (int)r);
+   return r;
+}
+static OSStatus ep_MPWaitForEvent(MPEventID ev, MPEventFlags *fl, Duration to) {
+   const double t0 = ep_now();
+   const OSStatus r = MPWaitForEvent(ev, fl, to);
+   mp_report("MPWaitForEvent", to, r, ep_now() - t0);
+   return r;
+}
+static OSStatus ep_MPWaitOnQueue(MPQueueID q, void **a, void **b, void **c,
+                                 Duration to) {
+   const double t0 = ep_now();
+   const OSStatus r = MPWaitOnQueue(q, a, b, c, to);
+   mp_report("MPWaitOnQueue", to, r, ep_now() - t0);
+   return r;
+}
+static OSStatus ep_MPWaitOnSemaphore(MPSemaphoreID sm, Duration to) {
+   const double t0 = ep_now();
+   const OSStatus r = MPWaitOnSemaphore(sm, to);
+   mp_report("MPWaitOnSemaphore", to, r, ep_now() - t0);
+   return r;
+}
+
 static void ep_atexit(void) {
    EP("\n[ev] ===== summary =====\n");
    EP("[ev] InstallEventHandler calls : %lu\n", n_install);
@@ -485,6 +583,14 @@ static void ep_atexit(void) {
    EP("[ev] mouse UP   received       : %lu\n", n_mouseup);
    EP("[ev] mouse MOVED received      : %lu\n", n_mousemoved);
    EP("[ev] KEYBOARD events received  : %lu\n", n_key);
+   EP("[mp] MPCreateTask calls        : %lu  (%lu FAILED)\n",
+      n_mp_task, n_mp_task_fail);
+   EP("[mp] MP waits                  : %lu  (%lu blocked >0.10s, worst %.3fs)\n",
+      n_mp_wait, n_mp_slow, mp_slowest);
+   if (n_mp_slow) {
+      EP("[mp] ⚠MP waits ARE stalling - that is the freeze, and a menu action "
+         "that waits the same way would silently do nothing\n");
+   }
    EP("[ev] app handler ran on a down : %lu\n", n_handler_mousedown);
    EP("[ev] HALO'S handler entered     : %lu  (on mouse-down: %lu)\n",
       n_halo_handler, n_halo_mousedown);
@@ -529,4 +635,11 @@ ep_interposers[] __attribute__((section("__DATA,__interpose"))) = {
    { (const void *)ep_ConvertEventRefToEventRecord,
      (const void *)ConvertEventRefToEventRecord },
    { (const void *)ep_WaitNextEvent,          (const void *)WaitNextEvent },
+   { (const void *)ep_MPCreateTask,           (const void *)MPCreateTask },
+   { (const void *)ep_MPCreateEvent,          (const void *)MPCreateEvent },
+   { (const void *)ep_MPCreateQueue,          (const void *)MPCreateQueue },
+   { (const void *)ep_MPCreateSemaphore,      (const void *)MPCreateSemaphore },
+   { (const void *)ep_MPWaitForEvent,         (const void *)MPWaitForEvent },
+   { (const void *)ep_MPWaitOnQueue,          (const void *)MPWaitOnQueue },
+   { (const void *)ep_MPWaitOnSemaphore,      (const void *)MPWaitOnSemaphore },
 };
