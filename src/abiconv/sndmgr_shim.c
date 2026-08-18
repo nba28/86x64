@@ -335,6 +335,24 @@ static void desc_to_asbd(const struct snd_ch *c, const snd_pcm_desc *d,
  * returning 0; a flat one falsifies it and the silence is written elsewhere.
  * i386 0x406c24 is in __bss -> translated 0x10a9d4e4 (0x10a3f000 + 0x5e4e4). */
 #define DECODE_UNDERRUN_CTR   0x10a9d4e4u
+/* ★THE VORBIS STREAM STATE, all reachable from the voice record. The decoder's
+ * `state` argument is R+0xa4 (0x248d9b `leal 0xa4(%eax),%edx`, parked in
+ * -0x6c(%ebp) and passed at 0x249185), and inside it:
+ *   +0x588  byte  set to 1 ONLY if ov_open_callbacks succeeded (0x246a0b);
+ *                 on failure 0x246a07 returns 0 and the flag stays 0
+ *   +0x589  byte  selects WHICH of two stream objects is live (double-buffered)
+ *   +0x58c  the datasource for stream A, and +0x59c for stream B, each laid out
+ *           by the read callback at 0x246b3a as
+ *              [0] offset   [4] base   [8] size   [0xc] EOF flag
+ *           read_func returns 0 when the EOF flag is set (0x246b59) or when the
+ *           request runs past size, which is precisely what libvorbisfile
+ *           reports upward as end-of-stream.
+ * So offset/size/eof say exactly how far the bitstream reader got, and the
+ * ov_open flag says whether it ever started. */
+#define VS_OVOPEN_OK      0x62c    /* R+0xa4+0x588 */
+#define VS_STREAM_SEL     0x62d    /* R+0xa4+0x589 */
+#define VS_DS_A           0x630    /* R+0xa4+0x58c: off/base/size/eof */
+#define VS_DS_B           0x640    /* R+0xa4+0x59c */
 #define SOUND_CACHE_SIZE_MB   16u
 
 /* Slide of the image whose name ends in "Halo.dylib", or 0 if absent. Resolved
@@ -604,6 +622,34 @@ static void snd_cursor_sweep(void) {
                             : (scanned == 0 ? "   <-- not scanned"
                                        : (peak == 0 ? "   <-- SOURCE IS SILENT" : "")));
             }
+         }
+      }
+      /* ★VORBIS STREAM STATE for any voice that has a source. Reported on
+       * change, so a stalled reader shows as one line and a working one as a
+       * running tally. This is the measurement that separates "ov_open never
+       * succeeded" from "it opened and the reader hit the end of its chunk and
+       * nobody refilled it" — the two remaining explanations for an ov_read
+       * that reports EOF on a bitstream we PROVED starts with a valid OggS. */
+      if (*(const uint32_t *)(R + VOICE_OFF_SOURCE)) {
+         static uint32_t last_off[VOICE_SCAN_MAX];
+         static uint8_t  vs_seen[VOICE_SCAN_MAX];
+         uint8_t  ok  = *(const uint8_t  *)(R + VS_OVOPEN_OK);
+         uint8_t  sel = *(const uint8_t  *)(R + VS_STREAM_SEL);
+         const uint8_t *ds = R + (sel ? VS_DS_A : VS_DS_B);
+         uint32_t off  = *(const uint32_t *)(ds + 0);
+         uint32_t base = *(const uint32_t *)(ds + 4);
+         uint32_t dsz  = *(const uint32_t *)(ds + 8);
+         uint8_t  eof  = *(const uint8_t  *)(ds + 12);
+         if (!vs_seen[i] || off != last_off[i]) {
+            TR("vorbis: voice=%u ov_open_ok=%u sel=%u ds{off=%u base=0x%x "
+               "size=%u eof=%u}%s\n", i, ok, sel, off, base, dsz, eof,
+               !ok  ? "   <-- ★ov_open FAILED: the decoder never started"
+               : (off == 0 && !eof)
+                    ? "   <-- reader has consumed NOTHING"
+               : (eof || (dsz && off >= dsz))
+                    ? "   <-- chunk EXHAUSTED and not refilled -> read_func returns 0"
+                    : "");
+            last_off[i] = off; vs_seen[i] = 1;
          }
       }
       /* Underrun counter, reported on change. Global, not per-voice, so it is
