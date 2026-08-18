@@ -306,6 +306,21 @@ static void desc_to_asbd(const struct snd_ch *c, const snd_pcm_desc *d,
  * correctly rebased, so the SIZE is not the defect; what remains unknown at rest
  * is whether src->data actually lands inside the live cache allocation.
  * i386 0x3b164c is in __bss, translated to 0x10a47f0c (+ dyld slide). */
+/* The 28 MB reservation the cache is carved out of, and the sub-allocator's
+ * other chunk. Halo does mmap(0x40000000, 0x1b40000, flags=0x1012 =
+ * MAP_ANON|MAP_FIXED|MAP_PRIVATE) at 0xc505c and then REQUIRES the result to be
+ * exactly 0x40000000 (`cmpl $0x40000000,%eax` at 0xc5077), taking an error path
+ * at 0xc508d otherwise. Everything the sound path allocates — the 16 MB cache
+ * the range check bounds — is sub-allocated from it at 0xcb0b4.
+ * ⚠MAP_FIXED is DESTRUCTIVE, and 0x40000000 lies inside libabiconv's own
+ * anonymous-mmap band [0x10000000, 0x80000000). Our band places with
+ * mach_vm_allocate + VM_FLAGS_FIXED, which fails rather than clobbers, so we
+ * cannot stomp Halo — but Halo can stomp us. Logging the actual result settles
+ * whether the reservation landed where Halo demands.
+ * i386 0x3b1640 -> translated 0x10a47f00 (__bss + 0x8f00). */
+#define SOUND_RESERVE_PTR     0x10a47f00u
+#define SOUND_RESERVE_WANT    0x40000000u
+#define SOUND_RESERVE_SIZE    0x1b40000u
 #define SOUND_CACHE_BASE_PTR  0x10a47f0cu
 #define SOUND_CACHE_SIZE_MB   16u
 
@@ -528,6 +543,14 @@ static void snd_cursor_sweep(void) {
                      scanned = n * 2;
                   }
                }
+               const uint32_t *rp =
+                  (const uint32_t *)i386_ptr((uint32_t)(SOUND_RESERVE_PTR + sl));
+               uint32_t resv = rp ? *rp : 0;
+               TR("reserve: got=0x%x want=0x%x size=0x%x %s\n",
+                  resv, SOUND_RESERVE_WANT, SOUND_RESERVE_SIZE,
+                  resv == SOUND_RESERVE_WANT
+                     ? "OK (Halo's fixed reservation landed)"
+                     : "   <-- ★NOT AT THE DEMANDED ADDRESS: 0xc5077 takes its error path");
                TR("srcdata: voice=%u data=0x%x len=%u cachesz=%u base=0x%x "
                   "limit=0x%llx in_range=%d peak=%u scanned=%u%s\n",
                   i, data, len, csz, cbase, (unsigned long long)climit,
