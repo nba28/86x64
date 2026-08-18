@@ -643,22 +643,119 @@ namespace MachO {
       const std::size_t sect_lo = cs.addr;
       const std::size_t sect_hi = cs.addr + cs.size;
 
-      bool contradicted = false, corroborated = false;
-      for (int delta : {-4, +4}) {
-         const std::size_t nb_vm = (std::size_t)((std::ptrdiff_t)loc.vmaddr + delta);
-         /* Stay strictly inside the section the slot lives in: a word beyond it
-          * belongs to a different object and says nothing about this run. */
-         if (nb_vm < sect_lo || nb_vm + 4 > sect_hi) { continue; }
-         const std::size_t nb_off = (std::size_t)((std::ptrdiff_t)loc.offset + delta);
-         const std::size_t nb = (std::size_t)img.at<uint32_t>(nb_off);
-         if (!vmaddr_in_instructions_sect(nb)) { continue; }   /* says nothing */
-         if (code_interior_alias(nb)) {
-            contradicted = true;   /* a non-boundary: this run is not a table */
-         } else {
-            corroborated = true;   /* a real boundary: consistent with a table */
+      /* ★RUN-WIDE, not just the two immediate neighbours — and that widening is
+       * the whole gate, because the ±4 form is STRUCTURALLY BLIND to a packed
+       * u16-pair table. Such a table is a contiguous run of code-aliasing words
+       * in which each word lands mid-instruction or on a boundary essentially
+       * at random, so a typical entry has one contradicting AND one
+       * corroborating neighbour and the `!corroborated` veto fires every time.
+       *
+       * MEASURED on Halo CE, the vertex-STRIDE table at i386 0x34e280 in
+       * __TEXT,__const — 20 u16 strides indexed by vertex format, i.e. 10
+       * words, delimited by 1.0f floats below and zeros above:
+       *     0x34e280 (56,32)  BOUNDARY   0x34e290 (24,16)  interior
+       *     0x34e284 (20, 8)  BOUNDARY   0x34e294 (16,20)  interior
+       *     0x34e288 (68,32)  interior   0x34e298 (32, 8)  interior
+       *     0x34e28c (24,36)  interior   0x34e29c (32,32)  BOUNDARY
+       *                                  0x34e2a0 (36,28)  BOUNDARY
+       *                                  0x34e2a4 (32,40)  interior
+       * Six of the ten are proven mid-instruction, yet ALL FOUR boundary words
+       * are corroborated by a boundary neighbour, so the ±4 test cannot fire on
+       * any of them. Two were then rebased — (20,8) -> 0x1009e312 and (32,32)
+       * -> 0x102a780f — so format 15's stride 32 read back as 4138. The vertex
+       * walk stepped 4138 bytes per vertex through the menu geometry and every
+       * animated 3D object in the background smeared. (The two survivors were
+       * saved by the record-field gate below, which is positional and happens
+       * to see this shape from a different angle; it is not reliable here.)
+       *
+       * The run-wide rule is EXACT, not a threshold: a switch jump table is a
+       * run of branch targets, and a branch target is an instruction boundary
+       * by construction, so a genuine table contains ZERO interior entries. One
+       * proven interior anywhere in the run therefore falsifies the entire run
+       * — a table cannot contradict itself, so this can never demote a real
+       * one however its entries are arranged.
+       *
+       * ★ONLY code_interior_alias MAY VOTE, for the reason the record-field
+       * gate's header records at length: the entry-evidence heuristics are ones
+       * jump tables are DELIBERATELY exempt from (their targets are basic-block
+       * heads with no symbol and no prologue), so letting those vote makes every
+       * table entry declassify every other and the blast radius was 8721 words.
+       * A mid-instruction address, by contrast, is not a legal branch target on
+       * any control path — that is arithmetic about the decode, not evidence
+       * about a symbol.
+       *
+       * ★THE MEASURE IS THE ALL-BOUNDARY BLOCK, NOT THE WHOLE RUN. A first cut
+       * that fired on "any proven interior anywhere in the surrounding run"
+       * DEMOTED THREE GENUINE JUMP TABLES on Halo (64, 56 and 44 entries at
+       * 0x34a5c8 / 0x357b60 / 0x34406c, every single target a boundary and all
+       * of them clustered inside one function) — because a wide window happily
+       * runs off the end of a real table into whatever packed data abuts it.
+       * The object boundary has to be found, not assumed.
+       *
+       * So walk outward through BOUNDARY words only and stop at the first word
+       * that is not one. That block is the candidate object, and the two shapes
+       * separate by an enormous margin — measured on Halo:
+       *     stride-table words   block =   2   .............B[B]iiiiiBBi......
+       *     jump tables          block = 278, 56, 44   BBBBBBBB[B]BBBBBBBB
+       * A switch table IS its all-boundary block, so it is long and its ends
+       * are the ends of the object. A packed u16 pair that merely happens to
+       * land on a boundary sits in a tiny block wedged between words that are
+       * PROVEN mid-instruction — and a mid-instruction word cannot be part of
+       * any table, so it is a real object edge, not a coincidence.
+       *
+       * Two conditions, both required:
+       *   - the block is terminated by a proven INTERIOR word on at least one
+       *     side. Terminating on a float/zero/section edge is not evidence: that
+       *     is exactly how a genuine table ends too.
+       *   - the block is shorter than any switch table a compiler would emit in
+       *     preference to a compare chain. The observed margin is 2 vs 44, so
+       *     this threshold is nowhere near either population. */
+      static const bool narrow =
+         std::getenv("M64_JT_COHESION_NEIGHBOURS_ONLY") != nullptr;
+      static const char *blkenv = std::getenv("M64_JT_COHESION_MAX_BLOCK");
+      const int max_block = blkenv ? std::atoi(blkenv) : 3;
+      const int window = 512;   /* cap: keeps the walk O(1) */
+
+      if (narrow) {   /* legacy +-4 form, kept for A/B */
+         bool contradicted = false, corroborated = false;
+         for (int delta : {-4, +4}) {
+            const std::size_t nb_vm =
+               (std::size_t)((std::ptrdiff_t)loc.vmaddr + delta);
+            if (nb_vm < sect_lo || nb_vm + 4 > sect_hi) { continue; }
+            const std::size_t nb_off =
+               (std::size_t)((std::ptrdiff_t)loc.offset + delta);
+            const std::size_t nb = (std::size_t)img.at<uint32_t>(nb_off);
+            if (!vmaddr_in_instructions_sect(nb)) { continue; }
+            if (code_interior_alias(nb)) { contradicted = true; }
+            else { corroborated = true; }
+         }
+         return contradicted && !corroborated;
+      }
+
+      int block = 1;                    /* the slot itself is a boundary */
+      bool interior_edge = false;
+      for (int dir : {-1, +1}) {
+         for (int step = 1; step <= window; ++step) {
+            const std::ptrdiff_t delta = (std::ptrdiff_t)dir * step * 4;
+            const std::size_t nb_vm =
+               (std::size_t)((std::ptrdiff_t)loc.vmaddr + delta);
+            /* Stay strictly inside the section the slot lives in: a word beyond
+             * it belongs to a different object and says nothing about this
+             * run. The section edge is NOT interior evidence. */
+            if (nb_vm < sect_lo || nb_vm + 4 > sect_hi) { break; }
+            const std::size_t nb_off =
+               (std::size_t)((std::ptrdiff_t)loc.offset + delta);
+            const std::size_t nb = (std::size_t)img.at<uint32_t>(nb_off);
+            if (!vmaddr_in_instructions_sect(nb)) { break; }  /* object edge */
+            if (code_interior_alias(nb)) {
+               interior_edge = true;    /* a PROVEN non-target ends the block */
+               break;
+            }
+            ++block;                    /* still inside the all-boundary block */
+            if (block > max_block) { return false; }   /* too long: a table */
          }
       }
-      return contradicted && !corroborated;
+      return interior_edge && block <= max_block;
    }
 
    template <Bits bits>
