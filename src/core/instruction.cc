@@ -593,12 +593,46 @@ namespace MachO {
                if (has_imm32 || has_small_imm) {
                   md = xed_decoded_inst_get_memory_displacement(operands, i);
                   dbg_orig_md = (std::size_t) md;
+                  /*
+                   * Does the disp32 name DATA (=> it is an address that must be
+                   * relocated)?  The type allowlist below used to be
+                   * S_REGULAR/S_ZEROFILL/S_GB_ZEROFILL only, which silently
+                   * excluded every LITERAL POOL: __literal4 is S_4BYTE_LITERALS,
+                   * __literal8 is S_8BYTE_LITERALS, __cstring is
+                   * S_CSTRING_LITERALS -- all of them DATA, none of them
+                   * S_REGULAR.  So a float compare against a pooled constant
+                   * (`cmpss xmm,[abs32],imm8`) kept its i386 ABSOLUTE
+                   * displacement; since ModR/M mod=00 r/m=101 means absolute in
+                   * 32-bit but RIP-RELATIVE in 64-bit, the emitted instruction
+                   * silently read whatever byte sat at that offset from rip.
+                   * Measured in Halo CE: four float compares reading __text,
+                   * __DATA,__data and our own __86x64_pcmap instead of 0.0f,
+                   * -0.05f and 0.0005f.
+                   *
+                   * A literal pool is data BY SECTION TYPE and can never hold
+                   * instructions, so admitting the pool types is safe as well as
+                   * correct -- and it keys on the section TYPE, not its name, so
+                   * it holds whatever a compiler calls its pools.  The
+                   * pre-existing types stay exactly as they were: this WIDENS the
+                   * gate, it does not redraw it.  Guard: tests-i386
+                   * literal_abs_disp_test.sh.
+                   */
+                  static const bool literal_abs_off =
+                     std::getenv("M64_NO_LITERAL_ABS_DISP") != nullptr;
+                  bool md_found = false;
                   for (auto *seg : env.archive.segments()) {
                      for (auto *sect : seg->sections) {
                         if (!sect->contains_vmaddr((std::size_t) md)) continue;
                         const uint32_t stype = sect->sect.flags & SECTION_TYPE;
+                        const bool pool =
+                           stype == S_CSTRING_LITERALS ||
+                           stype == S_4BYTE_LITERALS ||
+                           stype == S_8BYTE_LITERALS ||
+                           stype == S_16BYTE_LITERALS ||
+                           stype == S_LITERAL_POINTERS;
                         dest_is_data = (stype == S_REGULAR || stype == S_ZEROFILL
-                                        || stype == S_GB_ZEROFILL);
+                                        || stype == S_GB_ZEROFILL
+                                        || (pool && !literal_abs_off));
                         /* capture for DBG_SMALLIMM */
                         std::strncpy(dbg_segname, seg->segment_command.segname,
                                      sizeof(dbg_segname) - 1);
@@ -606,9 +640,23 @@ namespace MachO {
                                      sizeof(dbg_sectname) - 1);
                         dbg_flags = sect->sect.flags;
                         dbg_matched = true;
+                        md_found = true;
                         break;
                      }
-                     if (dest_is_data) break;
+                     /* stop at the CONTAINING section: sections do not overlap,
+                        so a later segment cannot supersede this verdict. */
+                     if (md_found) break;
+                  }
+                  if (std::getenv("DBG_MDSECT")) {
+                     const char *want = std::getenv("DBG_MDSECT");
+                     if (want[0] == '*' ||
+                         (std::size_t) md == (std::size_t) strtoull(want, nullptr, 0)) {
+                        std::fprintf(stderr, "[mdsect] bits=%d vm=0x%zx md=0x%zx "
+                           "seg=%.16s sect=%.16s flags=0x%08x found=%d data=%d\n",
+                           bits == Bits::M32 ? 32 : 64, (std::size_t) loc.vmaddr,
+                           (std::size_t) md, dbg_segname, dbg_sectname, dbg_flags,
+                           md_found ? 1 : 0, dest_is_data ? 1 : 0);
+                     }
                   }
                }
                if (has_imm32 && dest_is_data) {

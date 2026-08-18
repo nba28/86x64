@@ -1,0 +1,3 @@
+literal: 1111  data: 11  data_sentinel=1234abcd
+ok: literal-pool and __DATA absolute displacements both relocated
+exit_code: 0
