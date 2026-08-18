@@ -277,6 +277,37 @@ static void desc_to_asbd(const struct snd_ch *c, const snd_pcm_desc *d,
 #define DSBUF_OFF_BASE    0x38
 #define DSBUF_OFF_SIZE    0x40
 #define DSBUF_OFF_PLAY    0x98
+/* Source descriptor hung off the voice, and the u16 the mixer dispatches on.
+ * 0x248de3 `movzwl 0x28(%ecx),%eax` with ecx = *(R+0x94): 1 or 0 -> 0x248fb8,
+ * 3 -> 0x248e05, anything else -> 0x248fcb. So +0x28 is a FORMAT selector. */
+#define SRC_OFF_TYPE      0x28
+/* dsbuf vtable slots the sound path uses, by their byte offsets in the vtable:
+ * 0x10 = slot 4  = GetCurrentPosition (0x24c35d calls *0x10(%ebx))
+ * 0x2c = slot 11 = Lock               (0x248d58 calls *0x2c(%ebx))
+ * ★Lock's return is tested `js` at 0x248d5b and a FAILURE returns 0 from the
+ * mixer at 0x249a98 — silently. Capturing the implementation address lets that
+ * routine be disassembled instead of guessed at. */
+#define VTBL_OFF_GETPOS   0x10
+#define VTBL_OFF_LOCK     0x2c
+/* Source descriptor fields, from the mixer's own PCM copy path (0x249005):
+ *   0x30 = sample DATA base   (0x249077 `addl 0x30(%edx),%eax` -> memcpy src)
+ *   0x38 = total LENGTH       (0x249008 `movl 0x38(%edi),%eax`, minus read off)
+ *   0x40 = size used by the CACHE-RANGE CHECK (0x24902a) */
+#define SRC_OFF_DATA      0x30
+#define SRC_OFF_LEN       0x38
+#define SRC_OFF_CACHESZ   0x40
+/* ★THE CACHE-RANGE CHECK, which can skip the memcpy entirely and is therefore a
+ * complete explanation for an all-zero ring. At 0x249018..0x249042:
+ *     base  = *(uint32 *)0x3b164c              (getter 0xc51aa)
+ *     limit = base + (*(int16 *)*(0x5b50dc) << 20)
+ *     if (src->data < base)                 -> error path, NO memcpy
+ *     if (src->data + src->[0x40] > limit)  -> error path, NO memcpy
+ * The 16 MB size and the 0x5b50dc pointer slot were both verified statically as
+ * correctly rebased, so the SIZE is not the defect; what remains unknown at rest
+ * is whether src->data actually lands inside the live cache allocation.
+ * i386 0x3b164c is in __bss, translated to 0x10a47f0c (+ dyld slide). */
+#define SOUND_CACHE_BASE_PTR  0x10a47f0cu
+#define SOUND_CACHE_SIZE_MB   16u
 
 /* Slide of the image whose name ends in "Halo.dylib", or 0 if absent. Resolved
  * once. Structural (a name suffix), not a path, so a moved bundle still works. */
@@ -401,6 +432,94 @@ static void snd_cursor_sweep(void) {
                i, dsbuf, base, size, play);
          }
          continue;
+      }
+      /* ★SOURCE FORMAT + VTABLE, once per voice. The whole-buffer probe proved
+       * the music ring is written with pure silence while the SFX ring carries
+       * audio, so the live question is what the RUNNING mixer reads. It
+       * dispatches on *(u16 *)(src + 0x28), and Halo bundles libVorbis for its
+       * music while its SFX are uncompressed — so if the two voices report
+       * DIFFERENT type codes, that is the compressed-vs-PCM split and names the
+       * decode path that is producing zeros. Same type on both would kill that
+       * reading outright.
+       *
+       * The vtable slots are logged as offsets into Halo.dylib so Lock can be
+       * DISASSEMBLED. That matters because a failing Lock is indistinguishable
+       * from a working one at this level: 0x248d5b tests it with `js` and the
+       * failure path at 0x249a98 returns 0 silently, while the CALLER advances
+       * wr_off regardless (0x24c4ec). An advancing wr_off therefore proves
+       * nothing about whether audio was written — which is exactly the trap the
+       * previous reading fell into. */
+      if (!cseen[i]) {
+         uint32_t src = *(const uint32_t *)(R + VOICE_OFF_SOURCE);
+         const uint8_t *vt = (const uint8_t *)i386_ptr(*(const uint32_t *)db);
+         /* Halo.dylib's __TEXT vmaddr is 0x10000000 (verified in the linked
+          * dylib), so the runtime image base is that plus dyld's slide. NOT
+          * the __common delta baked into VOICE_ARRAY_TRANS — that one maps
+          * i386 __common addresses and would give a nonsense TEXT offset. */
+         int  have2 = 0;
+         intptr_t sl = halo_image_slide(&have2);
+         unsigned long imgb = (unsigned long)(0x10000000L + sl);
+         if (src) {
+            const uint8_t *sp = (const uint8_t *)i386_ptr(src);
+            TR("srctype: voice=%u state=%u src=0x%x type(+0x28)=%u\n",
+               i, st, src, sp ? *(const uint16_t *)(sp + SRC_OFF_TYPE) : 0xffffu);
+         } else {
+            TR("srctype: voice=%u state=%u src=0 (no source descriptor)\n", i, st);
+         }
+         if (vt) {
+            unsigned long getpos = *(const uint32_t *)(vt + VTBL_OFF_GETPOS);
+            unsigned long lock   = *(const uint32_t *)(vt + VTBL_OFF_LOCK);
+            TR("dsvtbl: voice=%u GetCurrentPosition=0x%lx (Halo+0x%lx) "
+               "Lock=0x%lx (Halo+0x%lx)\n", i,
+               getpos, getpos > imgb ? getpos - imgb : 0UL,
+               lock,   lock   > imgb ? lock   - imgb : 0UL);
+         }
+         /* ★THE SOURCE ITSELF. The whole-buffer probe proved the DESTINATION
+          * ring is all zeros; this asks the same question of the SOURCE, and
+          * evaluates the cache-range check the mixer applies before copying.
+          * Three outcomes, all decisive:
+          *   range FAILS            -> the mixer takes its error path and never
+          *                             copies. Complete explanation, and the
+          *                             defect is whatever put the data outside
+          *                             the cache.
+          *   range ok, src SILENT   -> the copy is legitimate but there is
+          *                             nothing to copy: the decode/load never
+          *                             filled it. Hunt moves upstream.
+          *   range ok, src HAS AUDIO-> the copy should be producing sound, and
+          *                             the destination measurement and this one
+          *                             contradict — rethink required.
+          * Same discipline as the dsprobe: report only what can be corroborated,
+          * and never dereference a pointer that fails its own sanity test. */
+         if (src) {
+            const uint8_t *sp = (const uint8_t *)i386_ptr(src);
+            if (sp) {
+               uint32_t data = *(const uint32_t *)(sp + SRC_OFF_DATA);
+               uint32_t len  = *(const uint32_t *)(sp + SRC_OFF_LEN);
+               uint32_t csz  = *(const uint32_t *)(sp + SRC_OFF_CACHESZ);
+               const uint32_t *bp =
+                  (const uint32_t *)i386_ptr((uint32_t)(SOUND_CACHE_BASE_PTR + sl));
+               uint32_t cbase = bp ? *bp : 0;
+               uint64_t climit = (uint64_t)cbase +
+                                 ((uint64_t)SOUND_CACHE_SIZE_MB << 20);
+               int in_range = cbase && data >= cbase &&
+                              (uint64_t)data + csz <= climit;
+               uint32_t peak = 0;
+               const int16_t *sd = (const int16_t *)i386_ptr(data);
+               if (sd && len && len <= (32u << 20)) {
+                  uint32_t n = len / 2; if (n > 200000u) { n = 200000u; }
+                  for (uint32_t k = 0; k < n; k++) {
+                     int32_t x = sd[k]; if (x < 0) { x = -x; }
+                     if ((uint32_t)x > peak) { peak = (uint32_t)x; }
+                  }
+               }
+               TR("srcdata: voice=%u data=0x%x len=%u cachesz=%u base=0x%x "
+                  "limit=0x%llx in_range=%d peak=%u%s\n",
+                  i, data, len, csz, cbase, (unsigned long long)climit,
+                  in_range, peak,
+                  !in_range ? "   <-- OUT OF CACHE RANGE: mixer skips the memcpy"
+                            : (peak == 0 ? "   <-- SOURCE IS SILENT" : ""));
+            }
+         }
       }
       if (cseen[i] && play == last_play[i] && wroff == last_wroff[i]) { continue; }
       TR("cursor: voice=%u state=%u play=%u wr_off=%u delta=%d size=%u "
