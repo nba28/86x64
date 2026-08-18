@@ -4,15 +4,18 @@
 # passes to the texture-upload entry points, and what pixel-store state is in
 # force when it does.
 #
-# THE QUESTION. Halo's ANIMATED menu background textures render as a DIAGONAL
-# SHEAR while pre-rendered stills, the HALO logo and all menu text are correct.
-# A shear is the signature of a ROW-PITCH mismatch. Three candidates:
-#   (a) wrong width/height/format reaching glTex(Sub)Image2D
-#   (b) a GL_UNPACK_* setting that is wrong or never applied
-#   (c) correct GL parameters, but data laid out wrong UPSTREAM by a
-#       mistranslated decode/copy loop — in which case (a) and (b) look perfect
-# This run separates (a)/(b) from (c). That is the point: (c) is a completely
-# different hunt, and knowing which one we are in is worth a launch.
+# ★STATUS: THE HUNT THIS WAS BUILT FOR IS CLOSED (2026-08-18). The smeared 3D
+# menu background was NEVER a texture defect — it was the VERTEX-STRIDE TABLE at
+# i386 0x34e280 in __TEXT,__const, corrupted by rebasing because two packed u16
+# strides form a word that aliases a __text instruction boundary. Fixed in the
+# TRANSLATOR (6acb4ef, ParseEnv::code_alias_run_contradicted judges the
+# all-boundary BLOCK, not the two neighbours); runtime-proven 3d46938; guarded by
+# tests-i386 96_jt_cohesion.
+#
+# So the texture sections below are HISTORY, kept because the probe is still a
+# useful general GL diagnostic. The section that earned its keep is the
+# SetStreamSource / vertex-array capture, which is what localised the bug and
+# then proved it fixed (STRIDE=1434 -> 32 at the same call site).
 #
 # ⚠This does NOT touch libabiconv. It inserts a standalone diagnostic dylib that
 # interposes the real GL entry points — which works because the abigen bridge
@@ -79,8 +82,8 @@ echo "===== summary ====="
 # the RTTI trace and any shimgen stub warnings land, and throwing it away once
 # already cost us a lead.
 if [ -s "$LOG.app" ]; then
-  n=$(grep -c "__dynamic_cast" "$LOG.app" 2>/dev/null || echo 0)
-  st=$(grep -c "shimauto" "$LOG.app" 2>/dev/null || echo 0)
+  n=$(grep -c "__dynamic_cast" "$LOG.app" 2>/dev/null); n=${n:-0}
+  st=$(grep -c "shimauto" "$LOG.app" 2>/dev/null); st=${st:-0}
   echo "app stderr: $LOG.app  (dynamic_cast lines: $n, shimauto stubs: $st)"
 fi
 if [ ! -s "$LOG" ]; then
@@ -144,12 +147,16 @@ if grep -q '\[d3d\]' "$LOG.app" 2>/dev/null; then
   echo "--- ★SetStreamSource calls (which streams get a stride, and is it sane?) ---"
   grep '\[d3d\]' "$LOG.app" | sed 's/^/  /' | head -24
   echo
-  echo "  READ IT LIKE THIS:"
-  echo "   STRIDE sane (e.g. 32) on every call  -> (A) is dead: the caller is fine,"
-  echo "     and the draw must be reading a stream nobody ever set."
-  echo "   only ONE stream ever appears         -> (B) confirmed: the other stream's"
-  echo "     strides[] slot keeps uninitialised heap, which is the garbage we see."
-  echo "   STRIDE itself garbage                -> (A): hunt moves up to its caller."
+  echo "  READ IT LIKE THIS (all three were measured; the answer is recorded):"
+  echo "   Every caller sane (32 / 68 / 16) -> the state after 6acb4ef. Correct."
+  echo "   +0x2bdd19 passing garbage        -> the ORIGINAL defect: it derives its"
+  echo "     stride from the 0x34e280 table, which rebasing had corrupted."
+  echo "   strides[1] holding heap garbage  -> never observed. Only stream 0 is"
+  echo "     ever set, so the uninitialised-slot theory is DEAD, not untested."
+  echo "  ★Cross-check the [geo] block: for an interleaved vertex every array must"
+  echo "   report the SAME stride and the ptrs must step by the component sizes"
+  echo "   (12/12/8 = 32). That coherence is what proves a stride RIGHT, not just"
+  echo "   different from before."
 fi
 
 echo "--- distinct upload geometries (size/format) ---"
@@ -179,11 +186,13 @@ echo "--- VERDICT HINT ---"
 bad=$(grep -oE 'unpack\{row_len=[0-9-]+' "$LOG" | grep -vc 'row_len=0')
 if [ "$bad" -gt 0 ]; then
   echo "  $bad uploads ran with a NONZERO GL_UNPACK_ROW_LENGTH — inspect those against"
-  echo "  their upload width; a mismatch IS the shear (candidate b)."
+  echo "  their upload width; a mismatch would shear the IMAGE."
 else
   echo "  every upload ran with GL_UNPACK_ROW_LENGTH=0, so the row length is the"
-  echo "  upload width by definition and cannot shear the image."
-  echo "  => leans (c): the GL parameters are right and the PIXEL DATA is already"
-  echo "     sheared when Halo hands it over — i.e. the defect is upstream, in"
-  echo "     translated Halo code that decodes/copies the texture."
+  echo "  upload width by definition and cannot shear an image."
 fi
+echo "  ⚠Do NOT read that as 'the pixel data must therefore be wrong'. This probe"
+echo "  once concluded exactly that, and it was WRONG: the uploads were always"
+echo "  fine and the smearing came from the VERTEX STRIDE, which no amount of"
+echo "  pixel-store evidence could have pointed at. Read the [geo] and [d3d]"
+echo "  blocks above before forming any theory about the texture path."
