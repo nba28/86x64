@@ -921,9 +921,29 @@ static void d3d_stream_diag(const uint32_t *a, uint32_t dst_ti) {
    uint32_t s0 = 0, s1 = 0;
    cxx_diag_read32(self + 0xa0, &s0);
    cxx_diag_read32(self + 0xa4, &s1);
+   /* ★WHO CALLS SetStreamSource. The stride turns out to be transmitted
+    * FAITHFULLY — Halo really does ask for 768 while the array pointers
+    * describe a 32-byte vertex (pos@0, normal@12, uv@24). 768 = 24*32, i.e. the
+    * shape of a BUFFER SIZE standing where a stride belongs. So the defect is
+    * one level up, and its caller is what we need.
+    *
+    * Standard frame: saved ebp at [ebp], return address at [ebp+4]. Reported as
+    * a raw i386-space value AND, when it resolves, as Halo.dylib+offset. */
+   uint32_t ret = 0;
+   cxx_diag_read32(ebp + 4, &ret);
+   char site[128];
+   site[0] = 0;
+   Dl_info di;
+   if (ret && dladdr((void *)(uintptr_t)ret, &di) && di.dli_fname) {
+      const char *b = strrchr(di.dli_fname, '/');
+      snprintf(site, sizeof site, " caller=%s+0x%lx", b ? b + 1 : di.dli_fname,
+               (unsigned long)((uintptr_t)ret - (uintptr_t)di.dli_fbase));
+   } else if (ret) {
+      snprintf(site, sizeof site, " caller=%#x(raw)", ret);
+   }
    fprintf(stderr, "[d3d] SetStreamSource this=%#x stream=%u buf=%#x off=%u "
-           "STRIDE=%u  | strides[0]=%u strides[1]=%u\n",
-           self, stream, buf, off, stride, s0, s1);
+           "STRIDE=%u  | strides[0]=%u strides[1]=%u%s\n",
+           self, stream, buf, off, stride, s0, s1, site);
    fflush(stderr);
 }
 
