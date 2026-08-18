@@ -527,7 +527,13 @@ static void mp_dur(char *out, size_t n, Duration d) {
  * blocked long enough for a human to see it. */
 static void mp_report(const char *who, Duration timeout, OSStatus r, double dt) {
    n_mp_wait++;
-   const int slow = dt > 0.10;
+   /* A wait with NO deadline that returns success is a worker parked waiting
+    * for work — the healthiest thing in the process, not a stall. Counting it
+    * as one made the summary shout "MP waits ARE stalling" on runs where the
+    * only long waits were exactly that, which is how I mislabelled a correct
+    * MPWaitForEvent(forever) as a symptom for several runs. Only a bounded wait
+    * that ran long is evidence of anything. */
+   const int slow = dt > 0.10 && timeout != kDurationForever;
    if (slow) { n_mp_slow++; if (dt > mp_slowest) { mp_slowest = dt; } }
    if (n_mp_wait <= 6 || slow) {
       char d[32]; mp_dur(d, sizeof d, timeout);

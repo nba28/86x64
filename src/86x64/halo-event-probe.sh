@@ -205,6 +205,12 @@ echo "--- where the chain breaks ---"
 inst=$(grep -c 'InstallEventHandler #[0-9]* target' "$OUT" 2>/dev/null); inst=${inst:-0}
 down=$(sed -n 's/.*mouse DOWN received *: *//p' "$OUT" | tail -1); down=${down:-0}
 hand=$(sed -n "s/.*HALO'S handler entered *: *\\([0-9]*\\).*/\\1/p" "$OUT" | tail -1); hand=${hand:-0}
+# ★Use the ON-MOUSE-DOWN sub-count, not the total. The total counts mouse-MOVED
+# entries too, and on every run so far it has equalled the moved count exactly —
+# so testing it reported "the click reaches Halo" on runs where Halo's handler
+# had NEVER been entered for a single button press. The question here is about
+# clicks; only the click sub-count can answer it.
+hdown=$(sed -n "s/.*HALO'S handler entered.*(on mouse-down: *\\([0-9]*\\)).*/\\1/p" "$OUT" | tail -1); hdown=${hdown:-0}
 if [ "$inst" = "0" ]; then
   echo "  NO handler was ever installed ⇒ the break is BEFORE the event system."
   echo "  Look at NewEventHandlerUPP wrapping, or at Halo bailing out earlier."
@@ -213,19 +219,21 @@ elif [ "$down" = "0" ]; then
   echo "  ⇒ ReceiveNextEvent is not producing them. Either the app is not"
   echo "   pumping the queue, or the press is going somewhere else entirely"
   echo "   (a captured display / a different event target)."
-elif [ "$hand" = "0" ]; then
-  echo "  Mouse-DOWN events ARRIVED ($down) but the app's handler never ran on"
-  echo "  one. ⇒ dispatch is dropping them: wrong target, or the registered"
+elif [ "$hdown" = "0" ]; then
+  echo "  Mouse-DOWN events ARRIVED ($down) but HALO'S handler never ran on ONE"
+  echo "  of them (it was entered $hand times TOTAL — those are mouse-MOVED)."
+  echo "  ⇒ dispatch is dropping the presses: wrong target, or the registered"
   echo "   event types do not include this class/kind."
-elif [ "$hand" = "0" ]; then
+elif [ "$hdown" = "0" ]; then
   echo "  Mouse-DOWN events ARRIVED ($down) and were dispatched, but HALO'S OWN"
   echo "  HANDLER WAS NEVER ENTERED. ⇒ something else claims the event first,"
   echo "  or the dispatcher never routes it to Halo's target. Check whether the"
   echo "  classic path (ConvertEventRefToEventRecord / WaitNextEvent) is the one"
   echo "  Halo actually uses — the lines above say whether it is called at all."
 else
-  echo "  The click REACHES translated Halo code ($hand handler runs on a"
-  echo "  mouse-down). ⇒ the plumbing is fine and the click is lost INSIDE the"
+  echo "  The click REACHES translated Halo code ($hdown handler runs on a"
+  echo "  mouse-DOWN, out of $hand entries total). ⇒ the plumbing is fine and"
+  echo "  the click is lost INSIDE the"
   echo "  game. Next: compare the GetEventParameter(MouseLocation) coordinates"
   echo "  above against where the pointer actually was — highlight (GetMouse,"
   echo "  port-aware) and click (event coords) come from DIFFERENT sources, and"
