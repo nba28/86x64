@@ -210,14 +210,36 @@ static void tp_whocalled(const char *what) {
    static int done;
    if (done) return;
    done = 1;
+
+   /* Our immediate caller is always the abigen bridge (___glVertexPointer.l1),
+    * which tells us nothing. The interesting caller is HALO, and the bridge
+    * parks its return address in a known place:
+    *
+    *     push rbp ; mov rsp,rbp        ->  [rbp+0]  = saved rbp
+    *                                       [rbp+8]  = caller's return address
+    *                                       [rbp+0xc]= arg0   (matches the
+    *                                                  disassembly exactly)
+    *
+    * so one frame up, at +8, is the translated Halo address that called GL.
+    * It is 4 bytes: translated Halo.dylib sits in the low 4GB, which is the
+    * whole point of the shadow. Reported as Halo.dylib+offset so it can be
+    * disassembled directly. */
    void *r0 = __builtin_return_address(0);
    Dl_info i0;
    if (dladdr(r0, &i0) && i0.dli_fname)
-      TP_LOG("[geo] caller of %s: ret=%p in %s (+0x%lx) sym=%s\n", what, r0,
-             i0.dli_fname, (unsigned long)((char *)r0 - (char *)i0.dli_fbase),
+      TP_LOG("[geo] bridge: ret=%p in %s (+0x%lx) sym=%s\n", r0, i0.dli_fname,
+             (unsigned long)((char *)r0 - (char *)i0.dli_fbase),
              i0.dli_sname ? i0.dli_sname : "-");
+
+   void *bridge_fp = __builtin_frame_address(1);
+   if (!bridge_fp) { TP_LOG("[geo] no bridge frame — cannot reach Halo\n"); return; }
+   uint32_t i386_ret = *(const uint32_t *)((const char *)bridge_fp + 8);
+   Dl_info i1;
+   if (i386_ret && dladdr((void *)(uintptr_t)i386_ret, &i1) && i1.dli_fname)
+      TP_LOG("[geo] ★HALO CALL SITE: %#x = %s +0x%lx\n", i386_ret, i1.dli_fname,
+             (unsigned long)((uintptr_t)i386_ret - (uintptr_t)i1.dli_fbase));
    else
-      TP_LOG("[geo] caller of %s: ret=%p (unresolved)\n", what, r0);
+      TP_LOG("[geo] ★HALO CALL SITE (raw, unresolved): %#x\n", i386_ret);
 }
 
 static GLsizei tp_stride(GLsizei s) {
