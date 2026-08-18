@@ -440,6 +440,8 @@ static intptr_t halo_image_slide(int *found) {
  * ⚠A cursor that HOLDS proves the deadlock; one that ADVANCES falsifies this
  * whole reading and the delta must be going to zero some other way. Both
  * outcomes are worth the run. DELETE with the other probes when #46 closes. */
+static uint32_t dsz_dump = 0;   /* one-shot guard for the Ogg dump */
+
 static void snd_cursor_sweep(void) {
    if (!getenv("ABICONV_SND_CURSORPROBE")) { return; }
    /* ★SELF-CONTAINED ON PURPOSE. Hanging this off snd_voice_probe would put it
@@ -602,6 +604,35 @@ static void snd_cursor_sweep(void) {
                         magic[q] = (mb[q] >= 32 && mb[q] < 127) ? (char)mb[q] : '.';
                      }
                      magic[8] = 0;
+                  }
+               }
+               /* ★DUMP THE BITSTREAM ONCE, so the decode can be reproduced
+                * OUTSIDE the translation. ov_open never succeeds (ever_opened=0
+                * on every sample) while its read callback consumes 8500/17000
+                * bytes of a stream whose first four bytes are literally "OggS".
+                * Those two facts cannot both be explained by the data OR by the
+                * decoder alone, and feeding these exact bytes to a native
+                * libvorbisfile partitions it decisively:
+                *   native ov_open SUCCEEDS -> the bytes are a valid stream and
+                *     the fault is inside TRANSLATED libVorbis (a translator bug)
+                *   native ov_open FAILS    -> the bytes are not a complete
+                *     stream, so Halo assembles/seeks them differently than I
+                *     assumed and the fault is upstream after all
+                * Gated on in_range so we only ever read memory the game's own
+                * bounds check has already vouched for. Written once. */
+               if (in_range && dsz_dump == 0 && getenv("ABICONV_SND_OGGDUMP")) {
+                  const char *dp = getenv("ABICONV_SND_OGGDUMP");
+                  FILE *df = fopen(dp, "wb");
+                  if (df) {
+                     uint32_t n = csz ? csz : 0;
+                     uint64_t avail = climit - (uint64_t)data;
+                     if (n > avail) { n = (uint32_t)avail; }
+                     const void *sp2 = i386_ptr(data);
+                     if (sp2 && n) { fwrite(sp2, 1, n, df); }
+                     fclose(df);
+                     dsz_dump = n;
+                     TR("oggdump: wrote %u bytes of voice=%u's bitstream to %s\n",
+                        n, i, dp);
                   }
                }
                TR("srcmagic: voice=%u first8='%s' %02x %02x %02x %02x %s\n",
