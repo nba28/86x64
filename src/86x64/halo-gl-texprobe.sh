@@ -30,6 +30,11 @@ APP="${HALO_APP:-$HOME/projects/translations/Apps64/Halo.app}"
 # --no-client-storage: force GL_UNPACK_CLIENT_STORAGE_APPLE off. This RUN IS A
 # VISUAL TEST — the answer is on the screen, not in the log.
 NOCS=""
+RTTI=""
+if [ "${1:-}" = "--rtti-trace" ]; then
+  RTTI="ABICONV_CXX_RTTI_TRACE=1"; shift
+  echo "★ RTTI trace on — looking for the SetStreamSource dynamic_cast that fails."
+fi
 STRIDE=""
 if [ "${1:-}" = "--stride" ]; then
   STRIDE="HALO_TEXPROBE_STRIDE=${2:-32}"; shift 2
@@ -51,7 +56,7 @@ if pgrep -x Halo >/dev/null; then
 fi
 
 echo "building probe -> $DYLIB"
-clang -arch x86_64 -dynamiclib -O1 -Wall -DGL_SILENCE_DEPRECATION \
+clang -arch x86_64 -dynamiclib -O1 -Wall -fno-omit-frame-pointer -DGL_SILENCE_DEPRECATION \
       -framework OpenGL -o "$DYLIB" "$HERE/halo-gl-texprobe.c" || {
   echo "probe build FAILED" >&2; exit 1; }
 
@@ -60,11 +65,19 @@ echo "Click Play, let the MAIN MENU sit ~15s so the animated background uploads,
 echo "then quit Halo."
 
 env DYLD_INSERT_LIBRARIES="$DYLIB" HALO_TEXPROBE_LOG="$LOG" \
-    HALO_TEXPROBE_DUMP="$DUMPDIR" $NOCS $STRIDE \
-  "$APP/Contents/MacOS/Halo" >/dev/null 2>&1
+    HALO_TEXPROBE_DUMP="$DUMPDIR" $NOCS $STRIDE $RTTI \
+  "$APP/Contents/MacOS/Halo" >"$LOG.app" 2>&1
 
 echo
 echo "===== summary ====="
+# Halo's OWN stderr now goes to $LOG.app rather than /dev/null. That is where
+# the RTTI trace and any shimgen stub warnings land, and throwing it away once
+# already cost us a lead.
+if [ -s "$LOG.app" ]; then
+  n=$(grep -c "__dynamic_cast" "$LOG.app" 2>/dev/null || echo 0)
+  st=$(grep -c "shimauto" "$LOG.app" 2>/dev/null || echo 0)
+  echo "app stderr: $LOG.app  (dynamic_cast lines: $n, shimauto stubs: $st)"
+fi
 if [ ! -s "$LOG" ]; then
   echo "NO PROBE OUTPUT AT ALL — the dylib never even loaded."
   echo "  DYLD_INSERT_LIBRARIES was ignored (library validation / hardened runtime),"
