@@ -202,7 +202,7 @@ echo "--- keyboard EVENTS (report: ENTER on a menu item does nothing either) ---
 grep -E 'KEY kind=|KEYBOARD events' "$OUT" | head -14 | sed 's/^/  /'
 echo
 echo "--- ★★CONTROL: does a NATIVELY-installed handler get the mouse-DOWN? ---"
-grep -E 'CONTROL handler|CONTROL: our own|⇒ mouse-DOWN DOES|⇒ moved reaches' "$OUT" | sed 's/^/  /'
+grep -E 'CONTROL handler|CONTROL: our own|⇒ mouse-DOWN DOES|⇒ moved reaches|★ACTIVATION|⇒ NEITHER' "$OUT" | sed 's/^/  /'
 echo
 echo "--- ★per-HANDLER breakdown: registered vs actually received ---"
 if grep -q 'handler #.*registered\[' "$OUT"; then

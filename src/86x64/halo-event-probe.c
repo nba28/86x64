@@ -431,11 +431,20 @@ static OSStatus ep_ReceiveNextEvent(ItemCount n, const EventTypeSpec *types,
  * Deliberately passive: it counts and always returns eventNotHandledErr, so it
  * cannot change what Halo does or does not receive. */
 static unsigned long n_ctl[16], n_ctl_other;
+static unsigned long n_app_act, n_app_deact, n_win_act, n_win_deact;
 
 static OSStatus ep_control_handler(EventHandlerCallRef ref, EventRef e, void *ud) {
    (void)ref; (void)ud;
-   const UInt32 ki = e ? GetEventKind(e) : 0;
-   if (ki < 16) { n_ctl[ki]++; } else { n_ctl_other++; }
+   const UInt32 cl = e ? GetEventClass(e) : 0, ki = e ? GetEventKind(e) : 0;
+   if (cl == kEventClassMouse) {
+      if (ki < 16) { n_ctl[ki]++; } else { n_ctl_other++; }
+   } else if (cl == kEventClassApplication) {
+      if (ki == kEventAppActivated)   { n_app_act++; }
+      if (ki == kEventAppDeactivated) { n_app_deact++; }
+   } else if (cl == kEventClassWindow) {
+      if (ki == kEventWindowActivated)   { n_win_act++; }
+      if (ki == kEventWindowDeactivated) { n_win_deact++; }
+   }
    return eventNotHandledErr;   /* never claim: stay a pure observer */
 }
 
@@ -447,11 +456,30 @@ static void ep_install_control(void) {
       { kEventClassMouse, kEventMouseUp },
       { kEventClassMouse, kEventMouseMoved },
       { kEventClassMouse, kEventMouseDragged },
+      /* ★ IS THE APP EVER ACTIVATED?
+       *
+       * MEASURED: a mouse-UP and a mouse-DRAGGED both reached the application
+       * target while not one mouse-DOWN ever did — for OUR native handler as
+       * well as Halo's. Something consumes the DOWN specifically, and the
+       * classic thing that consumes a down and nothing else is the click that
+       * ACTIVATES an inactive window: the system eats it, and the up that
+       * follows goes through normally. That predicts the window never becomes
+       * active, so every click is spent activating and none is ever delivered.
+       *
+       * kEventAppActivated/Deactivated and kEventWindowActivated/Deactivated
+       * say whether that is what is happening. If neither ever fires, the app
+       * genuinely never activates and the fix is about activation, not events.
+       * If they DO fire, this explanation is dead and the down is being eaten
+       * somewhere else. */
+      { kEventClassApplication, kEventAppActivated },
+      { kEventClassApplication, kEventAppDeactivated },
+      { kEventClassWindow, kEventWindowActivated },
+      { kEventClassWindow, kEventWindowDeactivated },
    };
    EventHandlerRef out = NULL;
    const OSStatus r = InstallEventHandler(GetApplicationEventTarget(),
                                           NewEventHandlerUPP(ep_control_handler),
-                                          4, t, NULL, &out);
+                                          sizeof t / sizeof t[0], t, NULL, &out);
    EP("[ev] (CONTROL: our own mouse handler on the APPLICATION target -> %d)\n",
       (int)r);
 }
@@ -962,6 +990,14 @@ static void ep_atexit(void) {
       }
       EP("[ev] ★CONTROL handler (ours, APPLICATION target, mouse 1/2/5/6): %s\n",
          g ? got : "RECEIVED NOTHING");
+      EP("[ev] ★ACTIVATION: app activated=%lu deactivated=%lu ; window "
+         "activated=%lu deactivated=%lu\n",
+         n_app_act, n_app_deact, n_win_act, n_win_deact);
+      if (n_app_act == 0 && n_win_act == 0) {
+         EP("[ev]   ⇒ NEITHER the app NOR the window ever activated. Every click"
+            " is being spent activating a window that never becomes active, so"
+            " none is ever delivered.\n");
+      }
       if (n_ctl[kEventMouseDown]) {
          EP("[ev]   ⇒ mouse-DOWN DOES reach the application target. Halo's own"
             " handler is being skipped — OUR InstallEventHandler is the suspect.\n");
