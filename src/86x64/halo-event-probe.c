@@ -432,6 +432,15 @@ static OSStatus ep_ReceiveNextEvent(ItemCount n, const EventTypeSpec *types,
  * cannot change what Halo does or does not receive. */
 static unsigned long n_ctl[16], n_ctl_other;
 static unsigned long n_app_act, n_app_deact, n_win_act, n_win_deact;
+static unsigned long n_fwd, n_fwd_claimed;
+
+/* Opt-in: HALO_EV_FORWARD_DOWN=1. Off by default so every other run stays a
+ * pure measurement. */
+static int ep_forward_down(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("HALO_EV_FORWARD_DOWN") ? 1 : 0; }
+   return t;
+}
 
 static OSStatus ep_control_handler(EventHandlerCallRef ref, EventRef e, void *ud) {
    (void)ref; (void)ud;
@@ -493,6 +502,36 @@ static OSStatus ep_SendEventToEventTarget(EventRef e, EventTargetRef t) {
    }
    const OSStatus r = SendEventToEventTarget(e, t);
    n_send++;
+   /* ★ THE EXPERIMENT, AND THE CANDIDATE FIX.
+    *
+    * Established: Halo sends every mouse-DOWN to the DISPATCHER; the front
+    * window's handlers all DECLINE (11 declines, 0 claims); the send returns
+    * noErr; and the APPLICATION target — where Halo's mouse-down handler lives,
+    * and where a natively-installed control of ours lives too — never sees it.
+    * mouse-UP, MOVED and DRAGGED all reach that same target normally, and the
+    * app and window both genuinely activate, so neither activation nor our
+    * translation explains it. What is left is the dispatcher performing its own
+    * default window processing for a declined DOWN and treating it as handled,
+    * so the event never propagates up to the application target.
+    *
+    * If that reading is right, forwarding the declined DOWN to the application
+    * target ourselves puts it exactly where a classic app expects it. This is
+    * OPT-IN because it MUTATES delivery: a perturbing run is not a measuring
+    * run. If the menu responds with it on and not with it off, the mechanism is
+    * confirmed and the real fix belongs in libabiconv's Carbon layer, not here.
+    *
+    * Passing the SAME EventRef preserves every parameter, so the click keeps
+    * its location, modifiers and click-count rather than a reconstruction. */
+   if (ep_forward_down() && interesting && ki == kEventMouseDown &&
+       t == GetEventDispatcherTarget()) {
+      const OSStatus fr = SendEventToEventTarget(e, GetApplicationEventTarget());
+      n_fwd++;
+      if (fr != eventNotHandledErr) { n_fwd_claimed++; }
+      EP("[ev] ★FORWARD: re-sent the declined mouse-DOWN to the APPLICATION "
+         "target -> %d%s\n", (int)fr,
+         fr != eventNotHandledErr ? "   (CLAIMED — the app took the click)"
+                                  : "   (still nobody claimed it)");
+   }
    if (interesting) {
       char c[5]; fourcc(c, cl);
       /* NAME the target. Halo installs its mouse handlers on the APPLICATION
@@ -990,6 +1029,14 @@ static void ep_atexit(void) {
       }
       EP("[ev] ★CONTROL handler (ours, APPLICATION target, mouse 1/2/5/6): %s\n",
          g ? got : "RECEIVED NOTHING");
+      if (ep_forward_down()) {
+         EP("[ev] ★FORWARD experiment: %lu downs re-sent to APPLICATION, %lu "
+            "CLAIMED%s\n", n_fwd, n_fwd_claimed,
+            n_fwd && !n_fwd_claimed
+               ? "   <-- forwarding reached the app and it STILL declined: the"
+                 " dispatcher is not the whole story"
+               : "");
+      }
       EP("[ev] ★ACTIVATION: app activated=%lu deactivated=%lu ; window "
          "activated=%lu deactivated=%lu\n",
          n_app_act, n_app_deact, n_win_act, n_win_deact);

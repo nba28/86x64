@@ -28,6 +28,16 @@ DYLIB="${TMPDIR:-/tmp}/halo-event-probe.dylib"
 SELFTEST_ONLY=0
 if [ "${1:-}" = "--selftest-only" ]; then SELFTEST_ONLY=1; shift; fi
 
+# --forward-down arms the MUTATING experiment: every mouse-DOWN the dispatcher
+# declines is re-sent to the APPLICATION target, where Halo's handler lives.
+# Opt-in and separate from the read-only runs, because a perturbing run is not a
+# measuring run — never leave it on for a baseline.
+FWD=""
+if [ "${1:-}" = "--forward-down" ]; then
+  FWD="HALO_EV_FORWARD_DOWN=1"; shift
+  echo "⚠ --forward-down: this run MUTATES event delivery (experiment)."
+fi
+
 if pgrep -x Halo >/dev/null; then
   echo "Halo is already running — quit it first (pkill -9 -x Halo)." >&2
   exit 1
@@ -114,7 +124,7 @@ echo
 # ABICONV_INPUT_TRACE also on: the classic Button/GetCurrentEventButtonState
 # counters land in Halo's own stderr ($OUT.app) and answer, in the SAME run,
 # whether that path is polled at all and whether it ever sees a press.
-env DYLD_INSERT_LIBRARIES="$DYLIB" HALO_EVENT_LOG="$OUT" ABICONV_INPUT_TRACE=1 ABICONV_KEYS_TRACE=1 \
+env DYLD_INSERT_LIBRARIES="$DYLIB" HALO_EVENT_LOG="$OUT" ABICONV_INPUT_TRACE=1 ABICONV_KEYS_TRACE=1 $FWD \
   "$APP/Contents/MacOS/Halo" >"$OUT.app" 2>&1
 
 echo
@@ -204,6 +214,14 @@ echo
 echo "--- ★★CONTROL: does a NATIVELY-installed handler get the mouse-DOWN? ---"
 grep -E 'CONTROL handler|CONTROL: our own|⇒ mouse-DOWN DOES|⇒ moved reaches|★ACTIVATION|⇒ NEITHER' "$OUT" | sed 's/^/  /'
 echo
+if grep -q '★FORWARD' "$OUT"; then
+  echo "--- ★★FORWARD experiment (this run MUTATED delivery) ---"
+  grep '★FORWARD' "$OUT" | tail -6 | sed 's/^/  /'
+  hd=$(sed -n "s/.*HALO'S handler entered.*(on mouse-down: *\([0-9]*\)).*/\1/p" "$OUT" | tail -1)
+  echo "  ⇒ Halo's handler ran on ${hd:-0} mouse-DOWNs this run"
+  echo "    (>0 with forwarding on, 0 with it off = the dispatcher was eating them)"
+  echo
+fi
 echo "--- ★per-HANDLER breakdown: registered vs actually received ---"
 if grep -q 'handler #.*registered\[' "$OUT"; then
   grep 'handler #.*registered\[' "$OUT" | sed 's/^/  /'
