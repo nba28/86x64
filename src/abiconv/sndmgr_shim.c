@@ -503,21 +503,38 @@ static void snd_cursor_sweep(void) {
                                  ((uint64_t)SOUND_CACHE_SIZE_MB << 20);
                int in_range = cbase && data >= cbase &&
                               (uint64_t)data + csz <= climit;
+               /* ⚠ONLY PEAK WHAT THE RANGE CHECK ALREADY PROVED SAFE. `data` is
+                * a pointer read out of the target's own memory, so it can be
+                * anything; walking 400KB from a wild pointer would SIGSEGV
+                * Halo and cost a run of a target that needs a human click to
+                * reach the menu. When in_range holds, data..data+cachesz is
+                * inside the live sound-cache allocation by construction, so
+                * clamp the walk to that and to the declared length. A probe
+                * that crashes the target is worse than no probe. */
                uint32_t peak = 0;
-               const int16_t *sd = (const int16_t *)i386_ptr(data);
-               if (sd && len && len <= (32u << 20)) {
-                  uint32_t n = len / 2; if (n > 200000u) { n = 200000u; }
-                  for (uint32_t k = 0; k < n; k++) {
-                     int32_t x = sd[k]; if (x < 0) { x = -x; }
-                     if ((uint32_t)x > peak) { peak = (uint32_t)x; }
+               uint32_t scanned = 0;
+               if (in_range && len) {
+                  uint64_t avail = climit - (uint64_t)data;
+                  uint64_t lim = len < avail ? len : avail;
+                  if (lim > csz) { lim = csz; }        /* the checked extent */
+                  uint32_t n = (uint32_t)(lim / 2);
+                  if (n > 200000u) { n = 200000u; }
+                  const int16_t *sd = (const int16_t *)i386_ptr(data);
+                  if (sd) {
+                     for (uint32_t k = 0; k < n; k++) {
+                        int32_t x = sd[k]; if (x < 0) { x = -x; }
+                        if ((uint32_t)x > peak) { peak = (uint32_t)x; }
+                     }
+                     scanned = n * 2;
                   }
                }
                TR("srcdata: voice=%u data=0x%x len=%u cachesz=%u base=0x%x "
-                  "limit=0x%llx in_range=%d peak=%u%s\n",
+                  "limit=0x%llx in_range=%d peak=%u scanned=%u%s\n",
                   i, data, len, csz, cbase, (unsigned long long)climit,
-                  in_range, peak,
+                  in_range, peak, scanned,
                   !in_range ? "   <-- OUT OF CACHE RANGE: mixer skips the memcpy"
-                            : (peak == 0 ? "   <-- SOURCE IS SILENT" : ""));
+                            : (scanned == 0 ? "   <-- not scanned"
+                                       : (peak == 0 ? "   <-- SOURCE IS SILENT" : "")));
             }
          }
       }
