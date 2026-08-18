@@ -624,15 +624,27 @@ static void snd_cursor_sweep(void) {
             }
          }
       }
-      /* ★VORBIS STREAM STATE for any voice that has a source. Reported on
-       * change, so a stalled reader shows as one line and a working one as a
-       * running tally. This is the measurement that separates "ov_open never
-       * succeeded" from "it opened and the reader hit the end of its chunk and
-       * nobody refilled it" — the two remaining explanations for an ov_read
-       * that reports EOF on a bitstream we PROVED starts with a valid OggS. */
+      /* ★VORBIS STREAM STATE for any voice that has a source.
+       *
+       * ⚠READ THE FLAG CAREFULLY — an earlier version of this probe labelled
+       * ov_open_ok=0 as "the decoder never started", and that was WRONG. The
+       * byte at state+0x588 is SET only on ov_open success (0x246a0b) but is
+       * CLEARED by two stream-reset paths (0x248fa6, 0x24961b), so 0 means
+       * "not open right now", never "never opened". The measurement that
+       * exposed the error: the datasource offset was simultaneously advancing
+       * to 8500 and 17000 — libvorbisfile's CHUNKSIZE and 2x CHUNKSIZE — which
+       * a decoder that never started could not possibly produce. What the two
+       * facts together describe is an open/read/fail/RESET/reopen LOOP.
+       *
+       * So log every field change, and remember whether the flag was EVER 1:
+       * "ever_ok" distinguishes "ov_open genuinely fails" from "it succeeds and
+       * something tears the stream down again", which are different bugs with
+       * different fixes. Sampling only on offset change could also alias a
+       * brief ok=1 window away entirely. */
       if (*(const uint32_t *)(R + VOICE_OFF_SOURCE)) {
-         static uint32_t last_off[VOICE_SCAN_MAX];
-         static uint8_t  vs_seen[VOICE_SCAN_MAX];
+         static uint32_t last_key[VOICE_SCAN_MAX];
+         static uint8_t  vs_seen[VOICE_SCAN_MAX], ever_ok[VOICE_SCAN_MAX];
+         static uint32_t opens[VOICE_SCAN_MAX];
          uint8_t  ok  = *(const uint8_t  *)(R + VS_OVOPEN_OK);
          uint8_t  sel = *(const uint8_t  *)(R + VS_STREAM_SEL);
          const uint8_t *ds = R + (sel ? VS_DS_A : VS_DS_B);
@@ -640,16 +652,22 @@ static void snd_cursor_sweep(void) {
          uint32_t base = *(const uint32_t *)(ds + 4);
          uint32_t dsz  = *(const uint32_t *)(ds + 8);
          uint8_t  eof  = *(const uint8_t  *)(ds + 12);
-         if (!vs_seen[i] || off != last_off[i]) {
-            TR("vorbis: voice=%u ov_open_ok=%u sel=%u ds{off=%u base=0x%x "
-               "size=%u eof=%u}%s\n", i, ok, sel, off, base, dsz, eof,
-               !ok  ? "   <-- ★ov_open FAILED: the decoder never started"
-               : (off == 0 && !eof)
-                    ? "   <-- reader has consumed NOTHING"
-               : (eof || (dsz && off >= dsz))
-                    ? "   <-- chunk EXHAUSTED and not refilled -> read_func returns 0"
-                    : "");
-            last_off[i] = off; vs_seen[i] = 1;
+         if (ok && !ever_ok[i]) { ever_ok[i] = 1; }
+         if (ok && !last_key[i]) { opens[i]++; }
+         uint32_t key = ((uint32_t)ok << 31) | ((uint32_t)eof << 30) |
+                        ((uint32_t)sel << 29) | (off & 0x1fffffffu);
+         if (!vs_seen[i] || key != last_key[i]) {
+            TR("vorbis: voice=%u open_now=%u ever_opened=%u opens=%u sel=%u "
+               "ds{off=%u base=0x%x size=%u eof=%u}%s\n",
+               i, ok, ever_ok[i], opens[i], sel, off, base, dsz, eof,
+               (!ever_ok[i] && off == 0)
+                  ? "   <-- never opened AND nothing read"
+               : (!ever_ok[i] && off)
+                  ? "   <-- ★read data but ov_open NEVER succeeded"
+               : (!ok && ever_ok[i])
+                  ? "   <-- ★opened before, torn down again (reset path)"
+                  : "");
+            last_key[i] = key; vs_seen[i] = 1;
          }
       }
       /* Underrun counter, reported on change. Global, not per-voice, so it is
