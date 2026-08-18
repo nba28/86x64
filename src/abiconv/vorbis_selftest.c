@@ -82,6 +82,37 @@ uint64_t _86x64_call_i386(uint64_t fn, uint64_t nwords, const uint32_t *words,
 #define CB_SLOT_CLOSE 0x18
 #define CB_SLOT_TELL  0x1c
 
+/*
+ * The HEADER PATH, identified by disassembly and cross-checked against the
+ * struct layouts they imply (see the journal entry for this commit):
+ *   _fetch_headers 0x2d5925 (5 stack args), ov_clear 0x2d6823 (its
+ *   `memset(vf,0,0x2c0)` is what CONFIRMS sizeof(OggVorbis_File)=0x2c0).
+ * Each entry is resolved from the RETURN SITE of the call that invokes it --
+ * function prologues carry no pcmap row, so the callee cannot be looked up
+ * directly. The value below is the i386 address of the instruction AFTER the
+ * call (call rel32 is 5 bytes).
+ */
+#define AFTER_OGG_STREAM_INIT   0x002d6754u   /* -> ogg_stream_init   0x307de6 */
+#define AFTER_OGG_PAGEIN        0x002d5a09u   /* -> ogg_stream_pagein 0x308538 */
+#define AFTER_OGG_PACKETOUT     0x002d5a20u   /* -> ogg_stream_packetout 0x308caa */
+#define AFTER_VORBIS_INFO_INIT  0x002d59d5u   /* -> vorbis_info_init  0x30a9c6 */
+#define AFTER_VORBIS_COMM_INIT  0x002d59e0u   /* -> vorbis_comment_init 0x30a8b3 */
+#define AFTER_VORBIS_HEADERIN   0x002d5a77u   /* -> vorbis_synthesis_headerin 0x30b41d */
+
+/* i386 struct layouts on the header path. sizeof(ogg_stream_state)=360 is
+ * CORROBORATED, not assumed: OggVorbis_File puts os at +0x74 and vd at +0x1dc,
+ * and 0x1dc-0x74 = 0x168 = 360, which is exactly what the libogg 1.0 field list
+ * sums to with i386's 4-byte alignment of ogg_int64_t. */
+#define SZ_OGG_STREAM_STATE 360
+struct ogg_page32   { uint32_t header, header_len, body, body_len; };
+struct ogg_packet32 { uint32_t packet; int32_t bytes, b_o_s, e_o_s;
+                      uint32_t gr_lo, gr_hi, pn_lo, pn_hi; };
+/* vorbis_info: version, channels, rate, bitrate_u/n/l/window, codec_setup */
+#define VI_VERSION 0
+#define VI_CHANNELS 1
+#define VI_RATE 2
+#define VC_VENDOR 3        /* vorbis_comment word 3 = char *vendor */
+
 /* Halo's Ogg datasource, decoded from the callbacks themselves (read cb
  * 0x246b3a, seek 0x246a5a, tell 0x246a3a, close 0x246a1e). 16 bytes. */
 struct halo_ds {
@@ -173,6 +204,39 @@ static uint64_t pcmap_trans(uint32_t orig) {
 
 /* ---- resolved targets --------------------------------------------------- */
 static uint64_t g_ovopen, g_read, g_seek, g_close, g_tell;
+static uint64_t g_os_init, g_pagein, g_packetout, g_info_init, g_comm_init,
+                g_headerin;
+
+/* Resolve the callee of a call whose RETURN SITE has a pcmap row. The
+ * translator expands `call X` so the five bytes before the return site are
+ * `e9 rel32` (or `e8 rel32` when it keeps a direct call); the callee follows.
+ * Shape-checked: every translated i386 function begins with the 4-byte push
+ * emulation `66 50` (push ax), so an entry that does not is refused rather
+ * than called. */
+static uint64_t resolve_call(uint32_t after_i386, const char *name) {
+   const uint64_t t = pcmap_trans(after_i386);
+   if (!t) { VS("  resolve %s: no pcmap row at %#x\n", name, after_i386); return 0; }
+   const uint8_t *p = (const uint8_t *)(uintptr_t)(t - 5);
+   if (p[0] != 0xe9 && p[0] != 0xe8) {
+      VS("  resolve %s: byte before the return site is 0x%02x, not e8/e9\n",
+         name, p[0]);
+      return 0;
+   }
+   const uint64_t tgt = t + (int64_t)*(const int32_t *)(p + 1);
+   if (tgt < g_text_vm || tgt >= g_text_vm + g_text_sz) {
+      VS("  resolve %s: %#llx is outside __text\n", name,
+         (unsigned long long)tgt);
+      return 0;
+   }
+   const uint8_t *e = (const uint8_t *)(uintptr_t)tgt;
+   if (!(e[0] == 0x66 && e[1] == 0x50)) {
+      VS("  resolve %s: entry %#llx does not begin with the translated "
+         "prologue (66 50) - refusing to call it\n",
+         name, (unsigned long long)tgt);
+      return 0;
+   }
+   return tgt;
+}
 
 /*
  * Two shapes, both read out of the instructions Halo itself executes:
@@ -236,6 +300,14 @@ static const char *resolve_targets(void) {
          return "a resolved callback is outside __text";
       }
    }
+   /* The stage functions are optional: part 3 declines if any is missing,
+    * but parts 1-2 still run. */
+   g_os_init   = resolve_call(AFTER_OGG_STREAM_INIT,  "ogg_stream_init");
+   g_pagein    = resolve_call(AFTER_OGG_PAGEIN,       "ogg_stream_pagein");
+   g_packetout = resolve_call(AFTER_OGG_PACKETOUT,    "ogg_stream_packetout");
+   g_info_init = resolve_call(AFTER_VORBIS_INFO_INIT, "vorbis_info_init");
+   g_comm_init = resolve_call(AFTER_VORBIS_COMM_INIT, "vorbis_comment_init");
+   g_headerin  = resolve_call(AFTER_VORBIS_HEADERIN,  "vorbis_synthesis_headerin");
    return NULL;
 }
 
@@ -371,6 +443,172 @@ static int32_t probe_open(const char *label, uint8_t *buf, uint32_t len,
    return rc;
 }
 
+/*
+ * Part 3: walk the header path STAGE BY STAGE, with libogg's SYNC layer
+ * bypassed entirely.
+ *
+ * Parts 1-2 established: the callbacks are correct, page sync works (a stream
+ * with 21 deliberately corrupt CRCs fails DIFFERENTLY, so checksums are being
+ * verified and the good stream's pages are being accepted), and re-paging the
+ * headers so nothing spans a page boundary changes nothing. What is left is
+ * packet reassembly and the codec's own header parse -- and ov_open cannot show
+ * which, because it memsets the whole OggVorbis_File on failure (ov_clear) and
+ * _fetch_headers clears vi/vc on its bail path.
+ *
+ * So this drives the stages directly. The Ogg framing is parsed HERE, in native
+ * code, from the file bytes -- so we know exactly what every packet must be --
+ * and each translated stage is checked against that reference:
+ *   ogg_stream_pagein     does it accept the page?
+ *   ogg_stream_packetout  is the packet it hands back byte-identical to the one
+ *                         the framing says is there, with the right b_o_s?
+ *   vorbis_synthesis_headerin  which of the three headers does it reject?
+ * A per-header return code is the whole point: ident vs comment vs setup are
+ * three different parsers, and knowing which one fails is the difference
+ * between auditing 40 instructions and auditing 4000.
+ */
+static void probe_stages(uint8_t *buf, uint32_t len) {
+   VS("--- part 3: header path stage by stage (sync layer BYPASSED) ---\n");
+   if (!g_os_init || !g_pagein || !g_packetout || !g_info_init ||
+       !g_comm_init || !g_headerin) {
+      VS("  DECLINED: not every stage function resolved; nothing was called.\n");
+      return;
+   }
+
+   /* --- native reference: parse the framing ourselves --- */
+   struct { uint32_t off, hdr_len, body, body_len; int bos; } pg[8];
+   uint32_t npg = 0, o = 0, serial = 0;
+   while (o + 27 <= len && memcmp(buf + o, "OggS", 4) == 0 && npg < 8) {
+      const uint32_t nseg = buf[o + 26];
+      if (o + 27 + nseg > len) { break; }
+      uint32_t blen = 0;
+      for (uint32_t i = 0; i < nseg; i++) { blen += buf[o + 27 + i]; }
+      pg[npg].off = o; pg[npg].hdr_len = 27 + nseg;
+      pg[npg].body = o + 27 + nseg; pg[npg].body_len = blen;
+      pg[npg].bos = (buf[o + 5] & 0x02) ? 1 : 0;
+      if (npg == 0) { memcpy(&serial, buf + o + 14, 4); }
+      npg++;
+      o = o + 27 + nseg + blen;
+   }
+   VS("  framing (parsed natively): %u pages, serial=0x%08x\n", npg, serial);
+   if (npg < 3) { VS("  DECLINED: fewer than 3 pages\n"); return; }
+
+   /* expected packets, reassembled natively across pages */
+   static uint8_t exp[3][8192];
+   uint32_t explen[3] = {0, 0, 0};
+   {
+      uint32_t k = 0, acc = 0;
+      for (uint32_t i = 0; i < npg && k < 3; i++) {
+         uint32_t q = pg[i].body;
+         for (uint32_t sgi = 0; sgi < pg[i].hdr_len - 27 && k < 3; sgi++) {
+            const uint32_t sz = buf[pg[i].off + 27 + sgi];
+            if (acc + sz <= sizeof exp[0]) { memcpy(exp[k] + acc, buf + q, sz); }
+            acc += sz; q += sz;
+            if (sz < 255) { explen[k] = acc; acc = 0; k++; }
+         }
+      }
+      VS("  expected header packets: %u / %u / %u bytes (types 0x%02x/0x%02x/0x%02x)\n",
+         explen[0], explen[1], explen[2], exp[0][0], exp[1][0], exp[2][0]);
+   }
+
+   /* --- allocate the i386-side structures --- */
+   uint8_t  *os = (uint8_t *)malloc(SZ_OGG_STREAM_STATE + 64);
+   uint32_t *vi = (uint32_t *)malloc(64);
+   uint32_t *vc = (uint32_t *)malloc(64);
+   struct ogg_page32   *og = (struct ogg_page32 *)malloc(sizeof *og);
+   struct ogg_packet32 *op = (struct ogg_packet32 *)malloc(sizeof *op);
+   if (!os || !vi || !vc || !og || !op) { VS("  DECLINED: allocation failed\n"); return; }
+   if (!lo32(os, "ogg_stream_state") || !lo32(vi, "vorbis_info") ||
+       !lo32(vc, "vorbis_comment") || !lo32(og, "ogg_page") ||
+       !lo32(op, "ogg_packet")) { return; }
+   memset(os, 0, SZ_OGG_STREAM_STATE + 64);
+   memset(vi, 0, 64); memset(vc, 0, 64);
+
+   uint32_t w[4];
+   w[0] = (uint32_t)(uintptr_t)os; w[1] = serial;
+   VS("  ogg_stream_init      -> %d\n", call32(g_os_init, 2, w));
+   w[0] = (uint32_t)(uintptr_t)vi;  call32(g_info_init, 1, w);
+   w[0] = (uint32_t)(uintptr_t)vc;  call32(g_comm_init, 1, w);
+   VS("  vorbis_info_init / vorbis_comment_init done "
+      "(codec_setup=0x%08x)\n", vi[7]);
+
+   /* --- feed pages, pull packets, parse headers --- */
+   uint32_t k = 0;
+   for (uint32_t i = 0; i < npg && k < 3; i++) {
+      og->header = (uint32_t)(uintptr_t)(buf + pg[i].off);
+      og->header_len = pg[i].hdr_len;
+      og->body = (uint32_t)(uintptr_t)(buf + pg[i].body);
+      og->body_len = pg[i].body_len;
+      w[0] = (uint32_t)(uintptr_t)os; w[1] = (uint32_t)(uintptr_t)og;
+      const int32_t pin = call32(g_pagein, 2, w);
+      VS("  page %u (hdr=%u body=%u bos=%d): pagein -> %d%s\n",
+         i, pg[i].hdr_len, pg[i].body_len, pg[i].bos, pin,
+         pin == 0 ? "" : "   ⚠REJECTED");
+      if (pin != 0) { continue; }
+
+      for (;;) {
+         memset(op, 0, sizeof *op);
+         w[0] = (uint32_t)(uintptr_t)os; w[1] = (uint32_t)(uintptr_t)op;
+         const int32_t po = call32(g_packetout, 2, w);
+         if (po == 0) { break; }
+         if (po < 0) {
+            VS("    packetout -> %d  ⚠HOLE reported by libogg\n", po);
+            continue;
+         }
+         if (k >= 3) { break; }
+         /* compare against the natively reassembled reference */
+         const uint8_t *got = (const uint8_t *)(uintptr_t)op->packet;
+         int same = (op->bytes == (int32_t)explen[k]) && got &&
+                    memcmp(got, exp[k], explen[k] < sizeof exp[0]
+                                        ? explen[k] : sizeof exp[0]) == 0;
+         VS("    packet %u: bytes=%d (expect %u) b_o_s=%d e_o_s=%d  %s\n",
+            k, op->bytes, explen[k], op->b_o_s, op->e_o_s,
+            same ? "IDENTICAL to the native reassembly"
+                 : "⚠DIFFERS from the native reassembly");
+         if (!same && got) {
+            VS("      got  %02x %02x%02x%02x%02x%02x%02x  first7\n",
+               got[0], got[1], got[2], got[3], got[4], got[5], got[6]);
+            VS("      want %02x %02x%02x%02x%02x%02x%02x\n",
+               exp[k][0], exp[k][1], exp[k][2], exp[k][3], exp[k][4],
+               exp[k][5], exp[k][6]);
+         }
+         if (k == 0 && op->b_o_s == 0) {
+            VS("      ⚠b_o_s is 0 on the IDENT packet: vorbis_synthesis_headerin "
+               "returns OV_EBADHEADER for exactly this\n");
+         }
+         w[0] = (uint32_t)(uintptr_t)vi; w[1] = (uint32_t)(uintptr_t)vc;
+         w[2] = (uint32_t)(uintptr_t)op;
+         const int32_t h = call32(g_headerin, 3, w);
+         static const char *nm[3] = { "ident(0x01)", "comment(0x03)", "setup(0x05)" };
+         VS("    headerin %-13s -> %-5d %s\n", nm[k], h, ov_err(h));
+         if (h == 0 && k == 0) {
+            VS("      vi: version=%d channels=%d rate=%d   %s\n",
+               (int32_t)vi[VI_VERSION], (int32_t)vi[VI_CHANNELS],
+               (int32_t)vi[VI_RATE],
+               ((int32_t)vi[VI_RATE] == 44100 && (int32_t)vi[VI_CHANNELS] == 2)
+                  ? "layout CORROBORATED (44100/2 as the file declares)"
+                  : "⚠does NOT match the file's declared 44100/2");
+         }
+         if (h == 0 && k == 1) {
+            VS("      vc->vendor=0x%08x\n", vc[VC_VENDOR]);
+         }
+         k++;
+         if (h != 0) {
+            VS("  ★STOP: header %u is where the translated decoder gives up.\n", k - 1);
+            goto done;
+         }
+      }
+   }
+   if (k >= 3) {
+      VS("  ★ALL THREE HEADERS PARSED HERE. So the stages are fine and the "
+         "failure is in what feeds them - the sync layer's page extraction.\n");
+   }
+done:
+   VS("  final vi: version=%d channels=%d rate=%d  vc->vendor=0x%08x\n",
+      (int32_t)vi[VI_VERSION], (int32_t)vi[VI_CHANNELS], (int32_t)vi[VI_RATE],
+      vc[VC_VENDOR]);
+   free(op); free(og); free(vc); free(vi); free(os);
+}
+
 /* Load one file into low-4GB memory. Returns NULL and explains on failure. */
 static uint8_t *load_low(const char *path, uint32_t *out_len) {
    int fd = open(path, O_RDONLY);
@@ -437,7 +675,11 @@ static void run_selftest(const char *paths) {
       /* the control runs twice: a differing pair would mean the result is not
        * deterministic, and every comparison below would be meaningless */
       probe_open(base, buf, len, ds);
-      if (first) { probe_open("(repeat)", buf, len, ds); first = 0; }
+      if (first) {
+         probe_open("(repeat)", buf, len, ds);
+         probe_stages(buf, len);
+         first = 0;
+      }
       free(buf);
       n++;
    }
