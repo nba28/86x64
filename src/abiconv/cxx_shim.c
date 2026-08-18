@@ -847,6 +847,41 @@ static void do_dyncast(uint32_t ti, int32_t src2dst, int access_path,
  * would hide a genuine defect (a stale or corrupt object pointer is worth
  * knowing about); a line per call would drown the log, since whatever produced
  * one bad pointer usually produces many. */
+/* ★WHY A CAST FAILED. The RTTI trace dumps INPUTS; it never said whether the
+ * walk returned a pointer or 0, so a 1900-line trace could not answer the one
+ * question that matters. Each bail-out now names itself, once per distinct
+ * reason, with the type names involved.
+ *
+ * This matters because a spurious NULL is not a cosmetic defect: Halo's
+ * SetStreamSource (i386 0x2b691e) casts its vertex buffer and, on NULL, takes
+ * an early return that SKIPS writing this->strides[stream] -- leaving a stale
+ * stride that reaches glVertexPointer and smears the geometry. Same shape as
+ * the NULL IDirect3DTexture9_Mac wall. */
+/* Mangled name of a typeinfo: field +4 is the name pointer in the i386
+ * Itanium layout (the same field cxx_rtti_dump_ti prints). Fault-safe, because
+ * this runs on a path that is already reporting something has gone wrong. */
+static const char *ti_name_of(uint32_t ti) {
+   uint32_t np = 0;
+   if (!ti || !cxx_diag_read32(ti + 4, &np) || !np) return "?";
+   char probe;
+   vm_size_t n = 0;
+   if (vm_read_overwrite(mach_task_self(), (vm_address_t)np, 1,
+                         (vm_address_t)(uintptr_t)&probe, &n) != KERN_SUCCESS)
+      return "?";
+   return (const char *)(uintptr_t)np;
+}
+
+static uint32_t dyncast_fail(int reason, uint32_t src_ti, uint32_t dst_ti) {
+   static uint8_t said[16];
+   if (reason >= 0 && reason < 16 && !said[reason]) {
+      said[reason] = 1;
+      fprintf(stderr, "[rtti] ★__dynamic_cast RETURNED 0 (reason %d) src=%s dst=%s\n",
+              reason, ti_name_of(src_ti), ti_name_of(dst_ti));
+      fflush(stderr);
+   }
+   return 0;
+}
+
 static uint32_t rtti_unreadable(uint32_t addr) {
    static int warned;
    if (!warned) {
@@ -929,7 +964,8 @@ uint32_t shim_dynamic_cast(uint32_t *a) {
    /* If the most-derived typeinfo isn't one we recognize (its vtable bind was
     * not redirected — a native/foreign type), we cannot walk it safely. Fail
     * the cast rather than risk a wild read. */
-   if (ti_kind_of(whole_type) == TI_UNKNOWN) return 0;
+   if (ti_kind_of(whole_type) == TI_UNKNOWN)
+      return dyncast_fail(1, src_type, dst_type);
 
    struct dyncast_result res;
    memset(&res, 0, sizeof res);
@@ -941,19 +977,20 @@ uint32_t shim_dynamic_cast(uint32_t *a) {
    do_dyncast(whole_type, src2dst, SK_contained_public, dst_type,
               whole_ptr, src_type, src_ptr, &res);
 
-   if (!res.dst_ptr) return 0;
-   if (res.dst2src == SK_contained_ambig) return 0;
+   if (!res.dst_ptr) return dyncast_fail(2, src_type, dst_type);
+   if (res.dst2src == SK_contained_ambig)
+      return dyncast_fail(3, src_type, dst_type);
    if (sk_contained_public_p(res.dst2src))
       return res.dst_ptr;                            /* src is a public base of dst */
    if (sk_contained_public_p(res.whole2src & res.whole2dst))
       return res.dst_ptr;                            /* valid public cross-cast */
    if (sk_contained_nonvirtual_p(res.whole2src))
-      return 0;                                      /* src uniquely found, not in dst */
+      return dyncast_fail(4, src_type, dst_type);    /* src uniquely found, not in dst */
    if (res.dst2src == SK_unknown)
       res.dst2src = find_public_src(dst_type, src2dst, res.dst_ptr, src_type, src_ptr);
    if (sk_contained_public_p(res.dst2src))
       return res.dst_ptr;
-   return 0;
+   return dyncast_fail(5, src_type, dst_type);
 }
 
 /* ---------------- std::type_info comparison operators ---------------- */
