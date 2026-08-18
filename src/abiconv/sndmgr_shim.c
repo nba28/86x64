@@ -32,6 +32,7 @@
 #include <stdio.h>
 #include <pthread.h>
 #include <AudioToolbox/AudioToolbox.h>
+#include <dispatch/dispatch.h>
 
 #include "snd_convert.h"
 #include "carbon_shim.h"   /* cm_handle_block / cm_handle_size / i386_ptr / to_i386 */
@@ -106,6 +107,8 @@ struct snd_ch {
    uint16_t                    cb_cmd;
    int16_t                     cb_p1;
    uint32_t                    cb_p2;
+   /* serial context the app's callback is delivered on — see snd_cb_defer() */
+   dispatch_queue_t            cbq;
    pthread_mutex_t             lk;
    struct snd_ch              *next;
 };
@@ -142,6 +145,58 @@ static void fire_callback(uint32_t chan, uint16_t cmd, int16_t p1, uint32_t p2) 
    TR("fire callBack upp=0x%x chan=0x%x p1=%d p2=0x%x\n", upp, chan, p1, p2);
    _86x64_call_i386((uint64_t)upp, 2, words, top);
    free(stk);
+}
+
+/* ★ A QUEUED CLASSIC CALLBACK MUST NEVER RUN ON THE CALLER'S STACK.
+ *
+ * SndDoCommand QUEUES a command; the Sound Manager executes it later, at
+ * interrupt time, on its own context. SndDoCommand returning therefore never
+ * means "the callback has already run", and no classic app can observe its own
+ * callBackCmd re-entering it from inside its own SndDoCommand call. Firing the
+ * callback inline invents a re-entrancy the real API cannot produce.
+ *
+ * That is not a theoretical nicety. An app is entitled to hold a lock across
+ * SndDoCommand, and a double-buffering app naturally does: take the voice lock,
+ * refill, queue the next bufferCmd, re-arm the callBackCmd, release. Deliver the
+ * callback inline and it re-enters that same critical section on the SAME
+ * thread, on a lock that is not recursive — and it deadlocks against itself.
+ *
+ * MEASURED on Halo (i386 0x2d80fa, its SndCallBackProc):
+ *     MPWaitOnSemaphore(voiceSem, 500 ms) -> refill -> SndDoCommand(bufferCmd)
+ *     -> SndDoCommand(callBackCmd) -> MPSignalSemaphore(voiceSem)
+ * With the inline fire, the callBackCmd re-entered that function on the caller's
+ * thread while it still held voiceSem. MP semaphores do not recurse, so the
+ * nested wait burned its full 500 ms deadline, returned kMPTimeoutErr, and took
+ * the early-out that SKIPS THE REFILL. Every symptom followed from that: the
+ * only 0x1f4 timeout in the whole binary, waiter == holder on every timed-out
+ * wait, held == 0.501 s, and a ring buffer that never gets refilled.
+ *
+ * So deliver it on a serial context of our own instead: still ordered, still
+ * off the app's stack, and the app has released its lock by the time it runs.
+ * Per channel, because the classic Sound Manager serialises per channel.
+ *
+ * Kill switch M64_NO_SND_CB_DEFER=1 restores the inline call — a real behaviour
+ * switch whose OFF arm genuinely reproduces the self-deadlock, not a log line. */
+static int snd_cb_defer_disabled(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("M64_NO_SND_CB_DEFER") ? 1 : 0; }
+   return t;
+}
+
+static void snd_cb_defer(struct snd_ch *c, uint32_t chan, uint16_t cmd,
+                         int16_t p1, uint32_t p2) {
+   if (snd_cb_defer_disabled()) { fire_callback(chan, cmd, p1, p2); return; }
+   pthread_mutex_lock(&c->lk);
+   if (!c->cbq) {
+      c->cbq = dispatch_queue_create("m64.sndmgr.callback", DISPATCH_QUEUE_SERIAL);
+   }
+   dispatch_queue_t q = c->cbq;
+   pthread_mutex_unlock(&c->lk);
+   /* No queue (allocation failed): inline is still better than dropping the
+    * app's callback on the floor — a lost callBackCmd stalls the chain forever,
+    * whereas the inline path merely risks the timeout above. */
+   if (!q) { fire_callback(chan, cmd, p1, p2); return; }
+   dispatch_async(q, ^{ fire_callback(chan, cmd, p1, p2); });
 }
 
 /* AudioQueue completion callback (runs on the queue's internal thread). */
@@ -1085,7 +1140,7 @@ static uint32_t do_command(uint32_t chan, uint32_t cmd32) {
       int fire_now = (c->inflight == 0);     /* channel idle: fire immediately */
       if (!fire_now) { c->cb_pending = 1; c->cb_cmd = cmd; c->cb_p1 = p1; c->cb_p2 = p2; }
       pthread_mutex_unlock(&c->lk);
-      if (fire_now) fire_callback(chan, cmd, p1, p2);
+      if (fire_now) snd_cb_defer(c, chan, cmd, p1, p2);
       break;
    }
    case snd_reInitCmd:   /* reinit channel — format handled per-buffer */
@@ -1269,9 +1324,19 @@ uint32_t shim_SndDisposeChannel(uint32_t *args) {
        * callback can never outlive its userdata. */
       pthread_mutex_lock(&c->lk);
       AudioQueueRef q = c->aq;
+      dispatch_queue_t cbq = c->cbq;
+      c->cbq = NULL;
       c->aq = NULL; c->running = 0; c->paused = 0; c->inflight = 0;
       pthread_mutex_unlock(&c->lk);
       if (q) { AudioQueueStop(q, true); AudioQueueDispose(q, true); }
+      /* Drain any deferred callback before the channel goes away. A serial
+       * queue runs this last, so when it returns nothing else is in flight.
+       * (fire_callback only reads `chan`, never `c`, but the mutex below is
+       * about to be destroyed and the queue released.) */
+      if (cbq) {
+         dispatch_sync(cbq, ^{ });
+         dispatch_release(cbq);
+      }
       pthread_mutex_destroy(&c->lk);
       free(c);
    }

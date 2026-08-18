@@ -73,7 +73,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-status-layout jt-cohesion literal-abs-disp classic-input-coords
+.PHONY: translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-status-layout jt-cohesion literal-abs-disp classic-input-coords
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -601,6 +601,21 @@ mp-allocate-buffer: $(BUILD_DIR)/99_mp_allocate_buffer.x86_64
 # by the script's watchdog.
 snd-lock-order: $(BUILD_DIR)/99_snd_lock_order.x86_64
 	@bash snd_lock_order_test.sh
+# snd-cb-reentrancy: A/B guard for the Sound Manager's DELIVERY CONTRACT -- a
+# QUEUED callback must never run on the caller's stack. SndDoCommand queues; the
+# Sound Manager executes later on its own context, so a callBackCmd cannot
+# re-enter the app from inside the app's own SndDoCommand call. Firing inline
+# invents a re-entrancy the real API cannot produce, and any app holding a
+# non-recursive lock across SndDoCommand (every double-buffering app) then
+# deadlocks against itself. MEASURED on Halo CE (2026-08-19): its SndCallBackProc
+# (i386 0x2d80fa) holds a voice semaphore across SndDoCommand(bufferCmd) +
+# SndDoCommand(callBackCmd); 0x2d8127 is the ONLY 500 ms MPWaitOnSemaphore in the
+# binary, and the inline fire made it wait on a semaphore its own outer frame
+# held -- the nested wait burned the deadline, returned kMPTimeoutErr and took
+# the early-out that SKIPS THE REFILL. M64_NO_SND_CB_DEFER=1 is the OFF arm and
+# must reproduce the re-entry; a clean OFF arm fails the guard as inert.
+snd-cb-reentrancy: $(BUILD_DIR)/99_snd_cb_reentrancy.x86_64
+	@bash snd_cb_reentrancy_test.sh
 # snd-status-layout: A/B guard for the classic SCStatus ABI. Sound.h defines
 # scStartTime@0 scEndTime@4 scCurrentTime@8 scChannelBusy@12 scChannelDisposed@13
 # scChannelPaused@14 scUnused@15 scChannelAttributes@16 scCPULoad@20, sizeof 24.
@@ -1680,6 +1695,12 @@ $(BUILD_DIR)/99_mp_allocate_buffer.i386: $(BUILD_DIR)/99_mp_allocate_buffer.o
 # (maptable_tramp.asm) and static-interpose binds them at translate time.
 # Overrides %.i386.
 $(BUILD_DIR)/99_snd_lock_order.i386: $(BUILD_DIR)/99_snd_lock_order.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+# 99_snd_cb_reentrancy: same reason as 99_snd_lock_order -- SndNewChannel /
+# SndDoCommand / SndDisposeChannel are undefined dynamic_lookup imports bound at
+# translate time by static-interpose to libabiconv's ___Snd<name> trampolines
+# (maptable_tramp.asm). Overrides %.i386.
+$(BUILD_DIR)/99_snd_cb_reentrancy.i386: $(BUILD_DIR)/99_snd_cb_reentrancy.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 # 98_snd_status_layout: same reason as 99_snd_lock_order -- SndNewChannel /
 # SndDoImmediate / SndChannelStatus / SndDisposeChannel are undefined
