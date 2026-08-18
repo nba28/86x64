@@ -244,6 +244,11 @@ static OSStatus ep_wrap(EventHandlerCallRef ref, EventRef e, void *ud) {
    return r;
 }
 
+/* Defined below, next to the control handler itself; declared here because the
+ * InstallEventHandler interposer is what triggers it. */
+static void ep_install_control(void);
+static int  g_ctl_installed;
+
 static OSStatus ep_InstallEventHandler(EventTargetRef target, EventHandlerUPP h,
                                        ItemCount n, const EventTypeSpec *types,
                                        void *ud, EventHandlerRef *out) {
@@ -311,6 +316,12 @@ static OSStatus ep_InstallEventHandler(EventTargetRef target, EventHandlerUPP h,
    }
    const OSStatus r = InstallEventHandler(target, use, n, types, use_ud, out);
    if (n_install <= 24) { EP("[ev] InstallEventHandler #%lu -> %d\n", n_install, (int)r); }
+   /* Install the control once Halo has shown us it uses the app target, so the
+    * comparison is against a live, comparable registration rather than one made
+    * before the app existed. */
+   if (!g_ctl_installed && target == GetApplicationEventTarget()) {
+      ep_install_control();
+   }
    ep_leave();
    return r;
 }
@@ -397,6 +408,52 @@ static OSStatus ep_ReceiveNextEvent(ItemCount n, const EventTypeSpec *types,
    }
    ep_leave();
    return r;
+}
+
+/* ★ THE CONTROL: a handler WE install, natively, on the very same target and
+ * for the very same event kinds Halo asks for.
+ *
+ * MEASURED: Halo's app-target handler registers mouse down/up/wheel/moved/
+ * dragged and receives ONLY moved (kind5=170, kind1=0), while the FRONT-WINDOW
+ * standard handler receives all 13 downs and DECLINES every one. Same target,
+ * same handler, different routing by kind — so the target itself plainly works.
+ *
+ * Two explanations remain and they need opposite fixes:
+ *   (a) mouse-DOWN genuinely does not propagate window -> application in this
+ *       environment. Then OUR control handler will not see one either, and the
+ *       defect is in routing//window activation, not in anything we translated.
+ *   (b) something about how HALO's handler was installed through our shim makes
+ *       it ineligible. Then our control WILL receive the downs that Halo's
+ *       handler missed, and the bug is ours, sitting in InstallEventHandler.
+ * Nothing already in the log separates these; a natively-installed twin does,
+ * and it costs one handler.
+ *
+ * Deliberately passive: it counts and always returns eventNotHandledErr, so it
+ * cannot change what Halo does or does not receive. */
+static unsigned long n_ctl[16], n_ctl_other;
+
+static OSStatus ep_control_handler(EventHandlerCallRef ref, EventRef e, void *ud) {
+   (void)ref; (void)ud;
+   const UInt32 ki = e ? GetEventKind(e) : 0;
+   if (ki < 16) { n_ctl[ki]++; } else { n_ctl_other++; }
+   return eventNotHandledErr;   /* never claim: stay a pure observer */
+}
+
+static void ep_install_control(void) {
+   if (g_ctl_installed) { return; }
+   g_ctl_installed = 1;
+   static const EventTypeSpec t[] = {
+      { kEventClassMouse, kEventMouseDown },
+      { kEventClassMouse, kEventMouseUp },
+      { kEventClassMouse, kEventMouseMoved },
+      { kEventClassMouse, kEventMouseDragged },
+   };
+   EventHandlerRef out = NULL;
+   const OSStatus r = InstallEventHandler(GetApplicationEventTarget(),
+                                          NewEventHandlerUPP(ep_control_handler),
+                                          4, t, NULL, &out);
+   EP("[ev] (CONTROL: our own mouse handler on the APPLICATION target -> %d)\n",
+      (int)r);
 }
 
 static OSStatus ep_SendEventToEventTarget(EventRef e, EventTargetRef t) {
@@ -895,6 +952,25 @@ static void ep_atexit(void) {
    EP("[ev] app handler ran on a down : %lu\n", n_handler_mousedown);
    EP("[ev] HALO'S handler entered     : %lu  (on mouse-down: %lu)\n",
       n_halo_handler, n_halo_mousedown);
+   {
+      char got[160]; int g = 0; got[0] = 0;
+      for (UInt32 k = 1; k < 16 && g < 130; k++) {
+         if (n_ctl[k]) {
+            g += snprintf(got + g, sizeof got - g, "%skind%u=%lu",
+                          g ? " " : "", (unsigned)k, n_ctl[k]);
+         }
+      }
+      EP("[ev] ★CONTROL handler (ours, APPLICATION target, mouse 1/2/5/6): %s\n",
+         g ? got : "RECEIVED NOTHING");
+      if (n_ctl[kEventMouseDown]) {
+         EP("[ev]   ⇒ mouse-DOWN DOES reach the application target. Halo's own"
+            " handler is being skipped — OUR InstallEventHandler is the suspect.\n");
+      } else if (n_ctl[kEventMouseMoved]) {
+         EP("[ev]   ⇒ moved reaches the app target but DOWN never does, for our"
+            " natively-installed handler too. Not a translation bug: the down is"
+            " consumed before it can propagate.\n");
+      }
+   }
    for (int i = 0; i < g_nw; i++) {
       struct wrapctx *w = &g_w[i];
       char reg[128]; int o = 0; reg[0] = 0;
