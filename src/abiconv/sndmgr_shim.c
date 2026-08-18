@@ -565,6 +565,37 @@ static void snd_cursor_sweep(void) {
                   resv == SOUND_RESERVE_WANT
                      ? "OK (Halo's fixed reservation landed)"
                      : "   <-- ★NOT AT THE DEMANDED ADDRESS: 0xc5077 takes its error path");
+               /* ★THE FIRST 16 BYTES OF THE BITSTREAM. ov_read (i386 0x2d7082,
+                * called from 0x247039) returns 0 = END OF STREAM, and the
+                * underrun counter proves it does so on every call. Two very
+                * different worlds produce that, and the magic separates them in
+                * one line: sounds.map holds 44295 genuine "OggS" pages, so if
+                * this data starts with OggS the bitstream reached the decoder
+                * intact and the fault is inside the decode; if it does not, the
+                * fault is upstream in whatever loads or copies it, and no amount
+                * of decoder analysis would have found it.
+                * ⚠Only read when the range check already vouched for the
+                * pointer, same rule as the peak. */
+               char magic[17]; magic[0] = 0;
+               if (in_range) {
+                  const unsigned char *mb = (const unsigned char *)i386_ptr(data);
+                  if (mb) {
+                     for (int q = 0; q < 8; q++) {
+                        magic[q] = (mb[q] >= 32 && mb[q] < 127) ? (char)mb[q] : '.';
+                     }
+                     magic[8] = 0;
+                  }
+               }
+               TR("srcmagic: voice=%u first8='%s' %02x %02x %02x %02x %s\n",
+                  i, magic,
+                  in_range ? ((const unsigned char *)i386_ptr(data))[0] : 0,
+                  in_range ? ((const unsigned char *)i386_ptr(data))[1] : 0,
+                  in_range ? ((const unsigned char *)i386_ptr(data))[2] : 0,
+                  in_range ? ((const unsigned char *)i386_ptr(data))[3] : 0,
+                  (in_range && magic[0]=='O' && magic[1]=='g' &&
+                   magic[2]=='g' && magic[3]=='S')
+                     ? "<-- valid OggS page: bitstream reached the decoder INTACT"
+                     : "<-- NOT an Ogg page: the fault is UPSTREAM of the decoder");
                TR("srcdata: voice=%u data=0x%x len=%u cachesz=%u base=0x%x "
                   "limit=0x%llx in_range=%d peak=%u scanned=%u%s\n",
                   i, data, len, csz, cbase, (unsigned long long)climit,
