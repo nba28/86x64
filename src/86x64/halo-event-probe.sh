@@ -22,6 +22,12 @@ APP="${HALO_APP:-$HOME/projects/translations/Apps64/Halo.app}"
 OUT="${1:-/tmp/halo-event-probe.log}"
 DYLIB="${TMPDIR:-/tmp}/halo-event-probe.dylib"
 
+# --selftest-only calibrates the instrument WITHOUT spending a human run (and
+# without launching Halo, which must only ever be started by the person who is
+# going to click).
+SELFTEST_ONLY=0
+if [ "${1:-}" = "--selftest-only" ]; then SELFTEST_ONLY=1; shift; fi
+
 if pgrep -x Halo >/dev/null; then
   echo "Halo is already running — quit it first (pkill -9 -x Halo)." >&2
   exit 1
@@ -45,14 +51,25 @@ SELF="${TMPDIR:-/tmp}/halo-event-selftest"
 cat > "$SELF.c" <<'CEOF'
 #include <Carbon/Carbon.h>
 #include <stdio.h>
+#include <unistd.h>
 static OSStatus h(EventHandlerCallRef r, EventRef e, void *u) {
    (void)r; (void)e; (void)u; return eventNotHandledErr;
 }
+/* The MP arm of the calibration: the probe now substitutes its own entry proc
+ * for the app's, so "the worker never ran" is only trustworthy if the
+ * substitution demonstrably fires when a worker DOES run. */
+static volatile int ran = 0;
+static OSStatus worker(void *p) { (void)p; ran = 1; return 0; }
 int main(void) {
    EventTypeSpec t = { kEventClassCommand, kEventCommandProcess };
    EventHandlerRef ref = NULL;
    InstallEventHandler(GetApplicationEventTarget(), NewEventHandlerUPP(h),
                        1, &t, NULL, &ref);
+   MPQueueID q = NULL; MPTaskID task = NULL;
+   if (MPCreateQueue(&q) == noErr &&
+       MPCreateTask(worker, NULL, 0, q, NULL, NULL, 0, &task) == noErr) {
+      for (int i = 0; i < 200 && !ran; i++) { usleep(5000); }
+   }
    return 0;
 }
 CEOF
@@ -69,7 +86,22 @@ if [ "$ent" != "1" ] || [ "$ret" != "1" ]; then
   echo "  interpose table is inert). NOT launching Halo." >&2
   exit 1
 fi
-echo "self-test: 1 call -> 1 entry, 1 return; interposition live  OK"
+# The MP arm. A control that creates a task and waits for it to run: if the
+# worker-entry substitution cannot see a worker that provably ran here, then
+# "worker never entered" in the Halo log would be the probe's artifact rather
+# than a finding — the exact mistake the recursion bug taught.
+tent=$(grep -c '>>> WORKER 0 ENTERED' "$SELF.log" 2>/dev/null); tent=${tent:-0}
+if [ "$tent" != "1" ]; then
+  echo "SELF-TEST FAILED: a worker that ran was seen $tent times." >&2
+  echo "  The MPCreateTask entry substitution is inert, so a 'never ran'" >&2
+  echo "  verdict from Halo would be meaningless. NOT launching Halo." >&2
+  exit 1
+fi
+echo "self-test: 1 call -> 1 entry, 1 return; worker entry seen; live  OK"
+if [ "$SELFTEST_ONLY" = "1" ]; then
+  echo "--selftest-only: instrument verified, Halo NOT launched."
+  exit 0
+fi
 
 echo "Logging to: $OUT"
 echo
@@ -107,6 +139,17 @@ echo
 echo "--- ★Multiprocessing: does a worker wait STALL? (report: ~1s freeze per selection) ---"
 if grep -q '^\[mp\]' "$OUT"; then
   grep -E '^\[mp\] (MPCreate|MP waits|MPCreateTask calls|⚠)' "$OUT" | head -14 | sed 's/^/  /'
+  echo "  --- ★did the WORKERS actually run? ---"
+  if grep -q '^\[mp\] worker ' "$OUT"; then
+    grep '^\[mp\] worker ' "$OUT" | sed 's/^/  /'
+    grep -q 'NEVER RAN' "$OUT" && \
+      echo "  ⇒ tasks are created but never entered: the main thread waits on a worker that does not exist"
+    grep -q 'DID NOT RETURN' "$OUT" && \
+      echo "  ⇒ the worker entered TRANSLATED code and never came back — our bug, in the callback trampoline"
+  else
+    echo "  (no worker lines — MPCreateTask was never called)"
+  fi
+  grep '>>> WORKER' "$OUT" | head -8 | sed 's/^/  /'
   echo "  --- waits that BLOCKED ---"
   grep 'BLOCKED' "$OUT" | head -8 | sed 's/^/  /'
   [ "$(grep -c 'BLOCKED' "$OUT")" = "0" ] && echo "  (none — MP waits are not the stall)"

@@ -526,14 +526,74 @@ static void mp_report(const char *who, Duration timeout, OSStatus r, double dt) 
    }
 }
 
+/* ★ DOES THE WORKER ACTUALLY RUN?
+ *
+ * MPCreateTask returning noErr only proves the NATIVE side accepted the task;
+ * it says nothing about whether the entry point is ever reached. And the entry
+ * point here is not Halo's function: libabiconv wraps the i386 TaskProc in a
+ * callback trampoline (x64_cb_wrap, sig 1) so that the native worker thread can
+ * call translated code. That trampoline re-enters the translated callback on a
+ * FRESH low-4GB stack, on a thread that has never executed translated code
+ * before -- the single least-exercised path in the whole runtime.
+ *
+ * So interpose the entry point too: substitute our own proc, which records that
+ * the worker thread reached us and then calls the trampoline. Three outcomes are
+ * now distinguishable, and they have completely different causes:
+ *   entered=0            -> the native task never starts the entry point;
+ *   entered>0 returned=0 -> the worker entered translated code and never came
+ *                           back (a fault or a hang INSIDE the translation);
+ *   entered=returned>0   -> workers run fine and the stall is elsewhere.
+ * Without this, all three look identical from the main thread: a wait that
+ * times out.
+ */
+#define EP_MAXTASK 8
+static TaskProc      task_orig[EP_MAXTASK];
+static unsigned long n_task_enter[EP_MAXTASK], n_task_return[EP_MAXTASK];
+static int           n_task_slot;
+
+static OSStatus ep_task_common(int i, void *param) {
+   n_task_enter[i]++;
+   if (n_task_enter[i] <= 2) {
+      EP("[mp] >>> WORKER %d ENTERED (thread=%p param=%p)\n", i,
+         (void *)pthread_self(), param);
+   }
+   const OSStatus r = task_orig[i](param);
+   n_task_return[i]++;
+   if (n_task_return[i] <= 2) {
+      EP("[mp] <<< worker %d returned %d\n", i, (int)r);
+   }
+   return r;
+}
+static OSStatus ep_task0(void *p) { return ep_task_common(0, p); }
+static OSStatus ep_task1(void *p) { return ep_task_common(1, p); }
+static OSStatus ep_task2(void *p) { return ep_task_common(2, p); }
+static OSStatus ep_task3(void *p) { return ep_task_common(3, p); }
+static OSStatus ep_task4(void *p) { return ep_task_common(4, p); }
+static OSStatus ep_task5(void *p) { return ep_task_common(5, p); }
+static OSStatus ep_task6(void *p) { return ep_task_common(6, p); }
+static OSStatus ep_task7(void *p) { return ep_task_common(7, p); }
+static const TaskProc ep_task_stub[EP_MAXTASK] = {
+   ep_task0, ep_task1, ep_task2, ep_task3,
+   ep_task4, ep_task5, ep_task6, ep_task7 };
+
 static OSStatus ep_MPCreateTask(TaskProc e, void *p, ByteCount ss, MPQueueID nq,
                                 void *t1, void *t2, MPTaskOptions o,
                                 MPTaskID *task) {
-   const OSStatus r = MPCreateTask(e, p, ss, nq, t1, t2, o, task);
+   /* Substitute only while a slot is free; past that, pass through untouched
+    * rather than silently dropping the app's entry point on the floor. */
+   TaskProc use = e;
+   int slot = -1;
+   if (n_task_slot < EP_MAXTASK) {
+      slot = n_task_slot++;
+      task_orig[slot] = e;
+      use = ep_task_stub[slot];
+   }
+   const OSStatus r = MPCreateTask(use, p, ss, nq, t1, t2, o, task);
    n_mp_task++;
    if (r != noErr) { n_mp_task_fail++; }
-   EP("[mp] MPCreateTask entry=%p stack=%lu -> %d%s\n", (void *)e, (unsigned long)ss,
-      (int)r, r == noErr ? "" : "   <-- FAILED: this worker will never run");
+   EP("[mp] MPCreateTask entry=%p stack=%lu slot=%d -> %d%s\n", (void *)e,
+      (unsigned long)ss, slot, (int)r,
+      r == noErr ? "" : "   <-- FAILED: this worker will never run");
    return r;
 }
 static OSStatus ep_MPCreateEvent(MPEventID *ev) {
@@ -585,6 +645,17 @@ static void ep_atexit(void) {
    EP("[ev] KEYBOARD events received  : %lu\n", n_key);
    EP("[mp] MPCreateTask calls        : %lu  (%lu FAILED)\n",
       n_mp_task, n_mp_task_fail);
+   for (int i = 0; i < n_task_slot; i++) {
+      EP("[mp] worker %d                  : entered %lu, returned %lu%s\n", i,
+         n_task_enter[i], n_task_return[i],
+         n_task_enter[i] == 0
+            ? "   <-- NEVER RAN: the task was created but its entry point was "
+              "never reached"
+            : (n_task_enter[i] > n_task_return[i]
+                  ? "   <-- ENTERED AND DID NOT RETURN: it is stuck inside the "
+                    "translated callback"
+                  : ""));
+   }
    EP("[mp] MP waits                  : %lu  (%lu blocked >0.10s, worst %.3fs)\n",
       n_mp_wait, n_mp_slow, mp_slowest);
    if (n_mp_slow) {
