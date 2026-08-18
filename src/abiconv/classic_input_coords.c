@@ -47,6 +47,7 @@
 // demand and the two-arm guards have a real OFF arm.
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <dlfcn.h>
 
@@ -125,3 +126,93 @@ int ci_button_is_down(void) {
    return CGEventSourceButtonState(CI_SOURCE_COMBINED_SESSION,
                                    CI_MOUSE_BUTTON_LEFT) ? 1 : 0;
 }
+
+/*
+ * Button() and GetCurrentEventButtonState() — THE OTHER HALF of the classic
+ * click idiom.
+ *
+ * This file already fixed StillDown/WaitMouseUp, and its own header states the
+ * idiom they belong to:
+ *
+ *     if (Button()) { while (StillDown()) { track } }   // ... then act
+ *
+ * but only the SECOND half was ever fixed. Button() and its Carbon successor
+ * GetCurrentEventButtonState() were left as plain abigen ABI bridges straight
+ * to HIToolbox — they were never hand-shimmed, unlike every other classic input
+ * entry point (GetMouse, GetGlobalMouse, GetKeys, GlobalToLocal, LocalToGlobal,
+ * StillDown, WaitMouseUp all are). And a permanently-false Button() defeats the
+ * idiom just as completely as a permanently-false StillDown: the guard never
+ * opens, the tracking loop never runs, nothing is ever clicked. The pointer
+ * still moves and menu items still HIGHLIGHT, because highlighting is driven by
+ * GetMouse polling, which works. That is exactly the reported symptom.
+ *
+ * The native calls are still asked FIRST and their answer is kept: this ORs in
+ * the physical button state rather than replacing it, so a context where
+ * HIToolbox answers correctly is completely unaffected. ABICONV_INPUT_TRACE=1
+ * prints both answers side by side, so a run says which one actually carried
+ * the click instead of leaving it to inference.
+ *
+ * HONEST LIMIT, inherited from ci_button_is_down and unchanged here: the
+ * CombinedSession source reports the PHYSICAL button globally, not "a click
+ * delivered to this app". For a full-screen game — the case this serves — those
+ * coincide. It is the same trade StillDown already makes; this does not widen
+ * it, and the kill switch M64_NO_CLASSIC_INPUT_FIX=1 disables both together.
+ */
+static int ci_trace(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("ABICONV_INPUT_TRACE") != NULL; }
+   return t;
+}
+
+/* Bounded, legible trace: the first few calls (did the app poll at all?), then
+ * only STATE CHANGES (each press and release, once). A button polled every
+ * frame would otherwise bury the one line that matters under thousands of
+ * identical ones, and a trace nobody can read is a trace nobody reads. */
+static void ci_report(const char *who, uint32_t nat, uint32_t cg) {
+   if (!ci_trace()) { return; }
+   static unsigned long ncalls[2];
+   static uint32_t last[2] = { 0xffffffffu, 0xffffffffu };
+   const int slot = (who[0] == 'B') ? 0 : 1;
+   const uint32_t now = nat | cg;
+   const unsigned long n = ++ncalls[slot];
+   const int changed = (now != last[slot]);
+   last[slot] = now;
+   if (n > 5 && !changed) { return; }
+   fprintf(stderr, "[input] %-26s call#%-6lu native=0x%x cg=0x%x -> 0x%x%s\n",
+           who, n, nat, cg, now,
+           (cg && !(nat & 1))
+              ? "   <-- PHYSICAL BUTTON DOWN, HIToolbox did NOT report it"
+              : "");
+   if (n == 5) {
+      fprintf(stderr, "[input]   (further %s calls reported only on CHANGE)\n", who);
+   }
+}
+
+typedef unsigned char (*button_fn)(void);
+typedef uint32_t (*gcebs_fn)(void);
+
+uint32_t shim_Button(uint32_t *args) {
+   (void)args;
+   static button_fn nat = NULL;
+   static int looked = 0;
+   if (!looked) { looked = 1; nat = (button_fn)dlsym(RTLD_DEFAULT, "Button"); }
+   const int n = nat ? (nat() ? 1 : 0) : 0;
+   const int c = ci_button_is_down();
+   ci_report("Button", (uint32_t)n, (uint32_t)c);
+   return (uint32_t)(n | c);
+}
+
+uint32_t shim_GetCurrentEventButtonState(uint32_t *args) {
+   (void)args;
+   static gcebs_fn nat = NULL;
+   static int looked = 0;
+   if (!looked) {
+      looked = 1;
+      nat = (gcebs_fn)dlsym(RTLD_DEFAULT, "GetCurrentEventButtonState");
+   }
+   const uint32_t n = nat ? nat() : 0u;
+   const uint32_t c = ci_button_is_down() ? 1u : 0u;   /* bit 0 = button 1 */
+   ci_report("GetCurrentEventButtonState", n, c);
+   return n | c;
+}
+

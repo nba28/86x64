@@ -1216,6 +1216,14 @@ _x64_exc_longjmp:
 	MTSHIM	___DragGrayRgn,                      _shim_DragGrayRgn
 	MTSHIM	___GetNextEvent,                     _shim_GetNextEvent
 	MTSHIM	___StillDown,                        _shim_StillDown
+	;; Button / GetCurrentEventButtonState: the OTHER half of the classic
+;; click idiom `if (Button()) { while (StillDown()) ... }`. StillDown was
+	;; fixed long ago; these two were left as raw abigen bridges to
+	;; HIToolbox, and a permanently-false Button() defeats the idiom just as
+	;; completely. Overriding here also removes them from the abigen
+	;; consider set. See classic_input_coords.c.
+	MTSHIM	___Button,                           _shim_Button
+	MTSHIM	___GetCurrentEventButtonState,       _shim_GetCurrentEventButtonState
 	MTSHIM	___WaitMouseUp,                      _shim_WaitMouseUp
 	MTSHIM	___CreateCustomList,                 _shim_CreateCustomList
 	MTSHIM	___GetListCellSize,                  _shim_GetListCellSize
