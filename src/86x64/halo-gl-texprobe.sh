@@ -30,6 +30,11 @@ APP="${HALO_APP:-$HOME/projects/translations/Apps64/Halo.app}"
 # --no-client-storage: force GL_UNPACK_CLIENT_STORAGE_APPLE off. This RUN IS A
 # VISUAL TEST — the answer is on the screen, not in the log.
 NOCS=""
+SDIAG=""
+if [ "${1:-}" = "--stream-diag" ]; then
+  SDIAG="ABICONV_D3D_STREAM_DIAG=1"; shift
+  echo "★ SetStreamSource argument capture on — is the stride sane, and which streams get set?"
+fi
 RTTI=""
 if [ "${1:-}" = "--rtti-trace" ]; then
   RTTI="ABICONV_CXX_RTTI_TRACE=1"; shift
@@ -65,7 +70,7 @@ echo "Click Play, let the MAIN MENU sit ~15s so the animated background uploads,
 echo "then quit Halo."
 
 env DYLD_INSERT_LIBRARIES="$DYLIB" HALO_TEXPROBE_LOG="$LOG" \
-    HALO_TEXPROBE_DUMP="$DUMPDIR" $NOCS $STRIDE $RTTI \
+    HALO_TEXPROBE_DUMP="$DUMPDIR" $NOCS $STRIDE $RTTI $SDIAG \
   "$APP/Contents/MacOS/Halo" >"$LOG.app" 2>&1
 
 echo
@@ -132,6 +137,19 @@ if grep -q 'STRIDE OVERRIDE' "$LOG"; then
   echo "  VERDICT IS VISUAL: 3D background correct -> the stride IS the bug and"
   echo "  the substituted value is right. Still smeared -> stride is not the"
   echo "  whole story (or the true stride differs)."
+fi
+
+if grep -q '\[d3d\]' "$LOG.app" 2>/dev/null; then
+  echo
+  echo "--- ★SetStreamSource calls (which streams get a stride, and is it sane?) ---"
+  grep '\[d3d\]' "$LOG.app" | sed 's/^/  /' | head -24
+  echo
+  echo "  READ IT LIKE THIS:"
+  echo "   STRIDE sane (e.g. 32) on every call  -> (A) is dead: the caller is fine,"
+  echo "     and the draw must be reading a stream nobody ever set."
+  echo "   only ONE stream ever appears         -> (B) confirmed: the other stream's"
+  echo "     strides[] slot keeps uninitialised heap, which is the garbage we see."
+  echo "   STRIDE itself garbage                -> (A): hunt moves up to its caller."
 fi
 
 echo "--- distinct upload geometries (size/format) ---"
