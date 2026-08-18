@@ -267,6 +267,16 @@ static void desc_to_asbd(const struct snd_ch *c, const snd_pcm_desc *d,
 #define VOICE_OFF_STATE   0x0c   /* u16 — see snd_voice_state_sweep */
 #define VOICE_OFF_F14     0x14   /* u8, adjacent flag: 0x24b8de sets 1, 0x24a605 sets 0 */
 #define VOICE_OFF_MODE    0x15   /* u8 — the FALSIFIED "one-shot vs stream" byte */
+/* ★R+0x90 — the field the STREAMING branch tests, and NOT the same as R+0x88.
+ * 0x24c393 does `cmpl $-0x1,0x84(%esi)` with esi = R+0xc, so R+0x90. The probe
+ * has only ever reported R+0x88 (which 0x2482ee tests), so this one has never
+ * been looked at. */
+#define VOICE_OFF_F90     0x90
+/* Halo's DirectSound buffer object, layout already PROVEN by the dsprobe
+ * identity base + play == samplePtr. */
+#define DSBUF_OFF_BASE    0x38
+#define DSBUF_OFF_SIZE    0x40
+#define DSBUF_OFF_PLAY    0x98
 
 /* Slide of the image whose name ends in "Halo.dylib", or 0 if absent. Resolved
  * once. Structural (a name suffix), not a path, so a moved bundle still works. */
@@ -319,6 +329,88 @@ static intptr_t halo_image_slide(int *found) {
  * R+0x88 rides along because 0x2482ee (`cmpl $-0x1,0x7c(%esi)`, esi = R+0xc,
  * so R+0x88) makes the SAME query report not-playing when it is -1, and the
  * silent voice was measured at -1. */
+/* ★PLAY-CURSOR SWEEP (task #46). READ-ONLY — mutates nothing.
+ *
+ * THE QUESTION IT SETTLES. Static decode of the mixer's caller says the music
+ * voice's mixer call is not merely "never reached" — it is reached and then
+ * DECLINED, by an arithmetic test on a cursor. At 0x24c333 (esi = R+0xc):
+ *
+ *   0x24c35d  call *0x10(%ebx)        ; dsbuf->vtbl[4] = GetCurrentPosition
+ *   0x24c360  cmpb $0x0,0x9(%esi)     ; R+0x15 (MODE) — measured 0 on all voices
+ *   0x24c366  mov  -0x24(%ebp),%edx   ; play cursor (first out-param)
+ *   0x24c369  sub  0x78(%esi),%edx    ; minus R+0x84 (wr_off) — measured 0
+ *   0x24c372  cmp  $-0x1,%edx ; cmovle ; wrap by the ring size
+ *   0x24c37a  je   0x24c7a4           ; ★delta == 0 -> BAIL, mixer NOT called
+ *   0x24c386  call 0x248cf2           ; otherwise MIX
+ *
+ * So "what invokes 0x248cf2 for a state-2 voice" is ANSWERED — this routine
+ * does — and the live question is why the delta is zero. With wr_off measured
+ * at 0 always, delta == play cursor, so the claim under test is exactly:
+ * THE MUSIC BUFFER'S PLAY CURSOR NEVER ADVANCES.
+ *
+ * ★That would be a DEADLOCK, and it also explains the result that killed the
+ * previous theory: forcing R+0x15 to 1 changed nothing (0f6b9bb). The other
+ * branch (0x24c39c) bails on `play == write`, which is equally true of two
+ * cursors that both sit still — so BOTH branches decline for one cause, and
+ * flipping the selector between them could never have helped.
+ *
+ * WHY IT PIGGYBACKS ON THE SWEEP. The existing dsprobe reads dsbuf+0x98 only
+ * inside an enqueue, and the music voice is precisely the one that never
+ * enqueues — so it is structurally invisible there. The SFX voices enqueue
+ * constantly, and every one of those is a free heartbeat on which to sample the
+ * SILENT voice's cursor. Logs only on CHANGE.
+ *
+ * ⚠A cursor that HOLDS proves the deadlock; one that ADVANCES falsifies this
+ * whole reading and the delta must be going to zero some other way. Both
+ * outcomes are worth the run. DELETE with the other probes when #46 closes. */
+static void snd_cursor_sweep(void) {
+   if (!getenv("ABICONV_SND_CURSORPROBE")) { return; }
+   /* ★SELF-CONTAINED ON PURPOSE. Hanging this off snd_voice_probe would put it
+    * behind TRACE + DSPROBE + "layout confirmed" + VOICEPROBE, and the dsprobe
+    * only confirms its layout for a buffer we were actually handed — i.e. never
+    * for the silent voice. A probe for the voice that never enqueues must not
+    * depend on that voice enqueueing. Gated by ONE env var and its own checks. */
+   int have = 0;
+   intptr_t slide = halo_image_slide(&have);
+   if (!have) { return; }
+   const uint8_t *arr     = (const uint8_t *)(VOICE_ARRAY_TRANS + slide);
+   const uint8_t *arr_end = (const uint8_t *)(VOICE_COMMON_END  + slide);
+   static uint32_t last_play[VOICE_SCAN_MAX], last_wroff[VOICE_SCAN_MAX];
+   static uint8_t  cseen[VOICE_SCAN_MAX];
+   for (uint32_t i = 0; i < VOICE_SCAN_MAX; i++) {
+      const uint8_t *R = arr + (size_t)i * VOICE_STRIDE;
+      if (R + VOICE_STRIDE > arr_end) { break; }
+      uint32_t dsbuf = *(const uint32_t *)(R + VOICE_OFF_DSBUF);
+      if (!dsbuf) { continue; }                  /* no buffer -> nothing to say */
+      uint16_t st    = *(const uint16_t *)(R + VOICE_OFF_STATE);
+      uint32_t wroff = *(const uint32_t *)(R + VOICE_OFF_WROFF);
+      int32_t  f88   = *(const int32_t  *)(R + VOICE_OFF_WREND);
+      int32_t  f90   = *(const int32_t  *)(R + VOICE_OFF_F90);
+      const uint8_t *db = (const uint8_t *)i386_ptr(dsbuf);
+      if (!db) { continue; }
+      uint32_t base = *(const uint32_t *)(db + DSBUF_OFF_BASE);
+      uint32_t size = *(const uint32_t *)(db + DSBUF_OFF_SIZE);
+      uint32_t play = *(const uint32_t *)(db + DSBUF_OFF_PLAY);
+      /* Same discipline as the dsprobe: a layout we cannot corroborate is not
+       * reported. base/size must at least be present and self-consistent. */
+      if (!base || !size || play > size) {
+         if (!cseen[i]) {
+            cseen[i] = 1;
+            TR("cursor: voice=%u dsbuf=0x%x layout NOT confirmed "
+               "(base=0x%x size=%u play=%u) — declining\n",
+               i, dsbuf, base, size, play);
+         }
+         continue;
+      }
+      if (cseen[i] && play == last_play[i] && wroff == last_wroff[i]) { continue; }
+      TR("cursor: voice=%u state=%u play=%u wr_off=%u delta=%d size=%u "
+         "R+0x88=%d R+0x90=%d%s\n",
+         i, st, play, wroff, (int)(play - wroff), size, f88, f90,
+         (play == wroff) ? "   <-- delta 0: mixer DECLINED at 0x24c37a" : "");
+      last_play[i] = play; last_wroff[i] = wroff; cseen[i] = 1;
+   }
+}
+
 static void snd_voice_state_sweep(const uint8_t *arr, const uint8_t *arr_end,
                                   uint32_t ringsize) {
    static uint16_t last_state[VOICE_SCAN_MAX];
@@ -493,6 +585,10 @@ static void enqueue_sound(struct snd_ch *c, uint32_t hdr32) {
          fmt.mSampleRate, d.channels, d.bits, d.is_signed ? "S" : "U", nbytes,
          d.samplePtr, peak, peak == 0 ? "  <-- SILENT BUFFER" : "");
    }
+
+   /* The cursor sweep runs on EVERY enqueue: the SFX voices enqueue constantly
+    * and each one is a free heartbeat on which to sample the SILENT voice. */
+   snd_cursor_sweep();
 
    /* WHOLE-BUFFER probe (ABICONV_SND_DSPROBE=1, trace only).
     *
