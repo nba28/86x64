@@ -19,24 +19,36 @@ set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 APP="${HALO_APP:-$HOME/projects/translations/Apps64/Halo.app}"
+# ⚠FLAGS MUST BE PARSED BEFORE $1 BECOMES THE LOG PATH. The first cut assigned
+# OUT here and parsed flags below it, so `--forward-down` was silently taken as
+# the log filename: the log landed in a file called "--forward-down" and every
+# summary grep then choked on it as an option. Parse flags first, then take
+# whatever positional argument is left.
+SELFTEST_ONLY=0
+FWD=""
+while [ $# -gt 0 ]; do
+  case "${1:-}" in
+    --selftest-only) SELFTEST_ONLY=1; shift ;;
+    --forward-down)
+      FWD="HALO_EV_FORWARD_DOWN=1"; shift
+      echo "⚠ --forward-down: this run MUTATES event delivery (experiment)." ;;
+    --) shift; break ;;
+    -*) echo "unknown flag: $1" >&2; exit 2 ;;
+    *) break ;;
+  esac
+done
+
 OUT="${1:-/tmp/halo-event-probe.log}"
 DYLIB="${TMPDIR:-/tmp}/halo-event-probe.dylib"
 
 # --selftest-only calibrates the instrument WITHOUT spending a human run (and
 # without launching Halo, which must only ever be started by the person who is
 # going to click).
-SELFTEST_ONLY=0
-if [ "${1:-}" = "--selftest-only" ]; then SELFTEST_ONLY=1; shift; fi
 
 # --forward-down arms the MUTATING experiment: every mouse-DOWN the dispatcher
 # declines is re-sent to the APPLICATION target, where Halo's handler lives.
 # Opt-in and separate from the read-only runs, because a perturbing run is not a
 # measuring run — never leave it on for a baseline.
-FWD=""
-if [ "${1:-}" = "--forward-down" ]; then
-  FWD="HALO_EV_FORWARD_DOWN=1"; shift
-  echo "⚠ --forward-down: this run MUTATES event delivery (experiment)."
-fi
 
 if pgrep -x Halo >/dev/null; then
   echo "Halo is already running — quit it first (pkill -9 -x Halo)." >&2
