@@ -322,6 +322,19 @@ static void desc_to_asbd(const struct snd_ch *c, const snd_pcm_desc *d,
 #define SOUND_RESERVE_WANT    0x40000000u
 #define SOUND_RESERVE_SIZE    0x1b40000u
 #define SOUND_CACHE_BASE_PTR  0x10a47f0cu
+/* ★★THE DECODER-UNDERRUN COUNTER — the sharpest instrument on this hunt.
+ * The music voice's source is type 3, whose path does NOT memcpy: it calls the
+ * Ogg decoder at 0x246b8e (-> 0x2d7a80, the libVorbis wrapper). At 0x2491b8:
+ *     testl %eax,%eax ; jne 0x24925b      ; decoded > 0 -> normal path
+ *     ...
+ *     calll _memset                       ; decoded == 0 -> FILL RING WITH ZEROS
+ *     addl  $0x1, 0x406c24                ; ...and bump THIS counter
+ * So when the decoder yields nothing, Halo writes the silence ITSELF and says
+ * nothing. That is exactly the measured symptom: an all-zero ring, no error, and
+ * playback continuing forever. A climbing counter proves the decoder is
+ * returning 0; a flat one falsifies it and the silence is written elsewhere.
+ * i386 0x406c24 is in __bss -> translated 0x10a9d4e4 (0x10a3f000 + 0x5e4e4). */
+#define DECODE_UNDERRUN_CTR   0x10a9d4e4u
 #define SOUND_CACHE_SIZE_MB   16u
 
 /* Slide of the image whose name ends in "Halo.dylib", or 0 if absent. Resolved
@@ -421,6 +434,7 @@ static void snd_cursor_sweep(void) {
    if (!have) { return; }
    const uint8_t *arr     = (const uint8_t *)(VOICE_ARRAY_TRANS + slide);
    const uint8_t *arr_end = (const uint8_t *)(VOICE_COMMON_END  + slide);
+   const intptr_t sl_g    = slide;
    static uint32_t last_play[VOICE_SCAN_MAX], last_wroff[VOICE_SCAN_MAX];
    static uint8_t  cseen[VOICE_SCAN_MAX];
    for (uint32_t i = 0; i < VOICE_SCAN_MAX; i++) {
@@ -558,6 +572,22 @@ static void snd_cursor_sweep(void) {
                   !in_range ? "   <-- OUT OF CACHE RANGE: mixer skips the memcpy"
                             : (scanned == 0 ? "   <-- not scanned"
                                        : (peak == 0 ? "   <-- SOURCE IS SILENT" : "")));
+            }
+         }
+      }
+      /* Underrun counter, reported on change. Global, not per-voice, so it is
+       * read once per sweep and only printed when it moves. */
+      {
+         static uint32_t last_ur = 0xffffffffu;
+         const uint32_t *up =
+            (const uint32_t *)i386_ptr((uint32_t)(DECODE_UNDERRUN_CTR + sl_g));
+         if (up) {
+            uint32_t ur = *up;
+            if (ur != last_ur) {
+               TR("underrun: decoder-returned-0 count = %u%s\n", ur,
+                  ur ? "   <-- Halo is memsetting the ring to SILENCE itself"
+                     : "");
+               last_ur = ur;
             }
          }
       }
