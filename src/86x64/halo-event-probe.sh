@@ -92,15 +92,19 @@ if [ ! -s "$OUT" ]; then
   exit 0
 fi
 
-grep -E '^\[ev\] (InstallEventHandler|ReceiveNextEvent|SendEventToEventTarget|CallNextEventHandler)' "$OUT" | head -30
+grep -E '^\[ev\] (InstallEventHandler #|ReceiveNextEvent REQUEST|  requested type|>>>|<<<|Convert|WaitNextEvent ->)' "$OUT" | head -40
+echo
+echo "--- mouse events (first 8) ---"
+grep -E 'MOUSE (DOWN|UP)' "$OUT" | head -8
+echo "  DOWN total: $(grep -c 'MOUSE DOWN' "$OUT")   UP total: $(grep -c 'MOUSE UP' "$OUT")"
 echo
 sed -n '/===== summary/,$p' "$OUT"
 
 echo
 echo "--- where the chain breaks ---"
-inst=$(grep -c 'InstallEventHandler  target' "$OUT" 2>/dev/null); inst=${inst:-0}
+inst=$(grep -c 'InstallEventHandler #[0-9]* target' "$OUT" 2>/dev/null); inst=${inst:-0}
 down=$(sed -n 's/.*mouse DOWN received *: *//p' "$OUT" | tail -1); down=${down:-0}
-hand=$(sed -n 's/.*app handler ran on a down *: *//p' "$OUT" | tail -1); hand=${hand:-0}
+hand=$(sed -n "s/.*HALO'S handler entered *: *\\([0-9]*\\).*/\\1/p" "$OUT" | tail -1); hand=${hand:-0}
 if [ "$inst" = "0" ]; then
   echo "  NO handler was ever installed ⇒ the break is BEFORE the event system."
   echo "  Look at NewEventHandlerUPP wrapping, or at Halo bailing out earlier."
@@ -113,6 +117,12 @@ elif [ "$hand" = "0" ]; then
   echo "  Mouse-DOWN events ARRIVED ($down) but the app's handler never ran on"
   echo "  one. ⇒ dispatch is dropping them: wrong target, or the registered"
   echo "   event types do not include this class/kind."
+elif [ "$hand" = "0" ]; then
+  echo "  Mouse-DOWN events ARRIVED ($down) and were dispatched, but HALO'S OWN"
+  echo "  HANDLER WAS NEVER ENTERED. ⇒ something else claims the event first,"
+  echo "  or the dispatcher never routes it to Halo's target. Check whether the"
+  echo "  classic path (ConvertEventRefToEventRecord / WaitNextEvent) is the one"
+  echo "  Halo actually uses — the lines above say whether it is called at all."
 else
   echo "  The click REACHES translated Halo code ($hand handler runs on a"
   echo "  mouse-down). ⇒ the plumbing is fine and the click is lost INSIDE the"

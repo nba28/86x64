@@ -55,6 +55,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <signal.h>
+
+/* Removed from the modern Carbon headers (the function is still exported by
+ * HIToolbox, which is why the translated app can bind to it). Declared here so
+ * this file can interpose it. */
+extern Boolean ConvertEventRefToEventRecord(EventRef inEvent,
+                                            EventRecord *outEvent);
+extern Boolean WaitNextEvent(EventMask eventMask, EventRecord *theEvent,
+                             UInt32 sleep, RgnHandle mouseRgn);
 
 static FILE *g_log;
 static pthread_mutex_t g_lk = PTHREAD_MUTEX_INITIALIZER;
@@ -111,10 +120,32 @@ static unsigned long n_install, n_recv, n_send, n_getparam;
 static unsigned long n_mousedown, n_mouseup, n_mousemoved, n_other;
 static unsigned long n_handler_calls, n_handler_mousedown;
 
-/* ---- the installed handler, wrapped so we can see if it is ever called ---- */
+/* ---- the installed handler, wrapped so we can see if it is ever called ----
+ * SendEventToEventTarget returning noErr only says SOMEBODY handled the event;
+ * it does not say WHO. And a handler that fully handles an event returns noErr
+ * WITHOUT calling CallNextEventHandler, so a zero CallNextEventHandler count
+ * proves nothing either way. The only way to know whether the click reaches
+ * Halo is to sit in the middle of its handler, so we substitute our own UPP for
+ * the first MOUSE-class handler it installs and forward faithfully. */
 #define EP_MAX_H 32
 static struct { EventHandlerUPP upp; EventTargetRef tgt; } g_h[EP_MAX_H];
 static int g_nh;
+static EventHandlerUPP g_mouse_orig;
+static unsigned long n_halo_handler, n_halo_mousedown;
+
+static OSStatus ep_mouse_wrapper(EventHandlerCallRef ref, EventRef e, void *ud) {
+   const UInt32 cl = e ? GetEventClass(e) : 0, ki = e ? GetEventKind(e) : 0;
+   n_halo_handler++;
+   char c[5]; fourcc(c, cl);
+   if (cl == kEventClassMouse) { n_halo_mousedown++; }
+   EP("[ev] >>> HALO'S OWN HANDLER entered: class='%s' kind=%u\n", c, (unsigned)ki);
+   const OSStatus r = g_mouse_orig
+      ? InvokeEventHandlerUPP(ref, e, ud, g_mouse_orig) : eventNotHandledErr;
+   EP("[ev] <<< HALO'S OWN HANDLER returned %d%s\n", (int)r,
+      r == eventNotHandledErr ? "  (eventNotHandledErr - IT DECLINED THE EVENT)"
+                              : "  (claimed it)");
+   return r;
+}
 
 static OSStatus ep_InstallEventHandler(EventTargetRef target, EventHandlerUPP h,
                                        ItemCount n, const EventTypeSpec *types,
@@ -137,7 +168,21 @@ static OSStatus ep_InstallEventHandler(EventTargetRef target, EventHandlerUPP h,
       EP("[ev] (further InstallEventHandler calls counted, not printed)\n");
    }
    if (g_nh < EP_MAX_H) { g_h[g_nh].upp = h; g_h[g_nh].tgt = target; g_nh++; }
-   const OSStatus r = InstallEventHandler(target, h, n, types, ud, out);
+   /* Substitute our wrapper for the app's FIRST mouse handler. Only one, only
+    * mouse-class, and it forwards faithfully - a diagnostic must not change
+    * what it measures more than it has to. */
+   EventHandlerUPP use = h;
+   if (!g_mouse_orig) {
+      for (ItemCount i = 0; i < n; i++) {
+         if (types[i].eventClass == kEventClassMouse) {
+            g_mouse_orig = h;
+            use = NewEventHandlerUPP(ep_mouse_wrapper);
+            EP("[ev] (wrapping this MOUSE handler so its invocation is visible)\n");
+            break;
+         }
+      }
+   }
+   const OSStatus r = InstallEventHandler(target, use, n, types, ud, out);
    if (n_install <= 24) { EP("[ev] InstallEventHandler #%lu -> %d\n", n_install, (int)r); }
    ep_leave();
    return r;
@@ -148,6 +193,21 @@ static OSStatus ep_ReceiveNextEvent(ItemCount n, const EventTypeSpec *types,
                                     EventRef *out) {
    if (!ep_enter("ReceiveNextEvent")) {
       return ReceiveNextEvent(n, types, to, pull, out);
+   }
+   /* The request matters as much as the result: a type list that asks only for
+    * mouse-DOWN is why no mouse-UP is ever seen, and pullEvent decides whether
+    * the event is consumed. Logged once - it is the same every iteration. */
+   static int said;
+   if (!said) {
+      said = 1;
+      EP("[ev] ReceiveNextEvent REQUEST: numTypes=%lu timeout=%.4f pullEvent=%d\n",
+         (unsigned long)n, (double)to, (int)pull);
+      for (ItemCount i = 0; i < n && i < 8; i++) {
+         char c[5]; fourcc(c, types[i].eventClass);
+         EP("[ev]   requested type[%lu] class='%s' kind=%u\n",
+            (unsigned long)i, c, (unsigned)types[i].eventKind);
+      }
+      if (n == 0) { EP("[ev]   (numTypes=0 -> asking for EVERY event)\n"); }
    }
    const OSStatus r = ReceiveNextEvent(n, types, to, pull, out);
    n_recv++;
@@ -240,6 +300,57 @@ static OSStatus ep_GetEventParameter(EventRef e, EventParamName name,
    return r;
 }
 
+/* Halo also imports WaitNextEvent and ConvertEventRefToEventRecord - the
+ * CLASSIC event path. A game ported from OS 9 very plausibly handles its menu
+ * from an EventRecord rather than from the Carbon handler, so that path is
+ * traced too: if the conversion fails, or hands back the wrong `what`/`where`,
+ * the click dies there and no amount of Carbon plumbing would show it. */
+static unsigned long n_convert, n_convert_fail, n_wne;
+
+static Boolean ep_ConvertEventRefToEventRecord(EventRef e, EventRecord *out) {
+   if (!ep_enter("ConvertEventRefToEventRecord")) {
+      return ConvertEventRefToEventRecord(e, out);
+   }
+   const UInt32 cl = e ? GetEventClass(e) : 0, ki = e ? GetEventKind(e) : 0;
+   const Boolean r = ConvertEventRefToEventRecord(e, out);
+   n_convert++;
+   if (!r) { n_convert_fail++; }
+   if (cl == kEventClassMouse && (ki == kEventMouseDown || ki == kEventMouseUp)) {
+      char c[5]; fourcc(c, cl);
+      if (r && out) {
+         EP("[ev] ConvertEventRefToEventRecord('%s' kind=%u) -> TRUE  "
+            "what=%u where=(%d,%d) mods=0x%x\n", c, (unsigned)ki,
+            (unsigned)out->what, (int)out->where.h, (int)out->where.v,
+            (unsigned)out->modifiers);
+         if (out->what != 1 /*mouseDown*/ && ki == kEventMouseDown) {
+            EP("[ev]   ⚠a Carbon mouseDown converted to classic what=%u, not 1\n",
+               (unsigned)out->what);
+         }
+      } else {
+         EP("[ev] ConvertEventRefToEventRecord('%s' kind=%u) -> FALSE  "
+            "⚠the classic path never sees this click\n", c, (unsigned)ki);
+      }
+   }
+   ep_leave();
+   return r;
+}
+
+static Boolean ep_WaitNextEvent(EventMask mask, EventRecord *out,
+                                UInt32 sleep, RgnHandle rgn) {
+   if (!ep_enter("WaitNextEvent")) { return WaitNextEvent(mask, out, sleep, rgn); }
+   const Boolean r = WaitNextEvent(mask, out, sleep, rgn);
+   n_wne++;
+   if (r && out && (out->what == 1 || out->what == 2)) {
+      EP("[ev] WaitNextEvent -> classic what=%u where=(%d,%d) mask=0x%x\n",
+         (unsigned)out->what, (int)out->where.h, (int)out->where.v,
+         (unsigned)mask);
+   } else if (n_wne == 1) {
+      EP("[ev] WaitNextEvent is being called (mask=0x%x)\n", (unsigned)mask);
+   }
+   ep_leave();
+   return r;
+}
+
 static void ep_atexit(void) {
    EP("\n[ev] ===== summary =====\n");
    EP("[ev] InstallEventHandler calls : %lu\n", n_install);
@@ -250,13 +361,33 @@ static void ep_atexit(void) {
    EP("[ev] mouse UP   received       : %lu\n", n_mouseup);
    EP("[ev] mouse MOVED received      : %lu\n", n_mousemoved);
    EP("[ev] app handler ran on a down : %lu\n", n_handler_mousedown);
+   EP("[ev] HALO'S handler entered     : %lu  (mouse-class: %lu)\n",
+      n_halo_handler, n_halo_mousedown);
+   EP("[ev] ConvertEventRefToEventRecord: %lu (%lu returned FALSE)\n",
+      n_convert, n_convert_fail);
+   EP("[ev] WaitNextEvent calls        : %lu\n", n_wne);
    if (g_recursed) {
       EP("[ev] ⚠THE PROBE RECURSED - treat every count above as unreliable.\n");
    }
 }
 
+/* The run ends with the app being KILLED, so atexit never fires and every
+ * counter is lost - which is exactly what happened on the first good run.
+ * Catch the terminating signals, print, then let the default action proceed. */
+static void ep_sig(int sig) {
+   EP("\n[ev] (terminated by signal %d)\n", sig);
+   ep_atexit();
+   signal(sig, SIG_DFL);
+   raise(sig);
+}
+
 __attribute__((constructor))
-static void ep_reg(void) { atexit(ep_atexit); }
+static void ep_reg(void) {
+   atexit(ep_atexit);
+   signal(SIGTERM, ep_sig);
+   signal(SIGINT, ep_sig);
+   signal(SIGHUP, ep_sig);
+}
 
 __attribute__((used)) static struct { const void *repl, *orig; }
 ep_interposers[] __attribute__((section("__DATA,__interpose"))) = {
@@ -265,4 +396,7 @@ ep_interposers[] __attribute__((section("__DATA,__interpose"))) = {
    { (const void *)ep_SendEventToEventTarget, (const void *)SendEventToEventTarget },
    { (const void *)ep_CallNextEventHandler,   (const void *)CallNextEventHandler },
    { (const void *)ep_GetEventParameter,      (const void *)GetEventParameter },
+   { (const void *)ep_ConvertEventRefToEventRecord,
+     (const void *)ConvertEventRefToEventRecord },
+   { (const void *)ep_WaitNextEvent,          (const void *)WaitNextEvent },
 };
