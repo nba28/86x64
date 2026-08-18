@@ -708,8 +708,28 @@ def cmd_reinterpose(args):
                 out.unlink()
             continue
         os.replace(out, macho)
-        subprocess.run(["codesign", "-f", "-s", "-", str(macho)],
-                       capture_output=True)
+        # ⚠SIGN THE NESTED CODE FIRST, AND CHECK THE RESULT.
+        #
+        # Rewriting a Mach-O invalidates its signature, so it must be re-signed
+        # or dyld refuses to load it ("code signature does not cover entire file
+        # up to signature"). For a FRAMEWORK binary that is not enough: codesign
+        # walks the version directory and REFUSES the whole operation if a
+        # sibling there is unsigned -- "In subcomponent: .../libabiconv.nulljump:
+        # code object is not signed at all". This call captured output and
+        # ignored the return code, so that refusal was swallowed and the bundle
+        # shipped with a stale signature: reinterpose reported "ok" and the app
+        # then died in dyld at launch. Sign the neighbours first, and surface a
+        # failure instead of hiding it.
+        for sib in sorted(macho.parent.glob("libabiconv*")):
+            if sib.is_file() and sib != macho:
+                subprocess.run(["codesign", "-f", "-s", "-", str(sib)],
+                               capture_output=True)
+        cs = subprocess.run(["codesign", "-f", "-s", "-", str(macho)],
+                            capture_output=True, text=True)
+        if cs.returncode != 0:
+            warn(f"codesign FAILED for {rel}: "
+                 f"{cs.stderr.strip().splitlines()[-1:]} "
+                 f"-- the bundle will NOT launch until this is resolved")
         n_bins += 1
         good(f"reinterposed {rel}")
     if not args.dry_run:
