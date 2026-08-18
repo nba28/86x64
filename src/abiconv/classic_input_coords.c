@@ -50,6 +50,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <dlfcn.h>
+#include <signal.h>
 
 // CoreGraphics event-source query, declared locally to keep this file
 // header-light (it resolves from the x86_64 shared cache like the rest of the
@@ -168,13 +169,45 @@ static int ci_trace(void) {
  * only STATE CHANGES (each press and release, once). A button polled every
  * frame would otherwise bury the one line that matters under thousands of
  * identical ones, and a trace nobody can read is a trace nobody reads. */
+/* ★Totals matter as much as the lines. The first run of this trace printed 5
+ * calls and then only state CHANGES, which made a heavily-polled call look like
+ * a handful of startup calls — and that mis-reading nearly retired
+ * GetCurrentEventButtonState as "not the path". Counts are reported at exit so
+ * "polled 40000 times, never once down" is distinguishable from "called 5
+ * times at startup". */
+static unsigned long ci_total[2], ci_downs[2];
+
+static void ci_summary(void) {
+   if (!ci_trace()) { return; }
+   fprintf(stderr, "[input] ===== summary =====\n");
+   fprintf(stderr, "[input] Button                     calls=%lu  ever-down=%lu\n",
+           ci_total[0], ci_downs[0]);
+   fprintf(stderr, "[input] GetCurrentEventButtonState calls=%lu  ever-down=%lu\n",
+           ci_total[1], ci_downs[1]);
+   if (ci_total[1] && !ci_downs[1]) {
+      fprintf(stderr, "[input] ⚠polled but NEVER observed down — either the fix "
+              "is disabled (M64_NO_CLASSIC_INPUT_FIX) or no click landed\n");
+   }
+}
+
+static void ci_sig(int sig) { ci_summary(); signal(sig, SIG_DFL); raise(sig); }
+
 static void ci_report(const char *who, uint32_t nat, uint32_t cg) {
    if (!ci_trace()) { return; }
+   static int reg;
+   if (!reg) {
+      reg = 1;
+      atexit(ci_summary);
+      signal(SIGTERM, ci_sig);
+      signal(SIGINT, ci_sig);
+   }
    static unsigned long ncalls[2];
    static uint32_t last[2] = { 0xffffffffu, 0xffffffffu };
    const int slot = (who[0] == 'B') ? 0 : 1;
    const uint32_t now = nat | cg;
    const unsigned long n = ++ncalls[slot];
+   ci_total[slot]++;
+   if (now) { ci_downs[slot]++; }
    const int changed = (now != last[slot]);
    last[slot] = now;
    if (n > 5 && !changed) { return; }

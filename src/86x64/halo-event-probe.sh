@@ -79,7 +79,10 @@ echo "  2. CLICK one — 'Campaign' or 'Settings'  (click a couple of times)"
 echo "  3. quit Halo"
 echo
 
-env DYLD_INSERT_LIBRARIES="$DYLIB" HALO_EVENT_LOG="$OUT" \
+# ABICONV_INPUT_TRACE also on: the classic Button/GetCurrentEventButtonState
+# counters land in Halo's own stderr ($OUT.app) and answer, in the SAME run,
+# whether that path is polled at all and whether it ever sees a press.
+env DYLD_INSERT_LIBRARIES="$DYLIB" HALO_EVENT_LOG="$OUT" ABICONV_INPUT_TRACE=1 \
   "$APP/Contents/MacOS/Halo" >"$OUT.app" 2>&1
 
 echo
@@ -100,6 +103,16 @@ echo "  DOWN total: $(grep -c 'MOUSE DOWN' "$OUT")   UP total: $(grep -c 'MOUSE 
 echo
 sed -n '/===== summary/,$p' "$OUT"
 
+echo
+echo "--- classic button-state path (from Halo's stderr) ---"
+if grep -q '^\[input\]' "$OUT.app" 2>/dev/null; then
+  grep -E '^\[input\] (=====|Button |GetCurrentEventButtonState |⚠)' "$OUT.app" | sed 's/^/  /'
+else
+  echo "  no [input] lines — the classic button path was never called at all"
+fi
+echo
+echo "--- keyboard (report: ENTER on a menu item does nothing either) ---"
+grep -E 'KEY kind=|KEYBOARD events' "$OUT" | head -14 | sed 's/^/  /'
 echo
 echo "--- where the chain breaks ---"
 inst=$(grep -c 'InstallEventHandler #[0-9]* target' "$OUT" 2>/dev/null); inst=${inst:-0}

@@ -56,6 +56,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <signal.h>
+#include <sys/time.h>
 
 /* Removed from the modern Carbon headers (the function is still exported by
  * HIToolbox, which is why the translated app can bind to it). Declared here so
@@ -64,6 +65,12 @@ extern Boolean ConvertEventRefToEventRecord(EventRef inEvent,
                                             EventRecord *outEvent);
 extern Boolean WaitNextEvent(EventMask eventMask, EventRecord *theEvent,
                              UInt32 sleep, RgnHandle mouseRgn);
+/* Window Manager calls the modern headers no longer declare (still exported). */
+extern short     FindWindow(Point thePoint, WindowRef *theWindow);
+extern WindowRef FrontWindow(void);
+extern WindowRef ActiveNonFloatingWindow(void);
+extern OSStatus  GetWindowBounds(WindowRef w, WindowRegionCode r, Rect *b);
+extern Boolean   IsWindowVisible(WindowRef w);
 
 static FILE *g_log;
 static pthread_mutex_t g_lk = PTHREAD_MUTEX_INITIALIZER;
@@ -117,7 +124,7 @@ static void fourcc(char out[5], UInt32 v) {
 
 /* Counters, so a flood of mouse-moved events cannot bury the one mouse-down. */
 static unsigned long n_install, n_recv, n_send, n_getparam;
-static unsigned long n_mousedown, n_mouseup, n_mousemoved, n_other;
+static unsigned long n_mousedown, n_mouseup, n_mousemoved, n_other, n_key;
 static unsigned long n_handler_calls, n_handler_mousedown;
 
 /* ---- the installed handler, wrapped so we can see if it is ever called ----
@@ -130,20 +137,74 @@ static unsigned long n_handler_calls, n_handler_mousedown;
 #define EP_MAX_H 32
 static struct { EventHandlerUPP upp; EventTargetRef tgt; } g_h[EP_MAX_H];
 static int g_nh;
-static EventHandlerUPP g_mouse_orig;
 static unsigned long n_halo_handler, n_halo_mousedown;
 
-static OSStatus ep_mouse_wrapper(EventHandlerCallRef ref, EventRef e, void *ud) {
+/*
+ * WRAP EVERY MOUSE-CLASS HANDLER, not just Halo's.
+ *
+ * Measured: 33 mouse-downs arrive, all dispatch with noErr, and HALO'S OWN
+ * handler is entered ZERO times. So somebody else consumes every click before
+ * it reaches Halo's application-target handler. The candidate is visible in the
+ * same log — install #10 is a SYSTEM handler (upp in the 0x7ff8... range, i.e.
+ * native code, not translated) registered for 'mous' kind=1 plus a pile of
+ * 'wind' kinds on a DIFFERENT target: the standard window handler. In Carbon a
+ * mouse-down goes to the window under the pointer first, and the standard
+ * handler processes it there.
+ *
+ * Wrapping only Halo's handler could show that it never ran; it could not show
+ * WHO ran instead. So each mouse-class handler is wrapped, labelled HALO or
+ * SYSTEM by whether its UPP is in the low-4GB translated range, and TIMED.
+ * The timing matters: a standard handler that enters a control-TRACKING loop
+ * blocks until the mouse is released and swallows the mouse-up inside itself —
+ * which would explain the other oddity in the same run, 33 downs and ZERO ups
+ * while Halo asks ReceiveNextEvent for EVERY event type.
+ *
+ * Context travels in userData: we install our own struct holding the original
+ * UPP and the app's original userData, and hand the original back on the way
+ * through, so the wrapped handler cannot tell the difference.
+ */
+struct wrapctx {
+   EventHandlerUPP orig;
+   void           *ud;
+   int             is_halo;
+   int             idx;
+};
+#define EP_MAX_W 16
+static struct wrapctx g_w[EP_MAX_W];
+static int g_nw;
+static unsigned long n_sys_mousedown;
+
+static double ep_now(void) {
+   struct timeval tv; gettimeofday(&tv, NULL);
+   return (double)tv.tv_sec + (double)tv.tv_usec / 1e6;
+}
+
+static OSStatus ep_wrap(EventHandlerCallRef ref, EventRef e, void *ud) {
+   struct wrapctx *w = (struct wrapctx *)ud;
    const UInt32 cl = e ? GetEventClass(e) : 0, ki = e ? GetEventKind(e) : 0;
-   n_halo_handler++;
+   const int is_down = (cl == kEventClassMouse && ki == kEventMouseDown);
    char c[5]; fourcc(c, cl);
-   if (cl == kEventClassMouse) { n_halo_mousedown++; }
-   EP("[ev] >>> HALO'S OWN HANDLER entered: class='%s' kind=%u\n", c, (unsigned)ki);
-   const OSStatus r = g_mouse_orig
-      ? InvokeEventHandlerUPP(ref, e, ud, g_mouse_orig) : eventNotHandledErr;
-   EP("[ev] <<< HALO'S OWN HANDLER returned %d%s\n", (int)r,
-      r == eventNotHandledErr ? "  (eventNotHandledErr - IT DECLINED THE EVENT)"
-                              : "  (claimed it)");
+   if (is_down) {
+      if (w->is_halo) { n_halo_handler++; n_halo_mousedown++; }
+      else            { n_sys_mousedown++; }
+      EP("[ev] >>> %s handler #%d entered on MOUSE DOWN\n",
+         w->is_halo ? "HALO'S" : "SYSTEM", w->idx);
+   } else if (w->is_halo) {
+      n_halo_handler++;
+   }
+   const double t0 = ep_now();
+   const OSStatus r = w->orig
+      ? InvokeEventHandlerUPP(ref, e, w->ud, w->orig) : eventNotHandledErr;
+   const double dt = ep_now() - t0;
+   if (is_down) {
+      EP("[ev] <<< %s handler #%d returned %d after %.3fs%s%s\n",
+         w->is_halo ? "HALO'S" : "SYSTEM", w->idx, (int)r, dt,
+         r == eventNotHandledErr ? "  (DECLINED - the event passes on)"
+                                 : "  (CLAIMED - the event stops here)",
+         dt > 0.15 ? "   <-- it BLOCKED: a tracking loop, which also eats the "
+                     "mouse-UP" : "");
+   }
+   (void)c;
    return r;
 }
 
@@ -168,21 +229,29 @@ static OSStatus ep_InstallEventHandler(EventTargetRef target, EventHandlerUPP h,
       EP("[ev] (further InstallEventHandler calls counted, not printed)\n");
    }
    if (g_nh < EP_MAX_H) { g_h[g_nh].upp = h; g_h[g_nh].tgt = target; g_nh++; }
-   /* Substitute our wrapper for the app's FIRST mouse handler. Only one, only
-    * mouse-class, and it forwards faithfully - a diagnostic must not change
-    * what it measures more than it has to. */
+   /* Wrap every MOUSE-class handler, whoever installs it, so the log shows who
+    * actually consumes a click. Forwards faithfully; the app's own userData is
+    * handed back unchanged. */
    EventHandlerUPP use = h;
-   if (!g_mouse_orig) {
-      for (ItemCount i = 0; i < n; i++) {
-         if (types[i].eventClass == kEventClassMouse) {
-            g_mouse_orig = h;
-            use = NewEventHandlerUPP(ep_mouse_wrapper);
-            EP("[ev] (wrapping this MOUSE handler so its invocation is visible)\n");
-            break;
-         }
-      }
+   void *use_ud = ud;
+   int mouse = 0;
+   for (ItemCount i = 0; i < n; i++) {
+      if (types[i].eventClass == kEventClassMouse) { mouse = 1; break; }
    }
-   const OSStatus r = InstallEventHandler(target, use, n, types, ud, out);
+   if (mouse && g_nw < EP_MAX_W) {
+      struct wrapctx *w = &g_w[g_nw];
+      w->orig = h;
+      w->ud = ud;
+      /* A translated Halo handler lives in the low 4GB; system handlers are up
+       * in the shared cache. That is the discriminator, and it is structural. */
+      w->is_halo = ((uintptr_t)h >> 32) == 0;
+      w->idx = ++g_nw;
+      use = NewEventHandlerUPP(ep_wrap);
+      use_ud = w;
+      EP("[ev] (wrapping MOUSE handler #%d: %s upp=%p)\n", w->idx,
+         w->is_halo ? "HALO" : "SYSTEM", (void *)h);
+   }
+   const OSStatus r = InstallEventHandler(target, use, n, types, use_ud, out);
    if (n_install <= 24) { EP("[ev] InstallEventHandler #%lu -> %d\n", n_install, (int)r); }
    ep_leave();
    return r;
@@ -227,6 +296,42 @@ static OSStatus ep_ReceiveNextEvent(ItemCount n, const EventTypeSpec *types,
             EP("[ev] ReceiveNextEvent  MOUSE %s at (%.1f,%.1f) [param rc=%d]\n",
                ki == kEventMouseDown ? "DOWN" : "UP  ",
                (double)pt.x, (double)pt.y, (int)g);
+            /* WHICH WINDOW does the OS think was clicked? A click attributed to
+             * the wrong window (or to no window) is consumed by that window's
+             * standard handler and never reaches the application target. The
+             * part code names it: 3 = inContent, 4 = inDrag, 0 = inDesk. */
+            if (ki == kEventMouseDown && n_mousedown <= 4) {
+               Point qd; qd.h = (short)pt.x; qd.v = (short)pt.y;
+               WindowRef hit = NULL;
+               const short part = FindWindow(qd, &hit);
+               WindowRef front = FrontWindow();
+               WindowRef act = ActiveNonFloatingWindow();
+               EP("[ev]   FindWindow -> part=%d window=%p | FrontWindow=%p | "
+                  "ActiveNonFloating=%p\n", (int)part, (void *)hit,
+                  (void *)front, (void *)act);
+               if (hit) {
+                  Rect b; GetWindowBounds(hit, kWindowContentRgn, &b);
+                  EP("[ev]   hit window content = (%d,%d)-(%d,%d) visible=%d\n",
+                     (int)b.left, (int)b.top, (int)b.right, (int)b.bottom,
+                     (int)IsWindowVisible(hit));
+               }
+            }
+         }
+      } else if (cl == kEventClassKeyboard) {
+         /* ★Report: pressing ENTER on a menu item does nothing either. If BOTH
+          * mouse and keyboard activation fail while the highlight still moves,
+          * the fault is unlikely to be in the mouse path specifically - so the
+          * key events get the same scrutiny as the clicks. */
+         n_key++;
+         if (n_key <= 12) {
+            UInt32 code = 0; char ch = 0;
+            GetEventParameter(*out, kEventParamKeyCode, typeUInt32, NULL,
+                              sizeof code, NULL, &code);
+            GetEventParameter(*out, kEventParamKeyMacCharCodes, typeChar, NULL,
+                              sizeof ch, NULL, &ch);
+            EP("[ev] ReceiveNextEvent  KEY kind=%u code=%u char=0x%02x%s\n",
+               (unsigned)ki, (unsigned)code, (unsigned char)ch,
+               (code == 36 || code == 76) ? "   <-- RETURN/ENTER" : "");
          }
       } else {
          n_other++;
@@ -360,9 +465,11 @@ static void ep_atexit(void) {
    EP("[ev] mouse DOWN received       : %lu\n", n_mousedown);
    EP("[ev] mouse UP   received       : %lu\n", n_mouseup);
    EP("[ev] mouse MOVED received      : %lu\n", n_mousemoved);
+   EP("[ev] KEYBOARD events received  : %lu\n", n_key);
    EP("[ev] app handler ran on a down : %lu\n", n_handler_mousedown);
-   EP("[ev] HALO'S handler entered     : %lu  (mouse-class: %lu)\n",
+   EP("[ev] HALO'S handler entered     : %lu  (on mouse-down: %lu)\n",
       n_halo_handler, n_halo_mousedown);
+   EP("[ev] SYSTEM handler on mouse-down: %lu\n", n_sys_mousedown);
    EP("[ev] ConvertEventRefToEventRecord: %lu (%lu returned FALSE)\n",
       n_convert, n_convert_fail);
    EP("[ev] WaitNextEvent calls        : %lu\n", n_wne);
