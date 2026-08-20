@@ -408,6 +408,43 @@ static uint32_t best_mode(uint32_t id, int bpp, int w, int h, double rr,
    }
    if (!have_rr || rr <= 0)
       rr = dict_dbl(CGDisplayCurrentMode(id), K_RR, 60.0);
+   /* ★NATIVE-GEOMETRY POLICY (opt-in: M64_FULLSCREEN_NATIVE_MODE=1).
+    *
+    * Synthesising the app's REQUESTED geometry keeps the app coherent with
+    * itself, but it makes the app then RESIZE its window to that geometry — and
+    * a resize is unsurvivable here. MEASURED on this machine (probes/
+    * displayswitch.m `carbonmove`, and a fresh bisection 2026-08-20):
+    *     resize once, BEFORE the window is ever shown ......... SURVIVES
+    *     resize twice before showing .......................... SIGILL
+    *     resize after showing / hidden / orderOut / SizeWindow
+    *       / structure region / resizing the Cocoa mirror ..... SIGILL
+    * Only the FIRST bounds change is survivable; after it the window owns a CGS
+    * context and NSCGSPanic is unconditional. Halo asks for five. So no policy
+    * that lets the resizes through can work, and suppressing them leaves the app
+    * rendering at a size the window does not have (measured: a misaligned menu).
+    *
+    * The remaining move is to stop the app WANTING a different size: answer with
+    * the display's NATIVE geometry, which is the size its fullscreen window
+    * already has, so the bounds it then asks for match what the window is and no
+    * resize is ever requested. The app stays coherent — it renders at what it
+    * believes the screen is, and that belief is now TRUE — and it gets the
+    * native resolution rather than a 640x480 upscale.
+    *
+    * Opt-in because it overrides the user's resolution choice, which is a real
+    * behaviour change and not mine to make silently. */
+   static int native_policy = -1;
+   if (native_policy < 0) {
+      native_policy = getenv("M64_FULLSCREEN_NATIVE_MODE") ? 1 : 0;
+   }
+   if (native_policy) {
+      CGRect nb = CGDisplayBounds(id);
+      const int nw = (int)nb.size.width, nh = (int)nb.size.height;
+      if (nw > 0 && nh > 0 && (nw != w || nh != h)) {
+         DLOG("BestModeForParameters: requested %dx%d -> answering with NATIVE "
+              "%dx%d so no window resize is ever needed\n", w, h, nw, nh);
+         w = nw; h = nh;
+      }
+   }
    CFDictionaryRef m = synth_mode(id, w, h, bpp > 0 ? bpp : 32, rr);
    if (exact) *exact = 1;
    DLOG("BestModeForParameters(display=%u, %dbpp %dx%d @%.0fHz) -> synthesised"
