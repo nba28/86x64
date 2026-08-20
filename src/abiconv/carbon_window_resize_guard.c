@@ -40,9 +40,15 @@
  * resized window", it is a dead process. A resize CANNOT be performed on this
  * OS — that is the measured bisection above, not a preference.
  *
+ * ⚠STATUS: OPT-IN (M64_WINDOW_RESIZE_GUARD=1), NOT a shipped default.
+ * Measured: it does prevent the NSCGSPanic — the first direct launch to get past
+ * the settings dialog — but the menu then renders MISALIGNED, because the window
+ * keeps a size the app did not choose while the app renders at the resolution it
+ * did choose. Stopping a crash by silently producing a wrong picture is not an
+ * improvement, so it stays off until the geometry is handled as well.
+ *
  * Universal: triggers on the operation (a bounds change whose size differs),
- * never on an app name. Kill switch M64_NO_WINDOW_RESIZE_GUARD=1 restores the
- * real resize — the OFF arm, which genuinely reproduces the panic.
+ * never on an app name.
  */
 
 #include <stdint.h>
@@ -58,9 +64,15 @@ typedef int32_t (*wrg_getb_fn)(void *, uint32_t, WRGRect *);
 
 #define WRG_CONTENT_RGN 33   /* kWindowContentRgn */
 
+/* ⚠DEFAULT OFF. Suppressing the resize does stop the panic, but it puts the
+ * window at a size the app did not ask for while the app keeps rendering at the
+ * resolution it chose — and the tester's run showed exactly that: "menu screen broken,
+ * misaligned". Trading a crash for a silently wrong picture is not a trade I get
+ * to make by default, so this is opt-in until the geometry is right too.
+ * M64_WINDOW_RESIZE_GUARD=1 enables it. */
 static int wrg_off(void) {
    static int t = -1;
-   if (t < 0) { t = getenv("M64_NO_WINDOW_RESIZE_GUARD") ? 1 : 0; }
+   if (t < 0) { t = getenv("M64_WINDOW_RESIZE_GUARD") ? 0 : 1; }
    return t;
 }
 static int wrg_trace(void) {
