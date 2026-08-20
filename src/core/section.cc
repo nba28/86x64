@@ -444,8 +444,48 @@ namespace MachO {
                 * aren't 4-aligned), so only gate non-executable targets. */
                const bool exec =
                   (seg->segment_command.initprot & VM_PROT_EXECUTE) != 0;
+               /* ★NARROWED to ZERO-FILL targets (M32). The rule above — "a real
+                * pointer into data points at an ALIGNED global" — is FALSE for a
+                * pointer into a packed BYTE-RECORD table, which legitimately
+                * starts at any offset. It produced a FALSE NEGATIVE that crashed
+                * Halo CE (measured 2026-08-20): the versioned-schema pointer at
+                * i386 0x3798ec holds 0x00379ec6 (& 3 == 2), a genuine pointer to
+                * a table of 10-byte records. Left unrebased, it survived into
+                * __DATA,__data of the translated image as a raw i386 address
+                * while every other pointer in the same struct was rebased. The
+                * scan at 0x19f0a4 walks that table for a tag-9 terminator, so it
+                * ran off the end of whatever happened to be mapped low and took
+                * SIGSEGV at exactly 0x379ec6 — reproducible, on the Campaign
+                * "load existing profile" path.
+                *
+                * Every false positive this gate was written for lands in
+                * ZERO-FILL space, and each is ALREADY covered by a gate that
+                * reasons from evidence rather than from alignment:
+                *   photocd's 0x30a91          -> __DATA,__bss    (zero-fill gate)
+                *   Halo's 0x0048021C/0x5802D0 -> __DATA,__common (zero-fill gate)
+                *   Civ's 0x01000100           -> __cstring interior (cstring gate)
+                *   Quinn's {4,4}              -> __text alias   (func-entry gate)
+                * A zero-fill target has no file content to corroborate, so
+                * alignment is the only signal left there and the gate keeps its
+                * bite. A target with real file content is a different situation,
+                * and rejecting it on alignment alone discards a true pointer.
+                * Kill switch M64_NO_MISALIGN_ZF_NARROW=1 restores the old
+                * unconditional gate — the OFF arm reproduces the crash. */
+               static const bool misalign_narrow_off =
+                  std::getenv("M64_NO_MISALIGN_ZF_NARROW") != nullptr;
                if (!exec && (value & 3) != 0) {
-                  break;   /* misaligned data-range value -> treat as constant */
+                  bool tgt_zerofill = !misalign_narrow_off ? false : true;
+                  if (!misalign_narrow_off) {
+                     for (Section<bits> *sec : seg->sections) {
+                        if (!sec->contains_vmaddr(value)) { continue; }
+                        const uint32_t st = sec->sect.flags & SECTION_TYPE;
+                        tgt_zerofill = (st == S_ZEROFILL || st == S_GB_ZEROFILL);
+                        break;
+                     }
+                  }
+                  if (tgt_zerofill) {
+                     break;   /* misaligned zero-fill target -> constant */
+                  }
                }
                /* ZERO-FILL TARGET gate (M32, reloc-less images). The gate above
                 * accepts that a data-range hit is weak evidence and rejects the
