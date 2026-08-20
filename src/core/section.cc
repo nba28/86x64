@@ -474,17 +474,44 @@ namespace MachO {
                static const bool misalign_narrow_off =
                   std::getenv("M64_NO_MISALIGN_ZF_NARROW") != nullptr;
                if (!exec && (value & 3) != 0) {
-                  bool tgt_zerofill = !misalign_narrow_off ? false : true;
+                  bool relax = false;
                   if (!misalign_narrow_off) {
+                     /* (a) the TARGET must have file content. A zero-fill
+                      * pointee can be corroborated by nothing, so alignment
+                      * stays the only signal there. */
+                     bool tgt_filebacked = false;
                      for (Section<bits> *sec : seg->sections) {
                         if (!sec->contains_vmaddr(value)) { continue; }
                         const uint32_t st = sec->sect.flags & SECTION_TYPE;
-                        tgt_zerofill = (st == S_ZEROFILL || st == S_GB_ZEROFILL);
+                        tgt_filebacked = (st != S_ZEROFILL && st != S_GB_ZEROFILL);
                         break;
                      }
+                     /* (b) ★the SLOT must live in WRITABLE data — a genuine
+                      * pointer FIELD. This half was missing in the first cut and
+                      * it cost a regression. `exec` above describes the TARGET's
+                      * segment, so a slot sitting in read-only __TEXT,__const
+                      * whose value merely ALIASES a __DATA address was relaxed
+                      * too. That is precisely where const tables of small
+                      * integers live — including the VERTEX-STRIDE table at
+                      * i386 0x34e280 whose corruption-by-rebasing was the
+                      * graphics bug fixed on 2026-08-18. MEASURED: without this
+                      * condition a Halo retranslate changed 753 bytes of
+                      * __TEXT,__const, against 144 of __DATA,__data, and the
+                      * graphics-settings dialog stopped responding.
+                      * A compile-time pointer into a byte-record table is a
+                      * FIELD in writable data; a small-integer table is not. */
+                     bool slot_writable = false;
+                     for (Segment<bits> *sl : env.archive.segments()) {
+                        if (!sl->contains_vmaddr(loc.vmaddr)) { continue; }
+                        slot_writable =
+                           (sl->segment_command.initprot & VM_PROT_WRITE) != 0 &&
+                           (sl->segment_command.initprot & VM_PROT_EXECUTE) == 0;
+                        break;
+                     }
+                     relax = tgt_filebacked && slot_writable;
                   }
-                  if (tgt_zerofill) {
-                     break;   /* misaligned zero-fill target -> constant */
+                  if (!relax) {
+                     break;   /* misaligned, unrelaxed -> treat as constant */
                   }
                }
                /* ZERO-FILL TARGET gate (M32, reloc-less images). The gate above
