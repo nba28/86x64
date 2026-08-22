@@ -175,6 +175,32 @@ uint32_t shim_SetWindowBounds(uint32_t *args) {
       return (uint32_t)setb(win, region, want);      /* pure move: safe */
    }
 
+   /* ---- EXPERIMENT (opt-in): report the failure instead of faking success.
+    *
+    * Measured 2026-08-23 with window identity in the trace: Halo drives TWO
+    * windows here. The visible one (A) is shown early and is refused 640x480
+    * three times; a SECOND window (B) is never shown and is sized to exactly
+    * the target 640x480 at exactly the origin we keep moving A to. That is the
+    * shape of a resolution-change routine which PREPARES a correctly-sized
+    * replacement window and then swaps to it.
+    *
+    * If so, returning noErr for a resize we did not perform is the active
+    * defect: the app concludes A really is 640x480, discards the replacement it
+    * had ready, keeps displaying A at 800x600 and renders 640x480 into it --
+    * which is precisely the letterboxed picture and the 120pt click offset.
+    *
+    * Telling the truth costs nothing if the app has no fallback (it is already
+    * not getting the resize either way) and fixes it outright if it does.
+    * OPT-IN until a run says which: M64_RESIZE_REPORT_FAILURE=1. */
+   if (getenv("M64_RESIZE_REPORT_FAILURE")) {
+      if (wrg_trace()) {
+         fprintf(stderr, "[winresize] win=%p POST-SHOW resize %dx%d -> %dx%d "
+                         "REFUSED, reporting paramErr (not faking success)\n",
+                 win, cw, ch, ww, wh);
+      }
+      return (uint32_t)-50;   /* paramErr */
+   }
+
    /* Keep the requested ORIGIN, keep the CURRENT size. */
    const WRGRect moved = { want->top, want->left,
                            (int16_t)(want->top  + ch),
