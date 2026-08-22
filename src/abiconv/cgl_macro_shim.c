@@ -333,7 +333,13 @@ uint32_t shim_aglSetCurrentContext(uint32_t *a)
 }
 
 uint32_t shim_aglUpdateContext(uint32_t *a) { return aglUpdateContext(ctx_in(a[0])); }
-void     shim_aglSwapBuffers(uint32_t *a)   { aglSwapBuffers(ctx_in(a[0])); }
+void     shim_aglSwapBuffers(uint32_t *a)   {
+   /* A frame exists now, so any window whose first show we are holding back is
+    * finally worth showing (carbon_window_deferred_show.c). */
+   { extern void carbon_deferred_show_on_frame(void);
+     carbon_deferred_show_on_frame(); }
+   aglSwapBuffers(ctx_in(a[0]));
+}
 
 uint32_t shim_aglSetInteger(uint32_t *a)
 {
