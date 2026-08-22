@@ -180,6 +180,12 @@ uint32_t shim_SetWindowBounds(uint32_t *args) {
                   dlsym(RTLD_DEFAULT, "GetWindowClass");
       }
       uint32_t wc = 0;
+      /* A/B isolation: force the old suppress-everything behaviour even for a
+       * class that survives. With M64_DOC_WINDOW_CLASS_SUB=1 this yields
+       * "new class, NO resize", which is the arm that separates a class effect
+       * from a resize effect on the menu backdrop. Diagnostic; remove with the
+       * window-geometry task. */
+      if (getenv("M64_RESIZE_FORCE_SUPPRESS")) { getcls = NULL; }
       if (getcls && getcls(win, &wc) == 0) {
          const int survives = (wc == 1 || wc == 2 || wc == 3 || wc == 4 ||
                                wc == 5 || wc == 8 || wc == 9 || wc == 10 ||
