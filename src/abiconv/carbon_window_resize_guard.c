@@ -97,12 +97,11 @@ extern uint64_t x64_objc_unwrap(uint32_t h);
  * runtime rather than linking it, and we read the NSApp GLOBAL rather than
  * calling +sharedApplication so that merely asking the question can never
  * instantiate an application object as a side effect.
- * Shared with carbon_window_deferred_show.c, which needs the same question.
  * ------------------------------------------------------------------------ */
 typedef uint32_t WRGCGWindowID;
 typedef WRGCGWindowID (*wrg_cgid_fn)(void *);
 
-int carbon_window_ever_shown(void *win) {
+static int wrg_ever_shown(void *win) {
    static wrg_cgid_fn cgid_of;
    static int resolved;
    if (!resolved) {
@@ -146,7 +145,7 @@ uint32_t shim_SetWindowBounds(uint32_t *args) {
 
    /* Never shown: the bounds change is free, and this is the ONLY moment the
     * app can legally establish its real geometry. Do not touch it. */
-   if (!carbon_window_ever_shown(win)) {
+   if (!wrg_ever_shown(win)) {
       const int32_t st0 = setb(win, region, want);
       if (wrg_trace()) {
          fprintf(stderr, "[winresize] pre-show bounds -> %dx%d at %d,%d PASSED "

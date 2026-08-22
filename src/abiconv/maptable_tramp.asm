@@ -1238,15 +1238,6 @@ _x64_exc_longjmp:
 	;; resolution after its settings dialog and dies. See
 	;; carbon_window_resize_guard.c.
 	MTSHIM	___SetWindowBounds,                  _shim_SetWindowBounds
-	;; ShowWindow/IsWindowVisible/HideWindow: hold a window's FIRST show back by
-	;; one runloop turn, so the resize a classic app does right after showing is
-	;; still a PRE-SHOW resize and therefore free. Without this the resize above
-	;; has to be suppressed, and the app renders its own resolution into a window
-	;; of a different size -- misaligned picture AND clicks off by the difference.
-	;; See carbon_window_deferred_show.c.
-	MTSHIM	___ShowWindow,                       _shim_ShowWindow
-	MTSHIM	___IsWindowVisible,                  _shim_IsWindowVisible
-	MTSHIM	___HideWindow,                       _shim_HideWindow
 	MTSHIM	___WaitMouseUp,                      _shim_WaitMouseUp
 	MTSHIM	___CreateCustomList,                 _shim_CreateCustomList
 	MTSHIM	___GetListCellSize,                  _shim_GetListCellSize
