@@ -816,12 +816,22 @@ static uint32_t run_alert(uint32_t *a, const char *kind) {
     free(alrt);
     long ilen = 0; uint8_t *ditl = load_resource('DITL', ditlID, &ilen);
     if (ditl) {
-        Dialog tmp; memset(&tmp, 0, sizeof tmp);
-        parse_ditl(&tmp, ditl, ilen);
-        for (int i = 0; i < tmp.nitems; i++)
-            if (tmp.items[i].type == kStatText && tmp.items[i].text[0]) {
-                msg = ns_str(tmp.items[i].text); break;
-            }
+        /* Dialog is ~19 KB (DLG_MAX_ITEMS x DItem). It must NOT be a stack
+         * local: a shim runs on the translated app's stack, and clang lowers a
+         * zero-fill this large to a call to ___bzero — which in THIS dylib
+         * resolves to abigen's i386 bridge of the same name, not libc's. That
+         * bridge reads its arguments off the i386 caller's frame, so a native
+         * call to it passes garbage and bzero()s a NULL pointer (SIGSEGV at 0).
+         * Heap-allocating both removes the huge frame and avoids the lowering. */
+        Dialog *tmp = (Dialog *)calloc(1, sizeof *tmp);
+        if (tmp) {
+            parse_ditl(tmp, ditl, ilen);
+            for (int i = 0; i < tmp->nitems; i++)
+                if (tmp->items[i].type == kStatText && tmp->items[i].text[0]) {
+                    msg = ns_str(tmp->items[i].text); break;
+                }
+            free(tmp);
+        }
         free(ditl);
     }
     if (!msg) msg = @"Alert";

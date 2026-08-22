@@ -9,6 +9,7 @@
 #import <Carbon/Carbon.h>
 #include <stdio.h>
 #include <string.h>
+#include <stdlib.h>
 
 extern OSStatus CreateNewWindow(WindowClass, WindowAttributes, const Rect *, WindowRef *);
 extern void     ShowWindow(WindowRef);
@@ -34,7 +35,16 @@ int main(int argc, char **argv) {
    printf("[rw] CreateNewWindow st=%d w=%p mode=%s\n", (int)st, (void *)w, mode);
    if (!w) { return 3; }
 
-   const int preshow = !strcmp(mode, "presize");
+   /* Modes that manage their OWN initial ShowWindow (they need to act on a
+    * never-yet-shown window). Everything else is shown up front. */
+   static const char *self_show[] = {
+      "presize", "presize_twice", "presize_same", "move_twice", "presize_move",
+      "presize_show_move", "coalesce", "nresize", "reshow", NULL
+   };
+   int preshow = 0;
+   for (int i = 0; self_show[i]; i++) {
+      if (!strcmp(mode, self_show[i])) { preshow = 1; break; }
+   }
    if (!preshow) { ShowWindow(w); }
 
    NSWindow *mir = cocoa_mirror();
@@ -77,6 +87,52 @@ int main(int argc, char **argv) {
       Rect t1 = { 0, 0, 500, 700 };
       st = SetWindowBounds(w, kWindowContentRgn, &t1);
       st = SetWindowBounds(w, kWindowContentRgn, &t);   /* both before show */
+      ShowWindow(w);
+   } else if (!strcmp(mode, "presize_same")) {
+      /* Two IDENTICAL resizes before show. If this survives, the predicate is
+       * "one EFFECTIVE size change", not "one call". */
+      st = SetWindowBounds(w, kWindowContentRgn, &t);
+      st = SetWindowBounds(w, kWindowContentRgn, &t);
+      ShowWindow(w);
+   } else if (!strcmp(mode, "move_twice")) {
+      /* Two pure MOVES before show (size never changes). If this survives, only
+       * size changes are counted. */
+      Rect m1 = { 100, 100, 100 + 622, 100 + 800 };
+      Rect m2 = { 300, 300, 300 + 622, 300 + 800 };
+      st = SetWindowBounds(w, kWindowContentRgn, &m1);
+      st = SetWindowBounds(w, kWindowContentRgn, &m2);
+      ShowWindow(w);
+   } else if (!strcmp(mode, "presize_move")) {
+      /* One resize, then a pure move, both before show. */
+      Rect mv = { 300, 300, 300 + 480, 300 + 640 };
+      st = SetWindowBounds(w, kWindowContentRgn, &t);
+      st = SetWindowBounds(w, kWindowContentRgn, &mv);
+      ShowWindow(w);
+   } else if (!strcmp(mode, "presize_show_move")) {
+      /* The candidate FIX shape: spend the one survivable resize before show,
+       * then only ever MOVE afterwards. */
+      Rect mv = { 300, 300, 300 + 480, 300 + 640 };
+      st = SetWindowBounds(w, kWindowContentRgn, &t);
+      ShowWindow(w);
+      st = SetWindowBounds(w, kWindowContentRgn, &mv);
+   } else if (!strcmp(mode, "coalesce")) {
+      /* Halo asks for five bounds changes. Apply ONLY the last, before show. */
+      Rect want[5] = { {0,0,600,800}, {0,0,480,640}, {0,0,768,1024},
+                       {0,0,600,800}, {0,0,480,640} };
+      Rect last = want[4];
+      for (int i = 0; i < 5; i++) { last = want[i]; }   /* remember, apply none */
+      st = SetWindowBounds(w, kWindowContentRgn, &last);
+      ShowWindow(w);
+   } else if (!strcmp(mode, "nresize")) {
+      /* How many pre-show resizes survive? argv[2] = count. */
+      int n = argc > 2 ? atoi(argv[2]) : 1;
+      for (int i = 0; i < n; i++) {
+         Rect ti = { 0, 0, (short)(480 + i * 8), (short)(640 + i * 8) };
+         st = SetWindowBounds(w, kWindowContentRgn, &ti);
+         printf("[rw] resize #%d -> %dx%d st=%d\n", i + 1,
+                ti.right - ti.left, ti.bottom - ti.top, (int)st);
+         fflush(stdout);
+      }
       ShowWindow(w);
    } else {
       printf("[rw] unknown mode\n"); return 3;
