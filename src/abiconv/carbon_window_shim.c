@@ -125,6 +125,39 @@ uint32_t shim_CreateNewWindow(uint32_t *a)
    *out = 0;
    uint32_t want = cw_disabled() ? attrs : (attrs | kWinCompositing);
 
+   /* ---- kDocumentWindowClass cannot be RESIZED once shown on this macOS ----
+    *
+    * Measured 2026-08-23 (probes/attrresize.m + classagl.m), holding attributes
+    * constant and varying only the class. A SetWindowBounds that changes the
+    * SIZE of an already-shown window:
+    *
+    *    survives : kAlert(1) kMovableAlert(2) kModal(3) kMovableModal(4)
+    *               kFloating(5) kHelp(8) kSheet(9) kToolbar(10) kOverlay(12)
+    *    SIGILL   : kDocument(6) kPlain(11) kSheetAlert(13) kAltPlain(14)
+    *               kSimple(15) kDrawer(16)            (NSCGSPanic, a trap)
+    *
+    * So the panic is NOT "a shown Carbon window can never be resized" -- an
+    * earlier belief of mine, measured only ever on kDocumentWindowClass. Apps
+    * that size their window after showing it (Halo does, to apply the
+    * resolution chosen in its settings dialog) therefore break purely because
+    * of the class they picked.
+    *
+    * kMovableModalWindowClass is the substitute: verified to create, to accept
+    * an aglSetWindowRef attach with a hardware renderer, to SURVIVE the
+    * post-show resize, and to keep GL live afterwards -- while still being a
+    * titled, movable, user-draggable window like a document window.
+    *
+    * ⚠OPT-IN (M64_DOC_WINDOW_CLASS_SUB=1). This changes window chrome for every
+    * document window in the process, which is the right trade for a full-screen
+    * game and the wrong one for a document editor, so it does not default on
+    * until each target says it wants it. */
+   if (cls == 6 /*kDocumentWindowClass*/ && getenv("M64_DOC_WINDOW_CLASS_SUB")) {
+      if (cw_trace())
+         fprintf(stderr, "[win] class kDocument(6) -> kMovableModal(4): "
+                         "kDocument cannot be resized once shown\n");
+      cls = 4 /*kMovableModalWindowClass*/;
+   }
+
    WindowRef w = NULL;
    int32_t   st = n_CreateNewWindow(cls, want, bnds, &w);
 
