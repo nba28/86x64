@@ -148,8 +148,8 @@ uint32_t shim_SetWindowBounds(uint32_t *args) {
    if (!wrg_ever_shown(win)) {
       const int32_t st0 = setb(win, region, want);
       if (wrg_trace()) {
-         fprintf(stderr, "[winresize] pre-show bounds -> %dx%d at %d,%d PASSED "
-                         "THROUGH (window never shown), st=%d\n",
+         fprintf(stderr, "[winresize] win=%p pre-show bounds -> %dx%d at %d,%d "
+                         "PASSED THROUGH (window never shown), st=%d\n", win,
                  want->right - want->left, want->bottom - want->top,
                  want->left, want->top, (int)st0);
       }
@@ -181,9 +181,10 @@ uint32_t shim_SetWindowBounds(uint32_t *args) {
                            (int16_t)(want->left + cw) };
    const int32_t st = setb(win, region, &moved);
    if (wrg_trace()) {
-      fprintf(stderr, "[winresize] POST-SHOW resize %dx%d -> %dx%d SUPPRESSED "
-                      "(would NSCGSPanic); moved to %d,%d instead, st=%d\n",
-              cw, ch, ww, wh, moved.left, moved.top, (int)st);
+      fprintf(stderr, "[winresize] win=%p POST-SHOW resize %dx%d -> %dx%d "
+                      "SUPPRESSED (would NSCGSPanic); moved to %d,%d instead, "
+                      "st=%d\n", win, cw, ch, ww, wh, moved.left, moved.top,
+              (int)st);
    }
    return 0;   /* report success: the app's own logic must continue */
 }
