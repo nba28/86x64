@@ -156,6 +156,48 @@ uint32_t shim_SetWindowBounds(uint32_t *args) {
       return (uint32_t)st0;
    }
 
+   /* Some window CLASSES survive a post-show size change and some trap. The
+    * split is measured, not assumed (probes/attrresize.m, holding attributes
+    * constant and varying only the class):
+    *
+    *    survives : kAlert(1) kMovableAlert(2) kModal(3) kMovableModal(4)
+    *               kFloating(5) kHelp(8) kSheet(9) kToolbar(10) kOverlay(12)
+    *    SIGILL   : kDocument(6) kPlain(11) kSheetAlert(13) kAltPlain(14)
+    *               kSimple(15) kDrawer(16)
+    *
+    * For a surviving class there is nothing to guard against, and suppressing
+    * the resize would do real harm -- it is what leaves the app rendering its
+    * chosen resolution into a window of a different size. So: ask the window
+    * what it is, and only refuse the classes that actually trap. An unknown or
+    * unreadable class resolves to "refuse", because a wrong guess there is a
+    * dead process rather than a wrong size. */
+   {
+      static uint32_t (*getcls)(void *, uint32_t *);
+      static int resolved;
+      if (!resolved) {
+         resolved = 1;
+         getcls = (uint32_t (*)(void *, uint32_t *))
+                  dlsym(RTLD_DEFAULT, "GetWindowClass");
+      }
+      uint32_t wc = 0;
+      if (getcls && getcls(win, &wc) == 0) {
+         const int survives = (wc == 1 || wc == 2 || wc == 3 || wc == 4 ||
+                               wc == 5 || wc == 8 || wc == 9 || wc == 10 ||
+                               wc == 12);
+         if (survives) {
+            const int32_t stc = setb(win, region, want);
+            if (wrg_trace()) {
+               fprintf(stderr, "[winresize] win=%p POST-SHOW resize -> %dx%d "
+                               "PERFORMED (class %u survives a post-show "
+                               "resize), st=%d\n", win,
+                       want->right - want->left, want->bottom - want->top,
+                       wc, (int)stc);
+            }
+            return (uint32_t)stc;
+         }
+      }
+   }
+
    WRGRect cur = { 0, 0, 0, 0 };
    if (!getb || getb(win, region, &cur) != 0) {
       /* Cannot establish the current size, so cannot prove this is a pure move.
