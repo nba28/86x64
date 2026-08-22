@@ -1238,10 +1238,6 @@ _x64_exc_longjmp:
 	;; resolution after its settings dialog and dies. See
 	;; carbon_window_resize_guard.c.
 	MTSHIM	___SetWindowBounds,                  _shim_SetWindowBounds
-	;; ⚠DIAGNOSTIC ONLY (carbon_window_order_probe.c) — pure pass-through; logs
-	;; the ordered show/bounds/GL sequence per WindowRef so the window-geometry
-	;; hold point can be chosen rather than guessed. DELETE with that task.
-	MTSHIM	___ShowWindow,                       _shim_ShowWindow
 	MTSHIM	___WaitMouseUp,                      _shim_WaitMouseUp
 	MTSHIM	___CreateCustomList,                 _shim_CreateCustomList
 	MTSHIM	___GetListCellSize,                  _shim_GetListCellSize
