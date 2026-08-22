@@ -171,6 +171,37 @@ int agl_gl_render_target(void **win_out, void **ctx_out)
    return found;
 }
 
+/* A window whose SIZE changed out from under a live GL context leaves that
+ * context's drawable geometry stale: the backing store keeps the old
+ * dimensions while the window has new ones, and the app draws into a mismatched
+ * buffer -- torn output and uninitialised grey where the new area is.
+ *
+ * Carbon apps are expected to call aglUpdateContext themselves when they handle
+ * their own resize, and some (Halo) do not. Whoever changes a window's bounds
+ * must therefore make the attached contexts re-read their geometry; this is
+ * that call, keyed on the WINDOW so the caller needs to know nothing about
+ * contexts. Universal: it triggers on "this window has GL attached", never on
+ * an app.
+ *
+ * Returns the number of contexts updated. */
+int agl_update_contexts_for_window(void *win)
+{
+   void *ctxs[AGL_MAX_CTX];
+   int n = 0;
+   os_unfair_lock_lock(&g_bind_lk);
+   for (int i = 0; i < AGL_MAX_CTX && n < AGL_MAX_CTX; i++) {
+      if (!g_bind[i].ctx || !g_bind[i].drawable) continue;
+      if (qd_port_window(g_bind[i].drawable) == win) ctxs[n++] = g_bind[i].ctx;
+   }
+   os_unfair_lock_unlock(&g_bind_lk);   /* never call out under the lock */
+
+   static GLboolean (*upd)(void *);
+   if (!upd) upd = (GLboolean (*)(void *))dlsym(RTLD_DEFAULT, "aglUpdateContext");
+   if (!upd) return 0;
+   for (int i = 0; i < n; i++) upd(ctxs[i]);
+   return n;
+}
+
 static uint32_t bind_get(void *ctx)
 {
    uint32_t d = 0;

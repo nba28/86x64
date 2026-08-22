@@ -186,6 +186,16 @@ uint32_t shim_SetWindowBounds(uint32_t *args) {
                                wc == 12);
          if (survives) {
             const int32_t stc = setb(win, region, want);
+            /* The window just changed size under whatever GL is attached to it;
+             * a context that is not told will keep drawing into a backing store
+             * of the old dimensions. */
+            extern int agl_update_contexts_for_window(void *);
+            const int nctx = agl_update_contexts_for_window(win);
+            if (wrg_trace() && nctx) {
+               fprintf(stderr, "[winresize] win=%p aglUpdateContext on %d "
+                               "attached GL context(s) after the resize\n",
+                       win, nctx);
+            }
             if (wrg_trace()) {
                fprintf(stderr, "[winresize] win=%p POST-SHOW resize -> %dx%d "
                                "PERFORMED (class %u survives a post-show "
