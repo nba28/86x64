@@ -151,11 +151,25 @@ uint32_t shim_CreateNewWindow(uint32_t *a)
     * document window in the process, which is the right trade for a full-screen
     * game and the wrong one for a document editor, so it does not default on
     * until each target says it wants it. */
-   if (cls == 6 /*kDocumentWindowClass*/ && getenv("M64_DOC_WINDOW_CLASS_SUB")) {
-      if (cw_trace())
-         fprintf(stderr, "[win] class kDocument(6) -> kMovableModal(4): "
-                         "kDocument cannot be resized once shown\n");
-      cls = 4 /*kMovableModalWindowClass*/;
+   if (cls == 6 /*kDocumentWindowClass*/) {
+      const char *sub = getenv("M64_DOC_WINDOW_CLASS_SUB");
+      if (sub && *sub) {
+         /* The value selects WHICH survivor to use; "1" (or any non-numeric
+          * truthy value) keeps the historical default of kMovableModal(4).
+          *
+          * ⚠The class is NOT a free choice: measured 2026-08-23, substituting
+          * kMovableModal(4) makes Halo's menu backdrop render as torn grey
+          * blocks even with the resize suppressed -- i.e. the CLASS breaks its
+          * 3D rendering, independently of any resize. Surviving classes still
+          * to be tried: kModal(3) kFloating(5) kAlert(1) kMovableAlert(2)
+          * kHelp(8) kSheet(9) kToolbar(10) kOverlay(12). */
+         long want = strtol(sub, NULL, 10);
+         if (want <= 1 || want > 16) want = 4;
+         if (cw_trace())
+            fprintf(stderr, "[win] class kDocument(6) -> %ld: kDocument cannot "
+                            "be resized once shown\n", want);
+         cls = (uint32_t)want;
+      }
    }
 
    WindowRef w = NULL;
