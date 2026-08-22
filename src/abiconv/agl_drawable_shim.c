@@ -194,6 +194,10 @@ uint32_t shim_aglSetDrawable(uint32_t *a)
    const int was_ours = bind_get(ctx) != 0;
    void *win = qd_agl_windowref_enabled() ? qd_port_window(draw_h) : NULL;
 
+   /* ⚠DIAGNOSTIC ONLY (carbon_window_order_probe.c) — remove with that probe. */
+   { extern void carbon_winorder_note_gl(void *, void *);
+     carbon_winorder_note_gl(win, ctx); }
+
    if (win) {
       AGL_NATIVE(setwin, agl_set_win, "aglSetWindowRef");
       if (setwin) {
