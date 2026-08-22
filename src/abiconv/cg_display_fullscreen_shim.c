@@ -430,11 +430,33 @@ static uint32_t best_mode(uint32_t id, int bpp, int w, int h, double rr,
     * believes the screen is, and that belief is now TRUE — and it gets the
     * native resolution rather than a 640x480 upscale.
     *
+    * ⛔HARMFUL — DO NOT USE. MEASURED (2026-08-22): a run with this flag
+    * set leaves the app's SAVED PREFERENCES corrupt, and every LATER launch —
+    * with or without the flag — comes up with an unresponsive graphics-settings
+    * dialog until com.macsoft.halo is deleted. The mechanism is obvious in
+    * hindsight: the app PERSISTS the graphics configuration it believes it
+    * selected, so lying about the mode does not just change this run, it writes
+    * a mode the app cannot read back. That also retro-explains the "unclickable
+    * dialog" I spent a long time blaming on a core-translator change: the first
+    * native-mode run poisoned the prefs, and every run after it inherited them.
+    *
+    * A shim may lie about what the SYSTEM reports; it must not cause the app to
+    * PERSIST a lie. Anything an app writes to disk outlives the process and the
+    * experiment, which makes this a different and much worse class of change
+    * than a per-run override. Kept only as a documented dead end so it is not
+    * reinvented.
+    *
     * Opt-in because it overrides the user's resolution choice, which is a real
     * behaviour change and not mine to make silently. */
    static int native_policy = -1;
    if (native_policy < 0) {
       native_policy = getenv("M64_FULLSCREEN_NATIVE_MODE") ? 1 : 0;
+      if (native_policy) {
+         fprintf(stderr, "[fullscreen] ⚠M64_FULLSCREEN_NATIVE_MODE is a KNOWN-BAD "
+                         "dead end: it makes the app persist a graphics config it "
+                         "cannot read back, so LATER launches break until prefs "
+                         "are deleted.\n");
+      }
    }
    if (native_policy) {
       CGRect nb = CGDisplayBounds(id);
