@@ -1,7 +1,12 @@
 #!/usr/bin/env bash
 # Launch the translated Portal 2 and capture where it dies.
 #
-# usage: run-portal2.sh [--timeout SECS] [--dyld-apis] [--lldb] [-- <extra game args>]
+# usage: run-portal2.sh [--timeout SECS] [--dyld-apis] [--lldb]
+#                       [--insert <dylib>]... [--env NAME=VALUE]... [-- <extra game args>]
+#
+# --insert loads a probe via DYLD_INSERT_LIBRARIES (repeatable; they are joined
+# with ':'). ⚠ A probe MUST be built -arch x86_64 or dyld silently ignores it for
+# this Rosetta target, so each one is checked here rather than failing quietly.
 #
 # Runs the x86_64 tree in bin/osx64 WITHOUT swapping bin/osx32: dyld finds the
 # translated dylibs through the wrapper's baked @rpath plus DYLD_LIBRARY_PATH.
@@ -20,14 +25,18 @@ TIMEOUT=60
 DYLD_APIS=0
 USE_LLDB=0
 EXTRA=()
+INSERTS=()
+ENVS=()
 
 while [ $# -gt 0 ]; do
   case "$1" in
     --timeout) TIMEOUT="$2"; shift 2;;
     --dyld-apis) DYLD_APIS=1; shift;;
+    --insert) INSERTS+=("$2"); shift 2;;
+    --env) ENVS+=("$2"); shift 2;;
     --lldb) USE_LLDB=1; shift;;
     --) shift; EXTRA=("$@"); break;;
-    -h|--help) sed -n '2,12p' "$0"; exit 0;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
 done
@@ -54,6 +63,25 @@ echo "==> timeout  ${TIMEOUT}s"
 cd "$P2" || exit 1
 env_args=(ABICONV_RUN_INITS=1 "DYLD_LIBRARY_PATH=$P2/bin/osx64")
 [ "$DYLD_APIS" -eq 1 ] && env_args+=(DYLD_PRINT_APIS=1)
+
+# Probes: refuse an arm64 build outright. dyld ignores a wrong-arch insert with NO
+# diagnostic, which reads as "the probe saw nothing" — a silent false negative.
+if [ "${#INSERTS[@]}" -gt 0 ]; then
+  ins=""
+  for lib in "${INSERTS[@]}"; do
+    [ -f "$lib" ] || { echo "FATAL: --insert $lib does not exist" >&2; exit 1; }
+    if ! lipo -archs "$lib" 2>/dev/null | tr ' ' '\n' | grep -qx x86_64; then
+      echo "FATAL: --insert $lib has no x86_64 slice (dyld would ignore it SILENTLY)." >&2
+      echo "       rebuild it with: clang -arch x86_64 -dynamiclib ..." >&2
+      exit 1
+    fi
+    ins="${ins:+$ins:}$lib"
+  done
+  echo "==> inserts  $ins"
+  env_args+=("DYLD_INSERT_LIBRARIES=$ins")
+fi
+
+for kv in ${ENVS[@]+"${ENVS[@]}"}; do env_args+=("$kv"); done
 
 if [ "$USE_LLDB" -eq 1 ]; then
   env "${env_args[@]}" lldb -b \

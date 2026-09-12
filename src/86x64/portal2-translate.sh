@@ -26,6 +26,10 @@
 #                   a known data-in-code rabbit hole, and it is only the in-game
 #                   Steam-Workshop/browser UI — not needed for gameplay)
 #   --no-exec       skip the game-root portal2_osx main executable
+#   --exec-only     translate ONLY the game-root exec (no dylibs). Use this when a
+#                   change lands in libwrapper (wrapper_setup.c): the wrapper is
+#                   statically linked into the exec, so `m64 resync` cannot deliver
+#                   it -- but the 41 dylibs are untouched and need no retranslate.
 set -uo pipefail
 
 P2="${P2:-$HOME/Library/Application Support/Steam/steamapps/common/Portal 2}"
@@ -40,6 +44,7 @@ DEPLOY=0
 DEPLOY_ONLY=0
 INCLUDE_CEF=0
 DO_EXEC=1
+EXEC_ONLY=0
 ONLY=()
 
 while [ $# -gt 0 ]; do
@@ -51,6 +56,7 @@ while [ $# -gt 0 ]; do
     --only) ONLY+=("$2"); shift 2;;
     --include-cef) INCLUDE_CEF=1; shift;;
     --no-exec) DO_EXEC=0; shift;;
+    --exec-only) EXEC_ONLY=1; shift;;
     -h|--help) sed -n '2,26p' "$0"; exit 0;;
     *) echo "unknown arg: $1" >&2; exit 2;;
   esac
@@ -93,7 +99,9 @@ fi
 # --- build the work list --------------------------------------------------
 targets=()
 if [ "$DEPLOY_ONLY" -eq 0 ]; then
-if [ ${#ONLY[@]} -gt 0 ]; then
+if [ "$EXEC_ONLY" -eq 1 ]; then
+  :                      # targets stays empty; only the exec below is translated
+elif [ ${#ONLY[@]} -gt 0 ]; then
   for n in "${ONLY[@]}"; do
     [ -f "$SRC32/$n" ] || { echo "FATAL: --only $n not found in osx32" >&2; exit 1; }
     targets+=("$n")
@@ -120,7 +128,7 @@ fi
 # the native slice instead would mean hand-bridging its whole exported surface
 # (the SteamAPI_* C API). Print it so the choice stays visible and reviewable.
 native_capable=()
-for n in "${targets[@]}"; do
+for n in ${targets[@]+"${targets[@]}"}; do
   case "$(lipo -info "$SRC32/$n" 2>/dev/null)" in *x86_64*) native_capable+=("$n");; esac
 done
 if [ ${#native_capable[@]} -gt 0 ]; then
@@ -158,7 +166,7 @@ export M64 LOGS
 results="$STAGE/.results"
 : > "$results"
 {
-  for n in "${targets[@]}"; do
+  for n in ${targets[@]+"${targets[@]}"}; do
     printf '%s\0%s\0%s\0' "$SRC32/$n" "$STAGE/$n" "$n"
   done
   if [ "$DO_EXEC" -eq 1 ]; then
