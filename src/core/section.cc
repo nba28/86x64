@@ -23,6 +23,101 @@
 
 namespace MachO {
 
+   /*
+    * Is this section nothing but NUL-terminated printable C strings and NOP
+    * padding?  If so it is a STRING POOL, whatever its section attributes claim.
+    *
+    * GCC-era i386 toolchains put the C++ RTTI type-NAME strings (__ZTS*) in
+    * __TEXT,__const_coal and align each one; because the section lives in an
+    * EXECUTABLE segment the filler they emit is NOP padding (0x90, or the
+    * multi-byte `0f 1f ...` forms), so the linker stamps the section
+    * S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS. Those attributes
+    * describe the PADDING, not the payload.
+    *
+    * Taking them at face value routes a pure string pool through TextParser,
+    * which fails two ways: every mangled name gets "translated" as machine code
+    * (corrupting type_info::name() — the Civ IV s24 failure mode the __DATA
+    * typeinfo routing below exists to prevent), and a pool whose last string
+    * does not happen to end on an instruction boundary aborts the parse outright
+    * ("blob ... overruns section end": Portal 2's libsteam.dylib, whose 809-name
+    * CryptoPP/common pool ends mid-string 5 bytes shy of the section end, where
+    * the trailing `inkE\0` decodes as a 7-byte instruction).
+    *
+    * So: the attribute is evidence, the content is proof. Real code cannot
+    * satisfy this test — a non-trivial instruction stream is full of opcode
+    * bytes outside 0x20..0x7e that are not NOPs (the synthesized `__jt_tramp`
+    * `ff 25` stubs and a `e8 00 00 00 00 / 58` PIC thunk both fail it on their
+    * first byte). Structural and universal: it triggers on the byte content of
+    * any NOP-padded literal pool, not on a section name or an app.
+    */
+   template <Bits bits>
+   static bool SectionIsNopPaddedCstringPool(const Image& img,
+                                             std::size_t fileoff,
+                                             std::size_t size) {
+      const bool trace = std::getenv("MACHO_TRACE_CSTRPOOL") != nullptr;
+#define CSTRPOOL_REJECT(why, POS)                                           \
+      do {                                                                  \
+         if (trace) {                                                       \
+            const std::size_t pos_ = (POS);                                 \
+            fprintf(stderr, "[cstrpool] reject @0x%zx: %s [", pos_, (why)); \
+            for (std::size_t k = 0; k < 12 && pos_ + k < fileoff + size; ++k) \
+               fprintf(stderr, "%02x ", img.template at<uint8_t>(pos_ + k)); \
+            fprintf(stderr, "]\n");                                         \
+         }                                                                  \
+         return false;                                                      \
+      } while (0)
+
+      if (size == 0 || fileoff + size > img.size()) { return false; }
+
+      std::size_t strings = 0;
+      std::size_t i = 0;
+      while (i < size) {
+         const uint8_t b = img.at<uint8_t>(fileoff + i);
+         if (b == 0x00) {
+            ++i;                      /* inter-string / alignment zero fill */
+            continue;
+         }
+         /* Try NOP padding FIRST, before treating the byte as string content.
+          * A multi-byte NOP may open with a PRINTABLE prefix byte — the
+          * operand-size prefix 0x66 is 'f', and the segment-override prefixes
+          * 0x2e/0x3e/0x26/0x36/0x64/0x65 are './>/&/6/d/e' — so `66 0f 1f 44 00
+          * 00` (nopw) reads as a string starting "f" and then trips over the
+          * 0x0f. Deciding NOP-first is safe in the other direction too: every
+          * NOP encoding is either exactly 0x90 or contains 0x0f, and neither
+          * byte is printable, so a genuine C string can never be consumed here.
+          */
+         {
+            xed_decoded_inst_t xd;
+            xed_decoded_inst_zero_set_mode(&xd, &Instruction<bits>::dstate());
+            xed_decoded_inst_set_input_chip(&xd, XED_CHIP_INVALID);
+            if (xed_decode(&xd, &img.at<uint8_t>(fileoff + i),
+                           size - i) == XED_ERROR_NONE &&
+                xed_decoded_inst_get_iclass(&xd) == XED_ICLASS_NOP) {
+               const unsigned len = xed_decoded_inst_get_length(&xd);
+               if (len > 0) { i += len; continue; }
+            }
+         }
+         if (b >= 0x20 && b < 0x7f) {
+            /* A printable run only counts if it is NUL-terminated INSIDE the
+             * section; an unterminated tail is not a string. */
+            std::size_t j = i;
+            while (j < size) {
+               const uint8_t c = img.at<uint8_t>(fileoff + j);
+               if (c == 0x00) { break; }
+               if (!(c >= 0x20 && c < 0x7f)) { CSTRPOOL_REJECT("nonprintable in run", fileoff + j); }
+               ++j;
+            }
+            if (j == size) { CSTRPOOL_REJECT("unterminated tail run", fileoff + i); }
+            ++strings;
+            i = j + 1;                /* step over the terminating NUL */
+            continue;
+         }
+         CSTRPOOL_REJECT("neither NOP padding nor printable string", fileoff + i);
+      }
+      return strings > 0;
+#undef CSTRPOOL_REJECT
+   }
+
    template <Bits bits>
    Section<bits> *Section<bits>::Parse(const Image& img, std::size_t offset, ParseEnv<bits>& env) {
       section_t<bits> sect = img.at<section_t<bits>>(offset);
@@ -216,9 +311,24 @@ namespace MachO {
           * metadata sections (__86x64_pcmap/__86x64_xrel, flags 0) and
           * __eh_frame (S_COALESCED, no instr attrs) are unaffected.
           */
+         if (std::getenv("MACHO_TRACE_SECTROUTE")) {
+            fprintf(stderr, "[sectroute] %.16s,%.16s flags=0x%x off=0x%x size=0x%x "
+                            "pure=%d exec=%d cstrpool=%d\n",
+                    sect.segname, sect.sectname, flags,
+                    (unsigned)sect.offset, (unsigned)sect.size,
+                    (flags & S_ATTR_PURE_INSTRUCTIONS) != 0,
+                    env.current_segment != nullptr &&
+                       (env.current_segment->segment_command.initprot & VM_PROT_EXECUTE) ? 1 : 0,
+                    (int)SectionIsNopPaddedCstringPool<bits>(img, sect.offset, sect.size));
+         }
          if ((flags & S_ATTR_PURE_INSTRUCTIONS) != 0 &&
              env.current_segment != nullptr &&
-             (env.current_segment->segment_command.initprot & VM_PROT_EXECUTE)) {
+             (env.current_segment->segment_command.initprot & VM_PROT_EXECUTE) &&
+             /* ...unless the CONTENT proves it is a NOP-padded literal pool
+              * rather than code, in which case the instruction attributes
+              * describe the linker's alignment filler. See
+              * SectionIsNopPaddedCstringPool. */
+             !SectionIsNopPaddedCstringPool<bits>(img, sect.offset, sect.size)) {
             return new Section<bits>(img, offset, env, TextParser);
          }
          /*
