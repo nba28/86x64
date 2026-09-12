@@ -40,6 +40,9 @@
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
 
+/* objc_slide.c: the i386 init stack's live range, 0 unless it is really ours. */
+extern int _86x64_init_stack_range(uintptr_t *top, uintptr_t *bottom);
+
 /* Reserve the heap inside the wrapper's low-4GB window [0x80000000,
  * 0xF0000000). Start the scan above the bottom 128 MB so the wrapper's
  * small shim-FILE / scratch allocations (which cluster at the base) don't
@@ -316,16 +319,22 @@ static int addr_is_code(const void *v, const Dl_info *info)
 
 static void heap_report_requesters(void)
 {
-   void **sp = (void **)__builtin_frame_address(0);
+   /* ⚠ Walk the stack in FOUR-byte steps, not eight. Translated code keeps an
+    * i386-granular stack even on the native stack -- a call is emitted as
+    * `pushw %ax; pushw %ax; movl %r11d,(%rsp); jmp target`, i.e. a 4-byte return
+    * address. Stepping 8 bytes only catches the ones that happen to land aligned,
+    * which is why an earlier version of this report saw a couple of translated
+    * frames and missed the rest of the chain. */
+   const uint32_t *sp = (const uint32_t *)__builtin_frame_address(0);
    const char *w = getenv("ABICONV_HEAP_WORDS");
-   const int words = w ? atoi(w) : 1024;
+   const int words = w ? atoi(w) : 2048;   /* 8 KB at 4 bytes/step */
    int shown = 0;
-   const int maxshow = 24;
+   const int maxshow = 40;
    fprintf(stderr, "[heap]   who asked (stack words pointing INTO __TEXT,__text of "
                    "a non-system image; live and dead frames are mixed, so this is "
                    "a candidate set, not a call chain):\n");
    for (int i = 0; i < words && shown < maxshow; ++i) {
-      void *v = sp[i];
+      void *v = (void *)(uintptr_t)sp[i];
       if (v == NULL) { continue; }
       Dl_info info;
       if (dladdr(v, &info) == 0 || info.dli_fname == NULL) { continue; }
@@ -336,13 +345,52 @@ static void heap_report_requesters(void)
       const char *base = strrchr(info.dli_fname, '/');
       base = base ? base + 1 : info.dli_fname;
       fprintf(stderr, "[heap]     [sp+0x%03x] %p  %s+0x%lx  %s\n",
-              (unsigned)(i * sizeof(void *)), v, base,
+              (unsigned)(i * 4), v, base,
               (unsigned long)((char *)v - (char *)info.dli_fbase),
               info.dli_sname ? info.dli_sname : "(no symbol)");
       ++shown;
    }
    if (shown == 0) {
       fprintf(stderr, "[heap]     (none found -- raise ABICONV_HEAP_WORDS)\n");
+   }
+
+   /* Now the stack that actually matters. A translated static initializer runs on
+    * the i386 init stack, so its frames are NOT on the native stack scanned above
+    * -- that is why the native scan can name the requesting library but never the
+    * instruction. Return addresses there are i386, i.e. FOUR bytes, so this walks
+    * 32-bit words. The stack grows DOWN from the base, so walking down from the
+    * base runs oldest-to-newest. */
+   uintptr_t istop = 0, isbot = 0;
+   if (_86x64_init_stack_range(&istop, &isbot)) {
+      const char *iw = getenv("ABICONV_HEAP_I386_WORDS");
+      const int iwords = iw ? atoi(iw) : 4096;          /* 16 KB of stack */
+      fprintf(stderr, "[heap]   i386 init-stack frames (base %#lx, newest LAST; "
+                      "feed an offset to pcmap-diff.py):\n",
+              (unsigned long)istop);
+      int ishown = 0;
+      for (int i = 1; i <= iwords && ishown < 40; ++i) {
+         const uintptr_t at = istop - (uintptr_t)i * 4;
+         if (at < isbot) { break; }
+         const uint32_t v = *(const volatile uint32_t *)at;
+         if (v == 0) { continue; }
+         Dl_info info;
+         if (dladdr((void *)(uintptr_t)v, &info) == 0 || info.dli_fname == NULL) { continue; }
+         if (strstr(info.dli_fname, "/usr/lib/") != NULL ||
+             strstr(info.dli_fname, "/System/") != NULL ||
+             strstr(info.dli_fname, "libabiconv") != NULL) { continue; }
+         if (!addr_is_code((const void *)(uintptr_t)v, &info)) { continue; }
+         const char *base = strrchr(info.dli_fname, '/');
+         base = base ? base + 1 : info.dli_fname;
+         fprintf(stderr, "[heap]     [%#lx] %#010x  %s+0x%lx  %s\n",
+                 (unsigned long)at, v, base,
+                 (unsigned long)((uintptr_t)v - (uintptr_t)info.dli_fbase),
+                 info.dli_sname ? info.dli_sname : "(no symbol)");
+         ++ishown;
+      }
+      if (ishown == 0) {
+         fprintf(stderr, "[heap]     (no translated frames found -- raise "
+                         "ABICONV_HEAP_I386_WORDS)\n");
+      }
    }
    fflush(stderr);
 }

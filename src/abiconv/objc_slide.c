@@ -132,6 +132,24 @@ static size_t   g_stub_cap    = 0;
 
 /* One-time setup of this copy's low init stack + shadow save-stack. Returns 0
  * on success. Safe to call repeatedly (idempotent per copy). */
+/* The i386 init stack's live range, for diagnostics that need to walk TRANSLATED
+ * frames. A translated static initializer runs on this stack, not the native one,
+ * so a native backtrace or stack scan cannot see its callers at all -- which is
+ * why a failing allocation could name the requesting library but never the
+ * instruction (malloc_shim.c). Returns 0 unless the stack is really ours, checked
+ * by the sentinel, so a caller never walks a stranger's mapping.
+ *
+ * `*top` is the stack BASE (highest address); it grows DOWN from there, so the
+ * newest frame is at the LOWEST used address and a walk from *top downward runs
+ * oldest-to-newest. Return addresses here are i386, i.e. FOUR bytes. */
+int _86x64_init_stack_range(uintptr_t *top, uintptr_t *bottom) {
+   if (!g_init_low_stack_top) { return 0; }
+   if (*(volatile uint64_t *)INIT_STACK_ADDR != INIT_STACK_MAGIC) { return 0; }
+   if (top)    { *top    = (uintptr_t)g_init_low_stack_top; }
+   if (bottom) { *bottom = (uintptr_t)INIT_STACK_ADDR; }
+   return 1;
+}
+
 static int init_stack_setup(void) {
    if (g_init_low_stack_top) { return 0; }
 
@@ -1368,6 +1386,21 @@ static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
                               uint64_t vmaddr_lo, uint64_t vmaddr_hi,
                               const char *imgname) {
    if (slide == 0 || vmaddr_lo >= vmaddr_hi) { return; }
+   /* Kill switch. This pass identifies pointers by VALUE -- any 4-byte word whose
+    * content falls inside the image's pre-slide vmaddr span -- so an INTEGER that
+    * merely aliases that window is indistinguishable from a pointer and gets slid,
+    * turning a plain number into an address. When a translated program computes a
+    * nonsensical, load-address-dependent value, this pass is the first suspect;
+    * being able to switch it off tells you in one run whether it is responsible.
+    * ⚠ Switching it off breaks any image that genuinely needs the slide, so this
+    * is a diagnostic, not a supported mode. */
+   if (getenv("ABICONV_NO_DATA_PTR_SLIDE")) {
+      if (g_verbose) {
+         fprintf(stderr, "abiconv objc_slide: data-pointer slide DISABLED for %s "
+                 "(ABICONV_NO_DATA_PTR_SLIDE)\n", imgname ? imgname : "?");
+      }
+      return;
+   }
    const uint8_t *p = (const uint8_t *)(mh64 + 1);
    size_t total_slid = 0;
    for (uint32_t i = 0; i < mh64->ncmds; i++) {
