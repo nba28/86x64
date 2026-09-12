@@ -3246,10 +3246,11 @@ namespace MachO {
                 * opcodes — the rewrite assumes a 1-byte opcode and a
                 * normal ModR/M layout. */
                std::size_t p = 0;
-               bool have_66 = false;
                while (p < instbuf.size()) {
                   const uint8_t b = instbuf.at(p);
-                  if (b == 0x66) { have_66 = true; ++p; continue; }
+                  /* Legacy prefixes are copied verbatim below and the REX is
+                   * placed after them, so none needs to be tracked here. */
+                  if (b == 0x66) { ++p; continue; }
                   if (b == 0x67) {
                      throw error("%s: pic_anchored with 0x67 prefix at "
                                  "vmaddr 0x%zx", __FUNCTION__,
@@ -3366,12 +3367,29 @@ namespace MachO {
                   }
                   /* REX.B (0x41): extends r11 as the SIB base register.
                    * REX.X is not needed since the index is within rax..rdi.
-                   * Insert after any existing 0x66 prefix but before REX
-                   * (there should be none at this point for i386 source). */
-                  sib_buf.insert(sib_buf.begin(), (uint8_t)0x41);
-                  if (have_66) {
-                     sib_buf.insert(sib_buf.begin(), (uint8_t)0x66);
-                  }
+                   *
+                   * ★REX MUST BE THE LAST PREFIX, immediately before the
+                   * opcode. sib_buf already holds this instruction's legacy
+                   * prefixes -- the copy loop above starts at index 0 -- so
+                   * inserting at begin() put the REX *ahead* of a mandatory
+                   * 0x66/0xF2/0xF3, and a REX followed by another prefix is
+                   * IGNORED by the CPU. REX.B was then lost and the SIB base
+                   * decoded from its low 3 bits alone: 011 = %rbx. Every
+                   * 16-bit (0x66: movw/cmpw/pinsrw) and SSE-scalar (0xF3/0xF2:
+                   * movss/movsd/mulss/...) access through a PIC anchor
+                   * therefore addressed a STALE %rbx instead of the table base
+                   * -- reading garbage, and writing to a wild 64-bit address
+                   * that silently corrupted whatever lived there. Measured on
+                   * Portal 2's engine.dylib: 292 such sites, one of which
+                   * scribbled 16-bit 0xFFFF into dyld's own allocations and
+                   * made dyld abort the process from an assert.
+                   *
+                   * Inserting at opcode_idx is a NO-OP for a prefix-less
+                   * instruction (opcode_idx == 0), so this changes only the
+                   * encodings that were provably wrong. The 0x66 is already
+                   * in the copied bytes, so re-adding it here would just
+                   * duplicate a prefix. */
+                  sib_buf.insert(sib_buf.begin() + opcode_idx, (uint8_t)0x41);
 
                   auto* main_sib = new Instruction<opposite<bits>>(sib_buf);
                   return {lea_sib, main_sib};
