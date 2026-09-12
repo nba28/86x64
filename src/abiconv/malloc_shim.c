@@ -36,6 +36,7 @@
 #include <os/lock.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <dlfcn.h>
 
 /* Reserve the heap inside the wrapper's low-4GB window [0x80000000,
  * 0xF0000000). Start the scan above the bottom 128 MB so the wrapper's
@@ -272,6 +273,60 @@ static int owned(const void *p) {
 /* Carve a fresh block of `cap` payload bytes whose payload is aligned to
  * `align` (>=16). Caller holds g_hc->lock. Writes the block header immediately
  * before the returned payload so free()/realloc() recover it at p-sizeof. */
+/* Name WHO asked for the allocation that could not be served.
+ *
+ * A size that cannot be served is useless on its own: the interesting question is
+ * always which code computed it, and a mistranslated size looks exactly like a
+ * legitimate one. The request arrives through a bridge from translated code, whose
+ * frames do not unwind (no x86_64 unwind info), so backtrace() stops short. But the
+ * `call` that reached the bridge still pushed its return address, and translated
+ * dylibs ARE real loaded images -- so dladdr resolves a stack word to
+ * "<image>+0x<off>", which is exactly what pcmap-diff.py needs to recover the
+ * original i386 site. Same technique as exit-trace-probe.c's stack scan.
+ *
+ * ⚠ TWO LIMITS, both measured on Portal 2 (2026-09-12), so nobody reads this output
+ * more confidently than it deserves:
+ *   - dladdr resolves ANY address inside an image's mapped range, including Mach-O
+ *     header and data words, so a hit is not necessarily code. Check the offset
+ *     against the image's __text start before believing it (libvstdlib+0x740 looked
+ *     like a call site and is below __text at 0x...e90).
+ *   - a TRANSLATED static initializer runs on the low-4GB init stack, not this one
+ *     (see init_high_stack_bug), so its frames are NOT here at all. What survives is
+ *     the native chain (the bridge, and the translated dylib frames that the bridge
+ *     re-entered), which is usually enough to name the requesting LIBRARY but not
+ *     the instruction. For the instruction, the exit-trace probe's scan plus
+ *     pcmap-diff.py is the current route. */
+static void heap_report_requesters(void)
+{
+   void **sp = (void **)__builtin_frame_address(0);
+   const char *w = getenv("ABICONV_HEAP_WORDS");
+   const int words = w ? atoi(w) : 192;
+   int shown = 0;
+   fprintf(stderr, "[heap]   who asked (stack words inside a loaded image -- may "
+                   "include non-code addresses; a translated initializer's own "
+                   "frames are on the low-4GB init stack, not here):\n");
+   for (int i = 0; i < words && shown < 12; ++i) {
+      void *v = sp[i];
+      if (v == NULL) { continue; }
+      Dl_info info;
+      if (dladdr(v, &info) == 0 || info.dli_fname == NULL) { continue; }
+      if (strstr(info.dli_fname, "/usr/lib/") != NULL ||
+          strstr(info.dli_fname, "/System/") != NULL ||
+          strstr(info.dli_fname, "libabiconv") != NULL) { continue; }
+      const char *base = strrchr(info.dli_fname, '/');
+      base = base ? base + 1 : info.dli_fname;
+      fprintf(stderr, "[heap]     [sp+0x%03x] %p  %s+0x%lx  %s\n",
+              (unsigned)(i * sizeof(void *)), v, base,
+              (unsigned long)((char *)v - (char *)info.dli_fbase),
+              info.dli_sname ? info.dli_sname : "(no symbol)");
+      ++shown;
+   }
+   if (shown == 0) {
+      fprintf(stderr, "[heap]     (none found -- raise ABICONV_HEAP_WORDS)\n");
+   }
+   fflush(stderr);
+}
+
 static void *bump(size_t cap, size_t align) {
    if (align < 16) align = 16;
    for (int attempt = 0; attempt < 2; ++attempt) {
@@ -301,6 +356,7 @@ static void *bump(size_t cap, size_t align) {
     * app vanishes with status 0, no output and no crash report (Portal 2,
     * 2026-09-12: libvstdlib's static initializers died exactly this way).
     * Anything that ends the process deserves one line saying why, so report the
+
     * request that could not be served and what the arena had left. Same
     * principle as fault_report_shim.c. */
    {
@@ -324,6 +380,7 @@ static void *bump(size_t cap, size_t align) {
                  (unsigned long long)(HEAP_SIZE / (1024 * 1024)),
                  (unsigned long long)freebytes,
                  (unsigned long)HEAP_SCAN_LO, (unsigned long)HEAP_SCAN_HI);
+         heap_report_requesters();
       }
    }
    return NULL;
