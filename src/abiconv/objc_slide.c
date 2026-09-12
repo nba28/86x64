@@ -1572,19 +1572,41 @@ static uint64_t xrel_resolve(const char *name) {
 static void bind_external_relocs(const struct mach_header_64 *mh64, intptr_t slide,
                                  const char *imgname) {
    const uint8_t *xrel = NULL;
+   /* ── A BINDER MUST ONLY WRITE INSIDE THE IMAGE IT IS BINDING ────────────────
+    * Each record's `slot_vmaddr` is a value we READ OUT OF THE IMAGE, so a bad
+    * record (or a slide applied to an already-slid field — the 2026-06-26
+    * double-slide bug) aims the write at an arbitrary address. The write below is
+    * preceded by an mprotect(PROT_READ|PROT_WRITE), so an out-of-image slot does
+    * not merely fault: it makes SOMEONE ELSE'S page writable and then scribbles 4
+    * bytes into it. dyld's own Loader objects are exactly the kind of neighbour
+    * that gets hit, and a clobbered Loader surfaces much later and far away as
+    *   dyld: Assertion failed: (this->magic == kMagic) ... Loader.cpp
+    * with no hint of who did it. So collect this image's WRITABLE segment ranges
+    * up front and refuse any slot that does not lie wholly inside one.
+    *
+    * Measured on Portal 2 2026-09-12: zero refusals, so this is an invariant being
+    * held rather than a bug being masked — which is exactly what ruled the wild
+    * write OUT as the cause of that assertion. */
+   struct { uint64_t lo, hi; } wr[24];
+   int nwr = 0;
    {
       const uint8_t *p = (const uint8_t *)(mh64 + 1);
-      for (uint32_t i = 0; i < mh64->ncmds && !xrel; i++) {
+      for (uint32_t i = 0; i < mh64->ncmds; i++) {
          const struct load_command *lc = (const struct load_command *)p;
          if (lc->cmd == LC_SEGMENT_64) {
             const struct segment_command_64 *seg =
                (const struct segment_command_64 *)p;
+            if ((seg->initprot & VM_PROT_WRITE) != 0 && nwr < 24) {
+               wr[nwr].lo = seg->vmaddr + (uint64_t)slide;
+               wr[nwr].hi = wr[nwr].lo + seg->vmsize;
+               ++nwr;
+            }
             const struct section_64 *sect =
                (const struct section_64 *)(seg + 1);
             for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
-               if (strncmp(sect->sectname, "__86x64_xrel", 16) == 0) {
+               if (xrel == NULL &&
+                   strncmp(sect->sectname, "__86x64_xrel", 16) == 0) {
                   xrel = (const uint8_t *)(uintptr_t)(sect->addr + slide);
-                  break;
                }
             }
          }
@@ -1626,8 +1648,31 @@ static void bind_external_relocs(const struct mach_header_64 *mh64, intptr_t sli
       }
       if (target == 0) { ++unresolved; continue; }        /* leave it NULL */
 
-      uint32_t *slot =
-         (uint32_t *)(uintptr_t)((uint64_t)slot_vmaddr + (int64_t)slide);
+      const uint64_t slot_addr = (uint64_t)slot_vmaddr + (int64_t)slide;
+      /* Refuse a slot outside this image's writable segments (see above). Report
+       * it: that would be a translator-side defect in the xrel table, or in the
+       * slide applied to it, and silently skipping would hide it. */
+      int in_image = 0;
+      for (int w = 0; w < nwr; ++w) {
+         if (slot_addr >= wr[w].lo && slot_addr + 4 <= wr[w].hi) {
+            in_image = 1;
+            break;
+         }
+      }
+      if (!in_image) {
+         static int complained = 0;
+         if (!complained || g_verbose) {
+            complained = 1;
+            fprintf(stderr, "abiconv objc_slide: REFUSED out-of-image xrel slot "
+                    "%#llx (record %u, vmaddr %#x, slide %#llx, symbol %s) in %s "
+                    "— a binder must never write outside the image it is binding\n",
+                    (unsigned long long)slot_addr, i, slot_vmaddr,
+                    (unsigned long long)(int64_t)slide, name, imgname);
+         }
+         ++unresolved;
+         continue;
+      }
+      uint32_t *slot = (uint32_t *)(uintptr_t)slot_addr;
       /* Defensively make the slot's page writable (the slots live in __DATA so
        * they normally already are; mprotect failure is non-fatal). A 4-byte,
        * 4-aligned slot never straddles a page boundary. */
