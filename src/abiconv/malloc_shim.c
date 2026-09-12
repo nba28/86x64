@@ -37,6 +37,8 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <dlfcn.h>
+#include <mach-o/getsect.h>
+#include <mach-o/loader.h>
 
 /* Reserve the heap inside the wrapper's low-4GB window [0x80000000,
  * 0xF0000000). Start the scan above the bottom 128 MB so the wrapper's
@@ -296,16 +298,33 @@ static int owned(const void *p) {
  *     re-entered), which is usually enough to name the requesting LIBRARY but not
  *     the instruction. For the instruction, the exit-trace probe's scan plus
  *     pcmap-diff.py is the current route. */
+/* Is `v` inside the __TEXT,__text of the image dladdr attributed it to? dladdr
+ * resolves ANY address in an image's mapped range, so a Mach-O header or a data
+ * word answers with an image and a plausible offset -- which is how
+ * libvstdlib+0x740 (below __text at +0xe90) read as a call site. Checking the
+ * actual code section is what makes a reported word worth believing. */
+static int addr_is_code(const void *v, const Dl_info *info)
+{
+   if (info->dli_fbase == NULL) { return 0; }
+   const struct mach_header_64 *mh = (const struct mach_header_64 *)info->dli_fbase;
+   if (mh->magic != MH_MAGIC_64) { return 0; }
+   unsigned long sz = 0;
+   const uint8_t *txt = getsectiondata(mh, "__TEXT", "__text", &sz);
+   if (txt == NULL || sz == 0) { return 0; }
+   return ((const uint8_t *)v >= txt && (const uint8_t *)v < txt + sz);
+}
+
 static void heap_report_requesters(void)
 {
    void **sp = (void **)__builtin_frame_address(0);
    const char *w = getenv("ABICONV_HEAP_WORDS");
-   const int words = w ? atoi(w) : 192;
+   const int words = w ? atoi(w) : 1024;
    int shown = 0;
-   fprintf(stderr, "[heap]   who asked (stack words inside a loaded image -- may "
-                   "include non-code addresses; a translated initializer's own "
-                   "frames are on the low-4GB init stack, not here):\n");
-   for (int i = 0; i < words && shown < 12; ++i) {
+   const int maxshow = 24;
+   fprintf(stderr, "[heap]   who asked (stack words pointing INTO __TEXT,__text of "
+                   "a non-system image; live and dead frames are mixed, so this is "
+                   "a candidate set, not a call chain):\n");
+   for (int i = 0; i < words && shown < maxshow; ++i) {
       void *v = sp[i];
       if (v == NULL) { continue; }
       Dl_info info;
@@ -313,6 +332,7 @@ static void heap_report_requesters(void)
       if (strstr(info.dli_fname, "/usr/lib/") != NULL ||
           strstr(info.dli_fname, "/System/") != NULL ||
           strstr(info.dli_fname, "libabiconv") != NULL) { continue; }
+      if (!addr_is_code(v, &info)) { continue; }   /* header/data word, not a site */
       const char *base = strrchr(info.dli_fname, '/');
       base = base ? base + 1 : info.dli_fname;
       fprintf(stderr, "[heap]     [sp+0x%03x] %p  %s+0x%lx  %s\n",
