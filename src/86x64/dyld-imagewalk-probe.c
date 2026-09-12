@@ -70,6 +70,26 @@
  * ⚠ Jumping out of dyld's assert is safe only because the assert checks and aborts
  * before mutating anything. It is a diagnostic, never something to ship.
  *
+ * IMGWALK_SCAN_ON=<leaf> scans ONLY when that image is the one being added, which
+ * is how you ask "was this entry already unqueryable BEFORE our runtime touched
+ * it?". The probe is an inserted library, so its add-image notifier is registered
+ * first and runs before libabiconv's slide_objc for the same image -- so a bad entry
+ * seen here happened during dyld's own load, not because of anything we did to it.
+ * ⚠ Use it with no prior bad entry in the run: every entry_is_bad() after the first
+ * one is read with dyld possibly mid-assert, so only the FIRST verdict is clean.
+ *
+ * IMGWALK_PROTECT=<leaf> write-protects the page holding that image's dyld path
+ * STRING once the image is added, to catch a stray write red-handed. The string
+ * sits just above 4 GB (measured: 0x1006bc604), and it was observed CORRUPTED later
+ * in the run -- two aligned 16-bit stores of 0xFFFF, at offsets 28 and 70 of the
+ * path -- while the Loader for the same image went unqueryable. A store that lands
+ * there SUCCEEDS silently because the page is mapped, so nothing faults and there is
+ * nothing to trace; making the page read-only converts the silent corruption into a
+ * fault whose rip names the writer. Feed a translated rip through
+ * src/86x64/pcmap-diff.py to reach the original i386 site.
+ * ⚠ dyld may also write there legitimately; the handler prints the faulting rip, so
+ * a dyld-side writer is distinguishable from a translated-code one.
+ *
  * ⚠ Per-index logging is not viable at this scale: ~1000 images x 2 APIs x
  * thousands of walks is millions of lines. So the EXACT aborting index comes from
  * a SIGABRT handler instead -- the last index handed to dyld is kept in a global
@@ -80,6 +100,10 @@
  * per walk. IMGWALK_ALL=1 logs every call; otherwise only the last few indices of
  * each walk (IMGWALK_TAIL, default 3) and anything anomalous are printed.
  */
+/* ucontext_t's mcontext is behind _XOPEN_SOURCE on macOS, but that alone switches
+ * on strict POSIX and hides dladdr/Dl_info -- so ask for the Darwin extensions too. */
+#define _XOPEN_SOURCE 700
+#define _DARWIN_C_SOURCE 1
 #include <stdio.h>
 #include <string.h>
 #include <dlfcn.h>
@@ -91,7 +115,10 @@
 #include <mach-o/dyld_images.h>
 #include <signal.h>
 #include <setjmp.h>
+#include <sys/mman.h>
+#include <ucontext.h>
 #include <unistd.h>
+#include <errno.h>
 
 /* dyld's plain {header, path} array. Reading it touches no Loader, so it is the
  * one identification channel that cannot trip the assert we are chasing. */
@@ -239,7 +266,7 @@ static void scan_tail(const char *when) {
    static uint32_t prev_count;
    static uint32_t repeat;
    const int changed = (strcmp(prev, map) != 0 || prev_count != count);
-   if (!changed) {
+   if (!changed && getenv("IMGWALK_SCAN_ON") == NULL) {
       /* An unchanging all-good map is noise; an unchanging BAD map still matters,
        * but only every so often. */
       if (nbad == 0 || ++repeat % 64 != 0) { return; }
@@ -264,9 +291,91 @@ static void scan_tail(const char *when) {
    fflush(stderr);
 }
 
+/* Name the image being added WITHOUT a dyld call: match its header in infoArray. */
+static const char *added_leaf(const struct mach_header *mh) {
+   const struct dyld_all_image_infos *ai = all_infos();
+   if (ai == NULL || ai->infoArray == NULL) { return "?"; }
+   for (uint32_t i = 0; i < ai->infoArrayCount; ++i) {
+      if (ai->infoArray[i].imageLoadAddress == mh) {
+         return leaf(ai->infoArray[i].imageFilePath);
+      }
+   }
+   return "(not in infoArray)";
+}
+
+/* Report a write fault on the page we protected: the faulting address and the rip
+ * of the instruction that did it. */
+static void on_write_fault(int sig, siginfo_t *si, void *uap) {
+   const ucontext_t *uc = (const ucontext_t *)uap;
+   unsigned long long rip = 0;
+   if (uc != NULL && uc->uc_mcontext != NULL) {
+      rip = (unsigned long long)uc->uc_mcontext->__ss.__rip;
+   }
+   fprintf(stderr, "\n[imgwalk] ===== WRITE FAULT sig=%d addr=%p rip=0x%llx =====\n",
+           sig, si ? si->si_addr : NULL, rip);
+   Dl_info info;
+   if (rip != 0 && dladdr((void *)(uintptr_t)rip, &info) && info.dli_fname) {
+      fprintf(stderr, "[imgwalk]   rip is in %s+0x%lx %s\n", leaf(info.dli_fname),
+              (unsigned long)(uintptr_t)((char *)(uintptr_t)rip - (char *)info.dli_fbase),
+              info.dli_sname ? info.dli_sname : "(nosym)");
+   } else {
+      fprintf(stderr, "[imgwalk]   rip belongs to NO image -- translated code; map it "
+              "through __86x64_pcmap (src/86x64/pcmap-diff.py)\n");
+   }
+   fflush(stderr);
+   _exit(70);
+}
+
+static void protect_path_page(const char *path) {
+   if (path == NULL) { return; }
+   static struct sigaction sa;
+   memset(&sa, 0, sizeof sa);
+   sa.sa_sigaction = on_write_fault;
+   sa.sa_flags = SA_SIGINFO;
+   sigaction(SIGBUS, &sa, NULL);
+   sigaction(SIGSEGV, &sa, NULL);
+
+   const uintptr_t pg = (uintptr_t)path & ~(uintptr_t)0xFFF;
+   if (mprotect((void *)pg, 0x1000, PROT_READ) != 0) {
+      fprintf(stderr, "[imgwalk] PROTECT failed for page %p (errno %d) -- dyld may "
+              "not permit it\n", (void *)pg, errno);
+   } else {
+      fprintf(stderr, "[imgwalk] PROTECT page %p is now READ-ONLY; a write there will "
+              "fault and name its rip\n", (void *)pg);
+   }
+   fflush(stderr);
+}
+
 static void probe_on_add(const struct mach_header *mh, intptr_t slide) {
-   (void)mh; (void)slide;
-   scan_tail("on add-image");
+   (void)slide;
+   const char *nm = added_leaf(mh);
+   const char *only = getenv("IMGWALK_SCAN_ON");
+   if (only != NULL && strcmp(only, nm) != 0) { return; }
+   /* Print WHERE the path string lives. If dyld's strings are below 4 GB they sit
+    * in the same address space translated i386 code can reach with a 32-bit store,
+    * which decides whether a stray write from translated code can corrupt them. */
+   const struct dyld_all_image_infos *ai = all_infos();
+   const char *path = NULL;
+   if (ai != NULL && ai->infoArray != NULL) {
+      for (uint32_t i = 0; i < ai->infoArrayCount; ++i) {
+         if (ai->infoArray[i].imageLoadAddress == mh) {
+            path = ai->infoArray[i].imageFilePath; break;
+         }
+      }
+   }
+   fprintf(stderr, "[imgwalk] ADDED %s  header=%p  pathstr=%p (%s4GB)  path=\"%s\"\n",
+           nm, (const void *)mh, (const void *)path,
+           ((uintptr_t)path < 0x100000000ULL) ? "<" : ">", path ? path : "?");
+   fflush(stderr);
+
+   {
+      const char *prot = getenv("IMGWALK_PROTECT");
+      if (prot != NULL && strcmp(prot, nm) == 0) { protect_path_page(path); }
+   }
+
+   char tag[96];
+   snprintf(tag, sizeof tag, "adding %s", nm);
+   scan_tail(tag);
 }
 
 __attribute__((constructor)) static void install_abort_handler(void) {
@@ -277,7 +386,10 @@ __attribute__((constructor)) static void install_abort_handler(void) {
    sa.sa_handler = on_abort;
    sa.sa_flags = SA_NODEFER;
    sigaction(SIGABRT, &sa, NULL);
-   if (env_flag("IMGWALK_SCAN", 0) > 0) {
+   /* Register for SCAN, but also for the per-image modes, which are useful on their
+    * own -- gating only on IMGWALK_SCAN made IMGWALK_PROTECT silently do nothing. */
+   if (env_flag("IMGWALK_SCAN", 0) > 0 || getenv("IMGWALK_SCAN_ON") != NULL ||
+       getenv("IMGWALK_PROTECT") != NULL) {
       _dyld_register_func_for_add_image(probe_on_add);
    }
 }
@@ -326,8 +438,10 @@ static const struct mach_header *probe_hdr(uint32_t i) {
    if (i == 0) {
       seen_reset();
       /* A full walk starts here. Scanning now separates "the entry was ALREADY bad
-       * before this walk began" from "it went bad during the walk". */
-      scan_tail("at walk start");
+       * before this walk began" from "it went bad during the walk". Suppressed when
+       * IMGWALK_SCAN_ON targets one image: those scans would drown the answer, and
+       * worse, an earlier caught assert makes every later verdict unreliable. */
+      if (getenv("IMGWALK_SCAN_ON") == NULL) { scan_tail("at walk start"); }
    }
    if (shielded(i)) {
       static uint32_t last_logged = 0xffffffff;
