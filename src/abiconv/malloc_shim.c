@@ -41,12 +41,38 @@
  * 0xF0000000). Start the scan above the bottom 128 MB so the wrapper's
  * small shim-FILE / scratch allocations (which cluster at the base) don't
  * fragment the search. Regions are reserved, not committed — macOS faults
- * pages in on first touch, so an oversized reservation is free. */
+ * pages in on first touch, so an oversized reservation is free.
+ *
+ * ⚠ HEAP_SIZE is a FRAGMENTATION BUDGET, not just a growth granularity. The
+ * whole window is only 0x68000000 (1.625 GiB), and a single allocation has to
+ * fit inside ONE region, so a large default region can make a large request
+ * impossible: at the old 768 MB, Portal 2's libvstdlib static initializers could
+ * not get their 1 GiB block (768 MB + 1 GiB > the window), and the NULL became a
+ * silent _exit(0). 256 MB leaves a 1 GiB request room to land while still
+ * amortising one mapping over many small blocks, and regions grow on demand, so
+ * total capacity is unchanged (the window, not HEAP_SIZE, is the real ceiling). */
 #define HEAP_SCAN_LO  0x88000000UL
 #define HEAP_SCAN_HI  0xF0000000UL
-#define HEAP_SIZE     (768UL * 1024 * 1024)
+#define HEAP_SIZE     (256UL * 1024 * 1024)
 #define HEAP_STEP     (16UL * 1024 * 1024)
 #define MAX_REGIONS   16
+
+/* OVERFLOW BAND — the anonymous-mmap band [0x10000000, 0x80000000) from
+ * mmap_shim.c, the widest contiguous low-4GB gap (~1.75 GB).
+ *
+ * The heap's own window is only 1.625 GiB, and a 32-bit target can legitimately
+ * want more than that: Portal 2's tier0 CStdMemAlloc reserves 1 GiB in one block
+ * and then hundreds of MB more, which no arrangement of the primary window can
+ * satisfy. Spilling into the mmap band is safe rather than merely expedient,
+ * because BOTH allocators place every mapping with mach_vm_allocate +
+ * VM_FLAGS_FIXED, which FAILS instead of clobbering when a slot is taken — so the
+ * two simply compete for slots and neither can corrupt the other.
+ *
+ * It is a LAST RESORT, tried only once the heap's own window is exhausted: at
+ * that point the alternative is returning NULL, which for a translated target is
+ * normally fatal. Structural trigger (primary window full), not app-specific. */
+#define HEAP_OVERFLOW_LO  0x10000000UL
+#define HEAP_OVERFLOW_HI  0x80000000UL
 
 /* 16-byte block header; payload (returned to caller) follows, 16-aligned.
  * `size` is the payload capacity. `next` links free blocks.
@@ -149,29 +175,85 @@ static void heap_init(void) {
    os_unfair_lock_unlock(&g_init_lock);
 }
 
-/* Reserve one more low-4GB region. Caller holds g_hc->lock. Returns the new
- * region or NULL if the address window is exhausted. */
-static struct region *add_region(void) {
+static size_t round_up(size_t n, size_t a) {
+   return (n + (a - 1)) & ~(a - 1);
+}
+
+/* Reserve one more low-4GB region with room for `need` bytes in ONE block.
+ * Caller holds g_hc->lock. Returns the new region or NULL if the address window
+ * cannot accommodate it.
+ *
+ * ⚠ A region is the unit a single allocation must fit inside, so its size cannot
+ * be a fixed constant: a request larger than HEAP_SIZE could never be served no
+ * matter how much total arena was free, and it failed SILENTLY. Portal 2's
+ * libvstdlib static initializers ask for exactly 1 GiB in one call, against
+ * HEAP_SIZE = 768 MB with 1.5 GB free across two regions — served NULL, which
+ * Source turns into Plat_ExitProcess -> _exit(0) (a silent status-0 death).
+ *
+ * So size the mapping to the caller: prefer HEAP_SIZE, so ordinary small
+ * allocations keep amortising one mapping over many blocks, but grow it when a
+ * single request needs more, and if the window no longer has room for the
+ * preferred size, fall back to the smallest mapping that still serves the
+ * request rather than failing outright. */
+static struct region *add_region(size_t need) {
    if (g_hc->nregions >= MAX_REGIONS) {
       return NULL;
    }
-   for (uintptr_t a = HEAP_SCAN_LO; a + HEAP_SIZE <= HEAP_SCAN_HI;
-        a += HEAP_STEP) {
-      mach_vm_address_t addr = a;
-      if (mach_vm_allocate(mach_task_self(), &addr, HEAP_SIZE,
-                           VM_FLAGS_FIXED) == KERN_SUCCESS) {
-         struct region *r = &g_hc->regions[g_hc->nregions++];
-         r->base = (char *)(uintptr_t)addr;
-         r->cur  = r->base;
-         r->end  = r->base + HEAP_SIZE;
-         return r;
+   const size_t gran = 2UL * 1024 * 1024;      /* keep mappings 2MB-aligned */
+   size_t least = round_up(need ? need : 1, gran);
+   /* Kill switch (guard tests-i386 lowmem-big-alloc): restore the old
+    * fixed-size, primary-window-only behaviour so the defect arm can be
+    * reproduced on demand — a request bigger than one region gets NULL. */
+   static int fixed_regions = -1;
+   if (fixed_regions < 0) {
+      fixed_regions = getenv("M64_HEAP_FIXED_REGIONS") ? 1 : 0;
+   }
+   if (fixed_regions && least > HEAP_SIZE) { return NULL; }
+   const size_t want  = least > HEAP_SIZE ? least : HEAP_SIZE;
+   const size_t primary  = (size_t)(HEAP_SCAN_HI - HEAP_SCAN_LO);
+   const size_t overflow = (size_t)(HEAP_OVERFLOW_HI - HEAP_OVERFLOW_LO);
+   const size_t window   = primary > overflow ? primary : overflow;
+   if (least > window) {
+      return NULL;                 /* larger than any low-4GB band we have */
+   }
+   /* An OVERSIZED region is placed as HIGH in its band as it will go, and the
+    * ordinary ones stay low: growing both from the same end would interleave
+    * them, and one 256 MB region landing in the middle of the window is enough to
+    * make every later GiB-scale request unsatisfiable. Big-high/small-low keeps
+    * the large contiguous span at the top intact for as long as possible. */
+   const int from_top = (least > HEAP_SIZE);
+   for (int band = 0; band < (fixed_regions ? 1 : 2); ++band) {
+      const uintptr_t blo = (band == 0) ? HEAP_SCAN_LO : HEAP_OVERFLOW_LO;
+      const uintptr_t bhi = (band == 0) ? HEAP_SCAN_HI : HEAP_OVERFLOW_HI;
+      for (int pass = 0; pass < 2; ++pass) {
+         const size_t rsize = (pass == 0) ? want : least;
+         if (pass == 1 && least >= want) { break; }  /* nothing smaller to try */
+         if (rsize > (size_t)(bhi - blo)) { continue; }
+         const uintptr_t last = (uintptr_t)(bhi - rsize);
+         for (uintptr_t i = blo; i <= last; i += HEAP_STEP) {
+            /* Same candidate set, walked from whichever end suits this region. */
+            const uintptr_t a = from_top ? (last - (i - blo)) : i;
+            mach_vm_address_t addr = a;
+            if (mach_vm_allocate(mach_task_self(), &addr, rsize,
+                                 VM_FLAGS_FIXED) == KERN_SUCCESS) {
+               struct region *r = &g_hc->regions[g_hc->nregions++];
+               r->base = (char *)(uintptr_t)addr;
+               r->cur  = r->base;
+               r->end  = r->base + rsize;
+               if (getenv("ABICONV_HEAP_TRACE")) {
+                  fprintf(stderr,
+                          "[heap] region %d: [0x%llx,0x%llx) %llu MB  band=%s\n",
+                          g_hc->nregions - 1, (unsigned long long)(uintptr_t)r->base,
+                          (unsigned long long)(uintptr_t)r->end,
+                          (unsigned long long)(rsize / (1024 * 1024)),
+                          band == 0 ? "primary" : "mmap-overflow");
+               }
+               return r;
+            }
+         }
       }
    }
    return NULL;
-}
-
-static size_t round_up(size_t n, size_t a) {
-   return (n + (a - 1)) & ~(a - 1);
 }
 
 /* True if p points into the payload area of some region we own. */
@@ -207,8 +289,42 @@ static void *bump(size_t cap, size_t align) {
             return (void *)payload;
          }
       }
-      /* No region had room — reserve another and retry once. */
-      if (!add_region()) break;
+      /* No region had room — reserve another, sized for THIS block, and retry
+       * once. The request must include the header and worst-case alignment
+       * slack, or a region sized to `cap` alone would still not fit the block. */
+      if (!add_region(sizeof(struct block) + align + cap)) break;
+   }
+   /* ── A FAILED LOW-4GB ALLOCATION MUST SPEAK ───────────────────────────────
+    * Returning NULL here is almost always terminal, and the way it kills the
+    * process makes it invisible: a Source-engine target routes the NULL into
+    * CStdMemAlloc::SetCRTAllocFailed -> Plat_ExitProcess -> _exit(0), so the
+    * app vanishes with status 0, no output and no crash report (Portal 2,
+    * 2026-09-12: libvstdlib's static initializers died exactly this way).
+    * Anything that ends the process deserves one line saying why, so report the
+    * request that could not be served and what the arena had left. Same
+    * principle as fault_report_shim.c. */
+   {
+      static int reported = 0;
+      if (!reported || getenv("ABICONV_HEAP_TRACE")) {
+         reported = 1;
+         size_t freebytes = 0;
+         for (int i = 0; i < g_hc->nregions; ++i) {
+            freebytes += (size_t)((uintptr_t)g_hc->regions[i].end -
+                                  (uintptr_t)g_hc->regions[i].cur);
+         }
+         fprintf(stderr,
+                 "[heap] ALLOCATION FAILED: %llu bytes (align %llu) — the "
+                 "low-4GB arena cannot serve it.\n"
+                 "[heap]   regions %d/%d of %llu MB each, %llu bytes free in "
+                 "the tail; window [0x%lx,0x%lx)\n"
+                 "[heap]   a single request larger than one region can NEVER be "
+                 "served — raise HEAP_SIZE or add regions.\n",
+                 (unsigned long long)cap, (unsigned long long)align,
+                 g_hc->nregions, MAX_REGIONS,
+                 (unsigned long long)(HEAP_SIZE / (1024 * 1024)),
+                 (unsigned long long)freebytes,
+                 (unsigned long)HEAP_SCAN_LO, (unsigned long)HEAP_SCAN_HI);
+      }
    }
    return NULL;
 }
@@ -219,7 +335,7 @@ void *malloc(size_t n) {
    heap_init();
    if (!g_hc) { errno = ENOMEM; return NULL; }
    os_unfair_lock_lock(&g_hc->lock);
-   if (g_hc->nregions == 0 && !add_region()) {
+   if (g_hc->nregions == 0 && !add_region(sizeof(struct block) + 16 + cap)) {
       os_unfair_lock_unlock(&g_hc->lock);
       errno = ENOMEM;
       return NULL;
@@ -237,6 +353,13 @@ void *malloc(size_t n) {
    void *p = bump(cap, 16);
    os_unfair_lock_unlock(&g_hc->lock);
    if (!p) errno = ENOMEM;
+   /* Large-allocation trail: the SEQUENCE of big requests distinguishes a
+    * legitimate one-off reservation from a doubling probe (and a doubling probe
+    * from a garbage size produced by a mistranslated length). */
+   if (cap >= (64UL << 20) && getenv("ABICONV_HEAP_TRACE")) {
+      fprintf(stderr, "[heap] large malloc %llu bytes (0x%llx) -> %p\n",
+              (unsigned long long)cap, (unsigned long long)cap, p);
+   }
    return p;
 }
 
@@ -338,7 +461,9 @@ int posix_memalign(void **out, size_t align, size_t n) {
    heap_init();
    if (!g_hc) { return ENOMEM; }
    os_unfair_lock_lock(&g_hc->lock);
-   if (g_hc->nregions == 0) add_region();
+   if (g_hc->nregions == 0) {
+      add_region(sizeof(struct block) + align + round_up(n, 16));
+   }
    void *p = bump(round_up(n, 16), align);
    os_unfair_lock_unlock(&g_hc->lock);
    if (!p) return ENOMEM;
