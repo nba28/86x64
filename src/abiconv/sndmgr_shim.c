@@ -36,6 +36,7 @@
 
 #include "snd_convert.h"
 #include "carbon_shim.h"   /* cm_handle_block / cm_handle_size / i386_ptr / to_i386 */
+#include "dyld_image_list.h"
 
 /* objc_reverse.asm: lay nwords i386 cdecl args + a return frame on a low-4GB
  * stack, enter the translated fn, return its eax. Used to invoke SndCallBackUPP. */
@@ -416,15 +417,8 @@ static intptr_t halo_image_slide(int *found) {
    static int done = 0, ok = 0;
    static intptr_t slide = 0;
    if (!done) {
-      uint32_t n = _dyld_image_count();
-      for (uint32_t i = 0; i < n; i++) {
-         const char *nm = _dyld_get_image_name(i);
-         if (!nm) { continue; }
-         size_t l = strlen(nm);
-         if (l >= 10 && strcmp(nm + l - 10, "Halo.dylib") == 0) {
-            slide = _dyld_get_image_vmaddr_slide(i); ok = 1; break;
-         }
-      }
+      intptr_t sl = 0;
+      if (x64_img_find_leaf("Halo.dylib", &sl) != NULL) { slide = sl; ok = 1; }
       done = 1;
    }
    if (found) { *found = ok; }

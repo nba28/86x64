@@ -38,6 +38,7 @@
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
+#include "dyld_image_list.h"
 
 #define MAX_SEGS 24
 #define MAX_DEPS 96
@@ -89,11 +90,11 @@ uint64_t x64_lazy_bind_helper(const void *image_mark, uint64_t lazy_off) {
    const struct mach_header_64 *mh = NULL;
    intptr_t slide = 0;
    const char *image_path = NULL;
-   const uint32_t nimg = _dyld_image_count();
+   const uint32_t nimg = x64_img_count();
    for (uint32_t i = 0; i < nimg && !mh; ++i) {
-      const struct mach_header *h = _dyld_get_image_header(i);
+      const struct mach_header *h = x64_img_header(i);
       if (!h || h->magic != MH_MAGIC_64) continue;
-      const intptr_t sl = _dyld_get_image_vmaddr_slide(i);
+      const intptr_t sl = x64_img_slide(h);
       const struct mach_header_64 *h64 = (const struct mach_header_64 *)h;
       const struct load_command *lc = (const struct load_command *)(h64 + 1);
       for (uint32_t k = 0; k < h64->ncmds; ++k) {
@@ -105,7 +106,7 @@ uint64_t x64_lazy_bind_helper(const void *image_mark, uint64_t lazy_off) {
                 && (uintptr_t)image_mark - lo < sc->vmsize) {
                mh = h64;
                slide = sl;
-               image_path = _dyld_get_image_name(i);
+               image_path = x64_img_path(i);
                break;
             }
          }

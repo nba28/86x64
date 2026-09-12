@@ -1,4 +1,9 @@
-add_library(wrapper STATIC wrapper.asm wrapper_setup.c)
+# dyld_image_list.c is shared with libabiconv: the wrapper walks the image list
+# too, from inside a dlopen, so it has the same exposure to dyld's in-flight
+# Loader assert and needs the same safe enumeration. Compiled in rather than
+# duplicated, so the two can never drift apart.
+add_library(wrapper STATIC wrapper.asm wrapper_setup.c
+                           ${CMAKE_CURRENT_SOURCE_DIR}/../abiconv/dyld_image_list.c)
 add_library(interpose SHARED interpose.c)
 # The CFPreferences NULL-appID guard references CoreFoundation symbols only to
 # carry the __interpose replacee reference + dlsym the real impls; resolve them

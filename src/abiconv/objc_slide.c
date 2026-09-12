@@ -48,6 +48,7 @@
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <runetype.h>
+#include "dyld_image_list.h"
 
 static int g_verbose = 0;
 
@@ -252,19 +253,16 @@ static void mark_processed(const struct mach_header *mh) {
    if (g_n_processed < MAX_PROCESSED_IMAGES) { g_processed[g_n_processed++] = mh; }
 }
 
+/* ⚠ Must NOT use dyld's indexed APIs: this runs from the add-image callback and
+ * from translated initializers, i.e. while another image is mid-load, and querying
+ * an in-flight entry ABORTS the process. dyld_image_list.c answers from infoArray,
+ * which also LISTS the in-flight image -- the property that keeps the dependency
+ * lookup here working. (A self-maintained registry does NOT: a dependency is
+ * mapped before the dependent's callback fires, so the registry misses it, which
+ * regressed this to 10/10 SIGSEGV.) */
 static const struct mach_header *find_loaded_image(const char *leaf,
                                                    intptr_t *slide_out) {
-   for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-      const char *n = _dyld_get_image_name(i);
-      if (!n) { continue; }
-      const char *b = strrchr(n, '/');
-      b = b ? b + 1 : n;
-      if (strcmp(b, leaf) == 0) {
-         if (slide_out) { *slide_out = _dyld_get_image_vmaddr_slide(i); }
-         return _dyld_get_image_header(i);
-      }
-   }
-   return NULL;
+   return x64_img_find_leaf(leaf, slide_out);
 }
 
 /* Max translated __mod_init_func pointers we collect per image in run-now
@@ -2062,13 +2060,8 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    int claimed = _86x64_objc_shared_claim_image(mh);
    const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
    const uint8_t *p = (const uint8_t *)(mh64 + 1);
-   const char *imgname = "?";
-   for (uint32_t i = 0; i < _dyld_image_count(); i++) {
-      if (_dyld_get_image_header(i) == mh) {
-         imgname = _dyld_get_image_name(i);
-         break;
-      }
-   }
+   const char *imgname = x64_img_path_for_header(mh);
+   if (imgname == NULL) { imgname = "?"; }
    /* Test signal (dyld_multicopy_reprocess_test.sh): one line per (copy,image)
     * decision, so the harness can count how many times slide_objc actually
     * PROCESSED each image across all copies. Env-gated, inert otherwise. */
@@ -2325,7 +2318,7 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
  * _86x64_cxx_typeinfo_init call below rather than inventing a new walk. */
 static void cxx_typeinfo_init_all_copies(void) {
    static uint32_t seen_images = 0;
-   uint32_t n = _dyld_image_count();
+   uint32_t n = x64_img_count();
    if (n == seen_images) { return; }
    seen_images = n;
    Dl_info self;
@@ -2336,10 +2329,9 @@ static void cxx_typeinfo_init_all_copies(void) {
    const char *self_base = strrchr(self.dli_fname, '/');
    self_base = self_base ? self_base + 1 : self.dli_fname;
    for (uint32_t i = 0; i < n; i++) {
-      const char *path = _dyld_get_image_name(i);
+      const char *path = x64_img_path(i);
       if (path == NULL) { continue; }
-      const char *base = strrchr(path, '/');
-      base = base ? base + 1 : path;
+      const char *base = x64_img_leaf(path);
       if (strcmp(base, self_base) != 0) { continue; }
       void *h = dlopen(path, RTLD_NOLOAD | RTLD_LAZY);
       if (h == NULL) { continue; }

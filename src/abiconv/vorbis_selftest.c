@@ -53,6 +53,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include "dyld_image_list.h"
 
 /* objc_reverse.asm: lay `nwords` i386 cdecl args + a return frame on the
  * provided low-4GB stack, enter the translated fn, return edx:eax in rax. */
@@ -162,9 +163,9 @@ static uint64_t                g_text_sz;
  * working if the bundle layout changes; the name is only used in the report. */
 static const char *pcmap_load(void) {
    if (g_rows) { return NULL; }
-   const uint32_t n = _dyld_image_count();
+   const uint32_t n = x64_img_count();
    for (uint32_t i = 0; i < n; i++) {
-      const struct mach_header *mh = _dyld_get_image_header(i);
+      const struct mach_header *mh = x64_img_header(i);
       if (!mh || mh->magic != MH_MAGIC_64) { continue; }
       const struct mach_header_64 *m64 = (const struct mach_header_64 *)mh;
       unsigned long psz = 0, tsz = 0;
@@ -183,7 +184,7 @@ static const char *pcmap_load(void) {
       g_text_vm = (uint64_t)(uintptr_t)tx;
       g_text_sz = (uint64_t)tsz;
       VS("image %s: %u pcmap rows, __text %p..%p\n",
-         _dyld_get_image_name(i) ? _dyld_get_image_name(i) : "?",
+         x64_img_path(i) ? x64_img_path(i) : "?",
          count, (const void *)tx, (const void *)(tx + tsz));
       return NULL;
    }

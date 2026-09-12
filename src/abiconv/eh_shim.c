@@ -72,6 +72,7 @@
 #include <pthread.h>
 #include <mach-o/dyld.h>
 #include <mach-o/getsect.h>
+#include "dyld_image_list.h"
 
 /* ===================================================================== */
 /* eh_tramp.asm                                                          */
@@ -432,9 +433,9 @@ static void eh_scan_images(void) {
    if (g_img_scanned) return;
    pthread_mutex_lock(&g_img_mu);
    if (g_img_scanned) { pthread_mutex_unlock(&g_img_mu); return; }
-   uint32_t n = _dyld_image_count();
+   uint32_t n = x64_img_count();
    for (uint32_t i = 0; i < n && g_img_n < (int)(sizeof g_imgs / sizeof g_imgs[0]); i++) {
-      const struct mach_header *mh = _dyld_get_image_header(i);
+      const struct mach_header *mh = x64_img_header(i);
       if (!mh) continue;
       const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
       unsigned long pcsz = 0, lssz = 0, txsz = 0, gxsz = 0;

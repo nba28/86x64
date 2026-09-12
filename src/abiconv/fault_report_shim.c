@@ -59,6 +59,7 @@
 #include <sys/ucontext.h>
 #include <unistd.h>
 #include <errno.h>
+#include "dyld_image_list.h"
 
 static struct sigaction g_prev_segv, g_prev_bus;
 static int g_words = 48;
@@ -165,10 +166,15 @@ static void fr_add_image(const struct mach_header *mh, intptr_t slide) {
 /* Upgrade the snapshot's names to full paths. Arm time only — NEVER from the
  * handler; this is the call that must not happen at fault time. */
 static void fr_arm_paths(void) {
-   uint32_t cnt = _dyld_image_count();
+   /* Via dyld_image_list, not dyld's indexed API: arm time is not a safe time
+    * either. Arming can happen while some image is still mid-load, and querying
+    * an in-flight entry aborts the process (dyld_image_list.c). infoArray is also
+    * strictly better here on the reporter's own terms -- it is a plain array read,
+    * where the dyld calls re-enter dyld. */
+   uint32_t cnt = x64_img_count();
    for (uint32_t i = 0; i < cnt; i++) {
-      const struct mach_header *mh = _dyld_get_image_header(i);
-      const char *nm = _dyld_get_image_name(i);
+      const struct mach_header *mh = x64_img_header(i);
+      const char *nm = x64_img_path(i);
       if (!mh || !nm) continue;
       uint64_t base = (uint64_t)(uintptr_t)mh;
       for (int k = 0; k < (int)g_nimgs; k++)
@@ -186,7 +192,10 @@ static int fr_image_for(uint64_t v, char *out, size_t n) {
 
    if (g_unsafe_syms) {
       /* KILL SWITCH — the pre-fix behaviour: ask dyld live, from inside a signal
-       * handler, while dyld may hold its own lock. Reproduces the masking. */
+       * handler, while dyld may hold its own lock. Reproduces the masking.
+       * ⚠ These two kill-switch blocks are the ONLY places in the runtime that may
+       * still call dyld's indexed image APIs: reproducing the unsafe behaviour is
+       * their entire purpose. Do not "fix" them to use dyld_image_list. */
       uint32_t cnt = _dyld_image_count();
       for (uint32_t i = 0; i < cnt; i++) {
          const struct mach_header *mh = _dyld_get_image_header(i);

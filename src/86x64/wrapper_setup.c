@@ -38,6 +38,7 @@
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <mach-o/nlist.h>
+#include "../abiconv/dyld_image_list.h"
 
 #define STACK_REGION_SIZE (16U * 1024U * 1024U)   /* 16 MB scratch region */
 #define ARG_FRAME_SIZE    (1U * 1024U * 1024U)    /* room for argv+strings */
@@ -100,18 +101,22 @@ static void fixup_translated_dylib_slots(void) {
     * (__DATA,__data; __TEXT,__const/__text) the slideshim doesn't
     * touch, and as a backstop for images whose initializers run after
     * main. */
-   uint32_t image_count = _dyld_image_count();
+   /* ⚠ Via dyld_image_list, NOT dyld's indexed APIs. This walk runs from inside a
+    * dlopen (and as a backstop from initializers), and querying an entry whose
+    * image is still mid-load ABORTS the process from inside dyld's own assert --
+    * it is one of the walks that was killing Portal 2. See
+    * src/abiconv/dyld_image_list.c for the measurements. */
+   uint32_t image_count = x64_img_count();
    for (uint32_t i = 0; i < image_count; ++i) {
-      const char *name = _dyld_get_image_name(i);
+      const char *name = x64_img_path(i);
       if (!name) continue;
-      const char *base = strrchr(name, '/');
-      base = base ? base + 1 : name;
+      const char *base = x64_img_leaf(name);
       /* Match any *.dylib that loads at the translated vmaddr — typically
        * just one (photocd.dylib or whatever the user converted). */
-      const struct mach_header *mh = _dyld_get_image_header(i);
+      const struct mach_header *mh = x64_img_header(i);
       if (!mh || mh->magic != MH_MAGIC_64) continue;
 
-      intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+      intptr_t slide = x64_img_slide(mh);
       /* Heuristic: only process the dylib whose preferred vmaddr falls in
        * the range we chose for translated dylibs. */
 

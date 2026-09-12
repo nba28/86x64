@@ -39,6 +39,7 @@
 #include <mach-o/dyld.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
+#include "dyld_image_list.h"
 
 /* Real native primitives (libabiconv's own calls are NOT static-interposed). */
 #pragma clang diagnostic push
@@ -113,9 +114,9 @@ int32_t shim_OSAtomicAdd32Barrier(uint32_t *a) { return osatomic_add32_common(a,
  * target dylib lives in the low 4 GB, so its header low32 uniquely brackets the
  * captured return address's low32. */
 static uintptr_t caller_image_base(uint32_t ret_low32) {
-   uint32_t count = _dyld_image_count();
+   uint32_t count = x64_img_count();
    for (uint32_t i = 0; i < count; i++) {
-      const struct mach_header *mh = _dyld_get_image_header(i);
+      const struct mach_header *mh = x64_img_header(i);
       if (!mh) { continue; }
       uintptr_t base = (uintptr_t)mh;
       /* __TEXT covers [base, base + text vmsize). Bracket the low32. */

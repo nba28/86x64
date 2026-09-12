@@ -26,6 +26,7 @@
 #include <mach/mach_vm.h>
 #include <objc/runtime.h>
 #include <objc/message.h>
+#include "dyld_image_list.h"
 extern id objc_retain(id);   /* libobjc ARC entrypoint; not in runtime.h */
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
@@ -129,7 +130,7 @@ struct map_ent { uint64_t real; uint32_t handle; };
                               * saturation */
 /* rb = readable byte extent from page base (0..4096). rb>0 is permanent (a
  * mapped page's readability is stable for the life of its mapping). rb==0
- * (unmapped) is valid only for image generation `gen` = _dyld_image_count at
+ * (unmapped) is valid only for image generation `gen` = x64_img_count() at
  * probe time, since a later dlopen could map the page — without caching the
  * negative, the same garbage metadata pointer is re-probed millions of times
  * (the iWeb startup storm: 3M+ repeated unmapped syscalls). */
@@ -856,7 +857,7 @@ static uint32_t page_readable_len(uintptr_t pg) {
    uint32_t cap;
    struct pgmemo_ent *memo = pgmemo_table(&cap);
    uint32_t mask = cap - 1;
-   uint32_t cur_gen = _dyld_image_count();
+   uint32_t cur_gen = x64_img_count();
    uint32_t h0 = (uint32_t)((pg >> 12) * 2654435761u) & mask;
    uint32_t h = h0, slot = h0;
    int have_slot = 0;
@@ -3072,14 +3073,14 @@ static int g_color_installed;
  * NULL. Walks LC_SYMTAB including LOCAL symbols — getRGBAImp is a non-exported
  * ProKit function, so dlsym can't see it. */
 static void *find_image_symbol(const char *image_substr, const char *sym) {
-   uint32_t nimg = _dyld_image_count();
+   uint32_t nimg = x64_img_count();
    for (uint32_t i = 0; i < nimg; ++i) {
-      const char *path = _dyld_get_image_name(i);
+      const char *path = x64_img_path(i);
       if (!path || !strstr(path, image_substr)) { continue; }
       const struct mach_header_64 *mh =
-         (const struct mach_header_64 *)_dyld_get_image_header(i);
+         (const struct mach_header_64 *)x64_img_header(i);
       if (!mh || mh->magic != MH_MAGIC_64) { return NULL; }
-      intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+      intptr_t slide = x64_img_slide((const struct mach_header *)mh);
       const struct load_command *lc =
          (const struct load_command *)((const uint8_t *)mh + sizeof *mh);
       const struct symtab_command *st = NULL;
@@ -3173,8 +3174,8 @@ static void prokit_color_neutralize(void) {
       static int traced;
       if (!traced && BRIDGE_TRACE()) {
          int pk = 0;
-         for (uint32_t i = 0, n = _dyld_image_count(); i < n; ++i) {
-            const char *p = _dyld_get_image_name(i);
+         for (uint32_t i = 0, n = x64_img_count(); i < n; ++i) {
+            const char *p = x64_img_path(i);
             if (p && strstr(p, "/ProKit")) { pk = 1; break; }
          }
          if (pk) {       /* ProKit IS loaded but symbol not found: trace once */
@@ -3236,7 +3237,7 @@ static void appkit_color_compat_reassert(void) {
     * count stabilizes after startup so steady-state cost is just the count. */
    static uint32_t s_last_imgcount;
    static int      s_last_clscount;
-   uint32_t ic = _dyld_image_count();
+   uint32_t ic = x64_img_count();
    int      cc = objc_getClassList(NULL, 0);
    if (ic != s_last_imgcount || cc != s_last_clscount) {
       s_last_imgcount = ic;
@@ -6956,7 +6957,7 @@ static volatile int g_ps_remaining;
 static os_unfair_lock  g_shadow_pop_lock = OS_UNFAIR_LOCK_INIT;
 static volatile int      g_shadows_done;    /* a full pass has completed */
 static volatile int      g_shadows_partial; /* >=1 dlsym miss: retry on new images */
-static volatile uint32_t g_shadows_imgs;    /* _dyld_image_count() at last pass */
+static volatile uint32_t g_shadows_imgs;    /* x64_img_count() at last pass */
 
 /* Populate ONE data-shadow table — ours, or that of a sibling libabiconv copy.
  * `track_pending` records object globals that are still nil at populate time
@@ -7046,9 +7047,9 @@ static void x64_populate_sibling_tables(int *partial_io) {
    /* our table symbols as offsets from our own mach header */
    const uintptr_t cnt_off = (uintptr_t)&x64_data_shadows_count - (uintptr_t)self_hdr;
    const int verbose = getenv("ABICONV_OBJC_SLIDE_VERBOSE") != NULL;
-   for (uint32_t i = 0, n = _dyld_image_count(); i < n; ++i) {
+   for (uint32_t i = 0, n = x64_img_count(); i < n; ++i) {
       const struct mach_header_64 *hdr =
-         (const struct mach_header_64 *)_dyld_get_image_header(i);
+         (const struct mach_header_64 *)x64_img_header(i);
       if (!hdr || hdr == self_hdr) { continue; }
       const uint8_t *u = x64_image_uuid(hdr);
       if (!u || memcmp(u, self_uuid, 16) != 0) { continue; }   /* not our build */
@@ -7062,7 +7063,7 @@ static void x64_populate_sibling_tables(int *partial_io) {
          if (partial_io) { *partial_io = 1; }
       }
       if (verbose) {
-         const char *path = _dyld_get_image_name(i);
+         const char *path = x64_img_path(i);
          fprintf(stderr, "objc_shim: filled %llu data-constant shadows in "
                          "sibling copy %s\n",
                  (unsigned long long)x64_data_shadows_count,
@@ -7079,7 +7080,7 @@ static void x64_populate_data_shadows(void) {
     * dedups through the shared map, so a re-wrap yields the SAME handle the
     * translated code already holds. */
    os_unfair_lock_lock(&g_shadow_pop_lock);
-   g_shadows_imgs = _dyld_image_count();
+   g_shadows_imgs = x64_img_count();
    int partial = x64_fill_shadow_table(x64_data_shadows, n, 1, 0);
    x64_populate_sibling_tables(&partial);
    g_ps_remaining    = g_ps_n;
@@ -7102,7 +7103,7 @@ static void x64_populate_data_shadows(void) {
 static void x64_ensure_data_shadows(void) {
    if (__builtin_expect(!g_shadows_done, 0)) { x64_populate_data_shadows(); return; }
    if (__builtin_expect(g_shadows_partial, 0) &&
-       _dyld_image_count() != g_shadows_imgs) {
+       x64_img_count() != g_shadows_imgs) {
       x64_populate_data_shadows();
    }
 }
@@ -8386,12 +8387,12 @@ static os_unfair_lock g_cfstr_lock = OS_UNFAIR_LOCK_INIT;
  * `str` field, which objc_slide's slide_cfstrings range-checks against the
  * __OBJC span and so skips when `str` points into __TEXT,__cstring. */
 static intptr_t image_slide_for_addr(uintptr_t addr) {
-   uint32_t nimg = _dyld_image_count();
+   uint32_t nimg = x64_img_count();
    for (uint32_t i = 0; i < nimg; ++i) {
       const struct mach_header_64 *mh =
-         (const struct mach_header_64 *)_dyld_get_image_header(i);
+         (const struct mach_header_64 *)x64_img_header(i);
       if (!mh || mh->magic != MH_MAGIC_64) { continue; }
-      intptr_t slide = _dyld_get_image_vmaddr_slide(i);
+      intptr_t slide = x64_img_slide((const struct mach_header *)mh);
       const struct load_command *lc =
          (const struct load_command *)((const uint8_t *)mh + sizeof *mh);
       for (uint32_t c = 0; c < mh->ncmds; ++c) {

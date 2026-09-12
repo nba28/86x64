@@ -448,6 +448,7 @@ add_library(abiconv SHARED
   mmap_shim.c
   gestalt_shim.c
   objc_shim.c
+  dyld_image_list.c
   callring_shim.c
   objc_slide.c
   maptable_shim.m
