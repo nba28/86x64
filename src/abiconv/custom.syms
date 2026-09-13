@@ -112,6 +112,28 @@ _pthread_rwlock_destroy
 # (pthread_sync_shim.c runs the once itself, calls the init via _86x64_call_i386).
 _pthread_once
 
+# pthread_t IDENTITY (pthread_sync_shim.c, Portal 2 s20n). abigen treats pthread_t
+# (= struct _opaque_pthread_t *) as a POINTER TO A STRUCT and deep-copies the
+# struct BY VALUE, so join/detach/equal/kill each got a pointer to a COPY rather
+# than the real thread, and pthread_self returned the native 8-byte handle
+# TRUNCATED to 32 bits. Worst of all, pthread_create never copied the pthread_t
+# OUT-PARAM back, so the caller's 4-byte slot kept its old value (0) -- thread
+# creation still worked, which is why it hid, but Valve's CThread::Start stores
+# that handle in m_hThread and CWorkerThread::Call opens with
+# `if (m_hThread == 0) return -1`, silently, so every CallWorker() no-opped and
+# CThreadPool::SuspendExecution waited forever for a reply it never asked for.
+# Hand-shimmed to hand the i386 side the thread's MACH PORT as a 32-bit token.
+# Guards 99_pthread_create_handle / 99_pthread_create_arg.
+_pthread_create
+_pthread_self
+_pthread_join
+_pthread_detach
+_pthread_equal
+_pthread_kill
+_pthread_cancel
+_pthread_setschedparam
+_pthread_getschedparam
+
 # Resource Manager Handle-boundary entries (rm_shim.c, s35): abigen would forward
 # to native but TRUNCATE the returned >4GB Handle (or pass our low Handle raw to
 # a native Handle-taking call). Hand-shim wraps/unwraps through a low-4GB arena

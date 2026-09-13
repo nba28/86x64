@@ -223,6 +223,22 @@
 	MTSHIM	___pthread_rwlock_trywrlock,  _shim_pthread_rwlock_trywrlock
 	MTSHIM	___pthread_rwlock_unlock,     _shim_pthread_rwlock_unlock
 	MTSHIM	___pthread_rwlock_destroy,    _shim_pthread_rwlock_destroy
+
+	;; pthread_t IDENTITY (pthread_sync_shim.c). abigen deep-copies pthread_t
+	;; BY VALUE (a pointer to _opaque_pthread_t), losing thread identity, and
+	;; never wrote pthread_create's OUT-PARAM back -- so the caller's handle
+	;; stayed 0 and every CallWorker()/join/kill on it silently no-opped while
+	;; the thread itself ran fine. The shims hand out the thread's MACH PORT as
+	;; a stable 32-bit token. Guard 99_pthread_create_handle (ON=42, OFF=9).
+	MTSHIM	___pthread_create,            _shim_pthread_create
+	MTSHIM	___pthread_self,              _shim_pthread_self
+	MTSHIM	___pthread_join,              _shim_pthread_join
+	MTSHIM	___pthread_detach,            _shim_pthread_detach
+	MTSHIM	___pthread_equal,             _shim_pthread_equal
+	MTSHIM	___pthread_kill,              _shim_pthread_kill
+	MTSHIM	___pthread_cancel,            _shim_pthread_cancel
+	MTSHIM	___pthread_setschedparam,     _shim_pthread_setschedparam
+	MTSHIM	___pthread_getschedparam,     _shim_pthread_getschedparam
 	;; pthread_once: the i386 once-control block ({long __sig; opaque} = 8B,
 	;; 4-byte sig) is NOT a valid native os_once_t, and its init routine is an
 	;; i386 void(void) fn ptr. abigen's forward to native pthread_once trips

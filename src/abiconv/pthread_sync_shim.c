@@ -49,6 +49,8 @@
 #include <time.h>
 #include <dlfcn.h>
 #include <errno.h>
+#include <sched.h>
+#include <mach/mach.h>
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
 
@@ -619,4 +621,217 @@ int32_t shim_pthread_once(uint32_t *a) {
    }
    pthread_mutex_unlock(&e->lk);
    return 0;
+}
+
+/* ══════════════════════════════════════════════════════════════════════════
+ * pthread_t IDENTITY  (Portal 2 2026-09-14, s20n)
+ * ══════════════════════════════════════════════════════════════════════════
+ * abigen treats pthread_t (= struct _opaque_pthread_t *) as a POINTER TO A
+ * STRUCT and marshals the struct BY VALUE -- the same disease this file already
+ * cures for mutex/cond/rwlock -- so pthread_join/detach/equal/kill each receive
+ * a pointer to a fresh COPY instead of the real thread, and ___pthread_self
+ * returns the native 8-byte pthread_t TRUNCATED to 32 bits.
+ *
+ * Worse, and this is the one that actually bit: for pthread_create the pthread_t
+ * OUT-PARAM is never copied back, so the caller's 4-byte slot keeps whatever it
+ * held before (0).
+ *
+ * ★WHY IT HID FOR SO LONG. Thread creation still WORKS -- the thread runs, its
+ * start routine executes, and a start handshake completes -- so every direct
+ * test of "can we create threads" passes. But Valve's CThread::Start does
+ *     pthread_create( &this->m_hThread   [+0x98], &attr, ThreadProc, this )
+ * and CWorkerThread::Call opens with
+ *     if ( m_hThread == 0 ) return -1;      // silent, no dispatch
+ * so with the handle left at 0 every CallWorker() quietly no-ops. Because
+ * CThreadPool::SuspendExecution dispatches in one loop and collects the replies
+ * in a SECOND loop, main then waits forever for a reply to a call it never sent.
+ * MEASURED (ABICONV_PSX_CENSUS): m_EventSend signals=0 while the worker polls it
+ * 233x, m_EventComplete waits=23M signals=0, 100% CPU on the main thread alone.
+ * Guards: 99_pthread_create_handle (ON=42, OFF=9) and 99_pthread_create_arg.
+ *
+ * REPRESENTATION. A native pthread_t is an 8-byte pointer and the i386 slot is 4
+ * bytes, so it cannot be stored raw and MUST NOT be truncated (two live threads
+ * can share low 32 bits). We hand the i386 side the thread's MACH PORT
+ * (pthread_mach_thread_np) as its 32-bit token: Apple's own identity for a
+ * thread, unique among live threads, and never 0 -- which matters, because
+ * `m_hThread != 0` is exactly the test real code makes. A small table maps
+ * token -> pthread_t so join/detach keep working for a thread that has already
+ * exited, where pthread_from_mach_thread_np would no longer resolve it.
+ *
+ * ⚠ A token is only meaningful while we own the thread. We deliberately do NOT
+ * invent tokens for threads we never saw: shim_pthread_self registers the
+ * calling thread lazily, so a NATIVE thread that calls into translated code still
+ * gets a stable, comparable value. */
+
+#define PSX_MAX_THREADS 512
+struct psx_thr { uint32_t token; pthread_t nat; };
+static struct psx_thr g_thr[PSX_MAX_THREADS];
+
+/* Register `t` and return its 32-bit token. 0 means "cannot represent". */
+static uint32_t psx_thread_token(pthread_t t) {
+   if (!t) { return 0; }
+   uint32_t tok = (uint32_t)pthread_mach_thread_np(t);
+   if (!tok) { return 0; }
+   pthread_mutex_lock(&g_reg_lock);
+   int free_slot = -1;
+   for (int i = 0; i < PSX_MAX_THREADS; ++i) {
+      if (g_thr[i].token == tok) { g_thr[i].nat = t; free_slot = -2; break; }
+      if (g_thr[i].token == 0 && free_slot < 0) { free_slot = i; }
+   }
+   if (free_slot >= 0) { g_thr[free_slot].token = tok; g_thr[free_slot].nat = t; }
+   pthread_mutex_unlock(&g_reg_lock);
+   /* Table full: the token still WORKS via pthread_from_mach_thread_np for a
+    * live thread, so degrade rather than fail the create. */
+   return tok;
+}
+
+static pthread_t psx_thread_lookup(uint32_t tok) {
+   if (!tok) { return NULL; }
+   pthread_t nat = NULL;
+   pthread_mutex_lock(&g_reg_lock);
+   for (int i = 0; i < PSX_MAX_THREADS; ++i) {
+      if (g_thr[i].token == tok) { nat = g_thr[i].nat; break; }
+   }
+   pthread_mutex_unlock(&g_reg_lock);
+   if (!nat) { nat = pthread_from_mach_thread_np((mach_port_t)tok); }
+   return nat;
+}
+
+static void psx_thread_forget(uint32_t tok) {
+   if (!tok) { return; }
+   pthread_mutex_lock(&g_reg_lock);
+   for (int i = 0; i < PSX_MAX_THREADS; ++i) {
+      if (g_thr[i].token == tok) { g_thr[i].token = 0; g_thr[i].nat = NULL; break; }
+   }
+   pthread_mutex_unlock(&g_reg_lock);
+}
+
+/* cb_bridge.c: bind an i386 fn ptr to a native trampoline slot. Declared here
+ * rather than in a header because the descriptor layout is private to that file
+ * and typeconv.cc; the two codes we need are CBA_PTR=2 and CBR_PTR=2. */
+#define PSX_CB_MAX_ARGS 16
+typedef struct {
+   uint32_t nargs;
+   uint32_t ret_kind;
+   uint8_t  arg_kinds[PSX_CB_MAX_ARGS];
+} psx_cb_sig;
+extern uint64_t x64_cb_wrap(uint32_t fn32, const psx_cb_sig *sig);
+
+/* void *(*start_routine)(void *) -- one pointer in, pointer out. */
+static const psx_cb_sig psx_start_sig = { 1, 2, { 2 } };
+
+#define I386_ATTR_OPAQUE 36            /* i386 pthread_attr_t = 4 + 36 */
+
+/* int pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *) */
+int32_t shim_pthread_create(uint32_t *a) {
+   uint32_t *slot   = (uint32_t *)(uintptr_t)a[0];
+   void     *i386at = a[1] ? (void *)(uintptr_t)a[1] : NULL;
+   uint32_t  fn32   = a[2];
+   uint32_t  arg32  = a[3];
+
+   if (!fn32) { return EINVAL; }
+   uint64_t tramp = x64_cb_wrap(fn32, &psx_start_sig);
+   if (!tramp) { return EAGAIN; }
+
+   /* Rebuild a native attr from the i386 one exactly as abigen does (native
+    * pthread already accepts that reconstruction). A NULL attr stays NULL. */
+   char nattr[8 + 56];
+   pthread_attr_t *pat = NULL;
+   if (i386at) {
+      psx_build_attr(nattr, i386at, I386_ATTR_OPAQUE, 56);
+      pat = (pthread_attr_t *)nattr;
+   }
+
+   pthread_t nat = NULL;
+   int r = pthread_create(&nat, pat, (void *(*)(void *))(uintptr_t)tramp,
+                          (void *)(uintptr_t)arg32);
+   if (r != 0) { return (int32_t)r; }
+
+   /* ★THE WRITE-BACK. This is the whole point of the shim: without it the
+    * caller's handle stays 0 and every later use of it silently no-ops.
+    * M64_NO_PTHREAD_TOKEN=1 reproduces the old (broken) behaviour exactly, so the
+    * guard has a real OFF arm and a regression can be bisected with one env var
+    * instead of a rebuild. */
+   static int no_token = -1;
+   if (no_token < 0) { no_token = getenv("M64_NO_PTHREAD_TOKEN") ? 1 : 0; }
+   uint32_t tok = psx_thread_token(nat);
+   if (slot && !no_token) { *slot = tok; }
+   if (psx_trace()) {
+      fprintf(stderr, "[psx] create -> nat=%p token=%#x slot=%p\n",
+              (void *)nat, tok, (void *)slot);
+   }
+   return 0;
+}
+
+/* pthread_t pthread_self(void) — returns the TOKEN, so it compares equal to
+ * whatever pthread_create handed the creator. */
+int32_t shim_pthread_self(uint32_t *a) {
+   (void)a;
+   return (int32_t)psx_thread_token(pthread_self());
+}
+
+int32_t shim_pthread_join(uint32_t *a) {
+   pthread_t t = psx_thread_lookup(a[0]);
+   if (!t) { return ESRCH; }
+   void *ret = NULL;
+   int r = pthread_join(t, &ret);
+   if (r == 0) {
+      psx_thread_forget(a[0]);
+      /* void **value_ptr is optional; the returned value is an i386-width
+       * pointer coming back from the translated start routine. */
+      if (a[1]) { *(uint32_t *)(uintptr_t)a[1] = (uint32_t)(uintptr_t)ret; }
+   }
+   return (int32_t)r;
+}
+
+int32_t shim_pthread_detach(uint32_t *a) {
+   pthread_t t = psx_thread_lookup(a[0]);
+   if (!t) { return ESRCH; }
+   int r = pthread_detach(t);
+   if (r == 0) { psx_thread_forget(a[0]); }
+   return (int32_t)r;
+}
+
+/* Comparing TOKENS is the whole benefit of using the mach port: identity works
+ * without resolving either side back to a pthread_t. */
+int32_t shim_pthread_equal(uint32_t *a) {
+   return (int32_t)(a[0] != 0 && a[0] == a[1]);
+}
+
+int32_t shim_pthread_kill(uint32_t *a) {
+   pthread_t t = psx_thread_lookup(a[0]);
+   if (!t) { return ESRCH; }
+   return (int32_t)pthread_kill(t, (int)a[1]);
+}
+
+int32_t shim_pthread_cancel(uint32_t *a) {
+   pthread_t t = psx_thread_lookup(a[0]);
+   if (!t) { return ESRCH; }
+   return (int32_t)pthread_cancel(t);
+}
+
+/* int pthread_setschedparam(pthread_t, int policy, const struct sched_param *)
+ * struct sched_param is { int sched_priority; char __opaque[4] } on both ABIs,
+ * so the i386 layout is directly usable. */
+int32_t shim_pthread_setschedparam(uint32_t *a) {
+   pthread_t t = psx_thread_lookup(a[0]);
+   if (!t || !a[2]) { return ESRCH; }
+   struct sched_param sp;
+   memset(&sp, 0, sizeof sp);
+   sp.sched_priority = (int)*(int32_t *)(uintptr_t)a[2];
+   return (int32_t)pthread_setschedparam(t, (int)a[1], &sp);
+}
+
+int32_t shim_pthread_getschedparam(uint32_t *a) {
+   pthread_t t = psx_thread_lookup(a[0]);
+   if (!t) { return ESRCH; }
+   int policy = 0;
+   struct sched_param sp;
+   memset(&sp, 0, sizeof sp);
+   int r = pthread_getschedparam(t, &policy, &sp);
+   if (r == 0) {
+      if (a[1]) { *(int32_t *)(uintptr_t)a[1] = (int32_t)policy; }
+      if (a[2]) { *(int32_t *)(uintptr_t)a[2] = (int32_t)sp.sched_priority; }
+   }
+   return (int32_t)r;
 }
