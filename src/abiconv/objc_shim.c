@@ -6072,6 +6072,24 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
  *   args32[2] = _cmd
  *   args32[3..] = explicit args
  */
+/* The struct-return decision below is the ONE thing that matters for a stret
+ * call, and it was invisible in OBJC_BRIDGE_TRACE: objc_bridge_prep_stret
+ * deliberately discards the kind fill_args_and_return prints (that one is the
+ * plain-send view of the same encoding), so the trace showed `ret_kind=0` for a
+ * call this code had actually classified some other way. Reading the trace as if
+ * it named the stret plan is a trap — print the real one. */
+static void trace_stret_plan(unsigned kind, size_t isz, size_t nsz,
+                             int rconv, const char *rt) {
+   fprintf(stderr, "[bp]   STRET plan kind=%u isz=%zu nsz=%zu conv=%s rt=\"%s\"",
+           kind, isz, nsz, rconv == CONV_I386 ? "i386" : "native",
+           rt ? rt : "(none)");
+   if (isz == nsz) {
+      fprintf(stderr, "  <-- layouts EQUAL: the i386 caller's buffer is passed"
+                      " RAW, so a width mismatch here overflows it");
+   }
+   fprintf(stderr, "\n");
+}
+
 /* Shared stret-return planning: given the resolved method, decide how the
  * struct return travels and configure the plan. Returns the reg_base for the
  * explicit args (3 = stret form with hidden ptr in reg[0], 2 = native
@@ -6096,12 +6114,16 @@ static unsigned plan_stret_return(struct objc_call_plan *plan, Method m,
       enc_classify(enc_skip_quals(rt), rconv, &isz, &nsz, sse);
       have = nsz > 0;
    }
-   free(rt);
+   const int trace_plan = BRIDGE_TRACE();
    if (!have || isz == nsz) {
+      if (trace_plan) trace_stret_plan(0, isz, nsz, rconv, rt);
+      free(rt);
       plan->reg[0] = (uint64_t)retbuf32;       /* raw passthrough */
       plan->ret_is_obj = 0;
       return 3;
    }
+   if (trace_plan) trace_stret_plan(nsz > 16 ? 3 : 6, isz, nsz, rconv, rt);
+   free(rt);
    if (nsz > 16) {
       if (nsz > PLAN_STRET_MAX) {
          if (BRIDGE_TRACE()) {
@@ -6127,6 +6149,7 @@ static unsigned plan_stret_return(struct objc_call_plan *plan, Method m,
    plan->sret_conv  = (uint32_t)rconv;
    return 2;
 }
+
 
 void objc_bridge_prep_stret(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();

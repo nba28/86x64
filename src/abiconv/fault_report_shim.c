@@ -54,6 +54,7 @@
 #include <dlfcn.h>
 #include <stdint.h>
 #include <mach/mach.h>
+#include <pthread.h>
 #include <mach/mach_vm.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
@@ -509,6 +510,23 @@ int dladdr(const void *addr, Dl_info *info) {
 }
 
 /* Dump the ring newest-first. Called only from the fault handler. */
+/* The reverse-bridge ObjC call ring (callring_shim.c, ABICONV_CALLRING) records
+ * {selector, receiver class, RETURN class} per thread. It armed itself only for
+ * SIGILL, because a Swift bounds-trap was what motivated it — but the question it
+ * answers is signal-agnostic, and it is exactly the question a SIGSEGV inside a
+ * system framework poses: the unwinder cannot cross the i386-frame bridge, so the
+ * last sends the translated caller made are the only evidence of what it handed
+ * the framework. Inert unless ABICONV_CALLRING is set. */
+extern int  _86x64_callring_enabled(void);
+extern void _86x64_callring_dump_all(uint32_t crashing_tid);
+
+static void fr_dump_callring(void) {
+   if (!_86x64_callring_enabled()) return;
+   fprintf(stderr, "[fault] reverse-bridge ObjC call ring "
+                   "(newest last; ABICONV_CALLRING):\n");
+   _86x64_callring_dump_all(pthread_mach_thread_np(pthread_self()));
+}
+
 static void fr_dump_dladdr_ring(void) {
    if (!g_trace_dladdr) { return; }
    long seq = g_dr_seq;
@@ -626,6 +644,8 @@ static void fr_handler(int sig, siginfo_t *info, void *uctx) {
    }
 
    fr_dump_dladdr_ring();
+   fr_dump_callring();
+
    fprintf(stderr, "[fault] loaded images (low-4GB, i.e. translated):\n");
    if (g_unsafe_syms) {
       uint32_t cnt = _dyld_image_count();          /* kill switch: live dyld */

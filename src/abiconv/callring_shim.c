@@ -41,6 +41,7 @@
 /* ---- forward decls (definitions below) ----------------------------------- */
 int  _86x64_callring_enabled(void);
 void _86x64_callring_arm(void);
+void _86x64_callring_dump_all(uint32_t crashing_tid);
 void _86x64_callring_send(uint64_t self, uint64_t sel, uint32_t caller_ra);
 void _86x64_callring_ret(uint64_t ret);
 
@@ -203,21 +204,33 @@ static void cr_dump_ring(struct cr_ring *r, int is_crashing) {
 	fflush(stderr);
 }
 
+/* Dump every thread's ring, the named one first. Exposed because the ring's job
+ * — naming the API that handed a translated caller a value it then mis-uses — is
+ * not specific to the Swift trap it was written for. The fault reporter
+ * (fault_report_shim.c) calls this on SIGSEGV/SIGBUS, which is the same question
+ * asked about a different signal: Portal 2's renderer init faults inside Metal on
+ * a stack the unwinder cannot cross, so the last few ObjC sends the translated
+ * caller made ARE the evidence. Async-signal-safe on the same terms as the SIGILL
+ * path: only already-interned strings, no runtime walks, no allocation. */
+void _86x64_callring_dump_all(uint32_t crashing_tid);
+void _86x64_callring_dump_all(uint32_t crashing_tid) {
+	if (!_86x64_callring_enabled()) return;
+	for (struct cr_ring *r = g_ring_list; r; r = r->next) {
+		if (r->tid == crashing_tid) { cr_dump_ring(r, 1); break; }
+	}
+	for (struct cr_ring *r = g_ring_list; r; r = r->next) {
+		if (r->tid != crashing_tid) cr_dump_ring(r, 0);
+	}
+	fprintf(stderr, "[callring] ====== end call-ring dump ======\n");
+	fflush(stderr);
+}
+
 static void cr_sigill_handler(int sig, siginfo_t *info, void *uctx) {
 	uint32_t me = pthread_mach_thread_np(pthread_self());
 	fprintf(stderr,
 	        "\n[callring] ====== SIGILL (Swift trap?) on tid=%x addr=%p ======\n",
 	        me, info ? info->si_addr : NULL);
-	/* crashing thread first */
-	for (struct cr_ring *r = g_ring_list; r; r = r->next) {
-		if (r->tid == me) { cr_dump_ring(r, 1); break; }
-	}
-	/* then the rest */
-	for (struct cr_ring *r = g_ring_list; r; r = r->next) {
-		if (r->tid != me) cr_dump_ring(r, 0);
-	}
-	fprintf(stderr, "[callring] ====== end call-ring dump ======\n");
-	fflush(stderr);
+	_86x64_callring_dump_all(me);
 	/* chain to the previous handler (or re-raise default) so the process still
 	 * dies exactly as it would have — pure diagnostic, no behavior change. */
 	if (g_prev_sigill.sa_flags & SA_SIGINFO) {
