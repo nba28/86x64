@@ -75,6 +75,23 @@
  *   7. "The driver is mapped below 4GB." AGXMetalG16X loads below 4GB in BOTH the
  *      failing (0x190c1000) and succeeding (0x3f24000) runs.
  *
+ * ★NARROWED (GLPROBE_PRELOAD=1): the fragile step is METAL DEVICE CREATION, not
+ * anything in CGL. Calling MTLCreateSystemDefaultDevice() alone from this native
+ * constructor — touching no CGL at all — is enough to make Portal 2's own
+ * CGLQueryRendererInfo succeed and the process survive. So the target is "the
+ * one-time creation of the Metal device / load-and-init of the AGX driver",
+ * which is far more specific and more fixable than "the first GL call".
+ *
+ * ⚠ ONE CONFOUND REMAINS, and it must be separated before anyone builds a fix.
+ * Loading Metal early also CHANGES WHERE THE DRIVER LANDS: AGXMetalG16X maps at
+ * 0x4271000 / 0x3f24000 when loaded early (BELOW our mmap band) and at
+ * 0x190c1000 when loaded late (INSIDE the band [0x10000000,0x80000000), because
+ * by then the space under 0x10000000 is full of translated images). So "early
+ * native caller" and "driver outside our band" are confounded in every
+ * succeeding run. The experiment that separates them is to make the driver load
+ * LATE but outside the band — e.g. reserve the whole band up front so dyld is
+ * forced to place it above 4GB — and see whether the app's call then succeeds.
+ *
  * STILL OPEN: why the first-touch fails. The one surviving difference between the
  * two AGX placements is that the failing one lands INSIDE the mmap band
  * [0x10000000,0x80000000) our allocators use, while the succeeding one is below
@@ -507,6 +524,26 @@ static void selftest(void) {
    LOG("SELFTEST: survived\n");
 }
 
+/* GLPROBE_PRELOAD=1 — narrow WHAT the fragile first-touch actually is. The
+ * selftest above does a full CGLQueryRendererInfo, which internally creates a
+ * context and spins up Metal's device dispatch, so it proves only that "some
+ * first-touch on a native caller fixes it". This does the Metal half ALONE
+ * (MTLCreateSystemDefaultDevice), touching no CGL. If the app's CGL call then
+ * succeeds, the fragile step is Metal DEVICE CREATION, which is a far more
+ * specific and more fixable target than "the first GL call". If it still
+ * crashes, the fragile step is in CGL/OpenGL above Metal. */
+static void preload(void) {
+   if (!getenv("GLPROBE_PRELOAD")) return;
+   void *h = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_LAZY);
+   if (!h) { LOG("PRELOAD: dlopen(Metal) failed: %s\n", dlerror()); return; }
+   void *(*mk)(void) = (void *(*)(void))dlsym(h, "MTLCreateSystemDefaultDevice");
+   if (!mk) { LOG("PRELOAD: no MTLCreateSystemDefaultDevice\n"); return; }
+   LOG("PRELOAD: MTLCreateSystemDefaultDevice() from a NATIVE constructor...\n");
+   void *dev = mk();
+   LOG("PRELOAD: -> device=%p\n", dev);
+   where_is_gl("PRELOAD/after");
+}
+
 __attribute__((constructor))
 static void probe_ctor(void) {
    probe_init();
@@ -525,6 +562,7 @@ static void probe_ctor(void) {
    sa.sa_sigaction = on_bus;  sigaction(SIGBUS,  &sa, &g_prev_bus);
    LOG("armed: %u-deep GL call ring + glGetError after every call%s\n",
        g_ring_n, g_all ? " (logging ALL calls)" : "");
+   preload();
    selftest();
 }
 
