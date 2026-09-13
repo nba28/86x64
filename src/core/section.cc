@@ -1685,6 +1685,11 @@ namespace MachO {
             }
          }
 
+         /* A register whose anchor step (2b) deliberately (re-)established on
+          * THIS instruction, and which the generalised definition-kill below
+          * must therefore leave alone. */
+         xed_reg_enum_t anchor_keep = XED_REG_INVALID;
+
          /* (2b) Track the anchor through a frame-slot spill/reload so a
           *      reloaded copy in another register is also recognized.
           *        spill:  mov %anchor_reg, disp(%ebp|%esp)
@@ -1741,7 +1746,9 @@ namespace MachO {
                          dst == XED_REG_EDI);
                      if (s != anchor_slots.end()) {
                         anchors[dst] = s->second;    /* reload of a spilled anchor */
+                        anchor_keep = dst;
                      } else if (entry_restore) {
+                        anchor_keep = dst;
                         /* EPILOGUE RESTORE of the callee-saved PIC register from
                          * the very slot the PROLOGUE saved it into. At RUNTIME
                          * this really does end the anchor's life — but the walk
@@ -1793,42 +1800,78 @@ namespace MachO {
                      }
                   }
                }
-            } else if (iform == XED_IFORM_MOV_GPRv_MEMv) {
-               /* (2b') THE SAME RE-PURPOSE, THROUGH A NON-FRAME ADDRESS.
-                *      The gate above only watches EBP/ESP frame slots, because
-                *      that is where an anchor is spilled and reloaded. But a
-                *      function re-purposes its anchor register just as often by
-                *      loading an OBJECT FIELD into it, and such a load has an
-                *      arbitrary base (and possibly an index), so it falls
-                *      straight through that gate and the dead anchor survives.
-                *
-                *      Portal 2 CKeyValuesSystem::CKeyValuesSystem (libvstdlib
-                *      i386 0x11fb1): %esi is the get_pc_thunk anchor (0x11e6f),
-                *      then `mov 0x64(%ebx),%esi` loads m_HashTable.m_Size into
-                *      it, and the very next instruction is
-                *          lea 0x7ff(%esi),%edi        # m_Size + 2047
-                *      which the stale anchor turned into
-                *          lea rip+...,%edi            # &(0x11e6f + 0x7ff)
-                *      i.e. an IMAGE ADDRESS where a count belongs. It reached
-                *      CUtlVector::GrowVector as `num`, so CUtlMemory::Grow
-                *      doubled 4 up past it and asked the allocator for
-                *      next_pow2(load_base) * sizeof(hash_item_t) — 1 or 2 GiB,
-                *      depending purely on where ASLR put the image. That NULL
-                *      made Source _exit(0) silently.
-                *
-                *      Structural, not app-shaped: ANY load into a GPR ends that
-                *      register's anchor. A genuine spilled anchor is reloaded
-                *      through a frame slot, which the gate above handles and
-                *      which never reaches here, so this cannot erase a live
-                *      one. Registers only (no memory destination): the
-                *      MOV_MEMv_GPRv store form is the gate's business. */
-               static const bool memload_kill =
-                  std::getenv("M64_NO_PIC_ANCHOR_MEMLOAD_KILL") == nullptr;
-               const xed_reg_enum_t dst =
-                  xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
-               if (memload_kill && dst >= XED_REG_EAX && dst <= XED_REG_EDI) {
-                  anchors.erase(dst);
-               }
+            }
+         }
+
+         /* (2b') ANY DEFINITION OF A REGISTER ENDS THAT REGISTER'S ANCHOR.
+          *      Step (2b) above only watches EBP/ESP frame slots, because that
+          *      is where an anchor is legitimately spilled and reloaded. But a
+          *      function re-purposes its anchor register in every other way
+          *      too, and each of those left the dead anchor in place:
+          *
+          *        mov  0x64(%ebx),%esi      # an object FIELD, arbitrary base
+          *        movzx 0x6bfa(%esi),%ebx   # a byte load, not the plain `mov`
+          *        pop  %esi                 # a restore that is not the anchor pop
+          *        xor  %ebx,%ebx            # no memory operand at all
+          *
+          *      Enumerating iforms is how this bug keeps coming back: the rule
+          *      is about the DEFINITION, not about which opcode performed it.
+          *      So ask XED which operands this instruction WRITES and erase the
+          *      anchor of every 32-bit GPR among them. A sub-register write
+          *      (%bl, %bx) counts — the value is no longer the anchor even
+          *      though the upper bytes survive — hence the normalisation to the
+          *      enclosing 32-bit register.
+          *
+          *      ⚠ ONE STALE ANCHOR HAS TWO OPPOSITE FAILURE MODES, and this
+          *      family has produced both:
+          *
+          *      - on the BASE, a FALSE rewrite: an ADDRESS is produced where a
+          *        VALUE belongs. Portal 2 CKeyValuesSystem::CKeyValuesSystem
+          *        (libvstdlib i386 0x11fb1): %esi is the get_pc_thunk anchor,
+          *        `mov 0x64(%ebx),%esi` loads m_HashTable.m_Size into it, and
+          *        the next instruction `lea 0x7ff(%esi),%edi` became
+          *        `lea rip+...,%edi` — an image address where a count belongs.
+          *        CUtlMemory::Grow then asked for next_pow2(load_base)*8, i.e.
+          *        1-2 GiB depending purely on ASLR; the NULL made Source
+          *        _exit(0) silently.
+          *
+          *      - on the INDEX, a SUPPRESSED rewrite: step (2)'s two-anchor
+          *        form is ambiguous and bails, leaving the RAW i386
+          *        displacement against a TRANSLATED anchor. Portal 2
+          *        localize.dylib i386 0xbc8f, in a static initializer:
+          *            movzx 0x6bfa(%esi),%ebx        # %ebx := a small count
+          *            mov   %eax,0x791e(%esi,%ebx,8) # store into a global table
+          *        %ebx had held a stale anchor, so the store kept `0x791e` and
+          *        landed at translated_anchor+0x791e inside its OWN read-only
+          *        __TEXT -> SIGBUS. Every sibling access in that same block
+          *        (seven of them, all without an index) WAS rewritten correctly,
+          *        which is exactly why the audit tools read the function as
+          *        clean: only the two indexed forms were left raw.
+          *
+          *      Exemptions are narrow and explicit: the `call $+0; pop %reg`
+          *      that ESTABLISHES an anchor (step 1, which already recorded it),
+          *      and the frame-slot reload/entry-restore that step (2b) just
+          *      recognised (anchor_keep). A reg->reg move re-establishes the
+          *      anchor in step (2c) below, which runs after this. A separate
+          *      get_pc_thunk call establishes its anchor after the call-clobber
+          *      clear further down. So nothing that genuinely re-creates an
+          *      anchor is lost here. */
+         static const bool memload_kill =
+            std::getenv("M64_NO_PIC_ANCHOR_MEMLOAD_KILL") == nullptr;
+         if (memload_kill && !is_anchor_pop && !anchors.empty()) {
+            const xed_inst_t *xi = xed_decoded_inst_inst(&xedd);
+            const unsigned nop = xed_inst_noperands(xi);
+            for (unsigned i = 0; i < nop; ++i) {
+               const xed_operand_t *op = xed_inst_operand(xi, i);
+               if (!xed_operand_written(op)) continue;
+               const xed_operand_enum_t nm = xed_operand_name(op);
+               if (!xed_operand_is_register(nm)) continue;
+               const xed_reg_enum_t raw = xed_decoded_inst_get_reg(&xedd, nm);
+               if (raw == XED_REG_INVALID) continue;
+               const xed_reg_enum_t r = xed_get_largest_enclosing_register32(raw);
+               if (r < XED_REG_EAX || r > XED_REG_EDI) continue;
+               if (r == anchor_keep) continue;
+               anchors.erase(r);
             }
          }
 
