@@ -1608,9 +1608,34 @@ namespace MachO {
           *      absolute zerofill pointers into immediates. Structural
           *      pointer operands (bare `[disp32]`, non-lazy slots) are NOT
           *      Immediate::heuristic and are never cancelled. */
+         /*      ★2026-09-13: the ZEROFILL restriction was pure conservatism and
+          *      it let the same bug through on __TEXT. Portal 2 engine.dylib
+          *      i386 0x2e4d5f, CVoxelTree::CVoxelTree:
+          *          movl $0x1000, 0x4(%esp)        # 4096 -- a page size
+          *      The immediate 0x1000 aliases the image's OWN early __TEXT, so
+          *      the heuristic relocated it and the argument arrived as
+          *          lea r11,[rip-0x475d43]; mov %r11d,0x4(%rsp)   # 0x1000145a
+          *      i.e. a CODE ADDRESS where an allocation size belongs. Two of
+          *      those per run reached the allocator as ~300 MB requests that
+          *      tracked ASLR (size == engine_base + 0x1460, low 12 bits always
+          *      0x460) and were SERVED, so nothing ever failed and no
+          *      signal-based tool could see them.
+          *      The governing argument does not mention zerofill at all: PIC
+          *      code NEVER embeds an absolute-address immediate, whatever
+          *      section the value happens to alias. Small constants (0x1000,
+          *      0x2000, a struct size) alias low __TEXT as readily as large
+          *      ones alias a megabyte __common. So cancel on ANY aliased
+          *      section. An immediate that aliases NOTHING was never heuristic,
+          *      so this is exactly "all of them"; genuine absolute immediates
+          *      live in fixed-address NON-PIC functions, which have no anchor
+          *      and never reach here (guards 95_abs32_imm_const,
+          *      98_abs32_imm_group, 87_alu_absdest_imm_ptr). */
+         static const bool imm_cancel_zerofill_only =
+            std::getenv("M64_PIC_ANCHOR_IMM_ZEROFILL_ONLY") != nullptr;
          if ((!anchors.empty() || anchored_region) &&
              inst->imm != nullptr && inst->imm->heuristic &&
-             env.vmaddr_in_zerofill(inst->imm->value)) {
+             (!imm_cancel_zerofill_only ||
+              env.vmaddr_in_zerofill(inst->imm->value))) {
             env.vmaddr_resolver.cancel(
                (std::size_t)inst->imm->value,
                (const SectionBlob<bits> **)&inst->imm->pointee);

@@ -484,6 +484,18 @@ void *malloc(size_t n) {
    if (cap >= (64UL << 20) && getenv("ABICONV_HEAP_TRACE")) {
       fprintf(stderr, "[heap] large malloc %llu bytes (0x%llx) -> %p\n",
               (unsigned long long)cap, (unsigned long long)cap, p);
+      /* A SERVED request can still be a mistranslated size, and then nothing
+       * ever fails -- so the requester report cannot be reserved for the
+       * failure path. Portal 2 2026-09-13: after the stale-anchor fix the fatal
+       * 1-2 GiB request was gone, but two ~300 MB requests per run remained,
+       * varying with ASLR (low 12 bits always 0x460) and SERVED, i.e. invisible
+       * to every signal-based tool. ABICONV_HEAP_WHO names who asked, at a
+       * threshold of its own so it does not fire on legitimate big buffers. */
+      const char *who = getenv("ABICONV_HEAP_WHO");
+      if (who != NULL) {
+         unsigned long long lo = strtoull(who, NULL, 0);   /* "1" = any large */
+         if (lo <= 1 || cap >= lo) { heap_report_requesters(); }
+      }
    }
    return p;
 }
