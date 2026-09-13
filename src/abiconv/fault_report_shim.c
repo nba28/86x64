@@ -638,6 +638,43 @@ static void fr_handler(int sig, siginfo_t *info, void *uctx) {
             fprintf(stderr, "   [rsp+%3d] 0x%08x\n", i * 4, w);
       }
 
+      /* ── NATIVE 8-BYTE RETURN ADDRESSES ───────────────────────────────────
+       * The 4-byte scan above exists because a translated call pushes a 4-byte
+       * i386-granular return address even on the native stack. But the crashes
+       * that most need a backtrace are the ones where translated code called
+       * INTO a system framework and the fault happened there: the frame chain is
+       * unusable (rbp=0 in Portal 2's renderer fault), the crash report names no
+       * image above the signal trampoline, and rip is in no region at all. Those
+       * frames are ordinary 8-byte native return addresses, and the 4-byte scan
+       * shows them only as unresolved halves — `0x186028b2` on one line and
+       * `0x00007ff8` on the next.
+       *
+       * So scan the same window again as 8-byte slots and resolve each against
+       * every loaded image, high ones included. It is a heuristic sweep, not an
+       * unwind: it lists candidates in stack order, and stale values from earlier
+       * frames appear alongside live ones. That is still enough to name the
+       * framework and the call path, which is what the unwinder could not do. */
+      fprintf(stderr, "[fault] native 8-byte return-address candidates "
+                      "(heuristic, stack order):\n");
+      {
+         int shown = 0;
+         const uint64_t base = ss->__rsp & ~(uint64_t)7;
+         for (int i = 0; i < g_words / 2; i++) {
+            uint64_t v = 0;
+            if (!fr_read(base + (uint64_t)i * 8, &v, sizeof v)) continue;
+            /* Below 4GB is the translated world, already covered above. */
+            if (v < 0x100000000ULL) continue;
+            char img[256];
+            if (!fr_image_for(v, img, sizeof(img))) continue;
+            fprintf(stderr, "   [rsp+%3d] 0x%016llx   %s\n",
+                    i * 8, (unsigned long long)v, img);
+            shown++;
+         }
+         if (!shown)
+            fprintf(stderr, "   (none — no high address on this stack resolved "
+                            "to a loaded image)\n");
+      }
+
       /* Chase the upstream object graph if the caller described it. */
       const char *chain = getenv("M64_FAULT_CHAIN");
       if (chain && *chain) fr_walk_chain(ss, chain);
