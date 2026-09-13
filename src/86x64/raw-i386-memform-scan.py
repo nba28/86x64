@@ -31,9 +31,22 @@ integer constant can alias a section (the value-alias immediate heuristic has th
 same shape). Confirm one by reading it next to its i386 original with
 pcmap-diff.py, which names the anchor.
 
-★ The high-value use is DIFFERENTIAL: run it on a before and an after build of
-the same image and watch SUSPECT go to zero. That is a whole-image static proof
-of a translator fix with no run at all.
+★ USE IT TO LOCATE, NOT TO COUNT. It is good at pointing at the handful of
+instructions worth reading; it is a BAD scoreboard, and that is measured, not
+theoretical. Across the whole Portal 2 tree a fix that cured a real SIGBUS moved
+the total from SUSPECT=1529 to SUSPECT=1529, with some images going UP -- because
+retiring a dead anchor correctly means an access is now (rightly) left raw, and
+this scan cannot tell that apart from a suppressed rewrite.
+
+★ For an exact before/after, diff the set of `__DATA,__86x64_pcmap` rows instead:
+a re-anchored instruction is emitted as a fresh blob with `orig_vmaddr == 0` and
+so LOSES its row. Rows that disappear = newly rewritten; rows that appear = newly
+left raw. On the same pair that scored 1529 -> 1529 this reported 191 newly
+rewritten against 1768 newly left raw. Then classify the newly-raw ones by which
+instruction last WROTE the memory base register (disassemble the i386 original
+and walk backwards) -- that histogram is what catches an over-aggressive rule:
+182 of the 1768 sat behind a `pop`, i.e. behind function epilogues, which is how
+the epilogue exemption in section.cc got found.
 
 usage:
   raw-i386-memform-scan.py <translated-macho>...          # per-image tally
