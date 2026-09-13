@@ -132,6 +132,7 @@
 #include <unistd.h>
 #include <errno.h>
 #include <pthread.h>
+#include <time.h>
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
 #include <OpenGL/gl.h>
@@ -532,7 +533,42 @@ static void selftest(void) {
  * succeeds, the fragile step is Metal DEVICE CREATION, which is a far more
  * specific and more fixable target than "the first GL call". If it still
  * crashes, the fragile step is in CGL/OpenGL above Metal. */
+/* GLPROBE_PRELOAD_MS=<ms> — do the preload from a DETACHED NATIVE THREAD after a
+ * delay, instead of from the constructor. This separates the last two candidates:
+ *   - if a LATE native preload still works, what matters is that the FIRST touch
+ *     comes from a native caller, and the app's accumulated process state is
+ *     irrelevant;
+ *   - if a late one crashes where an early one worked, the process state the app
+ *     builds up is what poisons Metal's initialisation.
+ * It races the app (which reaches its own CGL call about 3 s in), so try a couple
+ * of delays and read which one won from the log order. */
+static void *preload_thread(void *arg) {
+   long ms = (long)(intptr_t)arg;
+   struct timespec ts = { ms / 1000, (ms % 1000) * 1000000L };
+   nanosleep(&ts, NULL);
+   LOG("PRELOAD: (delayed %ld ms, native thread) "
+       "MTLCreateSystemDefaultDevice()...\n", ms);
+   void *h = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_LAZY);
+   if (!h) { LOG("PRELOAD: dlopen(Metal) failed: %s\n", dlerror()); return NULL; }
+   void *(*mk)(void) = (void *(*)(void))dlsym(h, "MTLCreateSystemDefaultDevice");
+   if (!mk) { LOG("PRELOAD: no MTLCreateSystemDefaultDevice\n"); return NULL; }
+   void *dev = mk();
+   LOG("PRELOAD: (delayed) -> device=%p\n", dev);
+   where_is_gl("PRELOAD-delayed/after");
+   return NULL;
+}
+
 static void preload(void) {
+   const char *d = getenv("GLPROBE_PRELOAD_MS");
+   if (d && *d) {
+      long ms = strtol(d, NULL, 0);
+      pthread_t t;
+      if (pthread_create(&t, NULL, preload_thread, (void *)(intptr_t)ms) == 0) {
+         pthread_detach(t);
+         LOG("PRELOAD: scheduled in %ld ms on a native thread\n", ms);
+      }
+      return;
+   }
    if (!getenv("GLPROBE_PRELOAD")) return;
    void *h = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_LAZY);
    if (!h) { LOG("PRELOAD: dlopen(Metal) failed: %s\n", dlerror()); return; }
