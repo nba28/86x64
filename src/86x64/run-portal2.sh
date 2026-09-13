@@ -61,6 +61,22 @@ echo "==> log      $LOG"
 echo "==> timeout  ${TIMEOUT}s"
 
 cd "$P2" || exit 1
+
+# ── -game portal2 IS MANDATORY, and omitting it looks like a translator bug ──
+# Source resolves the game directory as CommandLine()->ParmValue("-game","hl2"),
+# so without it Portal 2 looks for `hl2/GameInfo.txt`, fails to build its search
+# paths, and CSourceAppSystemGroup::Create() returns false. The app then unloads
+# every module (a dlclose cascade) and hangs -- with NO error text anywhere,
+# because a Source client's Msg/Warning does not reach stdout. That presented for
+# a whole session as "it loads all 17 modules and then tears down", which reads
+# exactly like a missing interface or a bad bridge.
+# ⚠ Steam normally supplies this argument; launching the binary directly does not.
+# Caller-supplied args win: only default it in when the user did not pass -game.
+case " ${EXTRA[*]-} " in
+  *" -game "*) ;;
+  *) EXTRA=(-game portal2 ${EXTRA[@]+"${EXTRA[@]}"});;
+esac
+
 env_args=(ABICONV_RUN_INITS=1 "DYLD_LIBRARY_PATH=$P2/bin/osx64")
 [ "$DYLD_APIS" -eq 1 ] && env_args+=(DYLD_PRINT_APIS=1)
 
