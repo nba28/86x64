@@ -1855,10 +1855,36 @@ namespace MachO {
           *      anchor in step (2c) below, which runs after this. A separate
           *      get_pc_thunk call establishes its anchor after the call-clobber
           *      clear further down. So nothing that genuinely re-creates an
-          *      anchor is lost here. */
+          *      anchor is lost here.
+          *
+          *      ⚠ POP IS EXEMPT WHILE A FORWARD BRANCH TARGET IS STILL AHEAD,
+          *      for exactly the reason the RET clear below is gated the same way.
+          *      `pop %reg` is how a function EPILOGUE restores its callee-saved
+          *      registers, and the linear walk reaches that epilogue BEFORE every
+          *      block the function only enters by a branch taken earlier — so a
+          *      pop kill there disarms the rewrite for all of them and they keep
+          *      their raw i386 displacements. Measured on Portal 2 engine.dylib:
+          *        0x2d1be  add esp,0x1c
+          *        0x2d1c1  pop esi ; pop edi ; pop ebx ; pop ebp ; ret
+          *        0x2d1c6  dec 0x5f67ce(%esi)   <- a slow-path block, %esi IS
+          *                                        still the anchor at runtime
+          *      An unconditional pop kill left 182 such sites raw across five
+          *      images. Gating on "is a target still pending ABOVE here" recovers
+          *      every one of them and matches the file's standing approximation:
+          *      keeping the anchor is correct for a linear walk, because a lost
+          *      rewrite is a wild access while a kept one is merely stale until
+          *      the next real definition. (A mid-function data pop can therefore
+          *      still leak an anchor while targets are pending — that is the
+          *      pre-existing baseline, not a new exposure.) */
          static const bool memload_kill =
             std::getenv("M64_NO_PIC_ANCHOR_MEMLOAD_KILL") == nullptr;
-         if (memload_kill && !is_anchor_pop && !anchors.empty()) {
+         const bool forward_target_ahead =
+            pending_forward_targets.upper_bound(inst->loc.vmaddr) !=
+            pending_forward_targets.end();
+         const bool is_pop = (xed_decoded_inst_get_category(&xedd) ==
+                              XED_CATEGORY_POP);
+         if (memload_kill && !is_anchor_pop && !anchors.empty() &&
+             !(is_pop && forward_target_ahead)) {
             const xed_inst_t *xi = xed_decoded_inst_inst(&xedd);
             const unsigned nop = xed_inst_noperands(xi);
             for (unsigned i = 0; i < nop; ++i) {

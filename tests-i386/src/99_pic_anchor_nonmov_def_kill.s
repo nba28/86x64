@@ -5,9 +5,9 @@
 ## was written as an iform test, so every OTHER way of defining a register still
 ## left the dead anchor live:
 ##
-##     movzbl 0x6bfa(%esi),%ebx    ## a byte load — not MOV_GPRv_MEMv
+##     movzbl 0x6bfa(%esi),%ebx    ## a zero-extending byte load — not MOV_GPRv_MEMv
 ##     xorl   %ebx,%ebx            ## no memory operand at all
-##     popl   %ebx                 ## a restore that is not the anchor pop
+##     movsbl 0x6bfa(%esi),%ebx    ## a sign-extending byte load, a third iform family
 ##
 ## The rule is about the DEFINITION, not about which opcode performed it, so the
 ## translator now asks XED which operands an instruction WRITES and retires the
@@ -30,6 +30,15 @@
 ##
 ## Exit 42 = all three arms correct. 1/2/3 = which arm is wrong. 9 = the anchor
 ## itself is broken, so the arms would prove nothing either way.
+##
+## ⚠ POP IS DELIBERATELY NOT TESTED HERE, because `pop %reg` is EXEMPT from the
+## rule while a forward branch target is still ahead. That is not an oversight in
+## the rule, it is a measurement: `pop` is how an epilogue restores callee-saved
+## registers, and a linear walk reaches the epilogue BEFORE every block the
+## function only enters by a branch taken earlier. Portal 2 engine.dylib 0x2d1c1
+## pops %esi four instructions before 0x2d1c6 `dec 0x5f67ce(%esi)`, a slow-path
+## block where %esi really is still the anchor; killing on pop left 182 such sites
+## raw across five images. The exemption is gated exactly like the RET clear.
 ##
 ## Kill switch: translate with M64_NO_PIC_ANCHOR_MEMLOAD_KILL=1 for the old
 ## behaviour. ⚠ The OFF arm then dies with SIGBUS (exit 138) rather than returning
@@ -94,7 +103,7 @@ Lpic2:
 	cmpl	$0x11111111, %eax
 	jne	Lfail2
 
-	## ── ARM 3: the index anchor is killed by a pop that is NOT the anchor pop
+	## ── ARM 3: killed by a SIGN-extending byte load (a third iform family) ─
 	calll	Lpic3b
 Lpic3b:
 	popl	%ebx                        ## %ebx = an anchor again
@@ -106,10 +115,7 @@ Lpic3:
 	cmpl	$0x00C0FFEE, %eax
 	jne	Lfail9
 
-	## `pushl $3; popl %ebx` — the pop's predecessor is not `call $+0`, so this
-	## is an ordinary restore, not an anchor establishment.
-	pushl	$3
-	popl	%ebx                        ## %ebx = 3; anchor DIES
+	movsbl	(_idxb3 - Lpic3)(%edi), %ebx ## %ebx = 3; anchor DIES
 
 	movl	(_table - Lpic3)(%edi,%ebx,4), %eax
 	cmpl	$0x44444444, %eax
@@ -144,6 +150,9 @@ _tag:
 	.long	0x00C0FFEE
 _idxb:
 	.byte	2                           ## the index arm 1 loads as a BYTE
+	.byte	0, 0, 0
+_idxb3:
+	.byte	3                           ## the index arm 3 loads as a SIGNED byte
 	.byte	0, 0, 0
 	.p2align 4
 _table:
