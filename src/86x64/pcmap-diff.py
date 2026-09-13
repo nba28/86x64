@@ -277,9 +277,56 @@ def audit(a, odata, tdata, obase, osects, tsects, rows, osyms):
     print("# %d of %d row%s differ:" % (total, len(sel), '' if total == 1 else 's'))
     for k in order:
         print("#   %-24s %d" % (k, len(buckets[k])))
+    want = a.show or 'unexplained'
     print("# UPPERCASE classes are UNEXPLAINED -- read those. lowercase are\n"
           "# rewrites the translator makes by construction.")
-    want = a.show or 'unexplained'
+
+    # ROW GAPS.  The class counts above can only speak for rows that EXIST, and a
+    # REWRITTEN instruction has no row: the PIC-anchor re-anchoring replaces one
+    # Instruction blob with a fresh `lea r11,[rip+t]; op [r11+idx]` pair, and
+    # inject_pcmap_section only records blobs that are still an Instruction with a
+    # non-zero orig_vmaddr.  So "0 unexplained" WITHOUT this scan means "0 among
+    # the rows that exist" -- which is how a whole-image audit of Portal 2's
+    # libvstdlib (22675 rows, 0 unexplained) exonerated an image whose actual bug
+    # was a mis-anchored `lea` the audit never saw.  Walking the ORIGINAL stream
+    # between consecutive rows finds those instructions.  Resynchronising at every
+    # row start (rather than sweeping linearly) keeps data-in-code from derailing
+    # the walk.
+    def dis_at(at):
+        fo = obase + otext[2] + (at - otext[0])
+        return next(md32.disasm(odata[fo:fo + 16], at), None)
+    gaps, desync = [], 0
+    for (o, _t0), (nxt, _t1) in zip(sel, sel[1:]):
+        if nxt <= o:
+            continue
+        cur, steps = o, 0
+        while True:
+            ins = dis_at(cur)
+            if ins is None or ins.size == 0:
+                desync += 1
+                break
+            cur += ins.size
+            steps += 1
+            if cur >= nxt or steps > 64:
+                if cur != nxt:
+                    desync += 1
+                break
+            gaps.append((cur, dis_at(cur)))
+    print("# %d original instruction start%s in range carry NO pcmap row%s" %
+          (len(gaps), '' if len(gaps) == 1 else 's',
+           (" (+%d resync failures)" % desync) if desync else ""))
+    if gaps:
+        print("#   A rewritten instruction LOSES its row, so this list is where the\n"
+              "#   class counts above are blind -- PIC-anchor re-anchored accesses\n"
+              "#   land here, and so do function prologues (which never had a row).\n"
+              "#   Read it: an anchored rewrite that used the WRONG anchor looks\n"
+              "#   exactly like one that used the right anchor from the row set.")
+        shown = gaps if want == 'all' else gaps[:40]
+        for at, gi in shown:
+            print("  %#010x   %s" % (
+                at, (gi.mnemonic + ' ' + gi.op_str).strip() if gi else '?'))
+        if len(shown) < len(gaps):
+            print("  ... %d more (--show all)" % (len(gaps) - len(shown)))
     for k in order:
         if want == 'unexplained' and k.islower():
             continue
