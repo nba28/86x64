@@ -47,6 +47,7 @@
 #include <dlfcn.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include <pthread.h>
 #include <runetype.h>
 #include "dyld_image_list.h"
 
@@ -95,6 +96,52 @@ extern void _86x64_dyld_noop(void);
 /* Consumed by init_trampoline.asm. */
 uint64_t g_init_shadow_sp     = 0;   /* grows down; 64 bytes per nesting level */
 uint64_t g_init_low_stack_top = 0;   /* 16-aligned top of the low-4GB init stack */
+
+/* ── Is the init phase REALLY single-threaded? ─────────────────────────────
+ * init_trampoline.asm is correct only under that assumption, and it is stated
+ * there as a fact rather than enforced: g_init_shadow_sp is ONE LIFO cursor,
+ * and every entry arriving on a >4GB stack resets rsp to the SAME
+ * g_init_low_stack_top. Two threads inside at once therefore descend onto each
+ * other's frames, and .landing restores an rsp its own thread never saved.
+ *
+ * ⚠ The damage is NOT confined to translated code. A frame established on the
+ * low init stack whose rsp is later restored to the real >4GB stack leaves a
+ * TRUNCATED-looking rbp (low 32 bits only) while rsp keeps its high half, and
+ * whatever runs next on that thread -- including a NATIVE dylib's initializer,
+ * e.g. a GPU driver loaded by a dlopen on a second thread -- stores through it
+ * into unmapped low memory. That is an rbp/rsp desync reported against someone
+ * else's correct code, which is exactly the kind of symptom this project has
+ * repeatedly chased into the wrong library.
+ *
+ * So MEASURE the assumption instead of trusting it. Two words, no lock on the
+ * fast path; a violation is latched and reported once. */
+uint64_t g_init_depth     = 0;   /* nesting levels currently live */
+uint64_t g_init_owner_tid = 0;   /* mach tid that owns the low init stack */
+uint64_t g_init_race_seen = 0;   /* latched: a second thread was observed inside */
+
+/* Called immediately around abiconv_call_init. Returns nothing; a detected race
+ * is reported once and latched for the fault reporter to print. */
+static void init_enter(void *target) {
+   uint64_t me = (uint64_t)pthread_mach_thread_np(pthread_self());
+   uint64_t owner = g_init_owner_tid;
+   if (g_init_depth != 0 && owner != 0 && owner != me) {
+      if (__sync_bool_compare_and_swap(&g_init_race_seen, 0, me)) {
+         fprintf(stderr, "[abiconv] ⚠ INIT-STACK RACE: tid %llu entered the "
+                 "low-4GB init stack while tid %llu is %llu level(s) deep "
+                 "(target=%p). The shadow save-stack and the stack TOP are both "
+                 "process-global, so these two threads are now sharing frames.\n",
+                 (unsigned long long)me, (unsigned long long)owner,
+                 (unsigned long long)g_init_depth, target);
+         fflush(stderr);
+      }
+   }
+   g_init_owner_tid = me;
+   __sync_fetch_and_add(&g_init_depth, 1);
+}
+
+static void init_leave(void) {
+   __sync_fetch_and_sub(&g_init_depth, 1);
+}
 extern void abiconv_init_trampoline(void);
 /* Run one translated __mod_init_func on the low-4GB init stack and return (see
  * init_trampoline.asm). Used by the run-now init path below (default; ABICONV_NO_RUN_INITS opts out). */
@@ -2320,7 +2367,9 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
                  i, n_init, imgname ? imgname : "?", init_targets[i]);
          fflush(stderr);
       }
+      init_enter(init_targets[i]);
       abiconv_call_init(init_targets[i], 0, NULL, NULL, NULL);
+      init_leave();
    }
 }
 

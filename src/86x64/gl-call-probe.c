@@ -146,6 +146,8 @@
 #include <time.h>
 #include <dlfcn.h>
 #include <mach-o/dyld.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <OpenGL/gl.h>
 #include <OpenGL/glext.h>
 #include <OpenGL/OpenGL.h>
@@ -155,17 +157,111 @@
 static FILE *g_out;
 static int   g_all;
 
+/* Milliseconds since the probe's constructor. ★EVERY line is timestamped: the
+ * whole GLPROBE_PRELOAD_MS finding is that the trigger is TIME, not the caller,
+ * so a log line without a clock cannot be correlated against anything. */
+static uint64_t g_t0_ms;
+
+static uint64_t now_ms(void) {
+   struct timespec ts;
+   clock_gettime(CLOCK_MONOTONIC, &ts);
+   return (uint64_t)ts.tv_sec * 1000u + (uint64_t)(ts.tv_nsec / 1000000);
+}
+
 static void probe_init(void) {
    const char *p = getenv("GLPROBE_LOG");
    g_out = NULL;
    if (p && *p) g_out = fopen(p, "w");
    if (!g_out) g_out = stderr;
    g_all = getenv("GLPROBE_ALL") ? 1 : 0;
+   if (!g_t0_ms) g_t0_ms = now_ms();
 }
 #define LOG(...) do { \
       if (!g_out) probe_init(); \
-      fprintf(g_out, "[glprobe] " __VA_ARGS__); fflush(g_out); \
+      fprintf(g_out, "[glprobe %5llu] ", (unsigned long long)(now_ms() - g_t0_ms)); \
+      fprintf(g_out, __VA_ARGS__); fflush(g_out); \
    } while (0)
+
+/* ---- low-4GB VM layout -------------------------------------------------- */
+/* WHY: the runtime reserves [0x10000000,0x80000000) for anonymous mmap and
+ * [0x80000000,0xF0000000) for the objc arenas + malloc heap, and dyld places
+ * native GPU bundles wherever the low space is still free. The one measured
+ * difference between a succeeding and a failing preload was WHERE the driver
+ * landed (0x3f24000 below the band vs 0x190c1000 inside it), so the band's
+ * occupancy over TIME is the thing to watch. Walks regions below 4GB only. */
+/* ---- who owns the coalesced C++ operator delete? ------------------------ */
+/* ★THE POINT: AGXMetalG16X calls operator delete through a <weak-def-coalesce>
+ * bind (__ZdlPv). dyld resolves a coalesced symbol to the FIRST image in load
+ * order that defines it -- and every TRANSLATED Source module exports its own
+ * __ZdlPv in __TEXT,__text as i386 code. If a translated definition wins, then
+ * NATIVE driver code calling operator delete runs translated i386, whose 4-byte
+ * `pop %ebp` epilogue ZEROES the high half of rbp. The driver then stores
+ * through a truncated frame pointer into unmapped low memory. So report WHICH
+ * image owns it, and whether that image is translated (low-4GB). */
+/* Read AGXMetalG16X's OWN GOT slot for operator delete and name its target.
+ * ★WHY NOT dlsym: dlsym(RTLD_DEFAULT,"_ZdlPv") answers a different question --
+ * the flat search order -- and it answers "libc++abi" even when dyld bound the
+ * DRIVER's <weak-def-coalesce> slot somewhere else entirely. The only
+ * authoritative answer is the pointer dyld actually wrote into AGX's slot.
+ * Offset measured from the x86_64 slice: __DATA_CONST,__got 0xa3ced8 = __ZdlPv
+ * (its __TEXT vmaddr is 0x0, so file vmaddr + slide == runtime address). */
+#define AGX_GOT_ZDLPV 0xa3ced8ULL
+static void agx_delete_slot(const char *when) {
+   for (uint32_t i = 0; i < _dyld_image_count(); ++i) {
+      const char *nm = _dyld_get_image_name(i);
+      if (!nm || !strstr(nm, "AGXMetalG16X")) continue;
+      uintptr_t base = (uintptr_t)_dyld_get_image_header(i);
+      void **slot = (void **)(base + AGX_GOT_ZDLPV);
+      void *tgt = *slot;
+      Dl_info di;
+      const char *img = "?";
+      if (dladdr(tgt, &di) && di.dli_fname) img = di.dli_fname;
+      LOG("AGXSLOT %s: base=%p __ZdlPv slot=%p -> %p  %s%s\n", when,
+          (void *)base, (void *)slot, tgt, img,
+          ((uintptr_t)tgt < 0x100000000ULL)
+             ? "   <<< TRANSLATED i386 (truncates rbp on `pop %ebp`)"
+             : "   (native)");
+      return;
+   }
+   LOG("AGXSLOT %s: AGXMetalG16X not loaded\n", when);
+}
+
+static void who_owns(const char *sym, const char *when) {
+   void *f = dlsym(RTLD_DEFAULT, sym);
+   if (!f) { LOG("OWNER %s: %s UNRESOLVED\n", when, sym); return; }
+   Dl_info di;
+   const char *img = "?";
+   if (dladdr(f, &di) && di.dli_fname) img = di.dli_fname;
+   LOG("OWNER %s: %-10s -> %p  %s%s\n", when, sym, f, img,
+       ((uintptr_t)f < 0x100000000ULL) ? "   <<< TRANSLATED (low-4GB) i386 code"
+                                       : "   (native)");
+}
+
+static void vm_layout(const char *when) {
+   mach_vm_address_t a = 0x1000;
+   int n = 0;
+   uint64_t in_band = 0, below = 0, arena = 0;
+   LOG("VMMAP %s: regions below 4GB --------------------------------\n", when);
+   while (a < 0x100000000ULL && n < 256) {
+      mach_vm_size_t sz = 0;
+      vm_region_basic_info_data_64_t info;
+      mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+      mach_port_t obj = MACH_PORT_NULL;
+      if (mach_vm_region(mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO_64,
+                         (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS)
+         break;
+      if (a >= 0x100000000ULL) break;
+      if      (a >= 0x80000000ULL) arena   += sz;
+      else if (a >= 0x10000000ULL) in_band += sz;
+      else                         below   += sz;
+      n++;
+      a += sz;
+   }
+   LOG("VMMAP %s: %d regions; below-band=%llu KB in-band=%llu KB arena=%llu KB\n",
+       when, n, (unsigned long long)(below / 1024),
+       (unsigned long long)(in_band / 1024),
+       (unsigned long long)(arena / 1024));
+}
 
 /* ---- ring of recent calls ---------------------------------------------- */
 /* Async-safe on the dump side: only already-constant strings plus one small
@@ -502,8 +598,8 @@ static void chain(struct sigaction *prev, int sig, siginfo_t *info, void *uc) {
    signal(sig, SIG_DFL);
    raise(sig);
 }
-static void on_segv(int sig, siginfo_t *info, void *uc) { dump_ring(sig); chain(&g_prev_segv, sig, info, uc); }
-static void on_bus (int sig, siginfo_t *info, void *uc) { dump_ring(sig); chain(&g_prev_bus,  sig, info, uc); }
+static void on_segv(int sig, siginfo_t *info, void *uc) { dump_ring(sig); agx_delete_slot("at-fault"); chain(&g_prev_segv, sig, info, uc); }
+static void on_bus (int sig, siginfo_t *info, void *uc) { dump_ring(sig); agx_delete_slot("at-fault"); chain(&g_prev_bus,  sig, info, uc); }
 
 /* GLPROBE_SELFTEST=1 — call the suspect API from NATIVE code inside the TARGET
  * PROCESS, from this dylib's constructor, before any translated code has run.
@@ -559,12 +655,18 @@ static void *preload_thread(void *arg) {
    nanosleep(&ts, NULL);
    LOG("PRELOAD: (delayed %ld ms, native thread) "
        "MTLCreateSystemDefaultDevice()...\n", ms);
+   vm_layout("PRELOAD-delayed/before");
+   who_owns("_ZdlPv", "before");
+   who_owns("_ZdaPv", "before");
+   who_owns("_Znwm", "before");
    void *h = dlopen("/System/Library/Frameworks/Metal.framework/Metal", RTLD_LAZY);
    if (!h) { LOG("PRELOAD: dlopen(Metal) failed: %s\n", dlerror()); return NULL; }
    void *(*mk)(void) = (void *(*)(void))dlsym(h, "MTLCreateSystemDefaultDevice");
    if (!mk) { LOG("PRELOAD: no MTLCreateSystemDefaultDevice\n"); return NULL; }
    void *dev = mk();
    LOG("PRELOAD: (delayed) -> device=%p\n", dev);
+   vm_layout("PRELOAD-delayed/after");
+   agx_delete_slot("after-success");
    where_is_gl("PRELOAD-delayed/after");
    return NULL;
 }
