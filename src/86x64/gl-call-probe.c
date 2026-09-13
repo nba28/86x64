@@ -92,6 +92,17 @@
  * LATE but outside the band — e.g. reserve the whole band up front so dyld is
  * forced to place it above 4GB — and see whether the app's call then succeeds.
  *
+ * ⛔ ALSO FALSIFIED — OUR ADD-IMAGE HANDLER DOES NOT SCRIBBLE THE DRIVER. This is
+ * the most natural theory to reach for (a native GPU bundle lands in the low band,
+ * and our runtime mutates images as they load), and it is wrong: all three
+ * per-image mutators gate correctly and skip it, because AGXMetalG16X's preferred
+ * __TEXT vmaddr is 0x0.
+ *   - wrap_mod_init_funcs (objc_slide.c) — gated on image_links_libabiconv().
+ *   - _86x64_import_repair — deliberately NOT gated on that, but returns early
+ *     unless text_base == IR_TRANSLATED_TEXT_BASE.
+ *   - fixup_translated_dylib_slots (wrapper_setup.c) — requires
+ *     seg->vmaddr >= TRANSLATED_DYLIB_VMADDR (0x10000000).
+ *
  * STILL OPEN: why the first-touch fails. The one surviving difference between the
  * two AGX placements is that the failing one lands INSIDE the mmap band
  * [0x10000000,0x80000000) our allocators use, while the succeeding one is below
