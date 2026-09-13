@@ -82,34 +82,58 @@
  * one-time creation of the Metal device / load-and-init of the AGX driver",
  * which is far more specific and more fixable than "the first GL call".
  *
- * ⚠ ONE CONFOUND REMAINS, and it must be separated before anyone builds a fix.
- * Loading Metal early also CHANGES WHERE THE DRIVER LANDS: AGXMetalG16X maps at
- * 0x4271000 / 0x3f24000 when loaded early (BELOW our mmap band) and at
- * 0x190c1000 when loaded late (INSIDE the band [0x10000000,0x80000000), because
- * by then the space under 0x10000000 is full of translated images). So "early
- * native caller" and "driver outside our band" are confounded in every
- * succeeding run. The experiment that separates them is to make the driver load
- * LATE but outside the band — e.g. reserve the whole band up front so dyld is
- * forced to place it above 4GB — and see whether the app's call then succeeds.
+ * ★★★RESOLVED 2026-09-13 -- THE ANSWER, so nobody re-runs the bisection below.
+ * It was never a GPU fault. AGXMetalG16X calls `operator delete` through a
+ * <weak-def-coalesce> bind, and because EVERY translated Source module exports
+ * its own __ZdlPv in __TEXT,__text (faithfully -- the pristine i386 originals do
+ * too), dyld bound the DRIVER's slot to launcher.dylib's TRANSLATED definition.
+ * The i386 epilogue's 4-byte `pop %ebp` zeroes rbp's high half, so the driver's
+ * next frame-pointer store faulted into unmapped low memory:
  *
- * ⛔ ALSO FALSIFIED — OUR ADD-IMAGE HANDLER DOES NOT SCRIBBLE THE DRIVER. This is
- * the most natural theory to reach for (a native GPU bundle lands in the low band,
- * and our runtime mutates images as they load), and it is wrong: all three
- * per-image mutators gate correctly and skip it, because AGXMetalG16X's preferred
- * __TEXT vmaddr is 0x0.
- *   - wrap_mod_init_funcs (objc_slide.c) — gated on image_links_libabiconv().
- *   - _86x64_import_repair — deliberately NOT gated on that, but returns early
- *     unless text_base == IR_TRANSLATED_TEXT_BASE.
- *   - fixup_translated_dylib_slots (wrapper_setup.c) — requires
- *     seg->vmaddr >= TRANSLATED_DYLIB_VMADDR (0x10000000).
+ *   3f7e4d: callq  applyWorkaroundForAppList   <- rbp intact going in
+ *   3f7e59: movq   %rax,-0x9d0(%rbp)           <- rbp = low32(rsp)+0xab4, faults
  *
- * STILL OPEN: why the first-touch fails. The one surviving difference between the
- * two AGX placements is that the failing one lands INSIDE the mmap band
- * [0x10000000,0x80000000) our allocators use, while the succeeding one is below
- * it. Whether that is causal is untested. ⇒ Next: check whether anything of ours
- * hands out or reserves memory overlapping the driver's mapping, and treat "a
- * native late-dlopen'd bundle placed inside our claimed band" as a hazard in its
- * own right regardless of this crash.
+ * Fixed by clearing MH_WEAK_DEFINES on translated output (src/core/transform.cc,
+ * c71fdb1); after it, the app's OWN CGLQueryRendererInfo(0x1) returns nrend=2
+ * with no probe, preload or pre-warm. See the cross-ABI weak-def coalesce bug.
+ * agx_delete_slot() below is the one measurement that proved it.
+ *
+ * ★WHY THE TIMING LOOKED CAUSAL: the coalescing winner CHANGES as translated
+ * modules load. At a 100 ms preload the driver's slot still resolves to native
+ * libc++abi; by 200 ms it resolves to launcher.dylib. "Early native caller" was
+ * never the mechanism -- it just beat the pool.
+ *
+ * ⛔ FALSIFIED, DO NOT RE-TEST (measured, not argued):
+ *   - the 0x1 display mask (it is this machine's real mask; cglprobe 0x1 -> 2
+ *     renderers), Rosetta (the standalone probe is x86_64 under Rosetta and
+ *     succeeds), bridging as such (99_cgl_renderer_check makes this exact call
+ *     and passes), stack size (256 KiB suffices natively; 1021 KiB remained),
+ *     stack ADDRESS, stale interposition (dyld_info -fixups shows all 43 CGL/GL
+ *     imports bound to libabiconv).
+ *   - "the driver is mapped below 4GB": it is, in BOTH the failing and the
+ *     succeeding run.
+ *   - "the driver lands INSIDE our mmap band": NO. vm_layout() reports
+ *     in-band = 0 KB in EVERY run, and the driver sits BELOW 0x10000000. This
+ *     was the last surviving hypothesis here and it is dead; the reserve-the-
+ *     band experiment it proposed is pointless and was never needed.
+ *   - our mmap/malloc shims poisoning the driver: libabiconv is TWOLEVEL with
+ *     no __interpose section anywhere, and the run script never sets
+ *     DYLD_FORCE_FLAT_NAMESPACE, so a native dylib's mmap stays on libSystem.
+ *     (libinterpose.dylib DOES interpose 9 symbols process-wide -- mmap, vm_*,
+ *     pthread_get_stack*, 2 CFPreferences -- but those replacements are native C
+ *     and preserve rbp.)
+ *   - objc_msgSend being ours: nothing in the tree defines _objc_msgSend.
+ *   - our add-image handlers scribbling the driver -- the most natural theory,
+ *     and wrong: all three per-image mutators skip it because AGXMetalG16X's
+ *     PREFERRED __TEXT vmaddr is 0x0.
+ *       - wrap_mod_init_funcs (objc_slide.c) -- gated on image_links_libabiconv().
+ *       - _86x64_import_repair -- NOT gated on that, but returns early unless
+ *         text_base == IR_TRANSLATED_TEXT_BASE, and text_base is the PREFERRED
+ *         seg->vmaddr, never vmaddr+slide, so it cannot match however AGX slides.
+ *       - fixup_translated_dylib_slots (wrapper_setup.c) -- requires
+ *         seg->vmaddr >= TRANSLATED_DYLIB_VMADDR (0x10000000).
+ *   - the CGFloat/NSRect stret path (trace_stret_plan disproved my own theory:
+ *     kind=3 isz=16 nsz=32).
  *
  * ⚠ IT PERTURBS TIMING BY DESIGN. glGetError forces the driver to settle its
  * error state, so a race may move or vanish under it. A crash that disappears
@@ -473,7 +497,14 @@ static void where_is_gl(const char *when) {
       unsigned long b = (unsigned long)(uintptr_t)_dyld_get_image_header(i);
       const char *leaf = strrchr(nm, '/');
       LOG("%s: %-30s base=%#lx%s\n", when, leaf ? leaf + 1 : nm, b,
-          b < 0x100000000UL ? "   <<< BELOW 4GB, i.e. inside our low band" : "");
+          /* ⚠ Say only what the number proves. "Below 4GB" is NOT "inside our
+           * mmap band" -- the band is [0x10000000,0x80000000), and the driver
+           * measured at 0x65ba000/0xa9a8000 is BELOW it. The old wording here
+           * claimed band membership for addresses outside the band and helped
+           * keep a dead theory alive for hours. */
+          b < 0x10000000UL   ? "   (below 4GB, BELOW our mmap band)"
+          : b < 0x80000000UL ? "   (below 4GB, INSIDE our mmap band)"
+          : b < 0x100000000UL ? "   (below 4GB, above our mmap band)" : "");
    }
 }
 
