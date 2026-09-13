@@ -165,6 +165,9 @@ namespace MachO {
       std::set<std::size_t> const_pin_slots;
       bool have_const_pins = false;
 
+      /* Lazily computed by min_section_vmaddr(); 0 means "not yet computed". */
+      mutable std::size_t min_sect_vmaddr_cache = 0;
+
       /* GCC PIC thunks (`___i686.get_pc_thunk.<r>`), keyed by the thunk's
        * entry vmaddr (= its nlist n_value) and valued by the x86 GPR encoding
        * (0=EAX,1=ECX,2=EDX,3=EBX,5=EBP,6=ESI,7=EDI) the thunk loads with the
@@ -256,6 +259,31 @@ namespace MachO {
        * `addl $0x124f80, %edx` computing &array[i]) and relocating it would
        * corrupt the pointer arithmetic (Halo-class zerofill repro). */
       bool vmaddr_in_zerofill(std::size_t vmaddr) const;
+
+      /* The lowest vmaddr of any SECTION in a real (non-PAGEZERO, non-LINKEDIT)
+       * segment — i.e. the floor below which a value cannot possibly point at
+       * anything in this image.
+       *
+       * ★It exists to replace a MAGIC NUMBER. The pointer-detection heuristics
+       * rejected any value below 0x1000 up front, as a cheap "obviously not a
+       * pointer" filter. That silently assumes no section lives in the first
+       * page, which is true of a non-PIE executable (__PAGEZERO ends at 0x1000)
+       * and FALSE of a dylib, whose __TEXT is based at vmaddr 0 so its __text
+       * routinely starts a couple of KiB in: 16 of Portal 2's 42 i386 modules
+       * have __text below 0x1000 (libtier0 0x840, vaudio_* 0x7b0, inputsystem
+       * 0xd80). Every function in that sub-page window was unreachable by
+       * pointer detection, so a vtable slot or fn-ptr table entry aiming at one
+       * survived into the translated image as a RAW i386 address.
+       *
+       * Measured: inputsystem.dylib's CInputSystem vtable at i386 __DATA,__const
+       * 0x10168 had 9 of 12 slots rebased and three — 0xed0, 0xef0, 0xf50, all
+       * below 0x1000 — left raw. The launcher's `mov (%ecx),%eax; call *0x14(%eax)`
+       * then jumped to 0xed0, unmapped, SIGSEGV on instruction fetch.
+       *
+       * Section granularity is deliberate: the enclosing SEGMENT starts at
+       * vmaddr 0 in a dylib, so a segment-level floor would make every small
+       * integer a pointer candidate. Sections skip the Mach-O header area. */
+      std::size_t min_section_vmaddr() const;
 
       /* True iff vmaddr falls in a constant/string/code section that is a
        * high-confidence pointer target (__cstring/__cfstring/__const/__text/

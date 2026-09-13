@@ -164,6 +164,28 @@ namespace MachO {
    }
 
    template <Bits bits>
+   std::size_t ParseEnv<bits>::min_section_vmaddr() const {
+      if (min_sect_vmaddr_cache != 0) { return min_sect_vmaddr_cache; }
+      std::size_t lo = SIZE_MAX;
+      for (Segment<bits> *seg : archive.segments()) {
+         if (std::strncmp(seg->segment_command.segname, SEG_PAGEZERO,
+                          sizeof(seg->segment_command.segname)) == 0) { continue; }
+         if (std::strncmp(seg->segment_command.segname, SEG_LINKEDIT,
+                          sizeof(seg->segment_command.segname)) == 0) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (sec->sect.size == 0) { continue; }
+            if ((std::size_t)sec->sect.addr < lo) {
+               lo = (std::size_t)sec->sect.addr;
+            }
+         }
+      }
+      /* An image with no sections at all: keep the caller's own floor by
+       * reporting a value that cannot lower it. */
+      min_sect_vmaddr_cache = (lo == SIZE_MAX) ? SIZE_MAX : lo;
+      return min_sect_vmaddr_cache;
+   }
+
+   template <Bits bits>
    bool ParseEnv<bits>::vmaddr_in_readonly_opaque_data(std::size_t vmaddr) const {
       for (Segment<bits> *seg : archive.segments()) {
          if ((seg->segment_command.initprot & VM_PROT_WRITE) != 0) { continue; }

@@ -1273,6 +1273,15 @@ $(BUILD_DIR)/99_cstr_pagezero_arg.i386: $(BUILD_DIR)/99_cstr_pagezero_arg.o
 	  || $(MAKE) --no-print-directory sysroot-objc
 	$(LD) $(LDFLAGS_I386) -e _main -framework CoreFoundation -o $@ $<
 
+# 99_subpage_text_fnptr: link with NO __PAGEZERO and __TEXT based at vmaddr 0, so
+# __text starts a few hundred bytes in -- BELOW 0x1000 -- which is the layout every
+# i386 DYLIB has and which the default -no_pie executable layout cannot produce
+# (__PAGEZERO owns the first page, so __text starts at 0x1000 and the test would
+# pass for the wrong reason, i.e. be inert). 16 of Portal 2's 42 i386 modules have
+# __text below 0x1000; this is the only way to reproduce that here.
+$(BUILD_DIR)/99_subpage_text_fnptr.i386: $(BUILD_DIR)/99_subpage_text_fnptr.o
+	$(LD) $(LDFLAGS_I386) -pagezero_size 0 -seg1addr 0 -e _main -o $@ $<
+
 $(BUILD_DIR)/99_cgl_renderer_check.i386: $(BUILD_DIR)/99_cgl_renderer_check.o
 	@[ -f "$(I386_SYSROOT)/System/Library/Frameworks/OpenGL.framework/OpenGL" ] \
 	  || $(MAKE) --no-print-directory sysroot-gl

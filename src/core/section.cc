@@ -530,8 +530,30 @@ namespace MachO {
 
       bool is_pointer = false;
       /* Reject obvious non-pointers up-front so we don't waste resolver
-       * traffic on integer constants or float bit patterns. */
-      if (value >= 0x1000 && value < 0x80000000U) {
+       * traffic on integer constants or float bit patterns.
+       *
+       * ⚠ The floor is the image's OWN lowest section, not a hardcoded 0x1000.
+       * A non-PIE executable puts __PAGEZERO in the first page, so "below
+       * 0x1000 cannot be a pointer" holds there — but a DYLIB's __TEXT is based
+       * at vmaddr 0, so its __text routinely starts a couple of KiB in and the
+       * magic number rejected genuine code pointers. 16 of Portal 2's 42 i386
+       * modules have __text below 0x1000. inputsystem.dylib's CInputSystem
+       * vtable (i386 __DATA,__const 0x10168) had 9 of 12 slots rebased and
+       * three left RAW — 0xed0, 0xef0, 0xf50, every one of them below the
+       * threshold — so the launcher's `mov (%ecx),%eax; call *0x14(%eax)`
+       * jumped to 0xed0 and took SIGSEGV on the instruction fetch.
+       *
+       * std::min keeps 0x1000 wherever it was already the tighter bound, so
+       * this can only ever ADD candidates, and only for an image that really
+       * does have a section down there. The false-positive side is unchanged and
+       * still handled by the evidence-based gates below plus __86x64_cpin. */
+      static const bool ptr_floor_page =
+         std::getenv("M64_PTR_FLOOR_PAGE") != nullptr;
+      const std::size_t ptr_floor =
+         ptr_floor_page ? 0x1000
+                        : std::min<std::size_t>(0x1000,
+                                                env.min_section_vmaddr());
+      if (value >= ptr_floor && value < 0x80000000U) {
          for (Segment<bits> *seg : env.archive.segments()) {
             std::string name(seg->segment_command.segname,
                              strnlen(seg->segment_command.segname,
@@ -1857,34 +1879,48 @@ namespace MachO {
           *      clear further down. So nothing that genuinely re-creates an
           *      anchor is lost here.
           *
-          *      ⚠ POP IS EXEMPT WHILE A FORWARD BRANCH TARGET IS STILL AHEAD,
-          *      for exactly the reason the RET clear below is gated the same way.
-          *      `pop %reg` is how a function EPILOGUE restores its callee-saved
-          *      registers, and the linear walk reaches that epilogue BEFORE every
-          *      block the function only enters by a branch taken earlier — so a
-          *      pop kill there disarms the rewrite for all of them and they keep
-          *      their raw i386 displacements. Measured on Portal 2 engine.dylib:
-          *        0x2d1be  add esp,0x1c
-          *        0x2d1c1  pop esi ; pop edi ; pop ebx ; pop ebp ; ret
-          *        0x2d1c6  dec 0x5f67ce(%esi)   <- a slow-path block, %esi IS
-          *                                        still the anchor at runtime
-          *      An unconditional pop kill left 182 such sites raw across five
-          *      images. Gating on "is a target still pending ABOVE here" recovers
-          *      every one of them and matches the file's standing approximation:
-          *      keeping the anchor is correct for a linear walk, because a lost
-          *      rewrite is a wild access while a kept one is merely stale until
-          *      the next real definition. (A mid-function data pop can therefore
-          *      still leak an anchor while targets are pending — that is the
-          *      pre-existing baseline, not a new exposure.) */
+          *      ⛔ POP IS EXEMPT ENTIRELY, and that is a measurement, not caution.
+          *      `pop %reg` is how a function EXIT restores its callee-saved
+          *      registers, and a LINEAR walk reaches every function exit BEFORE
+          *      the blocks that are only entered from somewhere else. Killing on
+          *      pop therefore disarms the rewrite for all of them and they keep
+          *      their raw i386 displacements — the very suppressed-rewrite failure
+          *      this whole family produces, just introduced from the other side.
+          *      Two distinct shapes were measured on Portal 2, and TOGETHER they
+          *      rule out a gate:
+          *
+          *        engine.dylib — exit by RET, then a slow-path block reached by a
+          *        branch taken earlier (182 sites across five images):
+          *          0x2d1be  add esp,0x1c
+          *          0x2d1c1  pop esi ; pop edi ; pop ebx ; pop ebp ; ret
+          *          0x2d1c6  dec 0x5f67ce(%esi)   <- %esi IS still the anchor
+          *
+          *        libsteam.dylib — exit by TAIL CALL, then an EH LANDING PAD (94
+          *        sites). The unwinder enters 0x1112 having restored the callee
+          *        -saved registers per the CFI, so %esi holds the anchor exactly
+          *        as the main path's identical access at 0x10fb does:
+          *          0x001109  pop esi ; pop edi ; pop ebx ; pop ebp
+          *          0x00110d  jmp 0x101c                   <- tail call, not RET
+          *          0x001112  mov ebx,eax                  <- landing pad
+          *          0x001114  mov 0x28bf24(%esi),%esi      <- %esi IS the anchor
+          *
+          *      Gating on "a forward branch target is still pending above here"
+          *      fixes the first shape and CANNOT fix the second: a landing pad is
+          *      reached through __eh_frame/LSDA, not through a branch
+          *      displacement, so pending_forward_targets never contains it. And
+          *      nothing distinguishes an epilogue pop from a data pop locally.
+          *      ⇒ Do not kill on pop. This restores the long-standing baseline
+          *      (before this rule, pop never killed an anchor) and matches the
+          *      file's standing approximation: for a linear walk, KEEPING an
+          *      anchor is the safe error, because a lost rewrite is a wild access
+          *      while a kept one is merely stale until the next real definition.
+          *      A mid-function data pop can still leak an anchor; no bug has ever
+          *      been attributed to that, whereas killing cost 276 real sites. */
          static const bool memload_kill =
             std::getenv("M64_NO_PIC_ANCHOR_MEMLOAD_KILL") == nullptr;
-         const bool forward_target_ahead =
-            pending_forward_targets.upper_bound(inst->loc.vmaddr) !=
-            pending_forward_targets.end();
          const bool is_pop = (xed_decoded_inst_get_category(&xedd) ==
                               XED_CATEGORY_POP);
-         if (memload_kill && !is_anchor_pop && !anchors.empty() &&
-             !(is_pop && forward_target_ahead)) {
+         if (memload_kill && !is_anchor_pop && !is_pop && !anchors.empty()) {
             const xed_inst_t *xi = xed_decoded_inst_inst(&xedd);
             const unsigned nop = xed_inst_noperands(xi);
             for (unsigned i = 0; i < nop; ++i) {
