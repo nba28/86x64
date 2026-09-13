@@ -54,6 +54,7 @@
 #include <dlfcn.h>
 #include <stdint.h>
 #include <mach/mach.h>
+#include <mach/mach_vm.h>
 #include <mach-o/dyld.h>
 #include <mach-o/loader.h>
 #include <sys/ucontext.h>
@@ -364,6 +365,68 @@ static void fr_walk_chain(x86_thread_state64_t *ss, const char *spec) {
    }
 }
 
+/* ── WHAT IS THIS MEMORY? ──────────────────────────────────────────────────────
+ * An address that resolves to NO loaded image used to be the end of the trail.
+ * That is exactly the case worth digging into, because the honest "no image"
+ * answer means either a wild pointer or a mapping nobody attributed — and the
+ * kernel already knows which. `mach_vm_region` names the containing region's
+ * base, size, protection and share mode, so an unattributed executable mapping
+ * (a stale/hand-made image copy) is immediately distinguishable from a data
+ * arena, from a guard page, and from genuinely unmapped space.
+ *
+ * Fault-safe: one Mach trap, no allocation, no dyld lock. */
+static void fr_print_region(const char *label, uint64_t v) {
+   mach_vm_address_t a = (mach_vm_address_t)v;
+   mach_vm_size_t sz = 0;
+   vm_region_basic_info_data_64_t bi;
+   mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+   mach_port_t obj = MACH_PORT_NULL;
+
+   if (mach_vm_region(mach_task_self(), &a, &sz, VM_REGION_BASIC_INFO_64,
+                      (vm_region_info_t)&bi, &cnt, &obj) != KERN_SUCCESS) {
+      fprintf(stderr, "[fault] %s 0x%llx: NO REGION AT OR ABOVE THIS ADDRESS\n",
+              label, (unsigned long long)v);
+      return;
+   }
+   if (v < (uint64_t)a) {
+      /* mach_vm_region rounds UP to the next region, so v itself is in a hole. */
+      fprintf(stderr, "[fault] %s 0x%llx: UNMAPPED (next region starts 0x%llx, "
+                      "+0x%llx away)\n", label, (unsigned long long)v,
+              (unsigned long long)a, (unsigned long long)((uint64_t)a - v));
+      return;
+   }
+   fprintf(stderr, "[fault] %s 0x%llx: region [0x%llx,0x%llx) size=0x%llx "
+                   "prot=%c%c%c max=%c%c%c %s%s\n",
+           label, (unsigned long long)v, (unsigned long long)a,
+           (unsigned long long)(a + sz), (unsigned long long)sz,
+           (bi.protection & VM_PROT_READ) ? 'r' : '-',
+           (bi.protection & VM_PROT_WRITE) ? 'w' : '-',
+           (bi.protection & VM_PROT_EXECUTE) ? 'x' : '-',
+           (bi.max_protection & VM_PROT_READ) ? 'r' : '-',
+           (bi.max_protection & VM_PROT_WRITE) ? 'w' : '-',
+           (bi.max_protection & VM_PROT_EXECUTE) ? 'x' : '-',
+           bi.shared ? "shared" : "private",
+           bi.reserved ? " reserved" : "");
+}
+
+/* Raw bytes at the faulting instruction. With no image to name it, the bytes
+ * themselves are the identity: they can be matched against a translated dylib
+ * on disk to prove which image a stray mapping is a copy of. */
+static void fr_print_code(uint64_t rip) {
+   unsigned char b[32];
+   /* Start a little BEFORE rip: the preceding bytes distinguish a translated
+    * call/anchor sequence from ordinary code (see the anchor-vs-frame rule). */
+   uint64_t lo = rip >= 16 ? rip - 16 : rip;
+   if (!fr_read(lo, b, sizeof b)) {
+      fprintf(stderr, "[fault] code at rip: unreadable\n");
+      return;
+   }
+   fprintf(stderr, "[fault] code 0x%llx (rip-16 .. rip+15):", (unsigned long long)lo);
+   for (size_t i = 0; i < sizeof b; i++)
+      fprintf(stderr, "%s%02x", i == 16 ? " |" : " ", b[i]);
+   fprintf(stderr, "\n");
+}
+
 static void fr_print_addr(const char *label, uint64_t v) {
    char img[256];
    if (fr_image_for(v, img, sizeof(img)))
@@ -518,6 +581,15 @@ static void fr_handler(int sig, siginfo_t *info, void *uctx) {
               (unsigned long long)ss->__r14, (unsigned long long)ss->__r15,
               (unsigned long long)ss->__rflags,
               (unsigned long long)uc->uc_mcontext->__es.__err);
+
+      /* An address in NO image is the interesting case, not a dead end: ask the
+       * kernel what the mapping actually is, and let the instruction bytes
+       * identify it. Printed for rip and for the faulting address, which are
+       * usually in different regions (executing here, writing there). */
+      fr_print_region("rip   ", ss->__rip);
+      fr_print_code(ss->__rip);
+      if (fault)
+         fr_print_region("fault ", (uint64_t)(uintptr_t)fault);
 
       /* ★ The point of the whole file. On a `rip == 0` fault the call that got us
        * here already pushed its return address, so the top of the stack names the
