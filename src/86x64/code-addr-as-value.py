@@ -25,9 +25,19 @@ pointer is taken by name, not re-anchored into a scratch register and spilled.
                 highest-confidence shape, and the one that cost us a day
   (default)     any store of %r11d, which also catches field/global writes
 
-NOT A PROOF either way: read each hit against the i386 original (pcmap-diff.py)
-before calling it a bug, and remember a jump table CAN legitimately live in
-__text -- which is why only STORES of the value, never reads through it, count.
+NOT A PROOF either way, and the authoritative test is elsewhere: ⚠⚠**A NON-PIC
+IMAGE RELOCATES ABSOLUTE CODE ADDRESSES FOR REAL, and those hits are CORRECT.**
+Portal 2's libmilesx86.dylib reports 61 sites and every one is legitimate -- it
+carries 5919 LOCAL RELOCATIONS, so its absolute addresses are genuine and the
+translator is obeying a real reloc entry, not guessing. The defect is the opposite
+case: an immediate with NO relocation covering it, which the value-alias heuristic
+guessed at. So to settle a hit, scan the ORIGINAL image's local+external
+relocation tables for an entry covering the immediate's file offset -- engine.dylib
+has 150084 local relocs and NONE in 0x2e4d40..0x2e4d7f, which is what proved the
+0x1000 constant was never an address.
+
+Also: a jump table CAN legitimately live in __text, which is why only STORES of
+the value count here, never reads through it.
 """
 import argparse, os, re, struct, sys
 
@@ -60,12 +70,60 @@ def sections(data):
     return out
 
 
+def func_entries(data, sects):
+    """Addresses that begin a function: LC_FUNCTION_STARTS if present, plus the
+    symbol table.
+
+    ⚠THIS IS A WEAK HINT, NOT A VERDICT, and it misled me once already. The idea
+    was "an entry address is just a callback, an interior address cannot be named
+    by any source construct" -- but the mis-relocated Portal 2 constant resolved,
+    via the containing-blob fallback, to a FUNCTION ENTRY (0x1000145a,
+    CLC_VoiceData::ToString), so the real defect was filed under "expected".
+    Both buckets need reading."""
+    import struct as _s
+    ncmds = _s.unpack_from('<I', data, 16)[0]
+    off, entries = 32, set()
+    text = sects.get(('__TEXT', '__text'))
+    base = None
+    for (sg, sn), (a, z, f) in sects.items():
+        if sg == '__TEXT' and (base is None or a < base):
+            base = a
+    for _ in range(ncmds):
+        cmd, cmdsize = _s.unpack_from('<II', data, off)
+        if cmd == 0x26 and base is not None:      # LC_FUNCTION_STARTS
+            dataoff, datasize = _s.unpack_from('<II', data, off + 8)
+            addr, i, end = base, dataoff, dataoff + datasize
+            while i < end:
+                delta, shift = 0, 0
+                while i < end:
+                    b = data[i]; i += 1
+                    delta |= (b & 0x7f) << shift
+                    if b & 0x80 == 0:
+                        break
+                    shift += 7
+                if delta == 0:
+                    break
+                addr += delta
+                entries.add(addr)
+        elif cmd == 0x2:                          # LC_SYMTAB
+            symoff, nsyms, stroff, strsize = _s.unpack_from('<IIII', data, off + 8)
+            for k in range(nsyms):
+                e = symoff + k * 16
+                n_type, n_sect = data[e + 4], data[e + 5]
+                value = _s.unpack_from('<Q', data, e + 8)[0]
+                if (n_type & 0x0e) == 0x0e and value:   # N_SECT
+                    entries.add(value)
+        off += cmdsize
+    return entries
+
+
 def scan(path, args_only, show):
     data = open(path, 'rb').read()
     sects = sections(data)
     if sects is None or ('__TEXT', '__text') not in sects:
         return 0
     ta, tz, tf = sects[('__TEXT', '__text')]
+    entries = func_entries(data, sects)
     md = capstone.Cs(capstone.CS_ARCH_X86, capstone.CS_MODE_64)
     hits, pend = [], None
     for i in md.disasm(data[tf:tf + tz], ta):
@@ -81,16 +139,21 @@ def scan(path, args_only, show):
             if i.mnemonic == 'mov' and 'r11d' in i.op_str:
                 is_arg = 'rsp' in i.op_str
                 if (not args_only or is_arg) and ta <= pend[1] < ta + tz:
-                    hits.append((pend[0], pend[1], i.op_str))
+                    hits.append((pend[0], pend[1], i.op_str,
+                                 pend[1] in entries))
             pend = None
+    interior = [h for h in hits if not h[3]]
     if hits:
-        print("%-26s %d site(s)%s" % (os.path.basename(path), len(hits),
-                                      " [args only]" if args_only else ""))
-        for at, tgt, op in hits[:show]:
-            print("    %#012x  lea r11 -> %#x (in __text)   store: %s" % (at, tgt, op))
-        if len(hits) > show:
-            print("    ... %d more (--show N)" % (len(hits) - show))
-    return len(hits)
+        print("%-26s %d site(s)  (%d interior, %d at a function entry -- a HINT "
+              "only, read both)%s"
+              % (os.path.basename(path), len(hits), len(interior),
+                 len(hits) - len(interior), " [args only]" if args_only else ""))
+        for at, tgt, op, is_entry in interior[:show]:
+            print("    %#012x  lea r11 -> %#x  INTERIOR of a function   store: %s"
+                  % (at, tgt, op))
+        if len(interior) > show:
+            print("    ... %d more (--show N)" % (len(interior) - show))
+    return len(interior)
 
 
 def main():
@@ -101,7 +164,7 @@ def main():
     ap.add_argument('--show', type=int, default=5, help='hits to print per image')
     a = ap.parse_args()
     total = sum(scan(p, a.args_only, a.show) for p in a.images if os.path.isfile(p))
-    print("TOTAL %d" % total)
+    print("TOTAL %d interior site(s); see the per-image counts for the rest" % total)
     return 0
 
 
