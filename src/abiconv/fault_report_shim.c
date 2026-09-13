@@ -99,9 +99,20 @@ static int g_words = 48;
  * below, and it is wrong. See fr_install.)
  *
  * Kill switch M64_FAULT_REPORT_UNSAFE_SYMS=1 restores the live-dyld lookup. */
-#define FR_MAX_IMAGES 1024
+/* ⚠1024 WAS NOT ENOUGH AND FAILING WAS SILENT. Portal 2 loads ~1000 system
+ * images before it dlopens its own modules, so the table filled with system
+ * frameworks and every late Portal 2 module -- datacache, vphysics,
+ * materialsystem, engine, shaderapidx9, vguimatsurface -- was dropped. The
+ * handler then attributed a fault inside one of them to the nearest EARLIER
+ * image: `rip = libvstdlib+0xd44faf6`, a 222 MB offset into a 622 KB dylib,
+ * which reads like a real answer and sent me to the wrong image. */
+#define FR_MAX_IMAGES 4096
 #define FR_NAME_MAX   192
-typedef struct { uint64_t base; char name[FR_NAME_MAX]; } fr_img;
+/* `span` is the image's mapped extent. Attribution used a flat 1 GiB window, so
+ * ANY address above an image base looked like it belonged to it; with the real
+ * span an address in no known image is reported as unknown instead of being
+ * dressed up as a plausible offset. */
+typedef struct { uint64_t base; uint64_t span; char name[FR_NAME_MAX]; } fr_img;
 static fr_img g_imgs[FR_MAX_IMAGES];
 /* sig_atomic_t + "publish the count LAST": the handler may read this while an
  * add-image callback is mid-append, so an entry is only visible once fully
@@ -157,8 +168,44 @@ static void fr_name_from_header(const struct mach_header *mh, char *out, size_t 
 static void fr_add_image(const struct mach_header *mh, intptr_t slide) {
    (void)slide;
    int n = (int)g_nimgs;
-   if (!mh || n >= FR_MAX_IMAGES) return;
+   if (!mh) return;
+   if (n >= FR_MAX_IMAGES) {
+      /* NEVER drop an image silently again: a missing entry does not produce a
+       * missing answer, it produces a WRONG one. */
+      static int warned = 0;
+      if (!warned) {
+         warned = 1;
+         fprintf(stderr, "[fault] WARNING: image table full at %d entries; "
+                         "later images will be UNATTRIBUTED (raise "
+                         "FR_MAX_IMAGES)\n", FR_MAX_IMAGES);
+         fflush(stderr);
+      }
+      return;
+   }
    g_imgs[n].base = (uint64_t)(uintptr_t)mh;
+   /* Mapped extent, from the image's own segments -- no dyld call. */
+   {
+      uint64_t base = (uint64_t)(uintptr_t)mh, top = base;
+      const struct mach_header_64 *m64 = (const struct mach_header_64 *)mh;
+      if (m64->magic == MH_MAGIC_64) {
+         /* Highest slid segment end. vmaddr is the PREFERRED address, so the
+          * live end is vmaddr+slide+vmsize -- which is why `slide` is taken
+          * rather than ignored here. */
+         const uint8_t *p = (const uint8_t *)(m64 + 1);
+         for (uint32_t i = 0; i < m64->ncmds; i++) {
+            const struct load_command *lc = (const struct load_command *)p;
+            if (lc->cmdsize == 0) break;
+            if (lc->cmd == LC_SEGMENT_64) {
+               const struct segment_command_64 *sg =
+                  (const struct segment_command_64 *)p;
+               uint64_t e = (uint64_t)((intptr_t)sg->vmaddr + slide) + sg->vmsize;
+               if (e > top) top = e;
+            }
+            p += lc->cmdsize;
+         }
+      }
+      g_imgs[n].span = (top > base) ? (top - base) : 0x1000;
+   }
    fr_name_from_header(mh, g_imgs[n].name, FR_NAME_MAX);
    g_nimgs = n + 1;                    /* publish only once fully written */
 }
@@ -208,7 +255,8 @@ static int fr_image_for(uint64_t v, char *out, size_t n) {
       int cnt = (int)g_nimgs;
       for (int i = 0; i < cnt; i++) {
          uint64_t base = g_imgs[i].base;
-         if (v >= base && v - base < 0x40000000ULL)
+         uint64_t span = g_imgs[i].span ? g_imgs[i].span : 0x40000000ULL;
+         if (v >= base && v - base < span)
             if (base > best_base) { best_base = base; best_name = g_imgs[i].name; }
       }
    }

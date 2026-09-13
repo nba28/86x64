@@ -97,6 +97,21 @@ if [ "$DEPLOY_ONLY" -eq 1 ]; then
 fi
 
 # --- build the work list --------------------------------------------------
+# ⚠ SKIPPING A DEPENDENCY SILENTLY BREAKS EVERY DEPENDENT.
+# libcef.dylib is excluded by default (29 MB of embedded Chromium), but
+# vguimatsurface.dylib BINDS 19 cef_* symbols from it, so dyld refuses to load
+# vguimatsurface AT ALL -- which made CSourceAppSystemGroup::Create() fail,
+# AddSystems() fail, and Portal 2 tear down, with no error text anywhere. That
+# presented for months as "the main thread idle-parks in startup"; it was the app
+# quitting and then hanging in CBaseFileSystem::ShutdownAsync.
+# Tell the pipeline the dep is deliberately absent so _weaken_dangling_deps.py
+# weakens BOTH the load command and the binds attributed to it: the module then
+# loads, and a real call into CEF faults at 0x0 -- loudly, and exactly where CEF
+# was needed -- rather than silently doing nothing. Cleared by --include-cef.
+if [ "$INCLUDE_CEF" -eq 0 ]; then
+  export M64_ABSENT_DEPS="${M64_ABSENT_DEPS:+$M64_ABSENT_DEPS,}libcef"
+fi
+
 targets=()
 if [ "$DEPLOY_ONLY" -eq 0 ]; then
 if [ "$EXEC_ONLY" -eq 1 ]; then

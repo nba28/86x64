@@ -28,6 +28,7 @@
 #include <errno.h>
 #include <string.h>
 #include <dlfcn.h>
+#include "dyld_image_list.h"
 #include <os/lock.h>
 #include <mach/vm_prot.h>
 #include <mach-o/dyld.h>
@@ -86,6 +87,22 @@ int32_t shim_dlopen(uint32_t *a) {
       if (h == NULL) {
          const char *e = dlerror();
          fprintf(stderr, "[posix]   dlerror: %s\n", e ? e : "(none)");
+      } else if (path) {
+         /* ★Print the LOAD BASE of the module just opened. Without it a fault
+          * inside a dlopen'd image cannot be placed: the fault reporter snapshots
+          * the image list when it ARMS, so a later dlopen is invisible to it and
+          * an address inside that module is attributed to the nearest EARLIER
+          * image -- `libvstdlib+0xb177af6`, a 185 MB offset into a 622 KB dylib,
+          * which looks like a real answer. The base logged here is what turns a
+          * register dump into a file offset. Via x64_img_* (a plain infoArray
+          * read), never dyld's indexed APIs. */
+         const char *lf = x64_img_leaf(path);
+         intptr_t slide = 0;
+         const struct mach_header *mh = lf ? x64_img_find_leaf(lf, &slide) : NULL;
+         if (mh) {
+            fprintf(stderr, "[posix]   loaded %s base=%p slide=%#llx\n",
+                    lf, (const void *)mh, (unsigned long long)slide);
+         }
       }
       fflush(stderr);
    }
