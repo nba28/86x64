@@ -1170,6 +1170,18 @@ namespace MachO {
       /* reg → anchor vmaddr (= vmaddr of the pop instruction that loaded the
        * anchor). Only EAX..EDI tracked. */
       std::unordered_map<xed_reg_enum_t, std::size_t> anchors;
+      /* ★Sticky "this region is PIC codegen", set when an anchor is ESTABLISHED
+       * and cleared only where the whole tracking state is (interleaved data,
+       * RET, interrupt). Steps (2c)/(2d) cancel an absolute-address heuristic
+       * because PIC code reaches globals anchor-relative or through slots, and
+       * that is a property of the CODE, not of whether an anchor is still LIVE.
+       * Gating them on `!anchors.empty()` conflated the two: the last anchor
+       * dying — e.g. `mov 0x28c(%eax),%eax` re-purposing the only anchor
+       * register, step (2b') — made a PIC function look non-PIC, and the
+       * heuristic then claimed a plain pointer OFFSET as an absolute table
+       * address (guard 96_zerofill_common_interior: `0x124f88(%eax)` =
+       * &freqstruct[150001], mis-resolved into __common's interior). */
+      bool anchored_region = false;
 
       /* frame-slot displacement → anchor vmaddr. Compilers spill the PIC
        * register to the stack (`mov %esi, -0x2c(%ebp)`) and later reload it
@@ -1336,6 +1348,7 @@ namespace MachO {
             anchor_slots.clear();
             entry_save_slots.clear();
             pre_anchor_saves.clear();
+            anchored_region = false;
             prev_inst = nullptr;
             continue;
          }
@@ -1415,6 +1428,7 @@ namespace MachO {
                entry_save_slots = pre_anchor_saves;
                pre_anchor_saves.clear();
                anchors[reg] = inst->loc.vmaddr;
+               anchored_region = true;
                is_anchor_pop = true;
             }
          }
@@ -1594,7 +1608,8 @@ namespace MachO {
           *      absolute zerofill pointers into immediates. Structural
           *      pointer operands (bare `[disp32]`, non-lazy slots) are NOT
           *      Immediate::heuristic and are never cancelled. */
-         if (!anchors.empty() && inst->imm != nullptr && inst->imm->heuristic &&
+         if ((!anchors.empty() || anchored_region) &&
+             inst->imm != nullptr && inst->imm->heuristic &&
              env.vmaddr_in_zerofill(inst->imm->value)) {
             env.vmaddr_resolver.cancel(
                (std::size_t)inst->imm->value,
@@ -1624,7 +1639,8 @@ namespace MachO {
           *      `[base+disp32]` sites live in fixed-address non-PIC
           *      functions — no live anchors — and keep the heuristic
           *      (Halo's C6 82 zerofill store, guard 98_abs32_imm_group). */
-         if (!anchors.empty() && inst->memdisp_absolute && !inst->pic_anchored) {
+         if ((!anchors.empty() || anchored_region) &&
+             inst->memdisp_absolute && !inst->pic_anchored) {
             const xed_operand_values_t* mops =
                xed_decoded_inst_operands_const(&xedd);
             const xed_reg_enum_t mbase =
@@ -1751,6 +1767,42 @@ namespace MachO {
                         anchors.erase(dst);
                      }
                   }
+               }
+            } else if (iform == XED_IFORM_MOV_GPRv_MEMv) {
+               /* (2b') THE SAME RE-PURPOSE, THROUGH A NON-FRAME ADDRESS.
+                *      The gate above only watches EBP/ESP frame slots, because
+                *      that is where an anchor is spilled and reloaded. But a
+                *      function re-purposes its anchor register just as often by
+                *      loading an OBJECT FIELD into it, and such a load has an
+                *      arbitrary base (and possibly an index), so it falls
+                *      straight through that gate and the dead anchor survives.
+                *
+                *      Portal 2 CKeyValuesSystem::CKeyValuesSystem (libvstdlib
+                *      i386 0x11fb1): %esi is the get_pc_thunk anchor (0x11e6f),
+                *      then `mov 0x64(%ebx),%esi` loads m_HashTable.m_Size into
+                *      it, and the very next instruction is
+                *          lea 0x7ff(%esi),%edi        # m_Size + 2047
+                *      which the stale anchor turned into
+                *          lea rip+...,%edi            # &(0x11e6f + 0x7ff)
+                *      i.e. an IMAGE ADDRESS where a count belongs. It reached
+                *      CUtlVector::GrowVector as `num`, so CUtlMemory::Grow
+                *      doubled 4 up past it and asked the allocator for
+                *      next_pow2(load_base) * sizeof(hash_item_t) — 1 or 2 GiB,
+                *      depending purely on where ASLR put the image. That NULL
+                *      made Source _exit(0) silently.
+                *
+                *      Structural, not app-shaped: ANY load into a GPR ends that
+                *      register's anchor. A genuine spilled anchor is reloaded
+                *      through a frame slot, which the gate above handles and
+                *      which never reaches here, so this cannot erase a live
+                *      one. Registers only (no memory destination): the
+                *      MOV_MEMv_GPRv store form is the gate's business. */
+               static const bool memload_kill =
+                  std::getenv("M64_NO_PIC_ANCHOR_MEMLOAD_KILL") == nullptr;
+               const xed_reg_enum_t dst =
+                  xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+               if (memload_kill && dst >= XED_REG_EAX && dst <= XED_REG_EDI) {
+                  anchors.erase(dst);
                }
             }
          }
@@ -1899,6 +1951,7 @@ namespace MachO {
                anchor_slots.clear();
                entry_save_slots.clear();
                pre_anchor_saves.clear();
+               anchored_region = false;
             }
          } else if ((cat == XED_CATEGORY_INTERRUPT &&
                      xed_decoded_inst_get_iclass(&xedd) != XED_ICLASS_INT3) ||
@@ -1908,6 +1961,7 @@ namespace MachO {
             anchor_slots.clear();
             entry_save_slots.clear();
             pre_anchor_saves.clear();
+            anchored_region = false;
          } else if (cat == XED_CATEGORY_CALL && !is_pic_call_zero) {
             anchors.erase(XED_REG_EAX);
             anchors.erase(XED_REG_ECX);
@@ -1917,6 +1971,7 @@ namespace MachO {
          /* Establish a separate-thunk anchor now (post call-clobber clear). */
          if (thunk_anchor_reg != XED_REG_INVALID) {
             anchors[thunk_anchor_reg] = thunk_anchor_vm;
+            anchored_region = true;
          }
 
          /* Track the last non-nop category for block (0b)'s dead-fall-through
