@@ -47,6 +47,10 @@
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <mach-o/getsect.h>
+#include <mach-o/loader.h>
 
 static int psx_trace(void) {
    static int v = -1;
@@ -190,7 +194,217 @@ static void cnd_do_init(void *native, void *vi386attr) {
       pthread_cond_init((pthread_cond_t *)native, NULL);
    }
 }
+/* ── CONDVAR CENSUS (env-gated, off by default) ──────────────────────────────
+ * `ABICONV_PSX_CENSUS=<seconds>` starts a thread that periodically prints, per
+ * i386 condvar, how many times it was WAITED on versus SIGNALLED. It exists for
+ * the one failure this shim cannot distinguish by itself:
+ *
+ *   waits > 0, signals == 0  ->  nobody ever signals it. The bug is UPSTREAM:
+ *                                whatever should produce the wakeup never runs.
+ *   signals on a DIFFERENT i386 address than the waiter's
+ *                            ->  an IDENTITY problem: signaller and waiter are
+ *                                not talking about the same object, which is the
+ *                                by-value-marshalling family this file cures.
+ *
+ * A periodic thread rather than atexit(): a parked process is killed by the
+ * harness watchdog, so an exit-time report never prints. Counters are plain
+ * relaxed atomics on a fixed open-addressed table -- no allocation, no lock, and
+ * no ordering imposed on the code being measured, so arming it cannot change the
+ * schedule it is trying to observe. */
+#define PSX_CENSUS_SLOTS 512
+struct psx_cen {
+   /* Plain types, touched only through __atomic_* builtins -- those builtins
+    * reject _Atomic-qualified operands, and the qualifier would buy nothing here
+    * since every access already names its ordering explicitly. */
+   uint32_t key;                          /* i386 object address, 0 = free */
+   unsigned long waits, timeouts, signals, broadcasts;
+   /* WHO is involved. An object that is waited on and never signalled is only
+    * half a diagnosis: the other half is which code waits, and whether that is
+    * the MAIN thread (so the whole app is parked) or a worker (idle by design).
+    * The MTSHIM trampoline hands us `a = &args[0]` on the i386-cdecl stack, so
+    * a[-1] is the caller's return address -- and it is a TRANSLATED address, so
+    * dladdr + __86x64_pcmap map it back to the original function. */
+   uint32_t wait_caller, signal_caller;
+   unsigned char waited_by_main;
+};
+static struct psx_cen g_cen[PSX_CENSUS_SLOTS];
+/* timedwait return-value histogram: 0, ETIMEDOUT, EINTR, EINVAL, EPERM, other */
+static unsigned long g_tw_ret[6];
+static const char *const g_tw_name[6] =
+   { "0 (signalled)", "ETIMEDOUT", "EINTR", "EINVAL", "EPERM", "other" };
+static int psx_census_secs(void) {
+   static int v = -1;
+   if (v < 0) {
+      const char *e = getenv("ABICONV_PSX_CENSUS");
+      v = e ? atoi(e) : 0;
+      if (v < 0) v = 0;
+   }
+   return v;
+}
+static struct psx_cen *psx_cen_slot(uint32_t key) {
+   if (!key) return NULL;
+   uint32_t h = (key * 2654435761u) % PSX_CENSUS_SLOTS;
+   for (int probe = 0; probe < 64; ++probe) {
+      struct psx_cen *c = &g_cen[(h + probe) % PSX_CENSUS_SLOTS];
+      uint32_t k = __atomic_load_n(&c->key, __ATOMIC_RELAXED);
+      if (k == key) return c;
+      if (k == 0) {
+         uint32_t expect = 0;
+         if (__atomic_compare_exchange_n(&c->key, &expect, key, 0,
+                                         __ATOMIC_RELAXED, __ATOMIC_RELAXED))
+            return c;
+         if (__atomic_load_n(&c->key, __ATOMIC_RELAXED) == key) return c;
+      }
+   }
+   return NULL;                           /* table full: undercount, never wrong */
+}
+#define PSX_CEN_BUMP(field, key) do {                                          \
+   if (psx_census_secs()) {                                                    \
+      struct psx_cen *_c = psx_cen_slot((uint32_t)(key));                      \
+      if (_c) __atomic_fetch_add(&_c->field, 1ul, __ATOMIC_RELAXED);           \
+   }                                                                           \
+} while (0)
+
+/* Record the caller (and whether it is the main thread) the FIRST time only, so
+ * a hot poll loop cannot turn this into a write storm. */
+#define PSX_CEN_WHO(which, key, argp) do {                                      \
+   if (psx_census_secs()) {                                                     \
+      struct psx_cen *_c = psx_cen_slot((uint32_t)(key));                       \
+      if (_c) {                                                                 \
+         if (__atomic_load_n(&_c->which, __ATOMIC_RELAXED) == 0) {              \
+            __atomic_store_n(&_c->which, ((const uint32_t *)(argp))[-1],        \
+                             __ATOMIC_RELAXED);                                 \
+         }                                                                      \
+         if (pthread_main_np())                                                 \
+            __atomic_store_n(&_c->waited_by_main, 1, __ATOMIC_RELAXED);         \
+      }                                                                         \
+   }                                                                            \
+} while (0)
+
+/* image+offset for a TRANSLATED return address, so the report is greppable and
+ * feeds straight into pcmap-diff.py. */
+static void psx_describe(uint32_t addr, char *out, size_t n) {
+   if (!addr) { snprintf(out, n, "-"); return; }
+   Dl_info info;
+   if (dladdr((void *)(uintptr_t)addr, &info) && info.dli_fname) {
+      const char *base = strrchr(info.dli_fname, '/');
+      base = base ? base + 1 : info.dli_fname;
+      snprintf(out, n, "%#x = %s+%#lx %s", addr, base,
+               (unsigned long)((uintptr_t)addr - (uintptr_t)info.dli_fbase),
+               info.dli_sname ? info.dli_sname : "");
+   } else {
+      snprintf(out, n, "%#x = (no image)", addr);
+   }
+}
+
+/* ONE-SHOT CALL-CHAIN DUMP for the main thread's wait, in steady state.
+ *
+ * The census names the IMMEDIATE caller (CThreadSyncObject::Wait) but not who
+ * called THAT, and the wall we are chasing is "which Source loop is polling".
+ * sample(1) cannot help: it stops at the shim because it cannot unwind through
+ * translated frames. So scan the i386-cdecl stack upward from the argument block
+ * and report words that point into the __text of a non-system image.
+ *
+ * ⚠Stepping is FOUR bytes: translated code keeps an i386-granular stack even on
+ * the native stack (a call is `pushw %ax; pushw %ax; movl %r11d,(%rsp); jmp`), so
+ * 8-byte stepping catches only the accidentally-aligned frames.
+ * ⚠This is a CANDIDATE SET, not a call chain -- live and dead frames are mixed.
+ * Disassemble each hit before believing it: a translated `call $+0; pop` leaves an
+ * ANCHOR VALUE on the stack that looks exactly like a return address, and a stale
+ * word can point at any instruction at all. */
+static void psx_dump_chain(const uint32_t *a) {
+   const char *e = getenv("ABICONV_PSX_MAIN_CHAIN");
+   if (!e) return;
+   unsigned long after = strtoul(e, NULL, 0);   /* dump on the Nth main wait */
+   if (after == 0) after = 1;
+   static unsigned long seen = 0;
+   static int done = 0;
+   if (done || !pthread_main_np()) return;
+   if (__atomic_fetch_add(&seen, 1ul, __ATOMIC_RELAXED) < after) return;
+   done = 1;
+   fprintf(stderr, "[psx] main-thread wait #%lu -- stack words pointing into "
+                   "__TEXT,__text of a non-system image (CANDIDATES, not a "
+                   "chain; verify by disassembly):\n", after);
+   int shown = 0;
+   for (int i = -1; i < 1024 && shown < 24; ++i) {
+      uint32_t v = a[i];
+      if (!v) continue;
+      Dl_info info;
+      if (!dladdr((void *)(uintptr_t)v, &info) || !info.dli_fname) continue;
+      if (strstr(info.dli_fname, "/usr/lib/") || strstr(info.dli_fname, "/System/")
+          || strstr(info.dli_fname, "libabiconv")) continue;
+      const struct mach_header_64 *mh =
+         (const struct mach_header_64 *)info.dli_fbase;
+      unsigned long tsz = 0;
+      const uint8_t *txt = mh ? getsectiondata(mh, "__TEXT", "__text", &tsz) : NULL;
+      if (!txt || (const uint8_t *)(uintptr_t)v < txt ||
+          (const uint8_t *)(uintptr_t)v >= txt + tsz) continue;   /* not code */
+      const char *base = strrchr(info.dli_fname, '/');
+      base = base ? base + 1 : info.dli_fname;
+      fprintf(stderr, "[psx]     [a%+d] %#10x  %s+%#lx  %s\n", i, v, base,
+              (unsigned long)((uintptr_t)v - (uintptr_t)info.dli_fbase),
+              info.dli_sname ? info.dli_sname : "(no symbol)");
+      ++shown;
+   }
+   if (!shown) fprintf(stderr, "[psx]     (none found)\n");
+   fflush(stderr);
+}
+
+static void *psx_census_thread(void *unused) {
+   (void)unused;
+   const int secs = psx_census_secs();
+   for (;;) {
+      struct timespec req = { secs, 0 };
+      nanosleep(&req, NULL);
+      fprintf(stderr, "[psx] ---- condvar census ----\n");
+      int shown = 0;
+      for (int i = 0; i < PSX_CENSUS_SLOTS; ++i) {
+         uint32_t k = __atomic_load_n(&g_cen[i].key, __ATOMIC_RELAXED);
+         if (!k) continue;
+         unsigned long w = __atomic_load_n(&g_cen[i].waits, __ATOMIC_RELAXED);
+         unsigned long t = __atomic_load_n(&g_cen[i].timeouts, __ATOMIC_RELAXED);
+         unsigned long sg = __atomic_load_n(&g_cen[i].signals, __ATOMIC_RELAXED);
+         unsigned long b = __atomic_load_n(&g_cen[i].broadcasts, __ATOMIC_RELAXED);
+         if (!w && !sg && !b) continue;
+         uint32_t wc = __atomic_load_n(&g_cen[i].wait_caller, __ATOMIC_RELAXED);
+         uint32_t sc = __atomic_load_n(&g_cen[i].signal_caller, __ATOMIC_RELAXED);
+         unsigned char bym =
+            __atomic_load_n(&g_cen[i].waited_by_main, __ATOMIC_RELAXED);
+         char wloc[128] = "-", sloc[128] = "-";
+         psx_describe(wc, wloc, sizeof wloc);
+         psx_describe(sc, sloc, sizeof sloc);
+         fprintf(stderr, "[psx]   cond %#10x  waits=%-7lu signals=%-5lu "
+                         "bcasts=%-5lu %s%s\n"
+                         "[psx]        waiter %s\n"
+                         "[psx]        signaller %s\n",
+                 k, w, sg, b, bym ? "MAIN " : "",
+                 (w && !sg && !b) ? "  <-- WAITED, NEVER SIGNALLED" : "", wloc, sloc);
+         (void)t;
+         ++shown;
+      }
+      if (!shown) fprintf(stderr, "[psx]   (no condvar traffic yet)\n");
+      fprintf(stderr, "[psx]   timedwait returns:");
+      for (int r = 0; r < 6; ++r) {
+         unsigned long v = __atomic_load_n(&g_tw_ret[r], __ATOMIC_RELAXED);
+         if (v) fprintf(stderr, "  %s=%lu", g_tw_name[r], v);
+      }
+      fprintf(stderr, "\n");
+      fflush(stderr);
+   }
+   return NULL;
+}
+static void psx_census_start(void) {
+   if (!psx_census_secs()) return;
+   static int started = 0;
+   if (started) return;
+   started = 1;
+   pthread_t th;
+   if (pthread_create(&th, NULL, psx_census_thread, NULL) == 0)
+      pthread_detach(th);
+}
+
 static pthread_cond_t *cnd_native(uint32_t i386cond, void *i386attr) {
+   psx_census_start();
    return (pthread_cond_t *)psx_resolve((void *)(uintptr_t)i386cond,
             PSX_MAGIC_COND, sizeof(pthread_cond_t), cnd_do_init, i386attr);
 }
@@ -204,15 +418,21 @@ int32_t shim_pthread_cond_init(uint32_t *a) {
    return c ? 0 : -1;
 }
 int32_t shim_pthread_cond_signal(uint32_t *a) {
+   PSX_CEN_BUMP(signals, a[0]);
+   PSX_CEN_WHO(signal_caller, a[0], a);
    pthread_cond_t *c = cnd_native(a[0], NULL);
    return c ? (int32_t)pthread_cond_signal(c) : -1;
 }
 int32_t shim_pthread_cond_broadcast(uint32_t *a) {
+   PSX_CEN_BUMP(broadcasts, a[0]);
+   PSX_CEN_WHO(signal_caller, a[0], a);
    pthread_cond_t *c = cnd_native(a[0], NULL);
    return c ? (int32_t)pthread_cond_broadcast(c) : -1;
 }
 int32_t shim_pthread_cond_wait(uint32_t *a) {
    /* a[0]=cond, a[1]=mutex */
+   PSX_CEN_BUMP(waits, a[0]);
+   PSX_CEN_WHO(wait_caller, a[0], a);
    pthread_cond_t  *c = cnd_native(a[0], NULL);
    pthread_mutex_t *m = mtx_native(a[1], NULL);
    if (!c || !m) return -1;
@@ -228,16 +448,47 @@ static void psx_build_timespec(struct timespec *ts, const void *i386ts) {
 }
 int32_t shim_pthread_cond_timedwait(uint32_t *a) {
    /* a[0]=cond, a[1]=mutex, a[2]=abstime */
+   PSX_CEN_BUMP(waits, a[0]);
+   PSX_CEN_WHO(wait_caller, a[0], a);
+   psx_dump_chain(a);
    pthread_cond_t  *c = cnd_native(a[0], NULL);
    pthread_mutex_t *m = mtx_native(a[1], NULL);
    if (!c || !m) return -1;
    if (!a[2]) return (int32_t)pthread_cond_wait(c, m);
    struct timespec ts;
    psx_build_timespec(&ts, (void *)(uintptr_t)a[2]);
-   return (int32_t)pthread_cond_timedwait(c, m, &ts);
+   int r = pthread_cond_timedwait(c, m, &ts);
+   /* The RETURN VALUE is load-bearing here, not just the wakeup: Source's
+    * CThreadSyncObject::Wait loops on it (`cmp $4,%eax; je` for EINTR, then a
+    * re-check of its own m_cSet), so a wait that keeps returning 0 without anyone
+    * signalling turns a timed wait into an unbounded spin. ⚠Sample the WHOLE run,
+    * not the first N calls: the first eight here each blocked ~150us and returned
+    * 0, which looked benign, while the aggregate rate was ~1us/call -- the
+    * degenerate behaviour only appears in the totals. */
+   if (psx_census_secs()) {
+      unsigned idx = (r == 0) ? 0 : (r == ETIMEDOUT) ? 1 : (r == EINTR) ? 2
+                   : (r == EINVAL) ? 3 : (r == EPERM) ? 4 : 5;
+      __atomic_fetch_add(&g_tw_ret[idx], 1ul, __ATOMIC_RELAXED);
+      /* How long did it actually block? A "successful" wait that returns in
+       * under a microsecond never waited at all. */
+      static unsigned long n = 0;
+      if ((__atomic_fetch_add(&n, 1ul, __ATOMIC_RELAXED) % 2000000ul) == 1999999ul) {
+         struct timespec now;
+         clock_gettime(CLOCK_REALTIME, &now);
+         fprintf(stderr, "[psx] timedwait sample: ret=%d ts={%lld,%ld} "
+                         "now={%lld,%ld} (deadline %lld s away)\n",
+                 r, (long long)ts.tv_sec, ts.tv_nsec,
+                 (long long)now.tv_sec, now.tv_nsec,
+                 (long long)(ts.tv_sec - now.tv_sec));
+         fflush(stderr);
+      }
+   }
+   return (int32_t)r;
 }
 int32_t shim_pthread_cond_timedwait_relative_np(uint32_t *a) {
    /* a[0]=cond, a[1]=mutex, a[2]=reltime */
+   PSX_CEN_BUMP(waits, a[0]);
+   PSX_CEN_WHO(wait_caller, a[0], a);
    pthread_cond_t  *c = cnd_native(a[0], NULL);
    pthread_mutex_t *m = mtx_native(a[1], NULL);
    if (!c || !m) return -1;

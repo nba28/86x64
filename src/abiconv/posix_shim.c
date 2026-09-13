@@ -76,6 +76,17 @@ int32_t shim_dlopen(uint32_t *a) {
    if (posix_trace()) {
       fprintf(stderr, "[posix] dlopen(\"%s\", 0x%x) = %p\n",
               path ? path : "(null)", mode, h);
+      /* ★A FAILED dlopen MUST REPORT dlerror(). Without it a module that cannot
+       * load is indistinguishable from one that was never asked for, and the app
+       * just quietly gives up: Portal 2's CSourceAppSystemGroup::Create() failed
+       * solely because vguimatsurface.dylib returned NULL here, and with no error
+       * text the whole startup looked like an idle-park in shutdown instead.
+       * dlerror() also CLEARS the error, so read it only on the failure path --
+       * never speculatively, or a later genuine dlerror() comes back empty. */
+      if (h == NULL) {
+         const char *e = dlerror();
+         fprintf(stderr, "[posix]   dlerror: %s\n", e ? e : "(none)");
+      }
       fflush(stderr);
    }
    return (int32_t)x64_objc_wrap((uint64_t)(uintptr_t)h);
@@ -485,6 +496,19 @@ int32_t shim_dladdr(uint32_t *a) {
 
 int32_t shim_dlclose(uint32_t *a) {
    void *h = dl_handle(a[0]);
+   /* Trace the CLOSE as well as the open: for an app that decides to quit, the
+    * FIRST dlclose is the start of teardown, so the last module opened before it
+    * is how far startup actually got. (Portal 2 2026-09-13: the loaded-image list
+    * at the hang was missing engine.dylib and materialsystem.dylib, which is what
+    * revealed the process was in CAppSystemGroup::OnShutdown rather than parked in
+    * startup.) */
+   if (posix_trace()) {
+      Dl_info info;
+      const char *name = "(unknown)";
+      if (h && dladdr(h, &info) && info.dli_fname) { name = info.dli_fname; }
+      fprintf(stderr, "[posix] dlclose(%p)  %s\n", h, name);
+      fflush(stderr);
+   }
    return (int32_t)dlclose(h);
 }
 
