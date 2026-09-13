@@ -5,6 +5,7 @@
 // Silicon it may well report 0, which would make a 2006 "do I have a usable GPU?"
 // test fail and take the never-tested error path.
 #include <stdio.h>
+#include <stdlib.h>
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/CGLRenderers.h>
 #include <ApplicationServices/ApplicationServices.h>
@@ -17,10 +18,24 @@ static void show(CGLRendererInfoObj info, GLint i, const char *name, CGLRenderer
     else printf("%d\n", (int)v);
 }
 
-int main(void) {
+/* The mask is now an ARGUMENT, because which mask you pass is the whole question
+ * for Portal 2. Its shaderapidx9 calls CGLQueryRendererInfo(0x1, ...) -- a
+ * hardcoded-looking mask, not the one CGDisplayIDToOpenGLDisplayMask returns on
+ * this machine -- and that call never returns: the process dies inside Metal on
+ * com.Metal.DeviceDispatch. Run `cglprobe` for the real mask and `cglprobe 0x1`
+ * for Portal 2's, in SEPARATE processes, since the second may fault by design.
+ * If 0x1 faults natively too then this is a platform fact about a stale mask and
+ * the cure is a shim, exactly as with the dead AGL enumeration API; if it
+ * succeeds natively, the bug is ours. */
+int main(int argc, char **argv) {
     CGDirectDisplayID disp = CGMainDisplayID();
     GLuint mask = CGDisplayIDToOpenGLDisplayMask(disp);
     printf("main display id = %u, OpenGL display mask = 0x%x\n", (unsigned)disp, (unsigned)mask);
+    if (argc > 1) {
+        mask = (GLuint)strtoul(argv[1], NULL, 0);
+        printf("using CALLER-SUPPLIED mask 0x%x\n", (unsigned)mask);
+    }
+    fflush(stdout);
 
     CGLRendererInfoObj info = NULL;
     GLint nrend = 0;
