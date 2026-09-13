@@ -61,6 +61,20 @@ static void ft_init(void) {
    if (!g_out) g_out = stderr;
    g_failonly = getenv("FTRACE_FAILONLY") ? 1 : 0;
    g_filter = getenv("FTRACE_FILTER");
+   /* ★Print &__stderrp IN THIS PROCESS. A translated i386 image binds
+    * libSystem/___stderrp into a __DATA,__nl_symbol_ptr slot and then reads it
+    * with a 32-bit load (`movl slot,%eax`) before dereferencing it once -- so a
+    * >4GB &__stderrp is TRUNCATED and the deref faults. Printing it here is the
+    * only way to compare against the observed fault address, because the dyld
+    * shared-cache slide differs between this process and a plain probe. */
+   {
+      extern FILE *__stderrp;
+      void *a = (void *)&__stderrp;
+      fprintf(g_out ? g_out : stderr,
+              "[ftrace] &__stderrp = %p  low32 = 0x%08x  (a 32-bit load of the "
+              "bind slot yields the low32 and faults on deref)\n",
+              a, (unsigned)(unsigned long)a);
+   }
    fprintf(g_out, "[ftrace] armed: fopen/freopen/open/stat/lstat/access%s%s\n",
            g_failonly ? " (failures only)" : "",
            g_filter ? " filter=" : "");
@@ -78,8 +92,22 @@ static void ft_log(const char *fn, const char *path, int ok, long extra) {
    if (!path) path = "(null)";
    if (g_filter && !strstr(path, g_filter)) { g_in = 0; return; }
    if (g_failonly && ok) { g_in = 0; return; }
-   if (ok)
+   if (ok) {
       fprintf(g_out, "[ftrace] %-7s %s\n", fn, path);
+      /* ★For fopen/freopen the RETURNED FILE* matters as much as success: the
+       * i386 caller receives it through a 32-bit slot, so a FILE allocated above
+       * 4GB is TRUNCATED on the way back and unusable. `extra` carries the
+       * pointer on success for those two. MEASURED on Portal 2 2026-09-14:
+       * libSystem's fopen returns 0x7ff8_5277abb8 -- above 4GB -- so this is a
+       * whole broken class, not just the __stderrp variable. */
+      if (extra) {
+         fprintf(g_out, "[ftrace]         -> FILE* = %#lx%s\n",
+                 (unsigned long)extra,
+                 ((unsigned long)extra >> 32)
+                    ? "   >>> ABOVE 4GB (truncates for a 32-bit caller)"
+                    : "   (below 4GB, representable)");
+      }
+   }
    else
       fprintf(g_out, "[ftrace] %-7s %s   >>> FAILED errno=%ld (%s)\n",
               fn, path, extra, strerror((int)extra));
@@ -89,14 +117,14 @@ static void ft_log(const char *fn, const char *path, int ok, long extra) {
 
 static FILE *ft_fopen(const char *path, const char *mode) {
    FILE *r = fopen(path, mode);
-   ft_log("fopen", path, r != NULL, (long)errno);
+   ft_log("fopen", path, r != NULL, r ? (long)(uintptr_t)r : (long)errno);
    return r;
 }
 INTERPOSE(ft_fopen, fopen);
 
 static FILE *ft_freopen(const char *path, const char *mode, FILE *s) {
    FILE *r = freopen(path, mode, s);
-   ft_log("freopen", path, r != NULL, (long)errno);
+   ft_log("freopen", path, r != NULL, r ? (long)(uintptr_t)r : (long)errno);
    return r;
 }
 INTERPOSE(ft_freopen, freopen);
