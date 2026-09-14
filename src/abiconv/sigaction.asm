@@ -56,6 +56,7 @@ ___sigaction:
    pop rdi
 
    leave
-
    mov r11d, [rsp]
+   add rsp, 4                   ; POP the i386 4-byte return address; without
+                                ; this the caller's esp stays 4 low forever
    jmp r11
