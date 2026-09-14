@@ -70,9 +70,40 @@ static int posix_trace(void) {
  * ABI; a high (native) address can't be called by i386 code directly and is
  * flagged. The RTLD_* pseudo-handles (-1..-5) sign-extend from their i386
  * 0xFFFFFFFx form. */
+/* INSTRUMENT (one job): make a named dlopen FAIL, to find out whether the app
+ * has a fallback path behind a library we cannot yet fully bridge.
+ * `M64_DLOPEN_DENY=<substr>[:<substr>...]` — a NULL return plus a dlerror the
+ * app can read is exactly what it would see if the library were absent, so this
+ * exercises the app's OWN not-available branch rather than a synthetic one.
+ * Inert unless the variable is set. */
+static int dlopen_denied(const char *path) {
+   if (path == NULL) { return 0; }
+   const char *deny = getenv("M64_DLOPEN_DENY");
+   if (deny == NULL || *deny == '\0') { return 0; }
+   const char *p = deny;
+   while (*p) {
+      const char *colon = strchr(p, ':');
+      size_t n = colon ? (size_t)(colon - p) : strlen(p);
+      if (n > 0) {
+         char pat[256];
+         if (n >= sizeof pat) { n = sizeof pat - 1; }
+         memcpy(pat, p, n); pat[n] = '\0';
+         if (strstr(path, pat) != NULL) { return 1; }
+      }
+      if (!colon) { break; }
+      p = colon + 1;
+   }
+   return 0;
+}
+
 int32_t shim_dlopen(uint32_t *a) {
    const char *path = a[0] ? (const char *)(uintptr_t)a[0] : NULL;
    int mode = (int)a[1];
+   if (dlopen_denied(path)) {
+      fprintf(stderr, "[posix] dlopen DENIED by M64_DLOPEN_DENY: %s\n", path);
+      fflush(stderr);
+      return 0;
+   }
    void *h = dlopen(path, mode);
    if (posix_trace()) {
       fprintf(stderr, "[posix] dlopen(\"%s\", 0x%x) = %p\n",
@@ -207,18 +238,89 @@ static uint32_t dlsym_make_thunk(uint64_t native, const char *name) {
  * address is already callable and passes through; a >4GB DATA symbol keeps the
  * arena-handle path (it is dereferenced, not called). Shared by every
  * lookup-by-name shim so the function-vs-data discipline stays in one place. */
+static int image_is_translated(const void *base);
+
+/* ★"FITS IN 32 BITS" IS NOT "IS TRANSLATED". This used to return any sub-4GB
+ * address to the i386 caller unchanged, on the reasoning that a low address must
+ * be one of our own translated images. That holds for every image the pipeline
+ * PRODUCES (they are based at 0x10000000) and for system frameworks (always in
+ * the high shared cache) -- but it is a property of where dyld happened to map
+ * something, not of which ABI its code speaks, and dyld will map a NATIVE dylib
+ * low whenever there is room.
+ *
+ * MEASURED, Portal 2 (2026-09-14): modern `steamclient.dylib` is x86_64 + arm64
+ * with NO i386 SLICE, and dyld mapped its 24 MB at 0x2143f000. libsteam_api
+ * dlsym'd `CreateInterface` from it, this returned the raw low address as
+ * "callable", and the translated caller then called genuinely native SysV code
+ * with the i386 cdecl frame. The callee read garbage argument registers and
+ * stored an out-param through one: SIGBUS, err=0x6, `movl $1,(%rbx)` with rbx
+ * pointing into steamclient's OWN read-only __TEXT -- while %rsp was still the
+ * low, 4-byte-aligned translated stack. That pairing (native rip, low
+ * 4-byte-aligned rsp) is the signature of a cross-ABI call with no bridge; see
+ * the unbridged native-call bug, of which dlsym is the second delivery
+ * mechanism -- and one the static-bind audit cannot see.
+ *
+ * So ask the question we actually mean, with the structural test this file
+ * already defines for the mirror-image case: an image is translated iff it
+ * loads libabiconv. A low NATIVE function now gets the same callable thunk a
+ * high one does; a low native DATA symbol still passes through, since a 4-byte
+ * pointer does reach it and it is read, not called. If dladdr cannot place the
+ * address at all we keep the old pass-through rather than guess.
+ * Kill switch M64_NO_LOW_NATIVE_THUNK=1. */
+static int addr_is_translated_code(uint64_t v) {
+   static int off = -1;
+   if (off < 0) { off = getenv("M64_NO_LOW_NATIVE_THUNK") ? 1 : 0; }
+   if (off) { return 1; }                  /* A/B arm: every low address passes */
+   Dl_info di;
+   if (dladdr((void *)(uintptr_t)v, &di) == 0 || di.dli_fbase == NULL) {
+      return 1;                            /* unplaceable: keep the old behaviour */
+   }
+   /* ★libabiconv is the ABI BOUNDARY ITSELF, and it is a native image mapped
+    * low, so the structural test below would call it "native" and wrap its
+    * entries in a marshalling thunk. Every entry point it publishes for an i386
+    * caller (the `___X` bridges) is ALREADY i386-callable, so that thunk would
+    * DOUBLE-CONVERT -- the same defect translated_provider_for exists to prevent,
+    * arriving from the other side. The three callers all consult
+    * lookup_by_name_target() first and return the shim before reaching here, so
+    * this only covers a libabiconv symbol resolved by a bare dlsym with no
+    * registered shim; pass those through exactly as before. */
+   static const void *abiconv_base = NULL;
+   if (abiconv_base == NULL) {
+      Dl_info self;
+      if (dladdr((void *)(uintptr_t)&addr_is_executable, &self) != 0) {
+         abiconv_base = self.dli_fbase;
+      }
+   }
+   if (abiconv_base != NULL && di.dli_fbase == abiconv_base) { return 1; }
+   return image_is_translated(di.dli_fbase);
+}
+
 static int32_t fnptr_lookup_result(uint64_t v, const char *name) {
    if (v == 0) { return 0; }
-   if (v < 0x100000000ULL) { return (int32_t)(uint32_t)v; }  /* translated/low: callable */
-   /* High native address. A FUNCTION (executable page) can't be called by i386
-    * code directly; hand back a low-4GB callable thunk. A DATA symbol keeps the
-    * arena-handle path (it is dereferenced, not called). */
+   /* Low AND translated: i386-callable as it stands. */
+   if (v < 0x100000000ULL && addr_is_translated_code(v)) {
+      return (int32_t)(uint32_t)v;
+   }
+   /* Native address, high or low. A FUNCTION (executable page) can't be called
+    * by i386 code directly; hand back a low-4GB callable thunk. A DATA symbol
+    * keeps the arena-handle path (it is dereferenced, not called). */
    if (addr_is_executable(v)) {
       uint32_t thunk = dlsym_make_thunk(v, name);
-      if (thunk) { return (int32_t)thunk; }
+      if (thunk) {
+         if (posix_trace() && v < 0x100000000ULL) {
+            fprintf(stderr, "[posix] lookup: LOW NATIVE function %s=0x%llx "
+                    "bridged via thunk 0x%x\n", name ? name : "?",
+                    (unsigned long long)v, thunk);
+            fflush(stderr);
+         }
+         return (int32_t)thunk;
+      }
       /* pool exhausted: fall through to the handle (better a later fault than
        * silently returning 0 / a wrong call) */
    }
+   /* A low native DATA symbol is reachable by a 4-byte pointer already — wrapping
+    * it in an arena handle would break the read it exists for. */
+   if (v < 0x100000000ULL) { return (int32_t)(uint32_t)v; }
    if (posix_trace()) {
       fprintf(stderr, "[posix] lookup: high DATA symbol %s=0x%llx wrapped as handle\n",
               name ? name : "?", (unsigned long long)v);

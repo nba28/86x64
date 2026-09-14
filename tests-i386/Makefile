@@ -1686,6 +1686,29 @@ $(BUILD_DIR)/99_csmem_handle_family.i386: $(BUILD_DIR)/99_csmem_handle_family.o
 $(BUILD_DIR)/99_translated_provider_defer.i386: $(BUILD_DIR)/99_translated_provider_defer.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -export_dynamic -e _main -o $@ $<
 
+# 99_low_native_thunk: the fixture dlopens a NATIVE x86_64 helper, which in a
+# translated process gets mapped BELOW 4GB -- the case `fnptr_lookup_result` used
+# to misread as "low, therefore translated, therefore i386-callable". It must
+# carry NO libabiconv load command, since "links libabiconv" is the structural
+# test the fix keys on.
+# -image_base is a HINT only, and `-no_fixup_chains` is what lets the linker
+# record it at all (ld disables preferred load addresses under chained fixups).
+# MEASURED: dyld does not honour it -- the helper lands wherever the low arena
+# has room (0xacb2f0, 0x2e182f0, ... across runs) -- which is fine, because low
+# is all the guard needs. Lowness is therefore asserted at RUN TIME by the test
+# script, via the "LOW NATIVE function" trace line that only the new branch
+# emits, never inferred from this flag.
+$(BUILD_DIR)/lownative_helper.dylib: $(SRC_DIR)/lownative_helper.c | $(BUILD_DIR)
+	clang -arch x86_64 -dynamiclib -O0 \
+	      -Wl,-image_base,0x30000000 -Wl,-no_fixup_chains \
+	      -install_name @rpath/lownative_helper.dylib \
+	      -o $@ $<
+
+.PHONY: low-native-thunk
+low-native-thunk: $(BUILD_DIR)/99_low_native_thunk.x86_64 \
+                  $(BUILD_DIR)/lownative_helper.dylib
+	@bash low_native_thunk_test.sh
+
 # 99_dladdr_shim: dladdr is absent from the i386 sysroot's link surface here, so
 # `undefined dynamic_lookup` lets static-interpose bind it to libabiconv's
 # ___dladdr at translate time -- the route the translated Python takes.
