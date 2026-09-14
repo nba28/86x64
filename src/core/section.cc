@@ -2468,6 +2468,53 @@ namespace MachO {
                }
             }
          }
+         /* (c+d fused) `add %anchor,[%anchor + idx*4 + disp]` — clang emits the
+          *     table LOAD and the anchor ADD as ONE instruction, with the anchor
+          *     serving as both the table base and the addend, and the result
+          *     landing back in the anchor register:
+          *
+          *       add edi,[edi + edx*4 + 0x2a7]   ; edi = anchor + table[idx]
+          *       jmp edi
+          *
+          *     The (c) -> (d) chain below never matches it: (c) wants
+          *     MOV_GPRv_MEMv and (d) wants a register-to-register ADD. So the
+          *     dispatch went unrecognised, the table was never claimed, and its
+          *     bytes were parsed as CODE — the same end state as the unbounded
+          *     table-base lea, reached by a different route.
+          *
+          *     MEASURED, Portal 2 libtogl `IDirect3D9::CheckDeviceFormat`
+          *     (i386 0x15b67, anchor 0x15a31, table 0x15cd8, 9 entries whose raw
+          *     values 0x272/0x13f/0x20e/0x215/0x29d decode as the junk
+          *     `jb`/`aas`/`add` stream the pcmap rows show). The jump then left
+          *     %rip in the low-4GB arena at a `prot=rw-` page (err=0x15:
+          *     instruction fetch + protection).
+          *
+          *     Both roles must be the SAME live anchor, and the scale must be 4;
+          *     anything else is an ordinary indexed add, not a dispatch. Case (e)
+          *     still validates every entry against the section before recording
+          *     slots, so a non-switch load that happens to match this shape
+          *     yields nothing. Kill switch M64_NO_JT_FUSED_ADD=1. */
+         else if (iform == XED_IFORM_ADD_GPRv_MEMv && jt_is_gpr32(reg0)) {
+            static const bool fused_add =
+               std::getenv("M64_NO_JT_FUSED_ADD") == nullptr;
+            const xed_reg_enum_t mbase =
+               jt_norm32(xed_decoded_inst_get_base_reg(ops, 0));
+            const xed_reg_enum_t midx =
+               jt_norm32(xed_decoded_inst_get_index_reg(ops, 0));
+            auto a = anchors.find(reg0);
+            if (fused_add && a != anchors.end() && mbase == reg0 &&
+                midx != XED_REG_INVALID && midx != reg0 &&
+                xed_operand_values_get_scale(ops) == 4) {
+               const ssize_t disp =
+                  xed_decoded_inst_get_memory_displacement(ops, 0);
+               const std::size_t tbl = (std::size_t)((ssize_t)a->second + disp);
+               if (tbl >= sect_lo && tbl < sect_hi) {
+                  tbl_val[reg0] = { tbl, a->second };   /* table AND anchor */
+                  tbl_addr.erase(reg0);
+                  sets_state = true;
+               }
+            }
+         }
          /* (d) add %reg,%anchor where reg holds a table entry -> reg = target.
           *     The anchor register's value resolves the table's anchor. */
          else if (iform == XED_IFORM_ADD_GPRv_GPRv_01 ||
