@@ -2356,9 +2356,47 @@ namespace MachO {
             } else if (index == XED_REG_INVALID) {
                auto a = anchors.find(jt_norm32(base));
                if (a != anchors.end()) {
-                  tbl_addr[reg0] = a->second + disp;      /* anchor-relative */
-                  tbl_val.erase(reg0);
-                  sets_state = true;
+                  /* ★A `lea %reg,[%anchor + disp]` is only a TABLE BASE if it
+                   * lands in THIS section. Anchor-relative addressing is how
+                   * i386 PIC reaches EVERYTHING — strings, globals, vtables —
+                   * so most such leas are not table bases at all, and recording
+                   * one poisons case (c): the indexed load finds a `tbl_addr`
+                   * entry and takes the table-base branch instead of the
+                   * (c-combined) anchor+disp branch that would compute the real
+                   * table. The rest of this pass already requires the table and
+                   * every case target to be inside the section (auto-size below
+                   * tests exactly that), so gating here is the same rule applied
+                   * one step earlier, not a new assumption.
+                   *
+                   * MEASURED, Portal 2 libtogl `GLMDecode` (i386 0x27890): the
+                   * default arm of the switch does `lea eax,[eax+0x19fbf]` to
+                   * get its "unknown" STRING, which recorded tbl_addr[EAX] =
+                   * 0x41858 — a __cstring address, far outside __text
+                   * [0x1630,0x2fb10). Two instructions later
+                   * `mov edx,[eax+edx*4+0xb3]` therefore resolved its table to
+                   * 0x41858 instead of 0x2794c, auto-size failed bounds at once
+                   * (i = 0 < 2), and NO slots were recorded. The 11 table bytes
+                   * were then parsed as CODE: entry 0x73 decoded as a short
+                   * `jae` and was WIDENED to a 6-byte near jcc, 0x4d became
+                   * `dec ebp`, 0x5d became the `pop ebp` idiom — so the emitted
+                   * table was shifted and shot through with instructions.
+                   * GLMDecode(10) jumped to anchor+0x24648d48. ⚠The linear walk
+                   * is why a NOT-TAKEN arm can do this: at run time %eax is
+                   * still the anchor when the indexed load executes.
+                   *
+                   * Falling through with sets_state = false lets the stale-drop
+                   * below erase any tbl_addr/tbl_val for %reg0, which is what we
+                   * want — the lea genuinely redefined it.
+                   * Kill switch M64_NO_JT_LEA_BOUNDS=1. */
+                  static const bool lea_bounds =
+                     std::getenv("M64_NO_JT_LEA_BOUNDS") == nullptr;
+                  const std::size_t cand =
+                     (std::size_t)((ssize_t)a->second + disp);
+                  if (!lea_bounds || (cand >= sect_lo && cand < sect_hi)) {
+                     tbl_addr[reg0] = cand;                /* anchor-relative */
+                     tbl_val.erase(reg0);
+                     sets_state = true;
+                  }
                }
             }
          }
