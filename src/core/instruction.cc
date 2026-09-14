@@ -3320,8 +3320,25 @@ namespace MachO {
                      goto pic_anchor_fallthrough; /* no SIB byte? bail */
                   }
                   const uint8_t sib      = instbuf.at(modrm_idx + 1);
-                  const uint8_t scale_f  = (sib >> 6) & 0x03;  /* bits 7:6 */
-                  const uint8_t idx_f    = (sib >> 3) & 0x07;  /* bits 5:3 */
+                  uint8_t scale_f        = (sib >> 6) & 0x03;  /* bits 7:6 */
+                  uint8_t idx_f          = (sib >> 3) & 0x07;  /* bits 5:3 */
+                  if (pic_anchor_in_index) {
+                     /* ★The anchor was the INDEX, not the base (section.cc
+                      * proved scale == 1 and base != ESP). SIB is symmetric at
+                      * scale 1, so the fix is to SWAP the roles: the live
+                      * value moves into the index field and r11 — holding the
+                      * resolved `anchor + disp` — takes the base field, giving
+                      *
+                      *   i386 | lea edx, [live + anchor + disp32]
+                      *   X86  | lea  r11, [rip + disp32]
+                      *        | lea  edx, [r11 + live*1]
+                      *
+                      * Encoding the live BASE in the index field is why
+                      * section.cc rejects an ESP base: index field 100 means
+                      * "no index" and would silently drop the operand. */
+                     idx_f = (uint8_t)(sib & 0x07);   /* old base -> new index */
+                     scale_f = 0;                     /* scale 1 */
+                  }
                   if (idx_f == 0x04) {
                      /* ESP/no-index in SIB — not reachable from a real index
                       * register; fall through to the generic rewrite. */

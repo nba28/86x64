@@ -32,6 +32,14 @@ namespace MachO {
                                                       (target = anchor + disp).
                                                       Transform emits rip-rel,
                                                       bypassing base register. */
+      bool pic_anchor_in_index = false;           /*!< SIB form whose ANCHOR is
+                                                      the INDEX register, not the
+                                                      base (`lea [live+anchor+
+                                                      disp32]`, scale 1). The
+                                                      transform must then keep the
+                                                      BASE as the live index and
+                                                      put the resolved target in
+                                                      the SIB base. */
       Immediate<bits> *imm = nullptr;
       const SectionBlob<bits> *brdisp = nullptr;  /*!< branch displacement pointee */
       std::size_t dbg_orig_md = 0;                /*!< DBG: original i386 abs disp32 */

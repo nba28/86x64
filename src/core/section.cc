@@ -1502,12 +1502,47 @@ namespace MachO {
                 * when the BASE is a known PIC anchor — the instruction.cc
                 * transform will emit `lea r11,[rip+table]; op [r11+idx*scale]`
                 * replacing the anchor base with the resolved table pointer.
-                * Forms where ONLY the INDEX is in the anchor range (no base)
-                * are not PIC patterns and skip as before. */
-               if (indexreg != XED_REG_INVALID) {
-                  /* Only proceed if basereg is actually an anchor — we've
-                   * already confirmed basereg is in EAX..EDI range above. */
-                  if (anchors.find(basereg) == anchors.end()) continue;
+                *
+                * ★But the anchor is not always the BASE. SIB is symmetric for
+                * scale 1, and clang emits the operands in whatever order its
+                * addressing-mode matcher produced, so a loop over a static
+                * buffer routinely comes out as
+                *
+                *     lea edx, [eax + edi + 0xa4b0]   # edi = get_pc_thunk anchor
+                *                                     # eax = a live counter
+                *
+                * which is the SAME access as `[anchor + idx + disp]` with the
+                * two SIB fields swapped. Skipping it left the RAW i386
+                * displacement in the translated instruction, and ★a raw disp
+                * is NEVER safe: translated code is bigger, so the translated
+                * section layout differs from the i386 one and `anchor + disp`
+                * reaches a DIFFERENT section than it did originally. Portal 2's
+                * libsteam_api (i386 0x61f6) then scanned and stored through
+                * `anchor + 0xa4b0`, which in the translated image lands inside
+                * its own read-only __TEXT — SIGBUS, err=0x6, on a write-
+                * protected r-x page. Three instructions earlier the sibling
+                * `lea esi,[edi + 0xa4b1]` (anchor in the BASE, no index) was
+                * rewritten CORRECTLY, which is why audits read the region clean.
+                *
+                * So: accept EITHER slot as the anchor. The index slot requires
+                * scale 1 (`anchor*2` is not an anchor) and a base that can be
+                * re-encoded AS a SIB index — field 100 means "no index", so an
+                * ESP base cannot make the swap. Both slots anchored stays
+                * ambiguous and still bails. Kill switch
+                * M64_NO_PIC_ANCHOR_INDEX=1 restores the old skip. */
+               static const bool index_anchor =
+                  std::getenv("M64_NO_PIC_ANCHOR_INDEX") == nullptr;
+               bool anchor_is_index = false;
+               xed_reg_enum_t anchor_reg = basereg;
+               if (anchors.find(basereg) == anchors.end()) {
+                  if (!index_anchor) continue;
+                  if (indexreg < XED_REG_EAX || indexreg > XED_REG_EDI) continue;
+                  if (anchors.find(indexreg) == anchors.end()) continue;
+                  if (xed_decoded_inst_get_scale(ops, i) != 1) continue;
+                  if (basereg == XED_REG_ESP) continue;
+                  anchor_is_index = true;
+                  anchor_reg = indexreg;
+               } else if (indexreg != XED_REG_INVALID) {
                   /* Index register must be a general GP (EAX..EDI) and must
                    * NOT itself be an anchor (if it is, the two-anchor form is
                    * ambiguous — bail and leave it unhandled). */
@@ -1517,16 +1552,17 @@ namespace MachO {
                const unsigned dwidth =
                   xed_decoded_inst_get_memory_displacement_width(ops, i);
                if (dwidth != sizeof(uint32_t)) continue;
-               auto anchor_it = anchors.find(basereg);
+               auto anchor_it = anchors.find(anchor_reg);
                if (anchor_it == anchors.end()) continue;
 
                const ssize_t disp =
                   xed_decoded_inst_get_memory_displacement(ops, i);
                const std::size_t target = anchor_it->second + disp;
                if (std::getenv("MACHO_TRACE_ANCHOR")) {
-                  fprintf(stderr, "[anchor] inst=0x%zx base=%s anchor=0x%zx disp=0x%zx target=0x%zx iform=%s\n",
+                  fprintf(stderr, "[anchor] inst=0x%zx %s=%s anchor=0x%zx disp=0x%zx target=0x%zx iform=%s\n",
                           (size_t)inst->loc.vmaddr,
-                          xed_reg_enum_t2str(basereg),
+                          anchor_is_index ? "index" : "base",
+                          xed_reg_enum_t2str(anchor_reg),
                           (size_t)anchor_it->second, (size_t)disp, (size_t)target,
                           xed_iform_enum_t2str(iform));
                }
@@ -1556,6 +1592,7 @@ namespace MachO {
                inst->memidx = i;
                inst->memdisp = target_blob;
                inst->pic_anchored = true;
+               inst->pic_anchor_in_index = anchor_is_index;
                /* pic_anchored implies neither absolute nor existing
                 * rip-relative — transform consumes the flag and
                 * synthesises a new rip-relative encoding. */
