@@ -25,6 +25,9 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
 
 /* must match the codes in typeconv.cc (cb_arg_code / cb_ret_code) and the
  * blob layout emitted by cb_sig_emit */
@@ -33,10 +36,12 @@ typedef struct {
    uint32_t nargs;
    uint32_t ret_kind;
    uint8_t  arg_kinds[X64_CB_MAX_ARGS];
+   uint32_t arg_sizes[X64_CB_MAX_ARGS];  /* CBA_PTR_REC pointee size | COPYBACK */
 } x64_cb_sig;
 
 enum { CBA_I32 = 0, CBA_I64 = 1, CBA_PTR = 2, CBA_OBJ = 3,
-       CBA_F32 = 4, CBA_F64 = 5 };
+       CBA_F32 = 4, CBA_F64 = 5, CBA_PTR_REC = 6 };
+#define CBA_SIZE_COPYBACK 0x80000000u
 enum { CBR_VOID = 0, CBR_I32 = 1, CBR_PTR = 2, CBR_OBJ = 3, CBR_I32SX = 4,
        CBR_I64 = 5 };
 
@@ -66,6 +71,42 @@ static os_unfair_lock g_bind_lock = OS_UNFAIR_LOCK_INIT;
 static int cb_trace(void) {
    static int t = -1;
    if (t < 0) { t = getenv("CB_BRIDGE_TRACE") != NULL; }
+   return t;
+}
+
+/* Bytes actually readable at `p`, capped at `want`: the header-derived pointee
+ * size is NOT trustworthy against the runtime, so the bounce must never read
+ * past the record's own VM region.
+ *
+ * ★MEASURED, and this is not hypothetical: abigen parses modern headers, where
+ * `struct dirent` is the 64-bit-inode layout of 1048 bytes — but Portal 2
+ * imports plain `_scandir` (not `$INODE64`), and modern libSystem still ships
+ * that legacy entry returning 268-byte, 32-bit-inode records. Copying the
+ * header's 1048 bytes from a 268-byte record over-reads ~780 bytes, which is
+ * usually harmless heap and occasionally the end of a mapping. Clamping turns
+ * a rare crash into a short copy; the tail is zeroed so the callee never reads
+ * undefined bytes either way. */
+static uint64_t cb_readable_span(uint64_t p, uint64_t want) {
+   mach_vm_address_t a = (mach_vm_address_t)p;
+   mach_vm_size_t    rsz = 0;
+   vm_region_basic_info_data_64_t info;
+   mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+   mach_port_t obj = MACH_PORT_NULL;
+   if (mach_vm_region(mach_task_self(), &a, &rsz, VM_REGION_BASIC_INFO_64,
+                      (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) {
+      return 0;
+   }
+   if (a > p) { return 0; }                        /* p sits in a hole */
+   if ((info.protection & VM_PROT_READ) == 0) { return 0; }
+   const uint64_t avail = (uint64_t)a + (uint64_t)rsz - p;
+   return want < avail ? want : avail;
+}
+
+/* Kill switch for the CBA_PTR_REC bounce (A/B harness): restores the old
+ * truncation of a >4GB callback pointer argument. */
+static int cb_no_ptr_bounce(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("M64_NO_CB_PTR_BOUNCE") != NULL; }
    return t;
 }
 
@@ -200,6 +241,9 @@ uint64_t x64_cb_dispatch(uint64_t slot, const uint64_t *gp, const uint64_t *fp,
    const x64_cb_sig  *sig = b.sig;
 
    uint32_t words[X64_CB_MAX_ARGS * 2];
+   struct { void *lo; uint64_t native; uint32_t size; int back; }
+      bounce[X64_CB_MAX_ARGS];
+   uint32_t nbounce = 0;
    uint32_t w = 0, gpi = 0, fpi = 0, sti = 0;
    for (uint32_t i = 0; i < sig->nargs; ++i) {
       const uint8_t kind = sig->arg_kinds[i];
@@ -213,6 +257,38 @@ uint64_t x64_cb_dispatch(uint64_t slot, const uint64_t *gp, const uint64_t *fp,
       case CBA_I32:
       case CBA_PTR:
       case CBA_F32:                /* float bits = xmm/stack slot low 4 bytes */
+         words[w++] = (uint32_t)v;
+         break;
+      case CBA_PTR_REC:
+         /* ★A pointer to a record the NATIVE side owns. Truncating it hands the
+          * i386 callback a plausible-looking unmapped address (Portal 2:
+          * scandir's `const struct dirent *` at 0x7f95fb809400 -> 0x748ea200,
+          * SIGSEGV in the callback's strcmp). Bounce the pointee through the
+          * low-4GB shim heap so a 4-byte pointer can actually reach it.
+          *
+          * A pointer already below 4GB is left EXACTLY as before — it is
+          * reachable, and it is usually the i386 side's own context word coming
+          * back — so this changes behaviour only where it was already broken. */
+         if (v >= 0x100000000ULL && !cb_no_ptr_bounce()) {
+            const uint32_t meta = sig->arg_sizes[i];
+            const uint32_t sz   = meta & ~CBA_SIZE_COPYBACK;
+            const uint64_t n = sz ? cb_readable_span(v, sz) : 0;
+            void *lo = n ? malloc(sz) : NULL;    /* shim malloc -> low-4GB */
+            if (lo) {
+               memcpy(lo, (const void *)(uintptr_t)v, (size_t)n);
+               if (n < sz) { memset((char *)lo + n, 0, (size_t)(sz - n)); }
+               bounce[nbounce].lo     = lo;
+               bounce[nbounce].native = v;
+               bounce[nbounce].size   = (uint32_t)n;   /* copy BACK only what we read */
+               bounce[nbounce].back   = (meta & CBA_SIZE_COPYBACK) != 0;
+               ++nbounce;
+               words[w++] = (uint32_t)(uintptr_t)lo;
+               break;
+            }
+            /* Allocation failed, or abigen recorded no size: fall through to the
+             * old truncation rather than pass 0 — a loud fault at the old
+             * address beats a silent NULL deref inside the callback. */
+         }
          words[w++] = (uint32_t)v;
          break;
       case CBA_OBJ:
@@ -269,6 +345,15 @@ uint64_t x64_cb_dispatch(uint64_t slot, const uint64_t *gp, const uint64_t *fp,
 
    cr->done = 1;
    __atomic_sub_fetch(&g_cb_depth, 1, __ATOMIC_SEQ_CST);
+   /* Copy a non-const bounced pointee back before releasing it, so a callback
+    * that WRITES through its argument is seen by the native caller. A const
+    * pointee is never written back — its page may genuinely be read-only. */
+   for (uint32_t k = 0; k < nbounce; ++k) {
+      if (bounce[k].back) {
+         memcpy((void *)(uintptr_t)bounce[k].native, bounce[k].lo, bounce[k].size);
+      }
+      free(bounce[k].lo);
+   }
    free(stkbuf);
    if (cb_trace()) {
       fprintf(stderr, "[cbret] t=%x slot %llu fn 0x%x eax=0x%x\n",

@@ -514,11 +514,34 @@ namespace {
    enum cb_arg_code : uint8_t {
       CBA_I32 = 0,   /* int-domain arg, low 32 bits -> 1 word              */
       CBA_I64 = 1,   /* long long -> 2 words (lo, hi)                      */
-      CBA_PTR = 2,   /* pointer, truncate (process heap is low-4GB)        */
+      CBA_PTR = 2,   /* pointer, truncate — see CBA_PTR_REC on why that is */
+                     /* right only for a pointer the i386 side itself owns  */
       CBA_OBJ = 3,   /* objc/CF object ptr: wrap via x64_objc_wrap if high */
       CBA_F32 = 4,   /* float (xmm low 4 bytes) -> 1 word                  */
       CBA_F64 = 5,   /* double -> 2 words                                  */
+      /* ★Pointer to a COMPLETE record, of the size in arg_sizes[]: bounce the
+       * pointee through a low-4GB buffer when it is >4GB.
+       *
+       * CBA_PTR's "truncate (process heap is low-4GB)" is true of OUR shim heap
+       * and false of libSystem's. It holds for the common callback pointer — a
+       * user-data/context word the i386 code supplied earlier and is getting
+       * back — but NOT for a record the NATIVE side allocated and the callback
+       * READS. Portal 2: `scandir`'s filter gets a `const struct dirent *` from
+       * libSystem's heap at 0x7f95fb809400; truncation handed FileSelect()
+       * 0x748ea200, and its `strcmp(d->d_name, ".")` faulted on an unmapped
+       * low address. ⚠CBA_OBJ is NOT the answer even though it handles >4GB:
+       * it yields an opaque arena HANDLE, and this callee DEREFERENCES the
+       * pointer as a struct rather than passing it back to an API.
+       *
+       * arg_sizes[i] = pointee size; bit 31 = copy the pointee BACK after the
+       * call (set only for a non-const pointee, so a genuinely read-only page
+       * is never written). */
+      CBA_PTR_REC = 6,
    };
+   constexpr uint32_t CBA_SIZE_COPYBACK = 0x80000000u;
+   /* Refuse to bounce an absurd pointee: a bad/huge size would turn one
+    * mis-declared prototype into a giant memcpy per callback invocation. */
+   constexpr long long CBA_MAX_REC_BOUNCE = 64 * 1024;
    enum cb_ret_code : uint32_t {
       CBR_VOID  = 0,
       CBR_I32   = 1, /* eax, zero-extended                                 */
@@ -532,7 +555,8 @@ namespace {
 
    struct cb_sig {
       uint32_t ret_kind;
-      std::vector<uint8_t> arg_kinds;
+      std::vector<uint8_t>  arg_kinds;
+      std::vector<uint32_t> arg_sizes;   /* CBA_PTR_REC only; 0 otherwise */
    };
    std::vector<cb_sig> cb_sigs;
    std::map<std::string, unsigned> cb_sig_dedupe;
@@ -602,7 +626,11 @@ namespace {
       return true;
    }
 
-   uint8_t cb_arg_code_for(CXType t) {
+   /* `size_out` receives the CBA_PTR_REC pointee size (with CBA_SIZE_COPYBACK
+    * set for a non-const pointee), or 0 for every other code. */
+   uint8_t cb_arg_code_for(CXType t, uint32_t *size_out = nullptr) {
+      if (size_out) { *size_out = 0; }
+      const CXType t_orig = t;
       t = clang_getCanonicalType(t);
       switch (t.kind) {
       case CXType_Bool:
@@ -630,9 +658,29 @@ namespace {
       case CXType_ObjCId:
       case CXType_ObjCClass:
          return CBA_OBJ;
-      case CXType_Pointer:
-         return cb_is_cf_record_ptr(clang_getCanonicalType(clang_getPointeeType(t)))
-            ? CBA_OBJ : CBA_PTR;
+      case CXType_Pointer: {
+         const CXType pointee = clang_getPointeeType(t);
+         const CXType pc = clang_getCanonicalType(pointee);
+         if (cb_is_cf_record_ptr(pc)) { return CBA_OBJ; }
+         /* A pointer to a COMPLETE record is one the native side may own and
+          * the callback will dereference — bounce it (see CBA_PTR_REC). An
+          * OPAQUE record was already taken by cb_is_cf_record_ptr above, and a
+          * non-record pointee (void*, char*, another pointer) has no size we
+          * can trust, so it keeps the old truncation. */
+         if (size_out && pc.kind == CXType_Record) {
+            const long long sz = clang_Type_getSizeOf(pc);
+            if (sz > 0 && sz <= CBA_MAX_REC_BOUNCE) {
+               uint32_t v = (uint32_t)sz;
+               if (!clang_isConstQualifiedType(pointee)) {
+                  v |= CBA_SIZE_COPYBACK;
+               }
+               *size_out = v;
+               return CBA_PTR_REC;
+            }
+         }
+         (void)t_orig;
+         return CBA_PTR;
+      }
       case CXType_BlockPointer:
       case CXType_ConstantArray:
       case CXType_IncompleteArray:
@@ -738,11 +786,17 @@ unsigned cb_sig_register(CXType fnproto) {
    cb_sig sig;
    sig.ret_kind = cb_ret_code_for(clang_getResultType(fnproto));
    for (int i = 0; i < nargs; ++i) {
-      sig.arg_kinds.push_back(cb_arg_code_for(clang_getArgType(fnproto, i)));
+      uint32_t asz = 0;
+      sig.arg_kinds.push_back(cb_arg_code_for(clang_getArgType(fnproto, i), &asz));
+      sig.arg_sizes.push_back(asz);
    }
 
    std::string key = std::to_string(sig.ret_kind) + ":";
    for (uint8_t k : sig.arg_kinds) { key += (char)('0' + k); }
+   /* ★Sizes are part of the signature's IDENTITY: two callbacks can agree on
+    * every arg_kind and differ in a bounced pointee's size, and sharing one
+    * descriptor between them would copy the wrong number of bytes. */
+   for (uint32_t z : sig.arg_sizes) { key += "/" + std::to_string(z); }
    auto it = cb_sig_dedupe.find(key);
    if (it != cb_sig_dedupe.end()) { return it->second; }
 
@@ -765,6 +819,12 @@ void cb_sig_emit(std::ostream& os) {
       for (unsigned k = 0; k < CB_MAX_ARGS; ++k) {
          if (k) { os << ", "; }
          os << (k < sig.arg_kinds.size() ? (unsigned)sig.arg_kinds[k] : 0u);
+      }
+      os << std::endl;
+      os << "\tdd ";
+      for (unsigned k = 0; k < CB_MAX_ARGS; ++k) {
+         if (k) { os << ", "; }
+         os << (k < sig.arg_sizes.size() ? (unsigned long)sig.arg_sizes[k] : 0ul);
       }
       os << std::endl;
    }
