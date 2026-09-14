@@ -174,6 +174,21 @@ extern CFStringRef CGImageSourceGetTypeWithURL(CFURLRef url);
  * here would clash. */
 #include <arpa/inet.h>
 
+/* <servers/bootstrap.h> — bootstrap_look_up & friends (Portal 2 2026-09-14).
+ * WHY THIS MATTERS BEYOND ONE SYMBOL: _bootstrap_look_up was ALREADY in the
+ * consider set, but with no prototype abigen could not emit a bridge, so
+ * static-interpose left the bind pointing at libSystem's REAL function. A
+ * translated caller then reached native code with i386 conventions -- and
+ * crucially the callee's `ret` pops EIGHT bytes where the translator pushed
+ * FOUR, so control returned to (adjacent stack word << 32 | real return addr).
+ * Portal 2 died at rip=0xb03_051044eb, whose low half is a valid
+ * libsteam_api address and whose high half is leftover stack. err=0x14
+ * (instruction fetch) is the tell.
+ * ⚠ A missing PROTOTYPE is therefore not a cosmetic gap: it silently converts a
+ * bridged call into a raw cross-ABI one. Audit with
+ * src/86x64/unbridged-native-calls.py, which lists exactly these. */
+#include <servers/bootstrap.h>
+
 
 //// TESTING ////
 struct coords {
