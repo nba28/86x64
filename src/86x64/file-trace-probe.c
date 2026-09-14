@@ -99,8 +99,10 @@ static void ft_log(const char *fn, const char *path, int ok, long extra) {
        * 4GB is TRUNCATED on the way back and unusable. `extra` carries the
        * pointer on success for those two. MEASURED on Portal 2 2026-09-14:
        * libSystem's fopen returns 0x7ff8_5277abb8 -- above 4GB -- so this is a
-       * whole broken class, not just the __stderrp variable. */
-      if (extra) {
+       * whole broken class, not just the __stderrp variable.
+       * ⚠ Gate on the CALL: every other entry point passes errno in `extra`, so an
+       * unguarded print reported a stat's errno as a "FILE* = 0x2". */
+      if (extra && (fn[0] == 'f' && (fn[1] == 'o' || fn[1] == 'r'))) {
          fprintf(g_out, "[ftrace]         -> FILE* = %#lx%s\n",
                  (unsigned long)extra,
                  ((unsigned long)extra >> 32)

@@ -13,6 +13,19 @@
 typedef uint32_t ptr32_t;
 typedef uint64_t ptr64_t;
 
+/* ★A FILE* crossing from i386 is a HANDLE, not a pointer (Portal 2 2026-09-14).
+ * typeconv.cc now classifies `struct __sFILE *` as a CF-style ref, so the normal
+ * bridges wrap a >4GB FILE on the way out and unwrap it on the way in. The printf
+ * family does NOT use those bridges -- it is variadic and hand-marshalled here --
+ * so every entry point that takes a stream must resolve it itself, or it hands
+ * native stdio an arena handle. x64_objc_unwrap returns an arena handle's real
+ * 64-bit value and passes anything else through unchanged, so a low raw FILE*
+ * (and NULL) still works. */
+extern "C" uint64_t x64_objc_unwrap(uint32_t h);
+static inline FILE *stream_from_i386(uint32_t h) {
+   return (FILE *)(uintptr_t)x64_objc_unwrap(h);
+}
+
 typedef uint32_t size32_t;
 typedef uint64_t size64_t;
 
@@ -64,6 +77,19 @@ namespace {
          ++i;
       }
       return (reg_width_t) i;
+   }
+
+   /* convert_arg<ptr32_t,ptr64_t> for a FILE* slot: resolve the handle instead
+    * of widening it. Advances the cursors identically. */
+   uint64_t convert_stream_arg(const void *& args32, void *& args64,
+                               reg_width_t *& argtypes, unsigned& arg_count) {
+      const uint64_t real = x64_objc_unwrap(*(const ptr32_t *)args32);
+      *(ptr64_t *)args64 = real;
+      args32 = (const char *) args32 + align_up<size_t>(sizeof(ptr32_t), 4);
+      args64 = (char *) args64 + align_up<size_t>(sizeof(ptr64_t), 8);
+      *argtypes++ = type_reg_width<ptr64_t>();
+      ++arg_count;
+      return real;
    }
 
    template <typename T32, typename T64>
@@ -415,7 +441,7 @@ extern "C" unsigned sprintf_conversion_f(const void *args32, void *args64, reg_w
 
 extern "C" unsigned fprintf_conversion_f(const void *args32, void *args64, reg_width_t *argtypes) {
    unsigned arg_count = 0;
-   convert_arg<ptr32_t, ptr64_t>(args32, args64, argtypes, arg_count);
+   convert_stream_arg(args32, args64, argtypes, arg_count);   /* FILE * */
    return printf_conversion_f(args32, args64, argtypes) + 1;
 }
 
@@ -470,7 +496,7 @@ extern "C" unsigned sscanf_conversion_f(const void *args32, void *args64, reg_wi
 
 extern "C" unsigned fscanf_conversion_f(const void *args32, void *args64, reg_width_t *argtypes) {
    unsigned arg_count = 0;
-   convert_arg<ptr32_t, ptr64_t>(args32, args64, argtypes, arg_count); /* FILE * */
+   convert_stream_arg(args32, args64, argtypes, arg_count);   /* FILE * */
    return scanf_conversion_f(args32, args64, argtypes) + 1;
 }
 
@@ -610,7 +636,7 @@ int vsprintf_vshim(const uint32_t *a) {
 }
 
 int vfprintf_vshim(const uint32_t *a) {
-   FILE        *stream = (FILE *)(uintptr_t)a[0];
+   FILE        *stream = stream_from_i386(a[0]);
    const char  *fmt    = (const char *)(uintptr_t)a[1];
    const uint32_t *ap   = (const uint32_t *)(uintptr_t)a[2];
    alignas(16) uint64_t args64[VA_SLOTS_MAX];
@@ -726,7 +752,7 @@ int printf_vshim(const uint32_t *a) {
    return vprintf(fmt, va);
 }
 int fprintf_vshim(const uint32_t *a) {
-   FILE *fp = (FILE *)(uintptr_t)a[0];
+   FILE *fp = stream_from_i386(a[0]);
    VA_BUILD((const char *)(uintptr_t)a[1], &a[2]);
    return vfprintf(fp, fmt, va);
 }

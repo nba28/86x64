@@ -1869,6 +1869,57 @@ static void patch_dyld_section(const struct mach_header_64 *mh64, intptr_t slide
 static uint64_t g_import_zero_word  = 0;
 static uint64_t g_import_errno_word = 0;
 
+/* ── The three stdio STREAM VARIABLES (Portal 2 2026-09-14) ────────────────
+ * A translated image binds libSystem/___stderrp (also ___stdoutp / ___stdinp)
+ * into a __DATA,__nl_symbol_ptr slot and then reads it the same way it reads any
+ * scalar extern:
+ *     movl slot, %eax        ; eax = &__stderrp, TRUNCATED to 32 bits
+ *     movl (%eax), %r11d     ; deref -> SIGSEGV
+ * dyld writes the real 64-bit &__stderrp, so the 4-byte load keeps only the low
+ * half. PROVEN inside the faulting process: &__stderrp = 0x7ff852955e38, low32
+ * 0x52955e38, and the fault address was 0x52955e38 exactly. 31 such binds exist
+ * across Portal 2's tree (19 stderr, 8 stdout, 4 stdin), and the one that bit was
+ * libsteam_api building an fprintf(stderr, ...) to report why Steam init failed.
+ *
+ * Point the slot at a low-4GB cell instead, holding the stream as a WRAPPED
+ * ARENA HANDLE -- the same representation typeconv now gives every FILE*, so the
+ * handle unwraps to the real native stream in whichever bridge receives it
+ * (including the hand-marshalled printf family). Storing the raw FILE* would not
+ * work: it is itself >4GB (measured: fopen -> 0x7ff8_5277abb8).
+ *
+ * ⛔ NOT fdopen(2,"w"): that allocates through LIBSYSTEM's malloc under two-level
+ * namespace, not our low-4GB shim, so it just returns another >4GB FILE*. */
+static uint64_t g_import_stdio_cell[3];   /* [0]=stdin [1]=stdout [2]=stderr */
+
+extern uint32_t x64_objc_wrap(uint64_t real);   /* objc_shim.c */
+
+static uint64_t *stdio_stream_cell(const char *name) {
+   /* M64_NO_STDIO_STREAM_CELL=1 leaves the slot bound to libSystem's &__stderrp,
+    * i.e. reproduces the real defect (a >4GB address read through a 4-byte load),
+    * so the guard's OFF arm faults for the genuine reason instead of an
+    * approximation of it. */
+   static int off = -1;
+   if (off < 0) { off = getenv("M64_NO_STDIO_STREAM_CELL") ? 1 : 0; }
+   if (off) { return NULL; }
+   int idx;
+   FILE *f;
+   if (strcmp(name, "___stdinp") == 0)        { idx = 0; f = stdin;  }
+   else if (strcmp(name, "___stdoutp") == 0)  { idx = 1; f = stdout; }
+   else if (strcmp(name, "___stderrp") == 0)  { idx = 2; f = stderr; }
+   else { return NULL; }
+   if (!g_import_stdio_cell[idx]) {
+      if (!f) { return NULL; }
+      const uint32_t h = x64_objc_wrap((uint64_t)(uintptr_t)f);
+      if (!h) { return NULL; }        /* arena exhausted: leave the slot alone */
+      g_import_stdio_cell[idx] = (uint64_t)h;
+      if (g_verbose) {
+         fprintf(stderr, "abiconv stdio: %s -> handle %#x (real %p)\n",
+                 name, h, (void *)f);
+      }
+   }
+   return &g_import_stdio_cell[idx];
+}
+
 /* Low-4GB i386-layout copy of `_DefaultRuneLocale` (the C rune-locale table the
  * inlined <ctype.h> macros — isalnum/isspace/tolower/... — index directly). An
  * i386 binary reads `__DefaultRuneLocale.__runetype[c]` as
@@ -1954,6 +2005,7 @@ static void patch_import_pointers(const struct mach_header_64 *mh64,
                                   intptr_t slide, const char *imgname) {
    if (((uintptr_t)&g_import_zero_word >> 32) ||
        ((uintptr_t)&g_import_errno_word >> 32) ||
+       ((uintptr_t)&g_import_stdio_cell[0] >> 32) ||
        ((uintptr_t)&g_i386_rune[0] >> 32)) {
       if (g_verbose) {
          fprintf(stderr, "abiconv import_pointers: libabiconv >4GB; skip %s\n",
@@ -2032,6 +2084,14 @@ static void patch_import_pointers(const struct mach_header_64 *mh64,
                    * table base instead of the truncated 64-bit libSystem addr. */
                   i386_rune_build();
                   target = (uint64_t *)(void *)g_i386_rune;
+               } else if (strcmp(name, "___stderrp") == 0 ||
+                          strcmp(name, "___stdoutp") == 0 ||
+                          strcmp(name, "___stdinp")  == 0) {
+                  /* stdio stream variable: hand the i386 double-deref a low cell
+                   * holding a wrapped FILE handle (see stdio_stream_cell). The
+                   * generic value-shadow below would copy 4 bytes of the >4GB
+                   * FILE* verbatim, which is still a truncated pointer. */
+                  target = stdio_stream_cell(name);
                } else if (name[0] == '_') {
                   /* General value-typed data constant (scalar / small record,
                    * e.g. HIToolbox's `const HIViewID kHIViewWindowContentID`):

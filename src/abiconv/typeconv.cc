@@ -552,9 +552,23 @@ namespace {
          return true;
       }
       CXString s = clang_getTypeSpelling(pointee_canon);
-      const bool cf = std::string(clang_getCString(s)).find("__CF") != std::string::npos;
+      const std::string nm(clang_getCString(s));
       clang_disposeString(s);
-      return cf;
+      /* ★FILE (= struct __sFILE) is a HANDLE, not a data pointer -- Portal 2
+       * 2026-09-14. It escapes the incomplete-record test above because macOS's
+       * <stdio.h> defines the struct COMPLETELY, yet it is opaque in every way
+       * that matters: libc owns the object, callers only ever pass it back, and
+       * -- decisively -- a native FILE lives in libSystem's own heap ABOVE 4GB.
+       * MEASURED: fopen returns 0x7ff8_5277abb8, and the three stream variables
+       * are worse still (`movl slot,%eax; movl (%eax),..` on a >4GB &__stderrp
+       * truncates to a wild low address and faults; 31 such binds across Portal
+       * 2's tree). Treating it as a CF-style ref gives exactly the right policy
+       * for free: unwrap an arena handle on the way in, and on the way back wrap
+       * ONLY if the value is >4GB, so a low FILE* still passes through raw.
+       * ⚠ The printf family does NOT come through here -- it is variadic and
+       * hand-marshalled in printf-conv.cc, which must unwrap the stream itself. */
+      return nm.find("__CF") != std::string::npos ||
+             nm.find("__sFILE") != std::string::npos;
    }
 
    /* True if the record (recursively) contains NO floating-point field, so every
