@@ -15,47 +15,50 @@ static void shim_note(const char *sym) {
   pthread_mutex_unlock(&mtx);
 }
 
+long AddFolderRouting(long a, long b, long c_, long d, long e, long f) __asm("_AddFolderRouting");
+long AddFolderRouting(long a, long b, long c_, long d, long e, long f) { shim_note("_AddFolderRouting"); return 0; }
+
+long AllocContig(long a, long b, long c_, long d, long e, long f) __asm("_AllocContig");
+long AllocContig(long a, long b, long c_, long d, long e, long f) { shim_note("_AllocContig"); return 0; }
+
 long Allocate(long a, long b, long c_, long d, long e, long f) __asm("_Allocate");
 long Allocate(long a, long b, long c_, long d, long e, long f) { shim_note("_Allocate"); return 0; }
 
 long ComponentFunctionImplemented(long a, long b, long c_, long d, long e, long f) __asm("_ComponentFunctionImplemented");
 long ComponentFunctionImplemented(long a, long b, long c_, long d, long e, long f) { shim_note("_ComponentFunctionImplemented"); return 0; }
 
-long CopyCStringToPascal(long a, long b, long c_, long d, long e, long f) __asm("_CopyCStringToPascal");
-long CopyCStringToPascal(long a, long b, long c_, long d, long e, long f) { shim_note("_CopyCStringToPascal"); return 0; }
-
-long CopyPascalStringToC(long a, long b, long c_, long d, long e, long f) __asm("_CopyPascalStringToC");
-long CopyPascalStringToC(long a, long b, long c_, long d, long e, long f) { shim_note("_CopyPascalStringToC"); return 0; }
-
-long DTInstall(long a, long b, long c_, long d, long e, long f) __asm("_DTInstall");
-long DTInstall(long a, long b, long c_, long d, long e, long f) { shim_note("_DTInstall"); return 0; }
-
-long DateString(long a, long b, long c_, long d, long e, long f) __asm("_DateString");
-long DateString(long a, long b, long c_, long d, long e, long f) { shim_note("_DateString"); return 0; }
-
-long DateToSeconds(long a, long b, long c_, long d, long e, long f) __asm("_DateToSeconds");
-long DateToSeconds(long a, long b, long c_, long d, long e, long f) { shim_note("_DateToSeconds"); return 0; }
-
-long DirCreate(long a, long b, long c_, long d, long e, long f) __asm("_DirCreate");
-long DirCreate(long a, long b, long c_, long d, long e, long f) { shim_note("_DirCreate"); return 0; }
-
-long FSMatchAlias(long a, long b, long c_, long d, long e, long f) __asm("_FSMatchAlias");
-long FSMatchAlias(long a, long b, long c_, long d, long e, long f) { shim_note("_FSMatchAlias"); return 0; }
-
-long FSSpecToNativePathName(long a, long b, long c_, long d, long e, long f) __asm("_FSSpecToNativePathName");
-long FSSpecToNativePathName(long a, long b, long c_, long d, long e, long f) { shim_note("_FSSpecToNativePathName"); return 0; }
+long ComponentSetTarget(long a, long b, long c_, long d, long e, long f) __asm("_ComponentSetTarget");
+long ComponentSetTarget(long a, long b, long c_, long d, long e, long f) { shim_note("_ComponentSetTarget"); return 0; }
 
 long FSpCreateResFile(long a, long b, long c_, long d, long e, long f) __asm("_FSpCreateResFile");
 long FSpCreateResFile(long a, long b, long c_, long d, long e, long f) { shim_note("_FSpCreateResFile"); return 0; }
 
-long FlushVol(long a, long b, long c_, long d, long e, long f) __asm("_FlushVol");
-long FlushVol(long a, long b, long c_, long d, long e, long f) { shim_note("_FlushVol"); return 0; }
+long FSpOpenOrphanResFile(long a, long b, long c_, long d, long e, long f) __asm("_FSpOpenOrphanResFile");
+long FSpOpenOrphanResFile(long a, long b, long c_, long d, long e, long f) { shim_note("_FSpOpenOrphanResFile"); return 0; }
 
-long FreeMem(long a, long b, long c_, long d, long e, long f) __asm("_FreeMem");
-long FreeMem(long a, long b, long c_, long d, long e, long f) { shim_note("_FreeMem"); return 0; }
+long FSpOpenRF(long a, long b, long c_, long d, long e, long f) __asm("_FSpOpenRF");
+long FSpOpenRF(long a, long b, long c_, long d, long e, long f) { shim_note("_FSpOpenRF"); return 0; }
+
+long FSpResourceFileAlreadyOpen(long a, long b, long c_, long d, long e, long f) __asm("_FSpResourceFileAlreadyOpen");
+long FSpResourceFileAlreadyOpen(long a, long b, long c_, long d, long e, long f) { shim_note("_FSpResourceFileAlreadyOpen"); return 0; }
+
+long FindFolderRouting(long a, long b, long c_, long d, long e, long f) __asm("_FindFolderRouting");
+long FindFolderRouting(long a, long b, long c_, long d, long e, long f) { shim_note("_FindFolderRouting"); return 0; }
+
+long FlushIconRefs(long a, long b, long c_, long d, long e, long f) __asm("_FlushIconRefs");
+long FlushIconRefs(long a, long b, long c_, long d, long e, long f) { shim_note("_FlushIconRefs"); return 0; }
+
+long FlushIconRefsByVolume(long a, long b, long c_, long d, long e, long f) __asm("_FlushIconRefsByVolume");
+long FlushIconRefsByVolume(long a, long b, long c_, long d, long e, long f) { shim_note("_FlushIconRefsByVolume"); return 0; }
+
+long FollowFinderAlias(long a, long b, long c_, long d, long e, long f) __asm("_FollowFinderAlias");
+long FollowFinderAlias(long a, long b, long c_, long d, long e, long f) { shim_note("_FollowFinderAlias"); return 0; }
 
 long GetAliasInfo(long a, long b, long c_, long d, long e, long f) __asm("_GetAliasInfo");
 long GetAliasInfo(long a, long b, long c_, long d, long e, long f) { shim_note("_GetAliasInfo"); return 0; }
+
+long GetComponentIconSuite(long a, long b, long c_, long d, long e, long f) __asm("_GetComponentIconSuite");
+long GetComponentIconSuite(long a, long b, long c_, long d, long e, long f) { shim_note("_GetComponentIconSuite"); return 0; }
 
 long GetComponentVersion(long a, long b, long c_, long d, long e, long f) __asm("_GetComponentVersion");
 long GetComponentVersion(long a, long b, long c_, long d, long e, long f) { shim_note("_GetComponentVersion"); return 0; }
@@ -63,101 +66,77 @@ long GetComponentVersion(long a, long b, long c_, long d, long e, long f) { shim
 long GetFPos(long a, long b, long c_, long d, long e, long f) __asm("_GetFPos");
 long GetFPos(long a, long b, long c_, long d, long e, long f) { shim_note("_GetFPos"); return 0; }
 
-long GetString(long a, long b, long c_, long d, long e, long f) __asm("_GetString");
-long GetString(long a, long b, long c_, long d, long e, long f) { shim_note("_GetString"); return 0; }
+long GetFolderName(long a, long b, long c_, long d, long e, long f) __asm("_GetFolderName");
+long GetFolderName(long a, long b, long c_, long d, long e, long f) { shim_note("_GetFolderName"); return 0; }
+
+long GetIconRefFromFile(long a, long b, long c_, long d, long e, long f) __asm("_GetIconRefFromFile");
+long GetIconRefFromFile(long a, long b, long c_, long d, long e, long f) { shim_note("_GetIconRefFromFile"); return 0; }
+
+long GetVRefNum(long a, long b, long c_, long d, long e, long f) __asm("_GetVRefNum");
+long GetVRefNum(long a, long b, long c_, long d, long e, long f) { shim_note("_GetVRefNum"); return 0; }
+
+long HCreate(long a, long b, long c_, long d, long e, long f) __asm("_HCreate");
+long HCreate(long a, long b, long c_, long d, long e, long f) { shim_note("_HCreate"); return 0; }
+
+long HCreateResFile(long a, long b, long c_, long d, long e, long f) __asm("_HCreateResFile");
+long HCreateResFile(long a, long b, long c_, long d, long e, long f) { shim_note("_HCreateResFile"); return 0; }
+
+long HGetFInfo(long a, long b, long c_, long d, long e, long f) __asm("_HGetFInfo");
+long HGetFInfo(long a, long b, long c_, long d, long e, long f) { shim_note("_HGetFInfo"); return 0; }
+
+long HOpen(long a, long b, long c_, long d, long e, long f) __asm("_HOpen");
+long HOpen(long a, long b, long c_, long d, long e, long f) { shim_note("_HOpen"); return 0; }
+
+long HOpenDF(long a, long b, long c_, long d, long e, long f) __asm("_HOpenDF");
+long HOpenDF(long a, long b, long c_, long d, long e, long f) { shim_note("_HOpenDF"); return 0; }
+
+long HOpenRF(long a, long b, long c_, long d, long e, long f) __asm("_HOpenRF");
+long HOpenRF(long a, long b, long c_, long d, long e, long f) { shim_note("_HOpenRF"); return 0; }
 
 long HOpenResFile(long a, long b, long c_, long d, long e, long f) __asm("_HOpenResFile");
 long HOpenResFile(long a, long b, long c_, long d, long e, long f) { shim_note("_HOpenResFile"); return 0; }
 
-long LMGetCurApName(long a, long b, long c_, long d, long e, long f) __asm("_LMGetCurApName");
-long LMGetCurApName(long a, long b, long c_, long d, long e, long f) { shim_note("_LMGetCurApName"); return 0; }
+long HRstFLock(long a, long b, long c_, long d, long e, long f) __asm("_HRstFLock");
+long HRstFLock(long a, long b, long c_, long d, long e, long f) { shim_note("_HRstFLock"); return 0; }
 
-long LMGetCurApRefNum(long a, long b, long c_, long d, long e, long f) __asm("_LMGetCurApRefNum");
-long LMGetCurApRefNum(long a, long b, long c_, long d, long e, long f) { shim_note("_LMGetCurApRefNum"); return 0; }
+long HSetFInfo(long a, long b, long c_, long d, long e, long f) __asm("_HSetFInfo");
+long HSetFInfo(long a, long b, long c_, long d, long e, long f) { shim_note("_HSetFInfo"); return 0; }
 
-long MakeDataExecutable(long a, long b, long c_, long d, long e, long f) __asm("_MakeDataExecutable");
-long MakeDataExecutable(long a, long b, long c_, long d, long e, long f) { shim_note("_MakeDataExecutable"); return 0; }
+long HSetFLock(long a, long b, long c_, long d, long e, long f) __asm("_HSetFLock");
+long HSetFLock(long a, long b, long c_, long d, long e, long f) { shim_note("_HSetFLock"); return 0; }
 
-long MatchAlias(long a, long b, long c_, long d, long e, long f) __asm("_MatchAlias");
-long MatchAlias(long a, long b, long c_, long d, long e, long f) { shim_note("_MatchAlias"); return 0; }
+long IsAliasFile(long a, long b, long c_, long d, long e, long f) __asm("_IsAliasFile");
+long IsAliasFile(long a, long b, long c_, long d, long e, long f) { shim_note("_IsAliasFile"); return 0; }
 
-long MoveHHi(long a, long b, long c_, long d, long e, long f) __asm("_MoveHHi");
-long MoveHHi(long a, long b, long c_, long d, long e, long f) { shim_note("_MoveHHi"); return 0; }
+long OpenRFPerm(long a, long b, long c_, long d, long e, long f) __asm("_OpenRFPerm");
+long OpenRFPerm(long a, long b, long c_, long d, long e, long f) { shim_note("_OpenRFPerm"); return 0; }
 
-long NativePathNameToFSSpec(long a, long b, long c_, long d, long e, long f) __asm("_NativePathNameToFSSpec");
-long NativePathNameToFSSpec(long a, long b, long c_, long d, long e, long f) { shim_note("_NativePathNameToFSSpec"); return 0; }
+long OverrideIconRefFromResource(long a, long b, long c_, long d, long e, long f) __asm("_OverrideIconRefFromResource");
+long OverrideIconRefFromResource(long a, long b, long c_, long d, long e, long f) { shim_note("_OverrideIconRefFromResource"); return 0; }
 
-long NewAlias(long a, long b, long c_, long d, long e, long f) __asm("_NewAlias");
-long NewAlias(long a, long b, long c_, long d, long e, long f) { shim_note("_NewAlias"); return 0; }
+long ReadIconFile(long a, long b, long c_, long d, long e, long f) __asm("_ReadIconFile");
+long ReadIconFile(long a, long b, long c_, long d, long e, long f) { shim_note("_ReadIconFile"); return 0; }
 
-long NewAliasMinimal(long a, long b, long c_, long d, long e, long f) __asm("_NewAliasMinimal");
-long NewAliasMinimal(long a, long b, long c_, long d, long e, long f) { shim_note("_NewAliasMinimal"); return 0; }
+long RegisterIconRefFromIconFile(long a, long b, long c_, long d, long e, long f) __asm("_RegisterIconRefFromIconFile");
+long RegisterIconRefFromIconFile(long a, long b, long c_, long d, long e, long f) { shim_note("_RegisterIconRefFromIconFile"); return 0; }
 
-long PBCloseSync(long a, long b, long c_, long d, long e, long f) __asm("_PBCloseSync");
-long PBCloseSync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBCloseSync"); return 0; }
+long RegisterIconRefFromResource(long a, long b, long c_, long d, long e, long f) __asm("_RegisterIconRefFromResource");
+long RegisterIconRefFromResource(long a, long b, long c_, long d, long e, long f) { shim_note("_RegisterIconRefFromResource"); return 0; }
 
-long PBDirCreateSync(long a, long b, long c_, long d, long e, long f) __asm("_PBDirCreateSync");
-long PBDirCreateSync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBDirCreateSync"); return 0; }
-
-long PBFlushFileSync(long a, long b, long c_, long d, long e, long f) __asm("_PBFlushFileSync");
-long PBFlushFileSync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBFlushFileSync"); return 0; }
-
-long PBFlushVolSync(long a, long b, long c_, long d, long e, long f) __asm("_PBFlushVolSync");
-long PBFlushVolSync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBFlushVolSync"); return 0; }
-
-long PBGetEOFSync(long a, long b, long c_, long d, long e, long f) __asm("_PBGetEOFSync");
-long PBGetEOFSync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBGetEOFSync"); return 0; }
-
-long PBGetFCBInfoSync(long a, long b, long c_, long d, long e, long f) __asm("_PBGetFCBInfoSync");
-long PBGetFCBInfoSync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBGetFCBInfoSync"); return 0; }
-
-long PBGetFPosSync(long a, long b, long c_, long d, long e, long f) __asm("_PBGetFPosSync");
-long PBGetFPosSync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBGetFPosSync"); return 0; }
-
-long PBHGetFInfoSync(long a, long b, long c_, long d, long e, long f) __asm("_PBHGetFInfoSync");
-long PBHGetFInfoSync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBHGetFInfoSync"); return 0; }
-
-long PBHOpenDenySync(long a, long b, long c_, long d, long e, long f) __asm("_PBHOpenDenySync");
-long PBHOpenDenySync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBHOpenDenySync"); return 0; }
-
-long PBReadAsync(long a, long b, long c_, long d, long e, long f) __asm("_PBReadAsync");
-long PBReadAsync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBReadAsync"); return 0; }
-
-long PBReadSync(long a, long b, long c_, long d, long e, long f) __asm("_PBReadSync");
-long PBReadSync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBReadSync"); return 0; }
-
-long PBSetCatInfoSync(long a, long b, long c_, long d, long e, long f) __asm("_PBSetCatInfoSync");
-long PBSetCatInfoSync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBSetCatInfoSync"); return 0; }
-
-long PBSetEOFSync(long a, long b, long c_, long d, long e, long f) __asm("_PBSetEOFSync");
-long PBSetEOFSync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBSetEOFSync"); return 0; }
-
-long PBWriteAsync(long a, long b, long c_, long d, long e, long f) __asm("_PBWriteAsync");
-long PBWriteAsync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBWriteAsync"); return 0; }
-
-long PBWriteSync(long a, long b, long c_, long d, long e, long f) __asm("_PBWriteSync");
-long PBWriteSync(long a, long b, long c_, long d, long e, long f) { shim_note("_PBWriteSync"); return 0; }
-
-long PurgeSpace(long a, long b, long c_, long d, long e, long f) __asm("_PurgeSpace");
-long PurgeSpace(long a, long b, long c_, long d, long e, long f) { shim_note("_PurgeSpace"); return 0; }
-
-long ResolveAlias(long a, long b, long c_, long d, long e, long f) __asm("_ResolveAlias");
-long ResolveAlias(long a, long b, long c_, long d, long e, long f) { shim_note("_ResolveAlias"); return 0; }
-
-long ResolveAliasFile(long a, long b, long c_, long d, long e, long f) __asm("_ResolveAliasFile");
-long ResolveAliasFile(long a, long b, long c_, long d, long e, long f) { shim_note("_ResolveAliasFile"); return 0; }
+long RemoveFolderRouting(long a, long b, long c_, long d, long e, long f) __asm("_RemoveFolderRouting");
+long RemoveFolderRouting(long a, long b, long c_, long d, long e, long f) { shim_note("_RemoveFolderRouting"); return 0; }
 
 long SetA5(long a, long b, long c_, long d, long e, long f) __asm("_SetA5");
 long SetA5(long a, long b, long c_, long d, long e, long f) { shim_note("_SetA5"); return 0; }
 
-long TempFreeMem(long a, long b, long c_, long d, long e, long f) __asm("_TempFreeMem");
-long TempFreeMem(long a, long b, long c_, long d, long e, long f) { shim_note("_TempFreeMem"); return 0; }
+long SetCurrentA5(long a, long b, long c_, long d, long e, long f) __asm("_SetCurrentA5");
+long SetCurrentA5(long a, long b, long c_, long d, long e, long f) { shim_note("_SetCurrentA5"); return 0; }
 
-long TimeString(long a, long b, long c_, long d, long e, long f) __asm("_TimeString");
-long TimeString(long a, long b, long c_, long d, long e, long f) { shim_note("_TimeString"); return 0; }
+long UnmountVol(long a, long b, long c_, long d, long e, long f) __asm("_UnmountVol");
+long UnmountVol(long a, long b, long c_, long d, long e, long f) { shim_note("_UnmountVol"); return 0; }
 
 long UpdateAlias(long a, long b, long c_, long d, long e, long f) __asm("_UpdateAlias");
 long UpdateAlias(long a, long b, long c_, long d, long e, long f) { shim_note("_UpdateAlias"); return 0; }
 
-long UpperString(long a, long b, long c_, long d, long e, long f) __asm("_UpperString");
-long UpperString(long a, long b, long c_, long d, long e, long f) { shim_note("_UpperString"); return 0; }
+long WriteIconFile(long a, long b, long c_, long d, long e, long f) __asm("_WriteIconFile");
+long WriteIconFile(long a, long b, long c_, long d, long e, long f) { shim_note("_WriteIconFile"); return 0; }
