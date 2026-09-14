@@ -2238,7 +2238,21 @@ namespace MachO {
        * Keyed by (normalised frame base reg, displacement); invalidated whenever
        * that slot is rewritten, the base register is redefined, or %esp moves. */
       std::map<std::pair<int, ssize_t>, std::size_t> stack_tbl;
+
+      /* The SAME thing happens to the PIC ANCHOR, and losing it costs more.
+       * `mov [ebp-0x14],%edi` parks the anchor in a local and a later dispatch
+       * reloads it into a different register: `mov %ecx,[ebp-0x14];
+       * add %ecx,(%ecx,%eax,4),0x236; jmp *%ecx`. The anchor REWRITE follows the
+       * spill and retargets that load at the translated table, but this detector
+       * did not, so the table was never claimed and its ENTRIES kept their i386
+       * anchor-relative offsets -> `translated_anchor + i386_offset` = a
+       * mid-instruction address. (Portal 2 KeyValues::MakeCopy: the resulting
+       * runaway ate the entire 16 MB i386 stack.) Same key, same lifetime rules
+       * as stack_tbl. */
+      std::map<std::pair<int, ssize_t>, std::size_t> stack_anchor;
       const bool jt_spill = std::getenv("M64_NO_JT_SPILL_SLOTS") == nullptr;
+      const bool jt_anchor_spill =
+         jt_spill && std::getenv("M64_NO_JT_ANCHOR_SPILL") == nullptr;
 
       bool prev_call0 = false;     /* previous insn was `call $+0` (e8 00000000) */
       std::size_t pend_r11 = 0;    /* value of the last `lea r11,[rip+d]` (x86_64 anchor dance) */
@@ -2416,6 +2430,12 @@ namespace MachO {
             auto tb = tbl_addr.find(reg0);
             if (tb != tbl_addr.end()) { stack_tbl[key] = tb->second; }
             else { stack_tbl.erase(key); }
+            auto an = anchors.find(reg0);
+            if (jt_anchor_spill && an != anchors.end()) {
+               stack_anchor[key] = an->second;
+            } else {
+               stack_anchor.erase(key);
+            }
             spill_write = true;
          }
          /* (b-reload) `mov %reg,[%ebp/%esp + disp]` from a slot holding a spilled
@@ -2425,11 +2445,19 @@ namespace MachO {
                   xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID &&
                   (jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)) == XED_REG_EBP ||
                    jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)) == XED_REG_ESP) &&
-                  stack_tbl.count({ (int)jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)),
-                                    xed_decoded_inst_get_memory_displacement(ops, 0) })) {
-            tbl_addr[reg0] =
-               stack_tbl[{ (int)jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)),
-                           xed_decoded_inst_get_memory_displacement(ops, 0) }];
+                  (stack_tbl.count({ (int)jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)),
+                                     xed_decoded_inst_get_memory_displacement(ops, 0) }) ||
+                   stack_anchor.count({ (int)jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)),
+                                        xed_decoded_inst_get_memory_displacement(ops, 0) }))) {
+            const std::pair<int, ssize_t> key {
+               (int)jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)),
+               xed_decoded_inst_get_memory_displacement(ops, 0) };
+            auto tb = stack_tbl.find(key);
+            if (tb != stack_tbl.end()) { tbl_addr[reg0] = tb->second; }
+            else                       { tbl_addr.erase(reg0); }
+            auto an = stack_anchor.find(key);
+            if (an != stack_anchor.end()) { anchors[reg0] = an->second; }
+            else                          { anchors.erase(reg0); }
             tbl_val.erase(reg0);
             sets_state = true;
          }
@@ -2595,15 +2623,17 @@ namespace MachO {
             tbl_val.erase(reg0);
          }
 
-         if (jt_spill && !stack_tbl.empty()) {
+         if (jt_spill && (!stack_tbl.empty() || !stack_anchor.empty())) {
             /* A tracked frame slot dies when anything else writes it ... */
             if (!spill_write && xed_decoded_inst_number_of_memory_operands(&xedd) > 0 &&
                 xed_decoded_inst_mem_written(&xedd, 0) &&
                 xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID) {
                const xed_reg_enum_t mb = jt_norm32(xed_decoded_inst_get_base_reg(ops, 0));
                if (mb == XED_REG_EBP || mb == XED_REG_ESP) {
-                  stack_tbl.erase({ (int)mb,
-                                    xed_decoded_inst_get_memory_displacement(ops, 0) });
+                  const std::pair<int, ssize_t> dead {
+                     (int)mb, xed_decoded_inst_get_memory_displacement(ops, 0) };
+                  stack_tbl.erase(dead);
+                  stack_anchor.erase(dead);
                }
             }
             /* ... when the frame pointer itself is redefined (epilogue/`leave`) ... */
@@ -2611,6 +2641,10 @@ namespace MachO {
                 (jt_norm32(reg0raw) == XED_REG_EBP && jt_reg0_written(&xedd))) {
                for (auto i = stack_tbl.begin(); i != stack_tbl.end(); ) {
                   i = (i->first.first == (int)XED_REG_EBP) ? stack_tbl.erase(i)
+                                                           : std::next(i);
+               }
+               for (auto i = stack_anchor.begin(); i != stack_anchor.end(); ) {
+                  i = (i->first.first == (int)XED_REG_EBP) ? stack_anchor.erase(i)
                                                            : std::next(i);
                }
             }
@@ -2624,6 +2658,10 @@ namespace MachO {
                   i = (i->first.first == (int)XED_REG_ESP) ? stack_tbl.erase(i)
                                                            : std::next(i);
                }
+               for (auto i = stack_anchor.begin(); i != stack_anchor.end(); ) {
+                  i = (i->first.first == (int)XED_REG_ESP) ? stack_anchor.erase(i)
+                                                           : std::next(i);
+               }
             }
          }
 
@@ -2635,7 +2673,7 @@ namespace MachO {
          if (cat == XED_CATEGORY_RET || cat == XED_CATEGORY_INTERRUPT ||
              cat == XED_CATEGORY_SYSCALL || cat == XED_CATEGORY_SYSRET) {
             anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
-            stack_tbl.clear();
+            stack_tbl.clear(); stack_anchor.clear();
          } else if (cat == XED_CATEGORY_CALL && !is_pic_call0) {
             anchors.erase(XED_REG_EAX);
             anchors.erase(XED_REG_ECX);
