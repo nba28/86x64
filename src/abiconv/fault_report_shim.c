@@ -63,6 +63,9 @@
 #include <errno.h>
 #include "dyld_image_list.h"
 
+/* objc_shim.c: 1 + description when the address is a proxy-arena handle. */
+int x64_objc_arena_describe(uint64_t addr, char *buf, size_t n);
+
 static struct sigaction g_prev_segv, g_prev_bus;
 static int g_words = 48;
 
@@ -599,6 +602,38 @@ static void fr_handler(int sig, siginfo_t *info, void *uctx) {
               (unsigned long long)ss->__r14, (unsigned long long)ss->__r15,
               (unsigned long long)ss->__rflags,
               (unsigned long long)uc->uc_mcontext->__es.__err);
+
+      /* ★A raw PROXY-ARENA HANDLE that escaped into native code is invisible in
+       * a register dump: the receiver is an opaque low address and the "Class"
+       * libobjc derives from it is a plausible heap pointer, because a handle is
+       * the ADDRESS OF A SLOT holding the real object and libobjc reads that
+       * slot as the isa. Label any register that is one, and say what it wraps —
+       * that turns "0x80809770 crashed objc_msgSend" into the object's class
+       * name, which is what identifies the leaking path. (Portal 2's GL-probe
+       * teardown: a handle reached the native autorelease pool and faulted on
+       * drain. Quinn: NSInvocation -retainArguments.) Inert when no arena
+       * exists, so a non-ObjC target prints nothing extra. */
+      {
+         static const char *const rn[] = {
+            "rax","rbx","rcx","rdx","rsi","rdi","r8","r9",
+            "r10","r11","r12","r13","r14","r15" };
+         const uint64_t rv[] = {
+            ss->__rax, ss->__rbx, ss->__rcx, ss->__rdx, ss->__rsi, ss->__rdi,
+            ss->__r8,  ss->__r9,  ss->__r10, ss->__r11, ss->__r12, ss->__r13,
+            ss->__r14, ss->__r15 };
+         char d[160];
+         for (unsigned i = 0; i < sizeof rv / sizeof rv[0]; ++i) {
+            if (x64_objc_arena_describe(rv[i], d, sizeof d)) {
+               fprintf(stderr, "[fault] %-4s 0x%llx: %s\n",
+                       rn[i], (unsigned long long)rv[i], d);
+            }
+         }
+         if (fault && x64_objc_arena_describe((uint64_t)(uintptr_t)fault,
+                                              d, sizeof d)) {
+            fprintf(stderr, "[fault] fault 0x%llx: %s\n",
+                    (unsigned long long)(uintptr_t)fault, d);
+         }
+      }
 
       /* An address in NO image is the interesting case, not a dead end: ask the
        * kernel what the mapping actually is, and let the instruction bytes

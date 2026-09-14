@@ -682,6 +682,50 @@ uint64_t x64_objc_unwrap(uint32_t h) {
    return (uint64_t)h;
 }
 
+static int mem_readable(uintptr_t p, size_t len);   /* defined below */
+
+/* ONE JOB: say whether `addr` is a proxy-arena HANDLE, and what it stands for.
+ *
+ * A handle is the ADDRESS OF AN ARENA SLOT holding the real 64-bit object, so
+ * when a raw handle escapes into native code and gets messaged, libobjc reads
+ * the SLOT as the object's `isa` — the real object pointer poses as a Class,
+ * its fields are read as cache/mask, and the probe walks a wild bucket. That
+ * crash names nothing on its own: the receiver is an opaque low address and the
+ * bogus "Class" is a plausible heap pointer.
+ *
+ * Precedents, same shape, different leak path: Quinn's NSInvocation
+ * -retainArguments (bp_invocation_arg above), and Portal 2's GL-probe teardown,
+ * where a handle reached the native AUTORELEASE POOL and faulted on drain.
+ *
+ * Returns 1 and fills `buf` when `addr` is a handle, else 0. Used by the fault
+ * reporter to label registers; keep it a pure read (it runs in a signal
+ * handler) and never message the object. */
+int x64_objc_arena_describe(uint64_t addr, char *buf, size_t n) {
+   if (buf == NULL || n == 0) { return 0; }
+   buf[0] = '\0';
+   const uintptr_t p = (uintptr_t)addr;
+   if (g_arena_base == 0 || p < g_arena_base || p >= g_arena_end) { return 0; }
+   if ((p - g_arena_base) % sizeof(uint64_t) != 0) {
+      snprintf(buf, n, "INTERIOR of the proxy arena (not slot-aligned)");
+      return 1;
+   }
+   if (!mem_readable(p, sizeof(uint64_t))) {
+      snprintf(buf, n, "proxy-arena slot %lu (UNREADABLE)",
+               (unsigned long)((p - g_arena_base) / sizeof(uint64_t)));
+      return 1;
+   }
+   const uint64_t real = *(const uint64_t *)p;
+   const char *cname = NULL;
+   if (real != 0 && mem_readable((uintptr_t)real, sizeof(uint64_t))) {
+      Class c = object_getClass((id)(uintptr_t)real);
+      if (c) { cname = class_getName(c); }
+   }
+   snprintf(buf, n, "proxy-arena handle, slot %lu -> real %p (%s)",
+            (unsigned long)((p - g_arena_base) / sizeof(uint64_t)),
+            (void *)(uintptr_t)real, cname ? cname : "class unreadable");
+   return 1;
+}
+
 /*
  * Register layout handed back to the asm trampoline. reg[0..5] map to
  * rdi,rsi,rdx,rcx,r8,r9. Offsets are relied on by objc_msgSend.asm:
