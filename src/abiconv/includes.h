@@ -189,6 +189,28 @@ extern CFStringRef CGImageSourceGetTypeWithURL(CFURLRef url);
  * src/86x64/unbridged-native-calls.py, which lists exactly these. */
 #include <servers/bootstrap.h>
 
+/* <IOKit/IOCFPlugIn.h> — IOCreatePlugInInterfaceForService / IODestroyPlugInInterface
+ * (Portal 2 2026-09-14). THE SAME MISSING-PROTOTYPE DEFECT as bootstrap.h above,
+ * caught from the other end: most of IOKit arrives transitively through
+ * <CoreServices>/<ApplicationServices> (hence ___IOMasterPort, ___IOIteratorNext,
+ * ...), but IOCFPlugIn.h is pulled in by NEITHER — not even by IOKitLib.h — so
+ * this one entry point had no bridge while its neighbours did.
+ *
+ * The damage was not the return-width hazard this time but a HANDLE LEAK.
+ * CFUUIDGetConstantUUIDWithBytes IS bridged, so it hands the i386 caller a
+ * low-4GB proxy-arena handle; IOCreatePlugInInterfaceForService was NOT, so
+ * libsdl2 / inputsystem passed that raw handle to native IOKit as a CFUUIDRef.
+ * IOKit autoreleased it, and draining the pool messaged the handle: libobjc read
+ * the arena SLOT as the receiver's isa, so the real object posed as a Class and
+ * the method-cache probe walked a wild bucket (SIGSEGV in objc_msgSend+0x29,
+ * with r10 == the real object). See x64_objc_arena_describe(), which labels
+ * exactly this in the fault report.
+ *
+ * ⚠ Bridging the ENTRY POINT does not finish the job: it returns
+ * `IOCFPlugInInterface ***`, a COM-style vtable the i386 caller then calls
+ * through, so those function pointers are a separate cross-ABI problem. */
+#include <IOKit/IOCFPlugIn.h>
+
 
 //// TESTING ////
 struct coords {
