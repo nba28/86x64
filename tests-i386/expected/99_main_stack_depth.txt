@@ -1,0 +1,2 @@
+burned 4160 KiB of main stack
+exit_code: 42

@@ -909,13 +909,29 @@ uint32_t build_i386_main_frame(int64_t argc, char **argv) {
     *   [esp ...] argc, argv[0..argc-1], 0 (argv terminator),
     *             0 (envp terminator), 0 (apple terminator)
     *
-    * Place the frame in the bottom of the region, well below the strings,
-    * 16-byte aligned. We need (argc + 4) 4-byte words. Round up.
+    * The frame goes directly BELOW the strings, 16-byte aligned. We need
+    * (argc + 4) 4-byte words. Round up.
+    *
+    * Everything from the frame down to the guard page is the translated
+    * program's main stack, so the region size IS the stack size. The frame
+    * used to sit at base + 1 MB instead, which left the i386 main thread a
+    * 1 MB stack while the 15 MB above it went unused — Portal 2 ran off the
+    * bottom of it (a native callee's `push rbp` faulted one page below base).
+    * A real i386 main thread gets 8 MB; this region is 16.
     */
    size_t frame_words = (size_t)argc + 4;        /* argc + argv + 3 terminators */
    size_t frame_bytes = ((frame_words * 4) + 15) & ~(size_t)15;
-   uintptr_t frame_top = base + ARG_FRAME_SIZE;  /* leave the upper part for strings/scratch */
+   uintptr_t frame_top = (uintptr_t)strings_cursor & ~(uintptr_t)15;
+   if (getenv("M64_NO_FULL_MAIN_STACK")) {       /* kill switch: the old 1 MB */
+      frame_top = base + ARG_FRAME_SIZE;
+   }
    uintptr_t frame_bottom = (frame_top - frame_bytes) & ~(uintptr_t)15;
+
+   /* Guard page at the bottom, so running off the end of the stack faults
+    * HERE instead of silently writing into whatever mmap placed below us. */
+   if (mprotect(region, PAGE_SIZE, PROT_NONE) != 0) {
+      perror("wrapper: mprotect stack guard page");   /* not fatal */
+   }
 
    uint32_t *frame = (uint32_t *)frame_bottom;
    frame[0] = (uint32_t)argc;
@@ -930,6 +946,10 @@ uint32_t build_i386_main_frame(int64_t argc, char **argv) {
    if (dbg) {
       fprintf(stderr, "wrapper: frame_bottom=0x%llx (returning esp)\n",
               (unsigned long long)frame_bottom);
+      fprintf(stderr, "wrapper: i386 main stack [0x%llx,0x%llx) = %llu KiB\n",
+              (unsigned long long)(base + PAGE_SIZE),
+              (unsigned long long)frame_bottom,
+              (unsigned long long)((frame_bottom - base - PAGE_SIZE) / 1024));
       fprintf(stderr, "wrapper: frame contents (12 dwords):\n");
       for (int i = 0; i < 12; ++i) {
          fprintf(stderr, "  [esp+%2d] = 0x%08x\n", i * 4, frame[i]);
