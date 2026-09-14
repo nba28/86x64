@@ -673,6 +673,47 @@ static void fr_handler(int sig, siginfo_t *info, void *uctx) {
             fprintf(stderr, "   [rsp+%3d] 0x%08x\n", i * 4, w);
       }
 
+      /* ── i386 FRAME-POINTER CHAIN ─────────────────────────────────────────
+       * When rsp has run away from rbp — a runaway indirect call, a bad `sub
+       * esp`, a stack overflow — the window at rsp holds nothing but the
+       * wreckage, and the only surviving evidence of WHO got us here is the
+       * frame chain hanging off rbp. Translated i386 code keeps the classic
+       * `push ebp; mov ebp,esp` chain with 4-byte links, so [ebp] is the
+       * caller's ebp and [ebp+4] is its return address. Walk it and name each
+       * one. Cheap, and it works when the unwinder and the crash report do not
+       * (Portal 2, 2026-09-14: rsp 16 MB below rbp, rip mid-instruction). */
+      fprintf(stderr, "[fault] i386 frame chain from rbp (4-byte links):\n");
+      {
+         uint32_t fp = (uint32_t)ss->__rbp;
+         int level = 0, printed = 0;
+         for (; level < 32; level++) {
+            uint32_t saved = 0, ret = 0;
+            if (!fr_read((uint64_t)fp, &saved, sizeof saved) ||
+                !fr_read((uint64_t)fp + 4, &ret, sizeof ret)) {
+               fprintf(stderr, "   #%-2d ebp=0x%08x  <unreadable>\n", level, fp);
+               break;
+            }
+            char img[256];
+            if (ret && fr_image_for((uint64_t)ret, img, sizeof img))
+               fprintf(stderr, "   #%-2d ebp=0x%08x  ret=0x%08x   %s\n",
+                       level, fp, ret, img);
+            else
+               fprintf(stderr, "   #%-2d ebp=0x%08x  ret=0x%08x\n",
+                       level, fp, ret);
+            printed++;
+            /* A frame chain only ever grows upward; anything else is garbage,
+             * not a shorter stack, so say so rather than chasing it. */
+            if (saved <= fp) {
+               fprintf(stderr, "   (chain ends: saved ebp 0x%08x does not grow "
+                               "upward)\n", saved);
+               break;
+            }
+            fp = saved;
+         }
+         if (!printed)
+            fprintf(stderr, "   (rbp is not a readable frame pointer)\n");
+      }
+
       /* ── NATIVE 8-BYTE RETURN ADDRESSES ───────────────────────────────────
        * The 4-byte scan above exists because a translated call pushes a 4-byte
        * i386-granular return address even on the native stack. But the crashes
@@ -813,6 +854,23 @@ static void fr_install(void) {
     * header-derived names to full paths while we are still in normal context. */
    _dyld_register_func_for_add_image(fr_add_image);
    fr_arm_paths();
+
+   /* SA_ONSTACK does NOTHING without an alternate stack actually installed —
+    * and without one, a fault whose rsp is off the end of the stack cannot be
+    * reported at all: the kernel writes the signal frame below the broken rsp,
+    * THAT write faults too, and all you ever see is the nested fault at
+    * `_sigtramp`'s own `push rbp` (Portal 2, 2026-09-14). Static storage, not
+    * malloc: the process is already crashing when this gets used. */
+   static char altstack[512 * 1024] __attribute__((aligned(16)));
+   stack_t ss;
+   memset(&ss, 0, sizeof(ss));
+   ss.ss_sp    = altstack;
+   ss.ss_size  = sizeof(altstack);
+   ss.ss_flags = 0;
+   if (sigaltstack(&ss, NULL) != 0) {
+      fprintf(stderr, "[fault] sigaltstack failed: %s — a fault on a broken "
+                      "stack will not be reportable\n", strerror(errno));
+   }
 
    struct sigaction sa;
    memset(&sa, 0, sizeof(sa));
