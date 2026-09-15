@@ -1287,6 +1287,14 @@ $(BUILD_DIR)/99_cgl_renderer_check.i386: $(BUILD_DIR)/99_cgl_renderer_check.o
 	  || $(MAKE) --no-print-directory sysroot-gl
 	$(LD) $(LDFLAGS_I386) -e _main -framework OpenGL -framework ApplicationServices -o $@ $<
 
+# 99_iconv_bridge: iconv lives in its own libiconv.2.dylib on SL, which `make
+# sysroot` does not stage — take the i386 slice straight off the DVD on demand.
+$(BUILD_DIR)/99_iconv_bridge.i386: $(BUILD_DIR)/99_iconv_bridge.o
+	@[ -f "$(I386_SYSROOT)/usr/lib/libiconv.2.dylib" ] \
+	  || { lipo -thin i386 "$(SL_DVD)/usr/lib/libiconv.2.dylib" -output "$(I386_SYSROOT)/usr/lib/libiconv.2.dylib" \
+	       && ln -sf libiconv.2.dylib "$(I386_SYSROOT)/usr/lib/libiconv.dylib"; }
+	$(LD) $(LDFLAGS_I386) -e _main -liconv -o $@ $<
+
 # 36_stripped_func_pad: STRIP local symbols (keep only the .globl _main) so the
 # translator sees an empty func_syms, exercising the no-symbol padding-resync
 # path. Without the strip, _h10/_h20 would be in func_syms and the existing

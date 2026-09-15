@@ -211,6 +211,18 @@ extern CFStringRef CGImageSourceGetTypeWithURL(CFURLRef url);
  * through, so those function pointers are a separate cross-ABI problem. */
 #include <IOKit/IOCFPlugIn.h>
 
+/* <iconv.h> — iconv_open / iconv / iconv_close (Portal 2 2026-09-14). The same
+ * missing-prototype defect again: all three were in the consider set, so
+ * static-interpose left them bound to the REAL libiconv and a translated caller
+ * reached it with i386 stack args. vguimatsurface's _V_UTF8ToUCS2 (from
+ * CMatSystemSurface::Init) died in iconv_open -> _citrus_iconv_open ->
+ * strlcpy -> strlen(0x10): the name "argument" was whatever sat in rdi.
+ * No hand marshalling needed: iconv_t is `struct __tag_iconv_t *`, an
+ * INCOMPLETE record, so the generic opaque-handle policy applies (a native
+ * iconv_t lives >4GB, so iconv_open wraps it and iconv/iconv_close unwrap it),
+ * and iconv's `char **` / `size_t *` in-out args are deep-copied both ways. */
+#include <iconv.h>
+
 
 //// TESTING ////
 struct coords {
