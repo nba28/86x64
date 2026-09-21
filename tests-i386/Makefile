@@ -33,7 +33,10 @@ PIPELINE      := $(PROJ_ROOT)/src/86x64/86x64.sh
 export PATH   := $(MACHO_TOOL_DIR):$(PATH)
 
 NASM   := nasm
-LD     := ld
+# Modern ld (ld-27037+) no longer links i386; prefer Snow Leopard's ld64-95 wrapper
+# when it is installed (see memory sl_sysroot_remount). Override with LD=...
+SL_LD  := $(HOME)/projects/Library/Toolchains/sl-ld64/ld-i386
+LD     := $(if $(wildcard $(SL_LD)),$(SL_LD),ld)
 CC_I386:= clang -arch i386 -isysroot $(I386_SYSROOT) -mmacosx-version-min=10.6
 LDFLAGS_I386 := -arch i386 -macos_version_min 10.6 -no_pie -syslibroot $(I386_SYSROOT) -lSystem
 

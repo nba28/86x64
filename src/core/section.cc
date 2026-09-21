@@ -2254,6 +2254,11 @@ namespace MachO {
       const bool jt_anchor_spill =
          jt_spill && std::getenv("M64_NO_JT_ANCHOR_SPILL") == nullptr;
 
+      /* Forward intra-function branch targets not yet reached; decides whether
+       * a RET ends the function (see "Anchor lifetime" below). */
+      std::set<std::size_t> pending_targets;
+      const bool jt_midfn_ret = std::getenv("M64_NO_JT_MIDFN_RET") == nullptr;
+
       bool prev_call0 = false;     /* previous insn was `call $+0` (e8 00000000) */
       std::size_t pend_r11 = 0;    /* value of the last `lea r11,[rip+d]` (x86_64 anchor dance) */
 
@@ -2665,12 +2670,37 @@ namespace MachO {
             }
          }
 
-         /* Anchor lifetime: clear on RET / system transitions; a real CALL
-          * clobbers caller-saved regs. Table-pointer state is purely local. */
+         /* Anchor lifetime: clear on a function-ending RET / system transitions;
+          * a real CALL clobbers caller-saved regs. Table-pointer state is purely
+          * local.
+          *
+          * ★A RET ends the function only when no forward branch target is still
+          * pending — the rule DetectPicAnchoredDisps already applies (its steps
+          * 4-6: prune targets we have reached, record in-section forward
+          * branches within 64 KB, keep anchors across a RET while any remain).
+          * A LINEAR walk reaches an early-return epilogue before the code behind
+          * it, so clearing at every RET dropped the anchor for every later
+          * dispatch in the function. The rewrite pass kept it and re-anchored
+          * those loads, but their tables were never claimed, so the entries kept
+          * i386 offsets. MEASURED, Portal 2 libcef: anchor 0xc7823e, early return
+          * 0xc7825f, dispatches 0xc78930 / 0xc78aa4 unclaimed; the entries decode
+          * as BOUND and trip the width guard. Kill switch M64_NO_JT_MIDFN_RET=1. */
+         pending_targets.erase(pending_targets.begin(),
+                               pending_targets.upper_bound(vmaddr));
+         if (cat == XED_CATEGORY_COND_BR || cat == XED_CATEGORY_UNCOND_BR) {
+            const ssize_t bd = xed_decoded_inst_get_branch_displacement(&xedd);
+            const std::size_t tgt = vmaddr + len + bd;
+            if (bd > 0 && tgt < sect_hi && tgt - vmaddr <= 0x10000) {
+               pending_targets.insert(tgt);
+            }
+         }
+         const bool midfn_ret =
+            jt_midfn_ret && cat == XED_CATEGORY_RET && !pending_targets.empty();
          const bool is_pic_call0 =
             iform == XED_IFORM_CALL_NEAR_RELBRz &&
             xed_decoded_inst_get_branch_displacement(&xedd) == 0;
-         if (cat == XED_CATEGORY_RET || cat == XED_CATEGORY_INTERRUPT ||
+         if ((cat == XED_CATEGORY_RET && !midfn_ret) ||
+             cat == XED_CATEGORY_INTERRUPT ||
              cat == XED_CATEGORY_SYSCALL || cat == XED_CATEGORY_SYSRET) {
             anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
             stack_tbl.clear(); stack_anchor.clear();
