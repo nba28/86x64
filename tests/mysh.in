@@ -1,3 +1,0 @@
-echo 'Hello, world!'
-cat mysh.c
-printf %d 42

@@ -45,3 +45,4 @@ src/abiconv/custom_all.syms
 src/abiconv/includes_auto.h
 src/abiconv/snd_convert_test
 src/core/test-encode
+graphify-out/

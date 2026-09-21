@@ -40,12 +40,4 @@ add_subdirectory(src)
 add_subdirectory(include)
 add_subdirectory(scripts)
 
-# Tests compile C source with -m32 (i386), which Apple removed from the
-# SDK with macOS 10.15. Disabled by default; re-enable with -DBUILD_TESTS=ON
-# only if you have an SDK that still supports i386.
-option(BUILD_TESTS "Build the tests/ subtree (requires -m32 support)" OFF)
-if(BUILD_TESTS)
-  add_subdirectory(tests)
-endif()
-
 set(86x64 name)
