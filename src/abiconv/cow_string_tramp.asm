@@ -176,6 +176,50 @@
 	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE12_M_leak_hardEv,                          _shim_Sw_leak_hard
 	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE9_M_mutateEmmm,                            _shim_Sw_mutate
 	MTSHIM      ____ZNKSbIwSt11char_traitsIwESaIwEE4findEPKwmm,                              _shim_Sw_find_buf3
+; ---- remaining members + COW internals (Portal 2 libcef / libsteam) ----
+	MTSHIM      ____ZNKSs12find_last_ofEcm,                                                      _shim_Ss_flo_ch
+	MTSHIM      ____ZNKSs12find_last_ofEPKcm,                                                    _shim_Ss_flo_cstr
+	MTSHIM      ____ZNKSs12find_last_ofEPKcmm,                                                   _shim_Ss_flo_buf3
+	MTSHIM      ____ZNKSs13find_first_ofEcm,                                                     _shim_Ss_ffo_ch
+	MTSHIM      ____ZNKSs16find_last_not_ofEPKcmm,                                               _shim_Ss_flno_buf3
+	MTSHIM      ____ZNKSs17find_first_not_ofEcm,                                                 _shim_Ss_ffno_ch
+	MTSHIM      ____ZNKSs2atEm,                                                                  _shim_Ss_cat
+	MTSHIM      ____ZNSs2atEm,                                                                   _shim_Ss_at
+	MTSHIM      ____ZNKSs4copyEPcmm,                                                             _shim_Ss_copy
+	MTSHIM      ____ZNKSs5emptyEv,                                                               _shim_Ss_empty
+	MTSHIM      ____ZNKSs5rfindEPKcmm,                                                           _shim_Ss_rfind_buf3
+	MTSHIM      ____ZNKSs6lengthEv,                                                              _shim_Ss_size
+	MTSHIM      ____ZNKSs7compareEmmPKc,                                                         _shim_Ss_compare_sub_cstr3
+	MTSHIM      ____ZNKSs7compareEmmRKSs,                                                        _shim_Ss_compare_sub_str
+	MTSHIM      ____ZNSs12_S_constructEmcRKSaIcE,                                                _shim_Ss_S_construct
+	MTSHIM      ____ZNSs4_Rep10_M_destroyERKSaIcE,                                               _shim_Ss_M_destroy
+	MTSHIM      ____ZNSs4_Rep9_S_createEmmRKSaIcE,                                               _shim_Ss_S_create
+	MTSHIM      ____ZNSs6appendEmc,                                                              _shim_Ss_append_fill
+	MTSHIM      ____ZNSs6appendERKSsmm,                                                          _shim_Ss_append_substr
+	MTSHIM      ____ZNSs6insertEmPKcm,                                                           _shim_Ss_insert_buf
+	MTSHIM      ____ZNSs6insertEmRKSsmm,                                                         _shim_Ss_insert_substr
+	MTSHIM      ____ZNSs6resizeEm,                                                               _shim_Ss_resize_nul
+	MTSHIM      ____ZNSs7replaceEmmmc,                                                           _shim_Ss_replace_aux
+	MTSHIM      ____ZNSs7replaceEN9__gnu_cxx17__normal_iteratorIPcSsEES2_mc,                     _shim_Ss_replace_iter_fill
+	MTSHIM      ____ZNSsaSEc,                                                                    _shim_Ss_assign_ch
+	MTSHIM      ____ZNSsaSEPKc,                                                                  _shim_Ss_assign_cstr
+	MTSHIM      ____ZNSsC1ERKSsmm,                                                               _shim_Ss_ctor_substr
+	MTSHIM      ____ZNSsC2ERKSsmm,                                                               _shim_Ss_ctor_substr
+	MTSHIM      ____ZNSspLEc,                                                                    _shim_Ss_pluseq_ch
+	MTSHIM      ____ZNSspLEPKc,                                                                  _shim_Ss_append_cstr
+	MTSHIM      ____ZNSspLERKSs,                                                                 _shim_Ss_append_str
+	MTSHIM      ____ZNKSbIwSt11char_traitsIwESaIwEE13find_first_ofEPKwmm,                        _shim_Sw_ffo_buf3
+	MTSHIM      ____ZNKSbIwSt11char_traitsIwESaIwEE16find_last_not_ofEPKwmm,                     _shim_Sw_flno_buf3
+	MTSHIM      ____ZNKSbIwSt11char_traitsIwESaIwEE17find_first_not_ofEPKwmm,                    _shim_Sw_ffno_buf3
+	MTSHIM      ____ZNKSbIwSt11char_traitsIwESaIwEE7compareEmmRKS2_,                             _shim_Sw_compare_sub_str
+	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE12_S_constructEmwRKS1_,                        _shim_Sw_S_construct
+	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE4_Rep10_M_destroyERKS1_,                       _shim_Sw_M_destroy
+	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE4_Rep9_S_createEmmRKS1_,                       _shim_Sw_S_create
+	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE6appendEPKwm,                                  _shim_Sw_append_buf
+	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE6resizeEmw,                                    _shim_Sw_resize
+	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE7reserveEm,                                    _shim_Sw_reserve
+	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEEC1EPKwmRKS1_,                                  _shim_Sw_ctor_buf
+	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEEC2EPKwmRKS1_,                                  _shim_Sw_ctor_buf
 ; ---- iterator==, allocator no-ops, list node ops, terminate ----
 	MTSHIM      ____ZN9__gnu_cxxeqIPKcSsEEbRKNS_17__normal_iteratorIT_T0_EES8_,              _shim_iter_eq
 	MTSHIM      ____ZNSaIcEC1Ev,                                                             _shim_alloc_noop

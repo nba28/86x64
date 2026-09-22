@@ -1,0 +1,48 @@
+== narrow search ==
+flo '/'        = 3
+flo "./"       = 5
+flo buf("/x",4,1) = 3
+ffo '/' @2     = 3
+flno "txt"     = 5
+ffno 'a'       = 1
+rfind buf "/"  = 3
+at(2)          = b
+length         = 9
+empty          = 0
+copy(5,6)      = 3 'txt'
+cmp(2,1,"b")   = 0
+cmp(4,5,str)   = 0
+== narrow mutate ==
+ctor_substr 'abc' (3)
+append(3,x) 'abcxxx' (6)
+append(s,2,1) 'abcxxxb' (7)
+insert(1,ZZ) 'aZZbcxxxb' (9)
+insert(0,s,6,3) 'txtaZZbcxxxb' (12)
+resize(4) 'txta' (4)
+replace(1,2,3,-) 't---a' (5)
+replace(it,it,1,+) 't+a' (3)
+at(0)=T 'T+a' (3)
+op=(q) 'q' (1)
+op=(hi) 'hi' (2)
++=! 'hi!' (3)
++=yo 'hi! yo' (6)
++=share 'hi! yoabc' (9)
+share intact 'abc' (3)
+== narrow COW internals ==
+S_create cap   = 10 ref=0
+S_create grow  = 20
+S_construct 'kkkk' (4)
+== wide ==
+ctor_buf(5) w'hello'
+reserve cap>=64 = 1
+after reserve w'hello'
+append_buf w'hello, there'
+resize(14,.) w'hello, there..'
+wffo "ol"      = 2
+wflno "."      = 11
+wffno "hel"    = 4
+wcmp(7,5,str)  = 0
+wS_construct w'zzz'
+wS_create cap  = 5
+done
+exit_code: 0

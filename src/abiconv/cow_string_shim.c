@@ -555,6 +555,113 @@ static uint32_t opplus_build(uint32_t dst, uint32_t d1, uint32_t l1, uint32_t d2
     return dst;
 }
 
+/* --- reverse set search (find_last_of / find_last_not_of) --- */
+static uint32_t flo_buf(uint32_t data, uint32_t len, uint32_t set, uint32_t nset, uint32_t pos, int cw, int want) {
+    if (len == 0) return NPOS;
+    uint32_t i = pos < len - 1 ? pos : len - 1;
+    for (;; i--) {
+        if (in_set(bytes_of(data) + (size_t)i * cw, set, nset, cw) == want) return i;
+        if (i == 0) return NPOS;
+    }
+}
+static uint32_t g_flo_buf3(uint32_t *a, int cw)  { uint32_t p = *obj_at(a, 0); return flo_buf(p, rep_of(p)->length, a[1], a[3], a[2], cw, 1); }
+static uint32_t g_flno_buf3(uint32_t *a, int cw) { uint32_t p = *obj_at(a, 0); return flo_buf(p, rep_of(p)->length, a[1], a[3], a[2], cw, 0); }
+static uint32_t g_ffno_ch(uint32_t *a, int cw)   { uint32_t p = *obj_at(a, 0); uint32_t c = a[1]; return ffno_buf(p, rep_of(p)->length, (uint32_t)(uintptr_t)&c, 1, a[2], cw); }
+static uint32_t g_rfind_buf3(uint32_t *a, int cw){ uint32_t p = *obj_at(a, 0); return rfind_buf(p, rep_of(p)->length, a[1], a[3], a[2], cw); }
+
+/* compare(pos, n1, const string&) */
+static uint32_t g_compare_sub_str(uint32_t *a, int cw) {
+    uint32_t p = *obj_at(a, 0), s = *obj_at(a, 3); uint32_t len = rep_of(p)->length;
+    uint32_t pos = a[1], n1 = a[2];
+    if (pos > len) pos = len;
+    if (n1 > len - pos) n1 = len - pos;
+    return (uint32_t)cmp_buf(p + pos * cw, n1, s, rep_of(s)->length, cw);
+}
+
+/* at(n): libstdc++ throws std::out_of_range, which cannot be raised into i386
+ * code from here. ponytail: abort loudly instead; bridge the throw if a target
+ * is ever seen relying on catching it. */
+static uint32_t at_check(uint32_t p, uint32_t n, int cw) {
+    if (n >= rep_of(p)->length) {
+        fprintf(stderr, "[cow_string] basic_string::at(%u) out of range (size %u)\n",
+                n, rep_of(p)->length);
+        fflush(stderr);
+        abort();
+    }
+    return p + n * cw;
+}
+static uint32_t g_cat(uint32_t *a, int cw) { return at_check(*obj_at(a, 0), a[1], cw); }
+static uint32_t g_at(uint32_t *a, int cw)  { return at_check(str_leak(obj_at(a, 0), cw), a[1], cw); }
+
+/* copy(char* s, n, pos) const -> chars copied */
+static uint32_t g_copy(uint32_t *a, int cw) {
+    uint32_t p = *obj_at(a, 0), len = rep_of(p)->length, n = a[2], pos = a[3];
+    if (pos > len) pos = len;
+    if (n > len - pos) n = len - pos;
+    memcpy(bytes_of(a[1]), bytes_of(p + pos * cw), (size_t)n * cw);
+    return n;
+}
+static uint32_t g_empty(uint32_t *a, int cw) { (void)cw; return rep_of(*obj_at(a, 0))->length == 0; }
+
+/* append(n, c) / resize(n) / replace(i1, i2, n, c) / insert variants */
+static uint32_t g_append_fill(uint32_t *a, int cw) {
+    uint32_t *obj = obj_at(a, 0);
+    uint32_t b[5] = { a[0], rep_of(*obj)->length, 0, a[1], a[2] };
+    g_replace_aux(b, cw);
+    return a[0];
+}
+static uint32_t g_resize_nul(uint32_t *a, int cw) { uint32_t b[3] = { a[0], a[1], 0 }; return g_resize(b, cw); }
+static uint32_t g_replace_iter_fill(uint32_t *a, int cw) {
+    uint32_t data = *obj_at(a, 0);
+    uint32_t b[5] = { a[0], (a[1] - data) / cw, (a[2] - a[1]) / cw, a[3], a[4] };
+    return g_replace_aux(b, cw);
+}
+static uint32_t g_append_substr(uint32_t *a, int cw) {   /* append(const string&, pos, n) */
+    uint32_t *obj = obj_at(a, 0), s = *obj_at(a, 1), slen = rep_of(s)->length;
+    uint32_t pos = a[2], n = a[3];
+    if (pos > slen) pos = slen;
+    if (n > slen - pos) n = slen - pos;
+    str_replace_raw(obj, rep_of(*obj)->length, 0, s + pos * cw, n, cw);
+    return a[0];
+}
+static uint32_t g_insert_buf(uint32_t *a, int cw) {      /* insert(pos, const char*, n) */
+    str_replace_raw(obj_at(a, 0), a[1], 0, a[2], a[3], cw);
+    return a[0];
+}
+static uint32_t g_insert_substr(uint32_t *a, int cw) {   /* insert(pos1, const string&, pos2, n) */
+    uint32_t s = *obj_at(a, 2), slen = rep_of(s)->length, pos2 = a[3], n = a[4];
+    if (pos2 > slen) pos2 = slen;
+    if (n > slen - pos2) n = slen - pos2;
+    str_replace_raw(obj_at(a, 0), a[1], 0, s + pos2 * cw, n, cw);
+    return a[0];
+}
+static uint32_t g_assign_ch(uint32_t *a, int cw) {        /* operator=(char) */
+    uint32_t *obj = obj_at(a, 0), c = a[1];
+    str_replace_raw(obj, 0, rep_of(*obj)->length, (uint32_t)(uintptr_t)&c, 1, cw);
+    return a[0];
+}
+static uint32_t g_pluseq_ch(uint32_t *a, int cw) { g_push_back(a, cw); return a[0]; }
+
+/* --- static COW internals called from inlined header code --- */
+/* _Rep::_S_create(capacity, old_capacity, alloc) -> _Rep* (header). Growth
+ * rule per libstdc++-v3: a request just past the old capacity doubles it. */
+static uint32_t g_S_create(uint32_t *a, int cw) {
+    uint32_t cap = a[0], old = a[1];
+    if (cap > old && cap < 2 * old) cap = 2 * old;
+    return (uint32_t)(uintptr_t)rep_alloc(cap, cw);
+}
+/* _Rep::_M_destroy(alloc): `this` IS the header; free it (never the empty rep). */
+static uint32_t g_M_destroy(uint32_t *a, int cw) {
+    if (a[0] + 12 != empty_data(cw)) free((void *)(uintptr_t)a[0]);
+    return 0;
+}
+/* _S_construct(n, c, alloc) -> _M_p of a fresh rep holding n copies of c. */
+static uint32_t g_S_construct_fill(uint32_t *a, int cw) {
+    uint32_t p;
+    str_init_fill(&p, a[0], a[1], cw);
+    return p;
+}
+
 /* ======================= exported width-specific shims ===================== */
 /* NARROW std::string (Ss) */
 uint32_t shim_Ss_ctor_default(uint32_t *a){ return g_ctor_default(a, 1); }
@@ -637,6 +744,46 @@ uint32_t shim_Sw_rep_dispose(uint32_t *a) { return g_rep_dispose_member(a, 4); }
 uint32_t shim_Sw_leak_hard(uint32_t *a)   { return g_leak_hard(a, 4); }
 uint32_t shim_Sw_mutate(uint32_t *a)      { return g_mutate(a, 4); }
 uint32_t shim_Sw_find_buf3(uint32_t *a)   { return g_find_buf3(a, 4); }
+
+/* narrow: remaining out-of-line members (Portal 2 libcef / libsteam) */
+uint32_t shim_Ss_flo_ch(uint32_t *a)      { return g_rfind_ch(a, 1); }
+uint32_t shim_Ss_flo_cstr(uint32_t *a)    { uint32_t b[4] = { a[0], a[1], a[2], chr_len(a[1], 1) }; return g_flo_buf3(b, 1); }
+uint32_t shim_Ss_flo_buf3(uint32_t *a)    { return g_flo_buf3(a, 1); }
+uint32_t shim_Ss_ffo_ch(uint32_t *a)      { return g_find_ch(a, 1); }
+uint32_t shim_Ss_flno_buf3(uint32_t *a)   { return g_flno_buf3(a, 1); }
+uint32_t shim_Ss_ffno_ch(uint32_t *a)     { return g_ffno_ch(a, 1); }
+uint32_t shim_Ss_cat(uint32_t *a)         { return g_cat(a, 1); }
+uint32_t shim_Ss_at(uint32_t *a)          { return g_at(a, 1); }
+uint32_t shim_Ss_copy(uint32_t *a)        { return g_copy(a, 1); }
+uint32_t shim_Ss_empty(uint32_t *a)       { return g_empty(a, 1); }
+uint32_t shim_Ss_rfind_buf3(uint32_t *a)  { return g_rfind_buf3(a, 1); }
+uint32_t shim_Ss_compare_sub_cstr3(uint32_t *a) { uint32_t b[5] = { a[0], a[1], a[2], a[3], chr_len(a[3], 1) }; return g_compare_sub_cstr(b, 1); }
+uint32_t shim_Ss_compare_sub_str(uint32_t *a)   { return g_compare_sub_str(a, 1); }
+uint32_t shim_Ss_S_construct(uint32_t *a) { return g_S_construct_fill(a, 1); }
+uint32_t shim_Ss_M_destroy(uint32_t *a)   { return g_M_destroy(a, 1); }
+uint32_t shim_Ss_S_create(uint32_t *a)    { return g_S_create(a, 1); }
+uint32_t shim_Ss_append_fill(uint32_t *a) { return g_append_fill(a, 1); }
+uint32_t shim_Ss_append_substr(uint32_t *a){ return g_append_substr(a, 1); }
+uint32_t shim_Ss_insert_buf(uint32_t *a)  { return g_insert_buf(a, 1); }
+uint32_t shim_Ss_insert_substr(uint32_t *a){ return g_insert_substr(a, 1); }
+uint32_t shim_Ss_resize_nul(uint32_t *a)  { return g_resize_nul(a, 1); }
+uint32_t shim_Ss_replace_iter_fill(uint32_t *a){ return g_replace_iter_fill(a, 1); }
+uint32_t shim_Ss_assign_ch(uint32_t *a)   { return g_assign_ch(a, 1); }
+uint32_t shim_Ss_pluseq_ch(uint32_t *a)   { return g_pluseq_ch(a, 1); }
+uint32_t shim_Ss_ctor_substr(uint32_t *a) { return g_ctor_substr(a, 1); }
+
+/* wide: remaining out-of-line members */
+uint32_t shim_Sw_ffo_buf3(uint32_t *a)    { return g_ffo_buf3(a, 4); }
+uint32_t shim_Sw_flno_buf3(uint32_t *a)   { return g_flno_buf3(a, 4); }
+uint32_t shim_Sw_ffno_buf3(uint32_t *a)   { return g_ffno_buf3(a, 4); }
+uint32_t shim_Sw_compare_sub_str(uint32_t *a) { return g_compare_sub_str(a, 4); }
+uint32_t shim_Sw_S_construct(uint32_t *a) { return g_S_construct_fill(a, 4); }
+uint32_t shim_Sw_M_destroy(uint32_t *a)   { return g_M_destroy(a, 4); }
+uint32_t shim_Sw_S_create(uint32_t *a)    { return g_S_create(a, 4); }
+uint32_t shim_Sw_append_buf(uint32_t *a)  { return g_append_buf(a, 4); }
+uint32_t shim_Sw_resize(uint32_t *a)      { return g_resize(a, 4); }
+uint32_t shim_Sw_reserve(uint32_t *a)     { return g_reserve(a, 4); }
+uint32_t shim_Sw_ctor_buf(uint32_t *a)    { return g_ctor_buf(a, 4); }
 
 /* operator+ (sret) */
 uint32_t shim_Ss_opplus_cstr_str(uint32_t *a) {  /* (const char* lhs, const string& rhs) */
