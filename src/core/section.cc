@@ -1280,6 +1280,48 @@ namespace MachO {
          }
       };
 
+      /* The SAME snapshot/JOIN for the anchor SPILL SLOTS (step 2b's
+       * anchor_slots), because a slot dies the same way a register does — and
+       * for the same reason the linear walk cannot see.
+       *
+       * ★MEASURED (Portal 2 libtogl `CGLMFBO::TexAttach`, i386 0x2260):
+       *     0x226e  pop %eax                 ; anchor
+       *     0x226f  mov %eax,-0x10(%ebp)     ; anchor_slots[(EBP,-0x10)] = anchor
+       *     0x2309  jne 0x23b5               ; forward branch
+       *     0x230f  mov -0x10(%ebp),%eax     ; reload (rewritten OK)
+       *     0x2312  mov 0x44daa(%eax),%eax
+       *     0x2318  mov (%eax),%eax
+       *     0x231a  mov %eax,-0x10(%ebp)     ; NON-anchor stored -> slot erased
+       *     0x23b0  jmp 0x25a3               ; (no fall-through into 0x23b5)
+       *     0x23b5: ... 0x23ce mov -0x10(%ebp),%eax ; reload -> NOT an anchor
+       *             0x23d1 mov 0x44daa(%eax),%eax   ; kept the raw i386 disp
+       * The two blocks are MUTUALLY EXCLUSIVE at runtime, but the linear walk
+       * sees the kill first and applies it to everything after. At runtime
+       * translated_anchor + i386_disp landed inside translated __text and the
+       * loaded "pointer" was code bytes (0xc700) -> SIGSEGV in CGLMFBO::TexAttach
+       * with the GL dispatch slots 0x1c8/0x1d4/0x1d8 one deref away.
+       * Register-level branch_anchor_snap already repairs exactly this shape;
+       * the slot map was simply never included.
+       *
+       * The JOIN is the same INTERSECTION, so it can only RECOVER a slot the
+       * linear walk dropped, never invent one.
+       * KILL SWITCH M64_NO_PIC_ANCHOR_SLOT_SNAP=1 (restores the drop). */
+      using anchor_slot_map = decltype(anchor_slots);
+      std::map<std::size_t, anchor_slot_map> branch_slot_snap;
+      const bool slot_snap_on =
+         std::getenv("M64_NO_PIC_ANCHOR_SLOT_SNAP") == nullptr;
+
+      auto slot_intersect = [](anchor_slot_map& dst, const anchor_slot_map& src) {
+         for (auto it = dst.begin(); it != dst.end(); ) {
+            auto s = src.find(it->first);
+            if (s == src.end() || s->second != it->second) {
+               it = dst.erase(it);
+            } else {
+               ++it;
+            }
+         }
+      };
+
       /* (0) Pre-scan for GCC-style PIC thunks. `___i686.get_pc_thunk.<r>` is the
        *     two-instruction leaf `mov %reg,(%esp); ret` — it copies the return
        *     address (the caller's PC) into %reg. A `call` to such a thunk is the
@@ -1413,6 +1455,25 @@ namespace MachO {
                   anchor_intersect(anchors, snap_it->second);
                }
                branch_anchor_snap.erase(snap_it);
+            }
+            /* The same adopt/JOIN for the anchor SPILL SLOTS. Kept in its own
+             * lookup because a target may have a slot snapshot even when the
+             * register snapshot was already consumed/absent. */
+            if (slot_snap_on) {
+               auto ssnap = branch_slot_snap.find(inst->loc.vmaddr);
+               if (ssnap != branch_slot_snap.end()) {
+                  bool no_fallthrough = false;
+                  if (prev_inst != nullptr) {
+                     no_fallthrough = (last_flow_cat == XED_CATEGORY_RET ||
+                                       last_flow_cat == XED_CATEGORY_UNCOND_BR);
+                  }
+                  if (no_fallthrough) {
+                     anchor_slots = ssnap->second;
+                  } else {
+                     slot_intersect(anchor_slots, ssnap->second);
+                  }
+                  branch_slot_snap.erase(ssnap);
+               }
             }
          }
 
@@ -2087,6 +2148,17 @@ namespace MachO {
                      branch_anchor_snap[tgt] = anchors;
                   } else {
                      anchor_intersect(sit->second, anchors);
+                  }
+                  /* Same snapshot for the anchor SPILL SLOTS (see
+                   * branch_slot_snap): a slot killed by a store on the
+                   * fall-through path is still live on this branch path. */
+                  if (slot_snap_on) {
+                     auto slit = branch_slot_snap.find(tgt);
+                     if (slit == branch_slot_snap.end()) {
+                        branch_slot_snap[tgt] = anchor_slots;
+                     } else {
+                        slot_intersect(slit->second, anchor_slots);
+                     }
                   }
                }
             }
