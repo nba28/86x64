@@ -1665,7 +1665,11 @@ namespace MachO {
          /* xed_patch_relbr was renamed to xed_patch_brdisp in newer xed. */
          if (!xed_patch_brdisp(&xedd, &*instbuf.begin(), enc)) {
             throw error("%s: xed_patch_brdisp: failed to patch instruction at offset 0x%zx, " \
-                        "vmaddr 0x%zx\n", __FUNCTION__, this->loc.offset, this->loc.vmaddr);
+                        "vmaddr 0x%zx, iform %s, width %u, disp %zd, target 0x%zx, orig 0x%zx\n",
+                        __FUNCTION__, this->loc.offset, this->loc.vmaddr,
+                        xed_iform_enum_t2str(xed_decoded_inst_get_iform_enum(&xedd)),
+                        width_bits, disp, (std::size_t)brdisp->loc.vmaddr,
+                        (std::size_t)this->orig_vmaddr);
          }
 #else
          patch_relbr(xedd, instbuf, disp);
@@ -3749,9 +3753,13 @@ namespace MachO {
          imm = other.imm->Transform_one(env);
       }
       
-      if (other.brdisp) {
-         env.resolve(other.brdisp, &brdisp);
-      }
+      /* The brdisp resolve is DEFERRED (the Resolver writes &brdisp when the
+       * target blob is transformed, possibly after this ctor returns), so it
+       * is registered only once we know the instruction survives. A far
+       * call/jmp NOP-substituted below would otherwise get its brdisp written
+       * back after being cleared, and Emit would try to patch a branch
+       * displacement into a NOP (Portal 2 libcef.dylib). */
+      bool nop_substituted = false;
 
       xed_decoded_inst_zero_set_mode(&xedd, &dstate());
       xed_decoded_inst_set_input_chip(&xedd, XED_CHIP_INVALID);
@@ -3820,7 +3828,7 @@ namespace MachO {
              * to overwrite trailing bytes with an operand value (the far
              * transfer's bogus pointer in particular). */
             this->imm = nullptr;
-            this->brdisp = nullptr;
+            nop_substituted = true;
             /* Re-decode: a buffer of 0x90 NOPs decodes to a 1-byte NOP
              * (xedd reflects only the first byte); the remaining bytes
              * are emitted verbatim via instbuf at Emit time, since
@@ -3844,6 +3852,10 @@ namespace MachO {
                         xed_error_enum_t2str(err), hex, instbuf.size(),
                         other.loc.vmaddr);
          }
+      }
+
+      if (other.brdisp && !nop_substituted) {
+         env.resolve(other.brdisp, &brdisp);
       }
 
       /*
