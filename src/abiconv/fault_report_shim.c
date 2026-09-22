@@ -66,7 +66,7 @@
 /* objc_shim.c: 1 + description when the address is a proxy-arena handle. */
 int x64_objc_arena_describe(uint64_t addr, char *buf, size_t n);
 
-static struct sigaction g_prev_segv, g_prev_bus;
+static struct sigaction g_prev_segv, g_prev_bus, g_prev_trap;
 static int g_words = 48;
 
 /* ── THE IMAGE TABLE MUST BE A SNAPSHOT, NOT A LIVE DYLD QUERY ─────────────────
@@ -575,7 +575,7 @@ static void fr_handler(int sig, siginfo_t *info, void *uctx) {
 
    fprintf(stderr, "\n[fault] ================ FATAL FAULT ================\n");
    fprintf(stderr, "[fault] signal=%d (%s)  si_code=%d  fault addr=%p\n",
-           sig, sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : "?",
+           sig, sig == SIGSEGV ? "SIGSEGV" : sig == SIGBUS ? "SIGBUS" : sig == SIGTRAP ? "SIGTRAP" : "?",
            info ? info->si_code : 0, fault);
 
    if (!uc || !uc->uc_mcontext) {
@@ -784,7 +784,8 @@ chain:
    /* Chain to whatever was installed before us so the process dies EXACTLY as it
     * would have (including producing the OS crash report). Pure diagnostic. */
    {
-      struct sigaction *prev = (sig == SIGBUS) ? &g_prev_bus : &g_prev_segv;
+      struct sigaction *prev = (sig == SIGBUS) ? &g_prev_bus :
+                               (sig == SIGTRAP) ? &g_prev_trap : &g_prev_segv;
       if ((prev->sa_flags & SA_SIGINFO) && prev->sa_sigaction) {
          prev->sa_sigaction(sig, info, uctx);
          return;
@@ -881,7 +882,10 @@ static void fr_install(void) {
    sigemptyset(&sa.sa_mask);
    sigaction(SIGSEGV, &sa, &g_prev_segv);
    sigaction(SIGBUS,  &sa, &g_prev_bus);
-   fprintf(stderr, "[fault] armed: SIGSEGV/SIGBUS reporter (M64_FAULT_REPORT), "
+   /* SIGTRAP: an i386 assert -> CoreServices Debugger() / int3 kills the process
+    * with EXIT=133 and no report at all otherwise (Portal 2 2026-09-22). */
+   sigaction(SIGTRAP, &sa, &g_prev_trap);
+   fprintf(stderr, "[fault] armed: SIGSEGV/SIGBUS/SIGTRAP reporter (M64_FAULT_REPORT), "
                    "%d stack slots\n", g_words);
    fflush(stderr);
 }
