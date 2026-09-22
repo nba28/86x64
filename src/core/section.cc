@@ -2165,6 +2165,9 @@ namespace MachO {
       case XED_REG_RDI: case XED_REG_EDI: return XED_REG_EDI;
       case XED_REG_RBP: case XED_REG_EBP: return XED_REG_EBP;
       case XED_REG_RSP: case XED_REG_ESP: return XED_REG_ESP;
+      /* the transform's scratch table base: `lea r11,[rip+d]` then an
+       * addr32 `[r11d + idx*s]` indexed load (EA-wrap fidelity) */
+      case XED_REG_R11D: return XED_REG_R11;
       default: return r;
       }
    }

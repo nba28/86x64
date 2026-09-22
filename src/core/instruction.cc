@@ -3411,6 +3411,19 @@ namespace MachO {
                    * in the copied bytes, so re-adding it here would just
                    * duplicate a prefix. */
                   sib_buf.insert(sib_buf.begin() + opcode_idx, (uint8_t)0x41);
+                  /* i386 EA-wrap fidelity: `[anchor + idx*scale + disp]` is
+                   * computed mod 2^32 on i386, so a negative/sentinel index
+                   * (idx = -1 -> table[-1]) reads just BELOW the table. With
+                   * 64-bit addressing the zero-extended index lands +16GB away
+                   * (Portal 2 shaderapidx9 ImageFormatToD3DFormat(-1): fault
+                   * at table+0x3fffffffc). r11 holds a low-4GB image address,
+                   * so addr32 (0x67, legal before REX) restores the exact i386
+                   * EA. Same policy as the MR rewrite and the copy ctor: not
+                   * when the index is the widened ebp (a 64-bit frame
+                   * pointer must not be truncated). */
+                  if (idx_f != 0x05) {
+                     sib_buf.insert(sib_buf.begin() + opcode_idx, (uint8_t)0x67);
+                  }
 
                   auto* main_sib = new Instruction<opposite<bits>>(sib_buf);
                   return {lea_sib, main_sib};
