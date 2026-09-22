@@ -44,5 +44,8 @@ wffno "hel"    = 4
 wcmp(7,5,str)  = 0
 wS_construct w'zzz'
 wS_create cap  = 5
+== atomics ==
+exchange_and_add old=5 new=4
+atomic_add new=7
 done
 exit_code: 0

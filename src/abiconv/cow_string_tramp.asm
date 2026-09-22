@@ -230,6 +230,9 @@
 	MTSHIM      ____ZNSt15_List_node_base6unhookEv,                                          _shim_list_unhook
 	MTSHIM      ____ZNSt15_List_node_base4swapERS_S0_,                                       _shim_list_swap
 	MTSHIM      ____ZNSt15_List_node_base8transferEPS_S0_,                                   _shim_list_transfer
+	MTSHIM      ____ZN9__gnu_cxx18__exchange_and_addEPVii,                                       _shim_exchange_and_add
+	MTSHIM      ____ZN9__gnu_cxx12__atomic_addEPVii,                                             _shim_atomic_add
+	MTSHIM      ____ZSt19__throw_logic_errorPKc,                                                 _shim_throw_logic_error
 	MTSHIM      ____ZSt9terminatev,                                                          _shim_terminate
 ; ---- by-value returns (i386 callee-pops hidden sret ptr): substr, operator+ ----
 	MTSHIM_SRET ____ZNKSs6substrEmm,                                                         _shim_Ss_substr

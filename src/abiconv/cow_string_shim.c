@@ -807,6 +807,28 @@ uint32_t shim_iter_eq(uint32_t *a) {
 /* std::allocator<char/wchar_t> ctor/dtor: stateless -> no-op */
 uint32_t shim_alloc_noop(uint32_t *a) { (void)a; return 0; }
 
+/* __gnu_cxx::__exchange_and_add / __atomic_add(volatile _Atomic_word*, int):
+ * the refcount atomics inlined COW code calls out of line (_M_dispose /
+ * _M_refcopy). Raw-bound to native they over-pop the i386 return address. */
+uint32_t shim_exchange_and_add(uint32_t *a) {
+    return (uint32_t)__atomic_fetch_add((int32_t *)(uintptr_t)a[0], (int32_t)a[1], __ATOMIC_ACQ_REL);
+}
+uint32_t shim_atomic_add(uint32_t *a) {
+    __atomic_fetch_add((int32_t *)(uintptr_t)a[0], (int32_t)a[1], __ATOMIC_ACQ_REL);
+    return 0;
+}
+
+/* std::__throw_logic_error(const char*): an i386 C++ exception cannot be
+ * raised from here. ponytail: abort loudly like shim_terminate; bridge the
+ * throw if a target is seen catching it. */
+uint32_t shim_throw_logic_error(uint32_t *a) {
+    fprintf(stderr, "[cow_string] std::__throw_logic_error(\"%s\") in translated "
+            "i386 code — aborting\n", a[0] ? (const char *)(uintptr_t)a[0] : "");
+    fflush(stderr);
+    abort();
+    return 0;
+}
+
 /* std::terminate(): graceful, better than a raw native jump */
 uint32_t shim_terminate(uint32_t *a) {
     (void)a;

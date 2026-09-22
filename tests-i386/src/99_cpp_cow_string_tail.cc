@@ -80,6 +80,10 @@ void     Sw_resize(void*, unsigned, wchar_t)                        asm(SW "6res
 void     Sw_reserve(void*, unsigned)                                asm(SW "7reserveEm");
 void     Sw_ctor_buf(void*, const wchar_t*, unsigned, const void*)  asm(SW "C1EPKwmRKS1_");
 
+/* ---- refcount atomics called out of line by inlined COW code ---- */
+int  X_exchange_and_add(volatile int*, int) asm("__ZN9__gnu_cxx18__exchange_and_addEPVii");
+void X_atomic_add(volatile int*, int)       asm("__ZN9__gnu_cxx12__atomic_addEPVii");
+
 static void pr(const char* tag, const void* s) { printf("%s '%s' (%u)\n", tag, Ss_c_str(s), Ss_size(s)); }
 static void prw(const char* tag, const void* s) {
     const wchar_t* w = Sw_c_str(s);
@@ -155,6 +159,13 @@ int main() {
     Rep* wr = Sw_S_create(5, 0, &alloc);
     printf("wS_create cap  = %u\n", wr->capacity);
     Sw_M_destroy(wr, &alloc);
+
+    printf("== atomics ==\n");
+    { volatile int rc = 5;
+      int old = X_exchange_and_add(&rc, -1);
+      printf("exchange_and_add old=%d new=%d\n", old, rc);   /* 5 4 */
+      X_atomic_add(&rc, 3);
+      printf("atomic_add new=%d\n", rc); }                   /* 7 */
 
     Ss_dtor(&s); Ss_dtor(&m); Ss_dtor(&share); Sw_dtor(&w);
     printf("done\n");
