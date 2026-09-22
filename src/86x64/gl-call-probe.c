@@ -202,7 +202,9 @@ static void probe_init(void) {
 }
 #define LOG(...) do { \
       if (!g_out) probe_init(); \
-      fprintf(g_out, "[glprobe %5llu] ", (unsigned long long)(now_ms() - g_t0_ms)); \
+      uint64_t _tid = 0; pthread_threadid_np(NULL, &_tid); \
+      fprintf(g_out, "[glprobe %5llu t%llu] ", (unsigned long long)(now_ms() - g_t0_ms), \
+              (unsigned long long)_tid); \
       fprintf(g_out, __VA_ARGS__); fflush(g_out); \
    } while (0)
 

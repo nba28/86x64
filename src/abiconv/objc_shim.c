@@ -1344,6 +1344,50 @@ static int enc_is_cfptr(const char *t) {
    return *t == '=' && t[1] == '}';               /* `^{Name=}` — empty body */
 }
 
+/* A pointer to a struct WITH a body (`^{Name=...}`) — e.g. CGLContextObj =
+ * `^{_CGLContextObject=^{__GLIContextRec}{__GLIFunctionDispatchRec=...}...}`.
+ *
+ * ★WHY THIS IS A HANDLE, NOT A BUFFER. The ObjC runtime's encoding carries the
+ * FRAMEWORK's view of the struct, which is complete even when every client
+ * header forward-declares it (`typedef struct _CGLContextObject *CGLContextObj`).
+ * The C-bridge side already classifies exactly this type as an opaque handle
+ * (typeconv.cc cb_is_cf_record_ptr: the CLIENT's record is incomplete ->
+ * convert_cf_ptr unwraps an arena handle on the way in), so leaving the ObjC
+ * side on raw-truncation makes the two bridges DISAGREE about the same pointer:
+ * `-[NSOpenGLContext CGLContextObj]` handed i386 code the low 32 bits of a
+ * >4GB context, and the very next `CGLSetParameter` bridge dereferenced it.
+ * MEASURED (Portal 2, 2026-09-22): native context 0x7f9bcb825e00 arrived at
+ * CGLSetParameter as 0xcb825e00, faulting in OpenGL at ctx+0x1f38.
+ *
+ * The wrap is CONDITIONAL (>4GB only, kind 10), so a genuine low-4GB struct
+ * pointer that i386 code really does dereference is untouched; a >4GB one is
+ * unusable raw no matter what, and wrapping at least preserves its identity for
+ * every C shim (convert_cf_ptr / __86x64_unwrap_obj_arg) downstream.
+ * `^{Name=#}` and empty-bodied `^{Name=}` are matched EARLIER by
+ * enc_is_objptr_struct / enc_is_cfptr, which wrap unconditionally.
+ *
+ * KILL SWITCH M64_NO_OBJC_STRUCTPTR_RET=1 — restore the raw 32-bit truncation
+ * (and the matching raw arg pass-through), i.e. reproduce the fault. */
+static int enc_is_structptr(const char *t) {
+   if (!t) { return 0; }
+   while (*t && strchr(ENC_QUALS, *t)) { ++t; }
+   if (*t != '^') { return 0; }
+   ++t;
+   while (*t && strchr(ENC_QUALS, *t)) { ++t; }
+   return *t == '{';
+}
+
+static int structptr_handle_disabled(void) {
+   static int d = -1;
+   if (d < 0) { d = getenv("M64_NO_OBJC_STRUCTPTR_RET") != NULL; }
+   return d;
+}
+
+/* The predicate as the marshallers use it: the kill switch folded in. */
+static int enc_is_handle_structptr(const char *t) {
+   return !structptr_handle_disabled() && enc_is_structptr(t);
+}
+
 /* A bare `^v` (`void *`, optionally const-qualified `r^v`) — an OPAQUE pointer
  * with no struct shape. A native method returning one (e.g.
  * -[NSGraphicsContext graphicsPort] -> CGContextRef) hands back a real 64-bit
@@ -2019,7 +2063,7 @@ static int marshal_arg_fwd(struct objc_call_plan *plan, struct mcur *c,
       uint32_t fn32 = args32[(*ai)++];
       return mcur_put_gp(plan, c, x64_cb_wrap(fn32, &g_objc_cmp_sig));
    }
-   if (b == '^' && t[1] == 'v') {
+   if ((b == '^' && t[1] == 'v') || enc_is_handle_structptr(t)) {
       /* Opaque `void*` arg. When the i386 app holds a value the bridge earlier
        * WRAPPED (a 64-bit native pointer that does NOT fit a 32-bit slot — e.g. a
        * CGContextRef obtained via `-[NSGraphicsContext CGContext]`
@@ -2035,16 +2079,19 @@ static int marshal_arg_fwd(struct objc_call_plan *plan, struct mcur *c,
        * unchanged, so real i386 buffers are never disturbed. This is the
        * symmetric inverse of the opaque-pointer RETURN wrap (and mirrors
        * bp_track_tag, which unwraps a wrapped 64-bit token on the remove* arg).
-       * Scoped to `^v` only: typed buffers (`^i`/`^c`/`^S`), by-ref out-params
-       * (`^@`), and struct pointers (`^{T=body}`) are always genuine app-side
-       * <4GB pointers, never wrapped handles, so they keep raw passthrough.
-       * (`^{Name=}` opaque CF/CG tokens and `^{Name=#}` object struct-ptrs are
-       * already unwrapped by enc_is_cfptr / enc_is_objptr_struct at the top.)
-       * UNIVERSAL: triggers on the `^v` encoding crossing into a native method,
+       * Scoped to `^v` and `^{T=body}` (enc_is_handle_structptr — the symmetric
+       * inverse of the kind-10 struct-pointer RETURN wrap): typed buffers
+       * (`^i`/`^c`/`^S`) and by-ref out-params (`^@`) are always genuine
+       * app-side <4GB pointers, never wrapped handles, so they keep raw
+       * passthrough. (`^{Name=}` opaque CF/CG tokens and `^{Name=#}` object
+       * struct-ptrs are already unwrapped by enc_is_cfptr /
+       * enc_is_objptr_struct at the top.) The unwrap is a pure arena read, so a
+       * genuine low-4GB struct pointer still passes through unchanged.
+       * UNIVERSAL: triggers on the ENCODING crossing into a native method,
        * not on the selector. */
       return mcur_put_gp(plan, c, x64_objc_unwrap(args32[(*ai)++]));
    }
-   /* everything else: int/char/short/BOOL/enum, ^i/^c/^@/^{T=body}/^* pointers —
+   /* everything else: int/char/short/BOOL/enum, ^i/^c/^@/^* pointers —
     * one 4-byte slot, GP (raw; genuine i386 pointers already fit <4GB) */
    return mcur_put_gp(plan, c, (uint64_t)args32[(*ai)++]);
 }
@@ -2692,7 +2739,7 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
       plan->ret_is_obj = 2;
    } else if (enc_is_objptr_struct(rt) || enc_is_cfptr(rt)) {
       plan->ret_is_obj = 1;          /* ^{Class=#...} obj / ^{CF=} ref -> wrap */
-   } else if (enc_is_opaque_voidptr(rt)) {
+   } else if (enc_is_opaque_voidptr(rt) || enc_is_handle_structptr(rt)) {
       /* `^v` (void*) opaque-pointer return, e.g. -[NSGraphicsContext graphicsPort]
        * -> CGContextRef. A >4GB native pointer truncates in the i386 caller's eax;
        * conditionally wrap it (>4GB only, like abigen's `.cfretlow`) into a low-4GB

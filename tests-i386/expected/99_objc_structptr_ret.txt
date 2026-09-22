@@ -1,0 +1,3 @@
+aeDesc nonnull=1
+ok structptr_return_roundtrip
+exit_code: 42
