@@ -1286,6 +1286,12 @@ $(BUILD_DIR)/99_cstr_pagezero_arg.i386: $(BUILD_DIR)/99_cstr_pagezero_arg.o
 	  || $(MAKE) --no-print-directory sysroot-objc
 	$(LD) $(LDFLAGS_I386) -e _main -framework CoreFoundation -o $@ $<
 
+# 99_cfnumber_i386_width links CoreFoundation the same way (see above).
+$(BUILD_DIR)/99_cfnumber_i386_width.i386: $(BUILD_DIR)/99_cfnumber_i386_width.o
+	@[ -f "$(I386_SYSROOT)/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" ] \
+	  || $(MAKE) --no-print-directory sysroot-objc
+	$(LD) $(LDFLAGS_I386) -e _main -framework CoreFoundation -o $@ $<
+
 # 99_subpage_text_fnptr: link with NO __PAGEZERO and __TEXT based at vmaddr 0, so
 # __text starts a few hundred bytes in -- BELOW 0x1000 -- which is the layout every
 # i386 DYLIB has and which the default -no_pie executable layout cannot produce

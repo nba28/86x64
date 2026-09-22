@@ -2220,6 +2220,10 @@ namespace MachO {
       const std::size_t sect_lo = sect.addr;
       const std::size_t sect_hi = sect.addr + sect.size;
       const bool trace = std::getenv("MACHO_TRACE_JUMPTABLE") != nullptr;
+      if (trace) {   /* one header per pass, so per-pass table sets can be compared */
+         fprintf(stderr, "[jumptable] pass bits=%d sect=0x%zx\n",
+                 bits == Bits::M32 ? 32 : 64, (size_t)sect_lo);
+      }
 
       std::unordered_map<xed_reg_enum_t, std::size_t> anchors;  /* reg -> anchor vmaddr */
       std::unordered_map<xed_reg_enum_t, std::size_t> tbl_addr;  /* reg -> table base vmaddr */
@@ -2260,7 +2264,36 @@ namespace MachO {
       /* Forward intra-function branch targets not yet reached; decides whether
        * a RET ends the function (see "Anchor lifetime" below). */
       std::set<std::size_t> pending_targets;
+
+      /* Anchor state at each forward branch SOURCE, keyed by its target: the
+       * linear walk drops an anchor a NOT-TAKEN arm clobbers (`jbe L; lea
+       * %eax,[%eax+str]; call warn; jmp out; L: add %eax,[%eax+%ecx*4+d];
+       * jmp *%eax` — the call erased the %eax anchor before the dispatch that
+       * only the branch reaches). On reaching the target, ADOPT the snapshot if
+       * the previous instruction has no fall-through, else INTERSECT it with
+       * the carried state — DetectPicAnchoredDisps' branch_anchor_snap rule.
+       * MEASURED, Portal 2 shaderapidx9 CShaderShadowDX8::BlendOp (i386
+       * 0x3600e): the rewrite pass re-anchored the fused load, this pass never
+       * claimed its table. Kill switch M64_NO_JT_BRANCH_SNAP=1. */
+      std::map<std::size_t, std::unordered_map<xed_reg_enum_t, std::size_t>> anchor_snap;
+      /* table base -> (entry count, anchor), for the next-table clamp below */
+      std::map<std::size_t, std::pair<std::size_t, std::size_t>> tables;
+      const bool jt_table_bound = std::getenv("M64_NO_JT_TABLE_BOUND") == nullptr;
+      const bool jt_branch_snap = std::getenv("M64_NO_JT_BRANCH_SNAP") == nullptr;
+      xed_category_enum_t prev_cat = XED_CATEGORY_INVALID;
       const bool jt_midfn_ret = std::getenv("M64_NO_JT_MIDFN_RET") == nullptr;
+      const bool jt_func_reset = std::getenv("M64_NO_JT_FUNC_RESET") == nullptr;
+      const bool jt_x64_anchor_at = std::getenv("M64_NO_JT_X64_ANCHOR_AT") == nullptr;
+      const bool jt_sym_resync = std::getenv("M64_NO_JT_SYM_RESYNC") == nullptr;
+      /* M64: a translated call to a PIC thunk is `lea r11,[rip+ret]; …; jmp
+       * thunk`, and the thunk leaves %reg = ret. Recognise it like the i386
+       * `call ___i686.get_pc_thunk.<r>`. Before the anchor-at rule (a-x64) these
+       * anchors were picked up by accident from the next unrelated `mov r,[rsp]`;
+       * with it they were lost (bugreporter_filequeue: M32 15 tables, M64 4).
+       * Kill switch M64_NO_JT_X64_THUNK=1. */
+      const bool jt_x64_thunk = std::getenv("M64_NO_JT_X64_THUNK") == nullptr;
+      const bool jt_anchor_copy = std::getenv("M64_NO_JT_ANCHOR_COPY") == nullptr;
+      const bool jt_fused_add_x64 = std::getenv("M64_NO_JT_FUSED_ADD_X64") == nullptr;
 
       bool prev_call0 = false;     /* previous insn was `call $+0` (e8 00000000) */
       std::size_t pend_r11 = 0;    /* value of the last `lea r11,[rip+d]` (x86_64 anchor dance) */
@@ -2286,15 +2319,31 @@ namespace MachO {
                mreg = XED_REG_INVALID; ++pit; ++pvm; continue;
             }
             const unsigned l = xed_decoded_inst_get_length(&xd);
-            if (mreg != XED_REG_INVALID &&
-                xed_decoded_inst_get_category(&xd) == XED_CATEGORY_RET) {
+            if (l > 1 && jt_sym_resync) {   /* same symbol re-sync as the main walk */
+               auto ns = env.func_syms.upper_bound(pvm);
+               if (ns != env.func_syms.end() && *ns < pvm + l) {
+                  mreg = XED_REG_INVALID; ++pit; ++pvm; continue;
+               }
+            }
+            /* The thunk's return: a RET (i386), or in a TRANSLATED image the
+             * `mov r11d,[rsp]` that starts the translated return
+             * (`mov ebx,[rsp]; mov r11d,[rsp]; lea rsp,[rsp+4]; jmp r11`). */
+            const bool thunk_ret =
+               xed_decoded_inst_get_category(&xd) == XED_CATEGORY_RET ||
+               (bits == Bits::M64 && jt_x64_thunk &&
+                xed_decoded_inst_get_iform_enum(&xd) == XED_IFORM_MOV_GPRv_MEMv &&
+                xed_decoded_inst_get_reg(&xd, XED_OPERAND_REG0) == XED_REG_R11D &&
+                xed_decoded_inst_get_base_reg(xed_decoded_inst_operands_const(&xd), 0) == XED_REG_RSP &&
+                xed_decoded_inst_get_memory_displacement(xed_decoded_inst_operands_const(&xd), 0) == 0);
+            if (mreg != XED_REG_INVALID && thunk_ret) {
                pic_thunks[mvm] = mreg;
             }
             mreg = XED_REG_INVALID;
             if (xed_decoded_inst_get_iform_enum(&xd) == XED_IFORM_MOV_GPRv_MEMv) {
                const xed_operand_values_t* o = xed_decoded_inst_operands_const(&xd);
                if (xed_decoded_inst_number_of_memory_operands(&xd) == 1 &&
-                   xed_decoded_inst_get_base_reg(o, 0) == XED_REG_ESP &&
+                   (xed_decoded_inst_get_base_reg(o, 0) == XED_REG_ESP ||
+                    xed_decoded_inst_get_base_reg(o, 0) == XED_REG_RSP) &&
                    xed_decoded_inst_get_index_reg(o, 0) == XED_REG_INVALID &&
                    xed_decoded_inst_get_memory_displacement(o, 0) == 0) {
                   const xed_reg_enum_t d =
@@ -2328,15 +2377,64 @@ namespace MachO {
          xed_decoded_inst_set_input_chip(&xedd, XED_CHIP_INVALID);
          if (xed_decode(&xedd, &img.at<uint8_t>(it), img.size() - it) != XED_ERROR_NONE) {
             tbl_addr.clear(); tbl_val.clear(); prev_call0 = false;
+            prev_cat = XED_CATEGORY_INVALID;
             ++it; ++vmaddr;
             continue;
          }
          const unsigned len = xed_decoded_inst_get_length(&xedd);
+         /* Re-sync at a function symbol the decoded instruction STRADDLES: the
+          * bytes before it are inter-function padding, exactly the rule the
+          * TextParser sweep applies (its func_syms boundary guard). Without it
+          * this walk decoded `nop…nop 00 | 8b 4c 24 04 4c 8d 1d …` (a translated
+          * entry after its 0x00 alignment byte) as `add [rbx+…],cl`, swallowed
+          * the entry and the `lea r11` of the anchor dance, and so never saw the
+          * function's anchor on any M64 re-parse. Kill switch M64_NO_JT_SYM_RESYNC=1. */
+         if (len > 1 && jt_sym_resync) {
+            auto ns = env.func_syms.upper_bound(vmaddr);
+            if (ns != env.func_syms.end() && *ns < vmaddr + len) {
+               tbl_addr.clear(); tbl_val.clear(); prev_call0 = false;
+               prev_cat = XED_CATEGORY_INVALID;
+               ++it; ++vmaddr;
+               continue;
+            }
+         }
          const xed_iform_enum_t iform = xed_decoded_inst_get_iform_enum(&xedd);
          const xed_category_enum_t cat = xed_decoded_inst_get_category(&xedd);
          const xed_operand_values_t* ops = xed_decoded_inst_operands_const(&xedd);
          const xed_reg_enum_t reg0raw = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
          const xed_reg_enum_t reg0 = jt_norm32(reg0raw);
+
+         /* A symbolled function entry starts with NO live anchor. The RET rule
+          * below cannot guarantee that: it keeps anchors across a RET while a
+          * forward branch target is pending, and a tail `jmp` to a later
+          * function stays pending for up to 64 KB. The M64 re-parse never sees
+          * a RET at all (the translated return is `jmp *%r11`). Either way a
+          * previous function's anchor leaked in: a stale %eax anchor turned
+          * `lea %esi,[%eax-4]` into a bogus table base and lost CTempMeshDX8::
+          * RenderPass's table (shaderapidx9 0xcfc7), and the M64 re-parse
+          * claimed ExecuteCommandBuffer's table with an earlier function's
+          * anchor. Kill switch M64_NO_JT_FUNC_RESET=1. */
+         if (jt_func_reset && env.func_syms.count(vmaddr) != 0) {
+            anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
+            stack_tbl.clear(); stack_anchor.clear(); pending_targets.clear();
+            anchor_snap.clear();
+            prev_call0 = false;
+         }
+         if (jt_branch_snap && !anchor_snap.empty()) {
+            auto sn = anchor_snap.find(vmaddr);
+            if (sn != anchor_snap.end()) {
+               if (prev_cat == XED_CATEGORY_RET || prev_cat == XED_CATEGORY_UNCOND_BR) {
+                  anchors = sn->second;
+               } else {
+                  for (auto i = anchors.begin(); i != anchors.end(); ) {
+                     auto o = sn->second.find(i->first);
+                     i = (o == sn->second.end() || o->second != i->second)
+                            ? anchors.erase(i) : std::next(i);
+                  }
+               }
+            }
+            anchor_snap.erase(anchor_snap.begin(), anchor_snap.upper_bound(vmaddr));
+         }
 
          bool sets_state = false;
          bool spill_write = false;   /* this insn is the tracked frame-slot spill */
@@ -2348,14 +2446,46 @@ namespace MachO {
             sets_state = true;
          }
          /* (a-x64) PIC anchor: the translated `lea r11,[rip+d]; …; mov %reg,[rsp]`
-          *         dance (call_op) leaves %reg = the rip-relative value. */
+          *         dance (call_op) leaves %reg = the rip-relative value.
+          *         Only the `mov` AT the dance's target is the anchor pop: the
+          *         translated `call $+0` pushes the address of that very `mov`.
+          *         Any later `mov %reg,[rsp]` (an epilogue `pop`, an argument
+          *         read) was taking the stale return address of the last real
+          *         CALL as an anchor, so every M64 re-parse claimed fused tables
+          *         with a wrong anchor and a wrong size (shaderapidx9
+          *         0x35d00: `pop %ebx` of the epilogue re-anchored %ebx at the
+          *         return site of a `call`). Kill switch M64_NO_JT_X64_ANCHOR_AT. */
          else if (iform == XED_IFORM_MOV_GPRv_MEMv && pend_r11 != 0 &&
+                  (vmaddr == pend_r11 || !jt_x64_anchor_at) &&
                   xed_decoded_inst_get_base_reg(ops, 0) == XED_REG_RSP &&
                   xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID &&
                   jt_is_gpr32(reg0)) {
             anchors[reg0] = pend_r11;
             tbl_addr.erase(reg0); tbl_val.erase(reg0);
             sets_state = true;
+         }
+         /* (a-copy) `mov %dst,%src` carries the anchor along, as
+          *     DetectPicAnchoredDisps step (2c) does. Copy only: an overwrite
+          *     does not clear %dst (this walk has no branch-join snapshot, and
+          *     keeping an anchor is the safe error for a linear walk).
+          *     GCC parks the anchor in one register and copies it into another
+          *     for the dispatch (`pop %esi; ... mov %edx,%esi; ... mov
+          *     %eax,[%edx+%eax*4+d]; add %eax,%edx; jmp *%eax`). The rewrite
+          *     pass followed the copy and re-anchored the load, this detector
+          *     did not: the table was never claimed on the i386 pass, and the
+          *     M64 re-parse then claimed it with whatever STALE anchor %edx
+          *     still held from an earlier function. MEASURED, Portal 2
+          *     shaderapidx9 CShaderAPIDx8::ExecuteCommandBuffer (i386 0x1e0f9).
+          *     Kill switch M64_NO_JT_ANCHOR_COPY=1. */
+         else if ((iform == XED_IFORM_MOV_GPRv_GPRv_89 ||
+                   iform == XED_IFORM_MOV_GPRv_GPRv_8B) && jt_is_gpr32(reg0) &&
+                  jt_anchor_copy) {
+            const xed_reg_enum_t src =
+               jt_norm32(xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1));
+            if (src != reg0) {
+               auto a = anchors.find(src);
+               if (a != anchors.end()) { anchors[reg0] = a->second; }
+            }
          }
          /* (b) table base via lea: i386 `[anchor+disp]` or x86_64 `[rip+disp]`.
           *     The M64 `convert` re-parse sees the ALREADY-TRANSLATED dispatch,
@@ -2550,6 +2680,28 @@ namespace MachO {
                   sets_state = true;
                }
             }
+            /* The same fused add with the table base in ANOTHER register:
+             * `add %anchor,[%tbl + idx*4]`. This is what the TRANSLATED fused
+             * dispatch looks like (`lea r11,[rip+d]; add edx,[r11d+rcx*4];
+             * jmp rdx`), so without it every M64 re-parse (modify, strip-bind,
+             * interpose, convert) missed each fused table and re-emitted its
+             * entries as code: entry 0x175 = `75 01` (jne) was widened to a
+             * 6-byte jcc, shifting every later entry by 4. MEASURED, Portal 2
+             * shaderapidx9 ImageLoader::D3DFormatToImageFormat (i386 0x49b10,
+             * two fused tables): M32 26 tables, M64 19.
+             * Kill switch M64_NO_JT_FUSED_ADD_X64=1. */
+            else if (fused_add && a != anchors.end() &&
+                     jt_fused_add_x64 &&
+                     midx != XED_REG_INVALID && midx != reg0 &&
+                     xed_operand_values_get_scale(ops) == 4 &&
+                     xed_decoded_inst_get_memory_displacement(ops, 0) == 0) {
+               auto tb = tbl_addr.find(mbase);
+               if (tb != tbl_addr.end()) {
+                  tbl_val[reg0] = { tb->second, a->second };
+                  tbl_addr.erase(reg0);
+                  sets_state = true;
+               }
+            }
          }
          /* (d) add %reg,%anchor where reg holds a table entry -> reg = target.
           *     The anchor register's value resolves the table's anchor. */
@@ -2571,8 +2723,15 @@ namespace MachO {
                const std::size_t table_base = tv->second.first;
                const std::size_t anchor = tv->second.second;
                /* Auto-size: the table ends at the lowest entry target above the
-                * base (= first case body). Stop on any out-of-section target. */
+                * base (= first case body). Stop on any out-of-section target,
+                * and at the next function symbol: a table never spans into
+                * another function (the post-pass below also stops it at the
+                * next table). */
                std::size_t min_target = sect_hi;
+               if (jt_table_bound) {
+                  auto ns = env.func_syms.upper_bound(table_base);
+                  if (ns != env.func_syms.end() && *ns < min_target) { min_target = *ns; }
+               }
                std::size_t i = 0;
                for (; ; ++i) {
                   const std::size_t slot = table_base + i * 4;
@@ -2589,6 +2748,8 @@ namespace MachO {
                   for (std::size_t k = 0; k < i; ++k) {
                      env.jump_table_slots[table_base + k * 4] = anchor;
                   }
+                  auto& tr = tables[table_base];
+                  if (i > tr.first) { tr = { i, anchor }; }
                   if (trace) {
                      fprintf(stderr, "[jumptable] dispatch@0x%zx anchor=0x%zx "
                              "table=0x%zx count=%zu\n",
@@ -2614,6 +2775,7 @@ namespace MachO {
                      tbl_addr.erase(reg0);
                      tbl_val.erase(reg0);
                      prev_call0 = false;
+                     prev_cat = cat;
                      continue;
                   }
                }
@@ -2695,6 +2857,18 @@ namespace MachO {
             const std::size_t tgt = vmaddr + len + bd;
             if (bd > 0 && tgt < sect_hi && tgt - vmaddr <= 0x10000) {
                pending_targets.insert(tgt);
+               if (jt_branch_snap) {
+                  auto sit = anchor_snap.find(tgt);
+                  if (sit == anchor_snap.end()) {
+                     anchor_snap[tgt] = anchors;
+                  } else {
+                     for (auto i = sit->second.begin(); i != sit->second.end(); ) {
+                        auto o = anchors.find(i->first);
+                        i = (o == anchors.end() || o->second != i->second)
+                               ? sit->second.erase(i) : std::next(i);
+                     }
+                  }
+               }
             }
          }
          const bool midfn_ret =
@@ -2723,6 +2897,12 @@ namespace MachO {
                auto t = pic_thunks.find(vmaddr + len + bd);
                if (t != pic_thunks.end()) { anchors[t->second] = vmaddr + len; }
             }
+         } else if (bits == Bits::M64 && jt_x64_thunk && cat == XED_CATEGORY_UNCOND_BR && xed_decoded_inst_get_branch_displacement(&xedd) != 0 &&
+                    pend_r11 == vmaddr + len) {
+            /* translated call: the pushed return address is this jmp's successor */
+            auto t = pic_thunks.find(vmaddr + len +
+                                     xed_decoded_inst_get_branch_displacement(&xedd));
+            if (t != pic_thunks.end()) { anchors[t->second] = vmaddr + len; }
          }
 
          prev_call0 = (iform == XED_IFORM_CALL_NEAR_RELBRz && len == 5 &&
@@ -2733,8 +2913,43 @@ namespace MachO {
              xed_decoded_inst_get_base_reg(ops, 0) == XED_REG_RIP) {
             pend_r11 = vmaddr + len + xed_decoded_inst_get_memory_displacement(ops, 0);
          }
+         prev_cat = cat;
          it += len;
          vmaddr += len;
+      }
+
+      /* A run of entries stops at the next table. Two switches sharing one
+       * anchor often place their tables back to back at the function's end,
+       * below every case body, so "stop at the first case body above the base"
+       * never fires and the first table's auto-size ran straight through the
+       * second (shaderapidx9 ImageLoader::D3DFormatToImageFormat: 0x49ce4
+       * sized 20 = its own 11 + the 9 of 0x49d10). Harmless while both share an
+       * anchor, wrong as soon as they do not. The walk meets dispatches in code
+       * order, not table order, so clamp here once every base is known and
+       * re-emit each clamped table's slots with its OWN anchor.
+       * Kill switch M64_NO_JT_TABLE_BOUND=1. */
+      if (jt_table_bound) {
+         for (auto t = tables.begin(); t != tables.end(); ++t) {
+            auto nx = std::next(t);
+            if (nx == tables.end()) { break; }
+            const std::size_t room = (nx->first - t->first) / 4;
+            if (t->second.first > room) {
+               if (trace) {
+                  fprintf(stderr, "[jumptable] clamp table=0x%zx count=%zu->%zu "
+                          "(next table 0x%zx)\n", (size_t)t->first,
+                          (size_t)t->second.first, room, (size_t)nx->first);
+               }
+               for (std::size_t k = room; k < t->second.first; ++k) {
+                  env.jump_table_slots.erase(t->first + k * 4);
+               }
+               t->second.first = room;
+            }
+         }
+         for (const auto& t : tables) {
+            for (std::size_t k = 0; k < t.second.first; ++k) {
+               env.jump_table_slots[t.first + k * 4] = t.second.second;
+            }
+         }
       }
    }
 
