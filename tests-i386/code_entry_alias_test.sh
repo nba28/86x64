@@ -26,6 +26,10 @@
 #   gate OFF -> the same word is rebased (proves the guard actually bites)
 # Both directions are asserted, so the test cannot silently pass for the wrong
 # reason. Needs the SL i386 sysroot; SKIPs without it (like the suite).
+# i386 linking needs the Snow Leopard ld64-95 wrapper: modern ld dropped -arch i386
+# (same resolution as the Makefile's LD). Override with LD=... in the environment.
+LD="${LD:-$HOME/projects/Library/Toolchains/sl-ld64/ld-i386}"; [ -x "$LD" ] || LD=ld
+
 set -u
 cd "$(dirname "$0")"
 
@@ -53,7 +57,7 @@ clang -arch i386 -isysroot "$SYSROOT" -mmacosx-version-min=10.6 \
    2>/dev/null || fail assemble
 # non-PIE MH_EXECUTE: the fixed-load-address, reloc-less shape that disarms
 # every other pointer-detection discriminator.
-ld -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" \
+"$LD" -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" \
    -lSystem -e _main -o build/code_entry_alias.i386 \
    build/code_entry_alias.o 2>/dev/null || fail link
 

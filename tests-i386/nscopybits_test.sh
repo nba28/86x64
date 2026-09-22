@@ -22,6 +22,10 @@
 # black background also copied (full rect, not just an edge). 3 == fixed. Without
 # the fix, gState==0 -> NSCopyBits copies nothing -> the dest stays its initial
 # color -> bit0 clear (RED absent) == RED.
+# i386 linking needs the Snow Leopard ld64-95 wrapper: modern ld dropped -arch i386
+# (same resolution as the Makefile's LD). Override with LD=... in the environment.
+LD="${LD:-$HOME/projects/Library/Toolchains/sl-ld64/ld-i386}"; [ -x "$LD" ] || LD=ld
+
 set -u
 cd "$(dirname "$0")"
 
@@ -141,7 +145,7 @@ EOF
 clang -arch i386 -isysroot "$HOST_SDK" -mmacosx-version-min=10.6 \
    -fobjc-runtime=macosx-fragile -c "$TMP/t.m" -o "$TMP/t.o" 2>"$TMP/cc.err" \
    || { cat "$TMP/cc.err"; fail compile; }
-ld -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" \
+"$LD" -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" \
    -lSystem -lobjc -framework Foundation -framework CoreFoundation \
    -undefined dynamic_lookup -e _main -o "$TMP/t.i386" "$TMP/t.o" 2>"$TMP/ld.err" \
    || { cat "$TMP/ld.err"; fail link; }

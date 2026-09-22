@@ -34,6 +34,10 @@
 #
 # Exit protocol of the translated program: 8 independent bits per scenario,
 # ANDed; 255 == every family landed in every scenario.
+# i386 linking needs the Snow Leopard ld64-95 wrapper: modern ld dropped -arch i386
+# (same resolution as the Makefile's LD). Override with LD=... in the environment.
+LD="${LD:-$HOME/projects/Library/Toolchains/sl-ld64/ld-i386}"; [ -x "$LD" ] || LD=ld
+
 set -u
 cd "$(dirname "$0")"
 
@@ -461,7 +465,7 @@ clang -arch i386 -isysroot "$HOST_SDK" -mmacosx-version-min=10.6 \
 # imports the pipeline's static-interpose resolves to libabiconv (exactly the
 # translated-Quinn shape: its .objc_class_name_* AppKit refs ride as never-fired
 # lazy binds).
-ld -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" \
+"$LD" -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" \
    -lSystem -lobjc -framework Foundation -framework CoreFoundation \
    -undefined dynamic_lookup -e _main \
    -o "$TMP/t.i386" "$TMP/t.o" 2>"$TMP/ld.err" \

@@ -41,6 +41,10 @@
 #
 # Needs the i386 sysroot + staged libstdc++ (see Makefile sysroot/sysroot-cpp);
 # SKIPs without.
+# i386 linking needs the Snow Leopard ld64-95 wrapper: modern ld dropped -arch i386
+# (same resolution as the Makefile's LD). Override with LD=... in the environment.
+LD="${LD:-$HOME/projects/Library/Toolchains/sl-ld64/ld-i386}"; [ -x "$LD" ] || LD=ld
+
 set -u
 MT="${1:?usage: pcmap_stage_shift_test.sh <path-to-macho-tool>}"
 
@@ -65,7 +69,7 @@ HOST_SDK="$(xcrun --show-sdk-path)"
 #     layout window (see header comment). ---
 clang++ -arch i386 -isysroot "$HOST_SDK" -mmacosx-version-min=10.6 \
    -c "$SRC" -o "$TMP/t.o" 2>/dev/null || fail "clang++ -arch i386"
-ld -arch i386 -macos_version_min 10.6 -dylib -image_base 0x10000000 \
+"$LD" -arch i386 -macos_version_min 10.6 -dylib -image_base 0x10000000 \
    -syslibroot "$SYSROOT" -lSystem -lstdc++ -o "$TMP/t.i386" "$TMP/t.o" \
    2>/dev/null || fail "ld i386 dylib"
 
@@ -73,10 +77,23 @@ ld -arch i386 -macos_version_min 10.6 -dylib -image_base 0x10000000 \
 "$MT" rebasify "$TMP/t.i386" "$TMP/t.rebase" >/dev/null 2>&1 || fail rebasify
 "$MT" -- transform "$TMP/t.rebase" "$TMP/t.transform" >/dev/null 2>&1 || fail transform
 
-data_addr() { otool -l "$1" 2>/dev/null | awk '/sectname __data$/{f=1} f&&/^ *addr/{print $2; exit}'; }
+# The shift probe is the fixture's FIRST __DATA section, whichever it is: a
+# C++ EH fixture need not have a __data section at all (today's clang++ gives it
+# __nl_symbol_ptr/__la_symbol_ptr only), and the test just needs one __DATA
+# address that moves when the load commands grow.
+sect_addr() { otool -l "$1" 2>/dev/null | awk -v want="$2" \
+   '/^ *sectname /{s=$2} /^ *segname /{g=$2} /^ *addr /{if(g=="__DATA"&&s==want){print $2; exit}}'; }
+# (the SEGMENT load command also prints a segname line, so only a segname that
+#  directly follows a sectname names a section.)
+first_data_sect() { otool -l "$1" 2>/dev/null | awk \
+   '/^ *sectname /{s=$2; p=1; next} /^ *segname /{if(p&&$2=="__DATA"){print s; exit}; p=0}'; }
+
+SECT=$(first_data_sect "$TMP/t.transform")
+[ -n "$SECT" ] || fail "no __DATA section in transform output"
+data_addr() { sect_addr "$1" "$SECT"; }
 
 D0=$(data_addr "$TMP/t.transform")
-[ -n "$D0" ] || fail "no __data in transform output"
+[ -n "$D0" ] || fail "no $SECT address in transform output"
 
 # --- Row dumper: prints "pcmap <trans_off> <orig>" and
 #     "ehlsda <func_off> <orig_func> <lsda_off>" lines, sorted. ---
@@ -142,14 +159,14 @@ for i in 1 2 3 4 5 6 7 8; do
    DN=$(data_addr "$CUR")
    if [ -n "$DN" ] && [ "$DN" != "$D0" ]; then SHIFTED=1; break; fi
 done
-[ -n "$SHIFTED" ] || fail "could not force a __DATA shift ($D0 unchanged after 8 inserts) — test premise broken, fix the forcing"
+[ -n "$SHIFTED" ] || fail "could not force a __DATA shift ($SECT $D0 unchanged after 8 inserts) — test premise broken, fix the forcing"
 
 # --- Final conversion (another re-parse; mirror the pipeline's flags). ---
 "$MT" convert --archive DYLIB --synthesize-dyld-info "$CUR" "$TMP/t.dylib" \
    >/dev/null 2>&1 || fail convert
 
 D1=$(data_addr "$TMP/t.dylib")
-echo "pcmap-stage-shift: __data ${D0} (transform) -> ${D1} (final dylib); ${NPC} pcmap + ${NLS} ehlsda rows"
+echo "pcmap-stage-shift: $SECT ${D0} (transform) -> ${D1} (final dylib); ${NPC} pcmap + ${NLS} ehlsda rows"
 
 dump_tables "$TMP/t.dylib" > "$TMP/rows.after" || fail "dump final tables"
 grep -q NOTABLES "$TMP/rows.after" && fail "final dylib lost the pcmap/ehlsda tables"

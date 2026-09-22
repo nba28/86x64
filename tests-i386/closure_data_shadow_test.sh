@@ -20,6 +20,10 @@
 # FAIL (not SKIP) when libabiconv lacks ___kABTitleProperty: that means the
 # closure discovery regressed OR the source pool's SF originals lost their i386
 # slice (see gotcha: an agent once translated the pool's SFTabular IN PLACE).
+# i386 linking needs the Snow Leopard ld64-95 wrapper: modern ld dropped -arch i386
+# (same resolution as the Makefile's LD). Override with LD=... in the environment.
+LD="${LD:-$HOME/projects/Library/Toolchains/sl-ld64/ld-i386}"; [ -x "$LD" ] || LD=ld
+
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROJ_ROOT="$(cd "$HERE/.." && pwd)"
@@ -82,7 +86,7 @@ HOST_SDK="$(xcrun --show-sdk-path)"
 clang -arch i386 -isysroot "$HOST_SDK" -mmacosx-version-min=10.6 \
       -fobjc-runtime=macosx-fragile -c "$TMP/t.m" -o "$TMP/t.o" 2> "$TMP/cc.err" \
    || { echo "SKIP closure-data-shadow (i386 objc compile unavailable)"; exit 0; }
-ld -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" \
+"$LD" -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" \
    -e _main -o "$TMP/t.i386" "$TMP/t.o" \
    -lSystem -lobjc -framework Foundation -framework CoreFoundation \
    -framework AddressBook 2> "$TMP/ld.err" \

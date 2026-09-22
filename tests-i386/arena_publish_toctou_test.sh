@@ -32,6 +32,10 @@
 # the test SKIPs (so it is inert until the coordinator lands the hook + fix).
 #
 # Needs the Snow Leopard i386 sysroot; SKIPs without it.
+# i386 linking needs the Snow Leopard ld64-95 wrapper: modern ld dropped -arch i386
+# (same resolution as the Makefile's LD). Override with LD=... in the environment.
+LD="${LD:-$HOME/projects/Library/Toolchains/sl-ld64/ld-i386}"; [ -x "$LD" ] || LD=ld
+
 set -u
 cd "$(dirname "$0")"
 
@@ -58,7 +62,7 @@ fail() { echo "FAIL arena-publish-toctou ($1)"; exit 1; }
 clang -arch i386 -isysroot "$SYSROOT" -mmacosx-version-min=10.6 \
    -c src/arena_publish_toctou_fixture.c \
    -o build/arena_publish_toctou_fixture.o 2>/dev/null || fail compile
-ld -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" \
+"$LD" -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" \
    -lSystem -e _main -o build/arena_publish_toctou_fixture.i386 \
    build/arena_publish_toctou_fixture.o 2>/dev/null || fail link
 bash "$PIPELINE" -m "$MT" -l "$LIBABICONV" -w "$LIBWRAPPER" -i "$LIBINTERPOSE" \

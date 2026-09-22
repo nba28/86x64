@@ -36,6 +36,10 @@
 # FINAL layout. Pre-fix this fails with the store exactly one page low.
 #
 # Needs the i386 sysroot (see Makefile `make sysroot`); SKIPs without.
+# i386 linking needs the Snow Leopard ld64-95 wrapper: modern ld dropped -arch i386
+# (same resolution as the Makefile's LD). Override with LD=... in the environment.
+LD="${LD:-$HOME/projects/Library/Toolchains/sl-ld64/ld-i386}"; [ -x "$LD" ] || LD=ld
+
 set -u
 MT="${1:?usage: selfref_imm_stage_shift_test.sh <path-to-macho-tool>}"
 
@@ -57,7 +61,7 @@ trap 'rm -rf "$TMP"' EXIT
 # --- Build the non-PIE i386 fixture. ---
 clang -arch i386 -isysroot "$SYSROOT" -mmacosx-version-min=10.6 \
    -c "$SRC" -o "$TMP/t.o" 2>/dev/null || fail "clang -arch i386"
-ld -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" \
+"$LD" -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" \
    -lSystem -e _main -o "$TMP/t.i386" "$TMP/t.o" 2>/dev/null || fail "ld i386"
 
 # --- Translate: rebasify + transform. ---
