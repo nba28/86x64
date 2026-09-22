@@ -142,6 +142,12 @@ def archs_of(path):
                              capture_output=True, text=True)
         if out.returncode == 0:
             return out.stdout.split()
+        # Current lipo rejects a fat file carrying a PPC slice under -archs
+        # ("not a mach-o"), but -info still lists it: "... are: ppc i386".
+        out = subprocess.run(["lipo", "-info", str(path)],
+                             capture_output=True, text=True)
+        if out.returncode == 0 and ":" in out.stdout:
+            return out.stdout.rsplit(":", 1)[1].split()
     except OSError:
         pass
     return []
