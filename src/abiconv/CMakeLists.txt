@@ -544,6 +544,9 @@ add_library(abiconv SHARED
   # DETERMINISTIC terminator, better than the garbage classic CF copied).
   # Symbol listed in custom.syms so abigen never dup-emits it.
   cfstring_range_shim.c
+  # cfnumber_width_shim.c / cfnumber_width_tramp.asm: ONE job — the CFNumber types
+  # named after a C type (Long, CFIndex, NSInteger, CGFloat) have the i386 width.
+  cfnumber_width_shim.c
   # carbon_datetime_shim.c / carbon_datetime_tramp.asm: ONE job — the classic
   # Date & Time Utilities (SecondsToDate / DateToSeconds / LongSecondsToDate /
   # LongDateToSeconds), which modern macOS REMOVED. abigen still emits a bridge,
@@ -731,6 +734,7 @@ add_library(abiconv SHARED
   cow_string_tramp.asm
   cg_display_tramp.asm
   cfstring_range_tramp.asm
+  cfnumber_width_tramp.asm
   carbon_datetime_tramp.asm
   carbon_fscatinfo_tramp.asm
   carbon_memory_tramp.asm

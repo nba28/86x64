@@ -1,0 +1,2 @@
+w=1512 h=982 rr=120 canary=5a5a5a5a long=77 cgfloat*10=25/25 bad=0
+exit_code: 42

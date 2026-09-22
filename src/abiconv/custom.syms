@@ -215,6 +215,11 @@ _CFStringAppendFormatAndArguments
 # the CFRange; modern CF throws from NSTaggedPointerString but not __NSCFString.
 _CFStringGetCharacters
 
+# cfnumber_width_shim.c / cfnumber_width_tramp.asm — Long/CFIndex/NSInteger/CGFloat
+# CFNumber types are 4 bytes on i386; native CF would write 8 into the i386 slot.
+_CFNumberGetValue
+_CFNumberCreate
+
 _NSUnionRect
 _NSIntersectionRect
 _NSInsetRect
