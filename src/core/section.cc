@@ -2292,6 +2292,8 @@ namespace MachO {
        * with it they were lost (bugreporter_filequeue: M32 15 tables, M64 4).
        * Kill switch M64_NO_JT_X64_THUNK=1. */
       const bool jt_x64_thunk = std::getenv("M64_NO_JT_X64_THUNK") == nullptr;
+      const bool jt_anchor_copy = std::getenv("M64_NO_JT_ANCHOR_COPY") == nullptr;
+      const bool jt_fused_add_x64 = std::getenv("M64_NO_JT_FUSED_ADD_X64") == nullptr;
 
       bool prev_call0 = false;     /* previous insn was `call $+0` (e8 00000000) */
       std::size_t pend_r11 = 0;    /* value of the last `lea r11,[rip+d]` (x86_64 anchor dance) */
@@ -2477,7 +2479,7 @@ namespace MachO {
           *     Kill switch M64_NO_JT_ANCHOR_COPY=1. */
          else if ((iform == XED_IFORM_MOV_GPRv_GPRv_89 ||
                    iform == XED_IFORM_MOV_GPRv_GPRv_8B) && jt_is_gpr32(reg0) &&
-                  std::getenv("M64_NO_JT_ANCHOR_COPY") == nullptr) {
+                  jt_anchor_copy) {
             const xed_reg_enum_t src =
                jt_norm32(xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1));
             if (src != reg0) {
@@ -2689,7 +2691,7 @@ namespace MachO {
              * two fused tables): M32 26 tables, M64 19.
              * Kill switch M64_NO_JT_FUSED_ADD_X64=1. */
             else if (fused_add && a != anchors.end() &&
-                     std::getenv("M64_NO_JT_FUSED_ADD_X64") == nullptr &&
+                     jt_fused_add_x64 &&
                      midx != XED_REG_INVALID && midx != reg0 &&
                      xed_operand_values_get_scale(ops) == 4 &&
                      xed_decoded_inst_get_memory_displacement(ops, 0) == 0) {
