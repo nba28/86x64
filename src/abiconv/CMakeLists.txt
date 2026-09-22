@@ -174,6 +174,10 @@ set(ABICONV_MODERN_TARGETS
     "$ENV{HOME}/projects/translations/Apps32/Pages.app/Contents/MacOS/Pages"
     "$ENV{HOME}/projects/translations/Apps32/Quinn.app/Contents/MacOS/Quinn"
     "$ENV{HOME}/Library/Application Support/Steam/steamapps/common/Portal 2/bin/osx32/engine.dylib"
+    # libcef is dlopen'd via vguimatsurface, outside engine's import closure, so
+    # its imports (Security SSL*/SecTrust*, CoreText CT*, libSystem dyld/poll/...)
+    # never entered the consider set and stayed raw cross-ABI binds.
+    "$ENV{HOME}/Library/Application Support/Steam/steamapps/common/Portal 2/bin/osx32/libcef.dylib"
     CACHE STRING "i386 ORIGINAL app executables (Apps32) whose imports drive the universal modern shim set")
 # Extra source pools for the import-closure dep resolution (_i386_closure.py
 # --source; searched before _vendor_deps' DEFAULT_SOURCES). Normally empty —

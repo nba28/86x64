@@ -88,8 +88,18 @@ UMBRELLA = {
                               "<AddressBook/ABAddressBookC.h>"],
     # libSystem umbrella: mach + the C library. mach/mach.h transitively declares
     # the unbridged-native time family (mach_timebase_info/mach_absolute_time/host_*).
+    # The rest are libSystem entry points whose ONLY declaring header is not
+    # reached transitively (Portal 2 2026-09-22: libcef's _NSGetExecutablePath
+    # had no prototype -> raw native call with i386 stack args -> size out-param
+    # never written -> resize(size-1) = resize(npos)). Value-ABI families only;
+    # <crt_externs.h> (_NSGetArgv & co return pointers INTO native storage) and
+    # <execinfo.h> (backtrace fills a void*[] of native-width PCs) need hand shims.
     "libSystem":             ["<mach/mach.h>", "<mach/mach_time.h>",
-                              "<sys/sysctl.h>", "<time.h>"],
+                              "<sys/sysctl.h>", "<time.h>",
+                              "<mach-o/dyld.h>", "<poll.h>", "<fnmatch.h>",
+                              "<langinfo.h>", "<copyfile.h>", "<sys/statvfs.h>",
+                              "<CommonCrypto/CommonDigest.h>",
+                              "<CommonCrypto/CommonCryptor.h>"],
 }
 
 # Leaves we deliberately do NOT umbrella-map here: handled elsewhere or no modern
