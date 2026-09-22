@@ -398,6 +398,35 @@ static void p_gettexlevelparameteriv(GLenum t, GLint l, GLenum p, GLint *v) {
    glGetTexLevelParameteriv(t, l, p, v); check("glGetTexLevelParameteriv");
 }
 
+/* ---- buffer objects: a NULL map return is a NULL destination pointer ------ */
+static void p_genbufarb(GLsizei n, GLuint *ids) {
+   ENTER("glGenBuffersARB", n);
+   glGenBuffersARB(n, ids); check("glGenBuffersARB");
+   LOG("glGenBuffersARB n=%d out=%p -> id=%u\n", n, (void *)ids, (n > 0 && ids) ? ids[0] : 0u);
+}
+static void p_bindbufarb(GLenum t, GLuint b) {
+   ENTER("glBindBufferARB", b);
+   glBindBufferARB(t, b); check("glBindBufferARB");
+   NOTE("glBindBufferARB target=%#x buf=%u\n", t, b);
+}
+static void p_bufdataarb(GLenum t, GLsizeiptrARB sz, const GLvoid *d, GLenum u) {
+   ENTER("glBufferDataARB", (long)sz);
+   glBufferDataARB(t, sz, d, u); check("glBufferDataARB");
+   LOG("glBufferDataARB target=%#x size=%lld data=%p usage=%#x\n",
+       t, (long long)sz, (void *)d, u);
+}
+static GLvoid *p_mapbufarb(GLenum t, GLenum access) {
+   ENTER("glMapBufferARB", access);
+   GLvoid *p = glMapBufferARB(t, access); check("glMapBufferARB");
+   GLint bound = 0, bsz = -1;
+   glGetIntegerv(t == 0x8893 ? 0x8895 /*ELEMENT_ARRAY_BUFFER_BINDING*/
+                             : 0x8894 /*ARRAY_BUFFER_BINDING*/, &bound);
+   glGetBufferParameterivARB(t, 0x8764 /*BUFFER_SIZE*/, &bsz);
+   LOG("glMapBufferARB target=%#x access=%#x -> %p  (bound=%d bufsize=%d)\n",
+       t, access, p, bound, bsz);
+   return p;
+}
+
 /* ---- FBO / renderbuffer: the sizing surface, where a garbage integer bites -- */
 static void p_bindfb(GLenum t, GLuint fb) { ENTER("glBindFramebufferEXT", fb); NOTE("glBindFramebufferEXT target=%#x fb=%u\n", t, fb); glBindFramebufferEXT(t, fb); check("glBindFramebufferEXT"); }
 static void p_bindrb(GLenum t, GLuint rb) { ENTER("glBindRenderbufferEXT", rb); NOTE("glBindRenderbufferEXT target=%#x rb=%u\n", t, rb); glBindRenderbufferEXT(t, rb); check("glBindRenderbufferEXT"); }
@@ -768,6 +797,10 @@ interposers[] __attribute__((section("__DATA,__interpose"))) = {
    { (const void *)p_getintegerv,            (const void *)glGetIntegerv },
    { (const void *)p_getstring,              (const void *)glGetString },
    { (const void *)p_gettexlevelparameteriv, (const void *)glGetTexLevelParameteriv },
+   { (const void *)p_genbufarb,              (const void *)glGenBuffersARB },
+   { (const void *)p_bindbufarb,             (const void *)glBindBufferARB },
+   { (const void *)p_bufdataarb,             (const void *)glBufferDataARB },
+   { (const void *)p_mapbufarb,              (const void *)glMapBufferARB },
    { (const void *)p_bindfb,                 (const void *)glBindFramebufferEXT },
    { (const void *)p_bindrb,                 (const void *)glBindRenderbufferEXT },
    { (const void *)p_genfb,                  (const void *)glGenFramebuffersEXT },

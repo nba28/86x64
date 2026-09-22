@@ -864,8 +864,50 @@ namespace MachO {
                 * i386-era address after the graphics-settings dialog
                 * (guard 98_abs32_imm_group).
                 */
+               /*
+                * ★ EXCEPTION: LEA DOES NOT DEREFERENCE ITS OPERAND, so for an
+                * AGEN operand the sentence above ("never an integer constant")
+                * is FALSE. `lea C(,%reg,4), %reg` is the compiler's ordinary
+                * idiom for the ARITHMETIC `C + 4*reg`, and C is then a plain
+                * integer that merely happens to alias a vmaddr.
+                *
+                * Gate it with the SAME doctrine the bare-immediate heuristic
+                * already uses (fixed_load_addr, below): only a FIXED-load-address
+                * image (non-PIE MH_EXECUTE) can name its own code/data with a
+                * literal absolute address. A dylib or a PIE executable is
+                * position-independent — it forms every real address through a PIC
+                * anchor (`lea tab(%ebx,%eax,4)`), which is a DIFFERENT operand
+                * shape (base register present) handled elsewhere — so a no-base
+                * literal disp32 there cannot be an address at all. A genuine
+                * absolute LEA that IS relocated never reaches here: the
+                * XED_IFORM_LEA_GPRv_AGEN reloc entry above returns first.
+                *
+                * MEASURED (Portal 2 wall 6): libtogl `CGLMBuffer::CGLMBuffer`
+                * picks the GL usage enum with
+                *     8d 04 85 e4 88 00 00   lea 0x88e4(,%eax,4), %eax
+                * = GL_STATIC_DRAW(0x88E4) + 4*(bool) = GL_DYNAMIC_DRAW(0x88E8).
+                * 0x88e4 aliases libtogl's own __text, so it was rewritten to the
+                * translated address and given a rebase; at run time the usage
+                * argument arrived as 0x4fec626 (= libtogl base + 0xc626),
+                * glBufferDataARB raised GL_INVALID_ENUM, the buffer kept a 0-byte
+                * store, glMapBufferARB returned NULL, and GenDebugFontTex stored
+                * through it (`movdqu %xmm3,(%ecx,%eax,2)`, ecx=0) -> SIGSEGV.
+                * Same class as the `mov $0x3400,%eax` integer-alias bug, one
+                * operand form further on.
+                *
+                * Kill switch M64_NO_LEA_INDEX_CONST=1 restores the old behaviour.
+                */
+               const bool agen_no_deref =
+                  xed_decoded_inst_get_iclass(&xedd) == XED_ICLASS_LEA;
+               const bool fixed_load_addr_img =
+                  env.archive.header.filetype == MH_EXECUTE &&
+                  (env.archive.header.flags & MH_PIE) == 0;
+               static const bool lea_index_const_disabled =
+                  std::getenv("M64_NO_LEA_INDEX_CONST") != nullptr;
+               const bool lea_const =
+                  agen_no_deref && !fixed_load_addr_img && !lea_index_const_disabled;
                const ssize_t disp = xed_decoded_inst_get_memory_displacement(operands, i);
-               if (disp >= 0x1000 && (std::size_t)disp < 0x80000000U
+               if (!lea_const && disp >= 0x1000 && (std::size_t)disp < 0x80000000U
                    && !memdisp) {
                   memidx = i;
                   memdisp_absolute = true;
