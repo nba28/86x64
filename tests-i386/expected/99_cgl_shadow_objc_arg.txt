@@ -1,0 +1,4 @@
+pixfmt err=0 ctx err=0 have_ctx=1
+CIContext class=1
+CIContext created=1
+exit_code: 42

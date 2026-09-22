@@ -656,6 +656,7 @@ uint32_t x64_objc_bounce_cstr(const char *s) {
 /* Forward decl: the i386-CFConstantString-constant resolver (defined far below
  * with the other legacy bridges). x64_objc_unwrap needs it — see below. */
 static id i386_cfstr_to_real(uint32_t p);
+uint64_t cgl_macro_ctx_native(uint32_t h);   /* cgl_macro_shim.c */
 
 /* 32-bit handle / i386 value -> real 64-bit object for a native call.
  *   - an arena PROXY HANDLE resolves to its real object (the common case);
@@ -677,6 +678,8 @@ uint64_t x64_objc_unwrap(uint32_t h) {
    if (p >= g_arena_base && p < g_arena_end) {
       return *(uint64_t *)p;
    }
+   uint64_t cn = cgl_macro_ctx_native(h);  /* i386-layout CGL shadow -> real ctx */
+   if (cn) { return cn; }
    id cf = i386_cfstr_to_real(h);
    if (cf) { return (uint64_t)(uintptr_t)cf; }
    return (uint64_t)h;
@@ -8685,6 +8688,23 @@ static uint64_t unwrap_obj_arg_core(uint32_t a) {
    }
    if ((uintptr_t)a >= g_arena_base && (uintptr_t)a < g_arena_end) {
       return *(uint64_t *)(uintptr_t)a;    /* arena proxy handle */
+   }
+   {
+      /* A CGL context the i386 side holds as an i386-layout SHADOW
+       * (cgl_macro_shim.c, so CGLMacro clients can read ctx->disp) must reach
+       * native code as the REAL context: native CoreImage/CGL read the 64-bit
+       * _CGLContextObject layout and call through the shadow's 4-byte
+       * dispatch slots (Quinn +[CIContext contextWithCGLContext:...] ->
+       * fused-rip fault). M64_NO_CGL_MACRO disarms the shadows, so this goes inert. */
+      uint64_t cn = cgl_macro_ctx_native(a);
+      if (cn) {
+         if (utrace) {
+            fprintf(stderr, "[uo] 0x%08x cgl-shadow -> 0x%llx\n",
+                    a, (unsigned long long)cn);
+            fflush(stderr);
+         }
+         return cn;
+      }
    }
    {
       /* An i386 block passed as a typed @?/@ argument to a native API the

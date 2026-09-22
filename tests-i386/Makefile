@@ -1464,6 +1464,13 @@ $(BUILD_DIR)/99_cmp_abs32_imm_notptr.i386: $(BUILD_DIR)/99_cmp_abs32_imm_notptr.
 	   rm -f $@; exit 1; \
 	 fi
 
+# 99_cgl_shadow_objc_arg: CGL/QuartzCore aren't in the i386 sysroot, so CGL*
+# are undefined dynamic_lookup imports bound at translate time to libabiconv's
+# ___CGL* shims (the shadow-context path), and CIContext is reached through
+# libobjc at run time. Overrides %.i386.
+$(BUILD_DIR)/99_cgl_shadow_objc_arg.i386: $(BUILD_DIR)/99_cgl_shadow_objc_arg.o
+	$(LD) $(LDFLAGS_I386) -lobjc -undefined dynamic_lookup -e _main -o $@ $<
+
 # 39_xml_memget_alloc: the i386 sysroot ships no libxml2, so `_xmlMemGet` is an
 # undefined dynamic_lookup import (resolved at translate time by static-interpose
 # -> libabiconv's ___xmlMemGet shim, exactly as a real binary's libxml2 bind is).

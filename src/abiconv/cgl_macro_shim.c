@@ -243,6 +243,9 @@ uint64_t cgl_macro_ctx_native(uint32_t h);
 uint64_t cgl_macro_ctx_native(uint32_t h)
 {
    if (!h) return 0;
+   /* Hot path: the ObjC/C unwrap bridges ask this for every non-handle value,
+    * and most processes never create a shadow. */
+   if (!__atomic_load_n(&g_shadows, __ATOMIC_ACQUIRE)) return 0;
    uint64_t n = 0;
    os_unfair_lock_lock(&g_lk);
    for (cgl_shadow *s = g_shadows; s; s = s->next)
