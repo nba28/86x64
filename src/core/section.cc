@@ -1346,6 +1346,10 @@ namespace MachO {
       std::map<std::size_t, anchor_slot_map> branch_slot_snap;
       const bool slot_snap_on =
          std::getenv("M64_NO_PIC_ANCHOR_SLOT_SNAP") == nullptr;
+      /* Extend the SAME snapshot to the case-body targets of an indirect PIC
+       * jump-table dispatch — see step (5b). */
+      const bool jt_target_snap_on =
+         std::getenv("M64_NO_PIC_ANCHOR_JT_TARGETS") == nullptr;
 
       auto slot_intersect = [](anchor_slot_map& dst, const anchor_slot_map& src) {
          for (auto it = dst.begin(); it != dst.end(); ) {
@@ -2200,6 +2204,55 @@ namespace MachO {
             }
          }
 
+         /* (5b) The SAME snapshot for an INDIRECT dispatch of a CLAIMED PIC
+          *      jump table. `jmp *%reg` is a branch whose target set is known
+          *      statically — DetectJumpTables resolved every case body while
+          *      auto-sizing the table (env.pic_switch_targets, keyed by this
+          *      dispatch's vmaddr) — but step (5) only sees a branch
+          *      DISPLACEMENT, so the linear walk carried no state into any case
+          *      body except the one that happens to follow the dispatch.
+          *
+          *      ★MEASURED (Portal 2 shaderapidx9 `CShaderShadowDX8::DepthFunc`,
+          *      i386 0x35a60, anchor `pop %ecx` at 0x35a6a):
+          *          0x35a91  mov 0xb2(%ecx,%edx,4),%edx   ; fused PIC table
+          *          0x35a9a  jmp *%edx
+          *          0x35a9c  mov 0x3c5c2(%ecx),%eax       ; case 1 - rewritten
+          *          0x35abc/0x35ad8/0x35af8  same insn    ; cases 2-4 - NOT
+          *      Case 1 is the walk's next instruction so it still holds the
+          *      anchor; a CALL in it erases ECX (caller-saved), and cases 2-4,
+          *      reachable ONLY through the table, then kept their raw i386
+          *      displacement. At runtime `mov (%eax),%eax` dereferenced
+          *      translated __text read as a pointer (0x76654472, ASCII "rDev")
+          *      -> SIGSEGV.
+          *
+          *      A case body is a plain intra-function block, so the same
+          *      ADOPT/INTERSECT join at (0b) applies unchanged, and the join
+          *      being an INTERSECTION means this can only RECOVER an anchor the
+          *      linear walk dropped, never invent one.
+          *      KILL SWITCH M64_NO_PIC_ANCHOR_JT_TARGETS=1. */
+         if (jt_target_snap_on) {
+            auto jt = env.pic_switch_targets.find(inst->loc.vmaddr);
+            if (jt != env.pic_switch_targets.end()) {
+               for (const std::size_t tgt : jt->second) {
+                  if (tgt <= inst->loc.vmaddr) { continue; }  /* forward only */
+                  auto sit = branch_anchor_snap.find(tgt);
+                  if (sit == branch_anchor_snap.end()) {
+                     branch_anchor_snap[tgt] = anchors;
+                  } else {
+                     anchor_intersect(sit->second, anchors);
+                  }
+                  if (slot_snap_on) {
+                     auto slit = branch_slot_snap.find(tgt);
+                     if (slit == branch_slot_snap.end()) {
+                        branch_slot_snap[tgt] = anchor_slots;
+                     } else {
+                        slot_intersect(slit->second, anchor_slots);
+                     }
+                  }
+               }
+            }
+         }
+
          /* (6) Control transfers. Three classes of behavior:
           *     - RET: function exit ONLY IF no forward branch targets
           *       are pending. Otherwise this is a mid-function RET (the
@@ -2386,6 +2439,10 @@ namespace MachO {
       std::map<std::size_t, std::unordered_map<xed_reg_enum_t, std::size_t>> anchor_snap;
       /* table base -> (entry count, anchor), for the next-table clamp below */
       std::map<std::size_t, std::pair<std::size_t, std::size_t>> tables;
+      /* table base -> vmaddr of the `jmp %reg` that dispatches it, so the
+       * post-pass below can publish each table's case-body targets keyed by
+       * their dispatch (env.pic_switch_targets). */
+      std::map<std::size_t, std::size_t> table_dispatch;
       const bool jt_table_bound = std::getenv("M64_NO_JT_TABLE_BOUND") == nullptr;
       const bool jt_branch_snap = std::getenv("M64_NO_JT_BRANCH_SNAP") == nullptr;
       xed_category_enum_t prev_cat = XED_CATEGORY_INVALID;
@@ -2858,6 +2915,7 @@ namespace MachO {
                   }
                   auto& tr = tables[table_base];
                   if (i > tr.first) { tr = { i, anchor }; }
+                  table_dispatch[table_base] = vmaddr;
                   if (trace) {
                      fprintf(stderr, "[jumptable] dispatch@0x%zx anchor=0x%zx "
                              "table=0x%zx count=%zu\n",
@@ -3057,6 +3115,24 @@ namespace MachO {
             for (std::size_t k = 0; k < t.second.first; ++k) {
                env.jump_table_slots[t.first + k * 4] = t.second.second;
             }
+         }
+      }
+
+      /* Publish each claimed table's CASE-BODY TARGETS keyed by its dispatch,
+       * for DetectPicAnchoredDisps' indirect-branch anchor snapshot. Computed
+       * here, after the clamp, so a table shortened above contributes only the
+       * targets it still owns. Nothing else reads this map, so populating it
+       * cannot change translation on its own. */
+      for (const auto& t : tables) {
+         auto d = table_dispatch.find(t.first);
+         if (d == table_dispatch.end() || t.second.first == 0) { continue; }
+         std::vector<std::size_t>& tgts = env.pic_switch_targets[d->second];
+         for (std::size_t k = 0; k < t.second.first; ++k) {
+            const std::size_t slot = t.first + k * 4;
+            if (slot + 4 > sect_hi) { break; }
+            const std::size_t slot_off = sect.offset + (slot - sect.addr);
+            const int32_t raw = (int32_t)img.at<uint32_t>(slot_off);
+            tgts.push_back(t.second.second + raw);
          }
       }
    }

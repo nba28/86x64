@@ -4,6 +4,7 @@
 #include <map>
 #include <set>
 #include <unordered_map>
+#include <vector>
 
 #include "loc.hh"
 #include "types.hh"
@@ -57,6 +58,16 @@ namespace MachO {
        * decoding the entry bytes as code) for any offset whose vmaddr is a key
        * here. See JumpTableEntry in section_blob.hh. */
       std::map<std::size_t, std::size_t> jump_table_slots;
+
+      /* The CASE-BODY TARGETS of each claimed PIC jump table, keyed by the
+       * vmaddr of the `jmp %reg` that dispatches it (target = anchor + the
+       * slot's raw delta). Also populated by Section::DetectJumpTables, which
+       * already computes both halves while auto-sizing the table, and consumed
+       * by DetectPicAnchoredDisps: an indirect dispatch is a BRANCH whose
+       * target set is known statically, so the PIC-anchor snapshot a direct
+       * forward branch records for its one target is recorded here for every
+       * case body. */
+      std::map<std::size_t, std::vector<std::size_t>> pic_switch_targets;
 
       /* Classic i386 self-modifying CALL-stub redirect map (`__IMPORT,
        * __jump_table`, section type S_SYMBOL_STUBS + attr
