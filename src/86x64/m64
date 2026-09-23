@@ -444,6 +444,10 @@ def translate_bundle(bundle, args):
             # the translated tree is signable from birth and the resources are
             # still readable (rsrc_datafork_shim.c). See flatten_forks().
             flatten_forks(dest, dry_run=False)
+            # ditto also brings across the ORIGINAL download's quarantine flag
+            # and any fork-less FinderInfo; both make the output unsignable or
+            # "damaged" at launch. See strip_signing_blockers().
+            strip_signing_blockers(dest)
             bundle = dest
 
     # Pull in any framework dependency that lives OUTSIDE the bundle (e.g. the
@@ -1330,6 +1334,43 @@ def _strip_native_execution(app):
         info("  stripped LSRequiresNativeExecution (Finder-launchable under Rosetta)")
 
 
+def strip_signing_blockers(app, verbose=True):
+    """Remove the xattrs that make a COPIED bundle unsignable or unopenable.
+
+    Two structural leftovers of copying someone else's bundle, neither of which
+    flatten_forks() covers (it only touches files that carry a RESOURCE FORK):
+
+      * `com.apple.FinderInfo` on a file with NO fork — the classic type/creator
+        (e.g. `TEXT!Rch` on a .plist). codesign refuses the whole bundle:
+        "resource fork, Finder information, or similar detritus not allowed",
+        so `--deep` signing fails and the bundle cannot run on Apple Silicon.
+      * `com.apple.quarantine` — inherited from however the ORIGINAL app was
+        downloaded (Quinn's says `Chrome`) and faithfully copied by ditto. On an
+        ad-hoc signed bundle Gatekeeper turns it into
+        "<App> is damaged and can't be opened", with no hint that an xattr is
+        the cause. A locally built translation is not a download, so the flag is
+        simply wrong on the output.
+
+    MEASURED 2026-09-23: Quinn.app carried 536 quarantined files plus one
+    FinderInfo plist; clearing both and re-signing made it launch again.
+    Idempotent, and a no-op on a clean bundle.
+    """
+    app = Path(app)
+    fi = [f for f in app.rglob("*")
+          if f.is_file() and not f.is_symlink()
+          and b"com.apple.FinderInfo" in subprocess.run(
+              ["xattr", str(f)], capture_output=True).stdout]
+    for f in fi:
+        subprocess.run(["xattr", "-d", "com.apple.FinderInfo", str(f)],
+                       capture_output=True)
+    q = subprocess.run(["xattr", "-r", "-d", "com.apple.quarantine", str(app)],
+                       capture_output=True)
+    if verbose and (fi or q.returncode == 0):
+        good(f"stripped signing blockers: {len(fi)} FinderInfo xattr(s), "
+             f"quarantine cleared")
+    return len(fi)
+
+
 def cmd_sign(args):
     require(FIX_SIGNING)
     app = Path(args.app)
@@ -1342,6 +1383,7 @@ def cmd_sign(args):
     # resources survive instead of being stripped away (flatten_forks()).
     flatten_forks(app, dry_run=args.dry_run)
     if not args.dry_run:
+        strip_signing_blockers(app)
         _strip_native_execution(app)
         for d in (app / "Contents" / "Frameworks").glob("*.dylib"):
             subprocess.run(["codesign", "-f", "-s", "-", str(d)],
