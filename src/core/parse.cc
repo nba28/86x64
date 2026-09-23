@@ -768,6 +768,41 @@ namespace MachO {
             const std::size_t nb_off =
                (std::size_t)((std::ptrdiff_t)loc.offset + delta);
             const std::size_t nb = (std::size_t)img.at<uint32_t>(nb_off);
+            /* ★QWORD HIGH HALF — NEUTRAL, NOT AN OBJECT EDGE. An M32 image has
+             * no 8-byte pointers, so an 8-aligned array of 64-bit INTEGERS is
+             * laid out as {value_lo, value_hi} pairs and its small entries put a
+             * ZERO in every odd word. Those zeros are not "another object": they
+             * are the other half of this one. The walk used to stop dead on the
+             * first of them, so every such array's low halves were judged with
+             * block == 1 and interior_edge == false — the gate could not see the
+             * proven mid-instruction siblings sitting two words away, and any
+             * entry whose value happened to land on an instruction BOUNDARY was
+             * rebased into a translated code address.
+             *
+             * ★MEASURED (Quinn, 2026-09-23): the 32-entry u64 knapsack vector at
+             * __TEXT,__const 0xb2c60 (the highscore file's obfuscation weights).
+             * Entries 7 (0x29a5) and 9 (0xbd3c) are exact i386 instruction
+             * boundaries and were rewritten to 0x10001ee7 / 0x10011d2a, while
+             * their stride-8 siblings 0x73b5 / 0x1ee7f / 0x425b6 land
+             * mid-instruction and were correctly left alone. Encrypting with two
+             * inflated weights made 63 of the 102 stored 8-byte records decrypt
+             * to garbage, so the saved NSArchiver stream came back with its
+             * "streamtyped" signature mangled and every highscore was lost on
+             * restart.
+             *
+             * EXACT, not a threshold: the skipped word must be zero AND sit at
+             * offset 4 of an 8-aligned slot AND the candidate itself must be
+             * 8-aligned — i.e. literally the high half of the same qword column.
+             * A 4-byte jump table cannot present that shape in its interior (a
+             * zero entry is not a branch target), and at its END the downward
+             * walk counts its real entries and exceeds max_block first.
+             * Kill switch M64_NO_QWORD_HIGH_SKIP=1. */
+            static const bool no_qword_skip =
+               std::getenv("M64_NO_QWORD_HIGH_SKIP") != nullptr;
+            if (!no_qword_skip && nb == 0 &&
+                (loc.vmaddr & 7) == 0 && (nb_vm & 7) == 4) {
+               continue;                  /* high half of a u64 -> neutral */
+            }
             if (!vmaddr_in_instructions_sect(nb)) { break; }  /* object edge */
             if (code_interior_alias(nb)) {
                interior_edge = true;    /* a PROVEN non-target ends the block */
