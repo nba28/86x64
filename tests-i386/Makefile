@@ -1843,3 +1843,19 @@ $(BUILD_DIR)/89_sret_regclass_gap.i386: $(BUILD_DIR)/89_sret_regclass_gap.o
 # fp_sret shims. Overrides %.i386.
 $(BUILD_DIR)/90_fp_sret_stack_balance.i386: $(BUILD_DIR)/90_fp_sret_stack_balance.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# self-weak-rebase: guard for "a translated image must satisfy its OWN weak
+# binds locally" (core archive.cc Archive<M64>::resolve_self_weak_binds).
+# transform.cc clears MH_WEAK_DEFINES so translated i386 code can never satisfy
+# a NATIVE image's C++ coalesced bind (the cross-ABI weak-def coalesce bug) --
+# which ALSO stopped a self-contained C++ image satisfying its own weak binds to
+# its linkonce_odr vtables / typeinfo / inline members. Those __nl/__la_symbol_ptr
+# slots then kept their UNSLID preferred-base file value, and the first call
+# through one jumped to an unmapped 0x100000xx. That single defect was behind ALL
+# SIX long-standing `make cpp` failures. This runs the full A/B with
+# M64_NO_SELF_WEAK_REBASE=1 and verifies the ON arm BY CONTENT (no weak bind to
+# an in-image definition survives; no slot is rebased twice), plus two control
+# fixtures that must pass in both arms. Depends on `cpp` for the .i386 fixtures.
+.PHONY: self-weak-rebase
+self-weak-rebase: cpp
+	@bash self_weak_rebase_test.sh $(MACHO_TOOL) $(LIBABICONV) $(LIBWRAPPER) $(LIBINTERPOSE)

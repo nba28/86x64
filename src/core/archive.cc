@@ -252,6 +252,12 @@ namespace MachO {
        * binds. */
       divert_narrow_const_binds_to_xrel();
 
+      /* Satisfy this image's weak binds to its OWN weak definitions with plain
+       * local rebases. MUST run after the narrow divert above (a rebase writes
+       * 8 bytes; the narrow 4-byte typeinfo slots must already be gone). M64
+       * only, no-op when nothing is self-satisfiable. */
+      resolve_self_weak_binds();
+
       /* Inject our runtime-bind metadata section (classic external relocs that
        * dyld can't process + the diverted narrow __const binds above) before
        * laying out, so it shares __DATA's layout and its XrelBlob::Emit can read
@@ -420,6 +426,107 @@ namespace MachO {
              st == S_THREAD_LOCAL_ZEROFILL) { insert_it = it; break; }
       }
       seg->sections.insert(insert_it, sect);
+   }
+
+   /* ── A TRANSLATED IMAGE MUST SATISFY ITS OWN WEAK BINDS LOCALLY ──
+    * C++ inline members, vtables, typeinfo and template instantiations are
+    * `linkonce_odr` ⇒ WEAK definitions. A reference to such a symbol's ADDRESS
+    * goes through a __DATA,__nl_symbol_ptr / __la_symbol_ptr slot serviced by
+    * the WEAK_BIND opcode stream, so that every image in the process coalesces
+    * on one definition. A self-contained C++ image therefore both SUPPLIES and
+    * CONSUMES coalescing: it weak-binds to symbols it defines itself.
+    *
+    * `transform.cc` clears MH_WEAK_DEFINES on every M64 emit, because that bit
+    * would otherwise let our i386 code satisfy a NATIVE x86_64 image's bind and
+    * truncate its rbp (the cross-ABI weak-def coalesce bug, the Portal 2 GPU
+    * driver crash). That directionality is correct and must stay. But it also
+    * removes this image from the candidate set for its OWN binds: dyld then
+    * finds no definition anywhere, the slot keeps its FILE value — the unslid
+    * preferred-base address — and the first call through it jumps to an
+    * unmapped 0x100000xx.
+    *
+    * ★MEASURED 2026-09-23 on tests-i386 32_member_func_ptr: 7 weak binds, all to
+    * symbols `nm` reports as `T` in the same image; fault at rip=0x10000e14 =
+    * the unslid `__ZN4MathC1Ei`, i.e. the process died on `Math m(10)` before
+    * printing anything. Six C++ fixtures failed this way.
+    *
+    * THE FIX, keyed purely on the blob graph: a weak bind whose target slot is a
+    * SymbolPointer with a non-null `pointee` already has its answer — the
+    * translator resolved the target to a blob in THIS image, and
+    * SymbolPointer::raw_data() emits that blob's post-Build unslid vmaddr into
+    * the slot. Such a bind needs no symbol lookup and no coalescing: drop it and
+    * emit a plain local REBASE so dyld just adds the slide. MH_WEAK_DEFINES
+    * stays cleared, so native images still cannot bind to us.
+    *
+    * Runs AFTER divert_narrow_const_binds_to_xrel so that NARROW (4-byte
+    * Immediate) weak slots — i386 typeinfo fields — are already gone to
+    * __86x64_xrel; a REBASE_TYPE_POINTER writes 8 bytes and would clobber their
+    * +4 neighbour. Only genuine 8-byte SymbolPointer slots reach here.
+    *
+    * Universal: triggers on "weak bind + slot is a SymbolPointer with an
+    * in-image pointee", never on a symbol, test or app name. Kill switch
+    * M64_NO_SELF_WEAK_REBASE=1 restores the old (broken) behaviour. */
+   template <Bits b>
+   void Archive<b>::resolve_self_weak_binds() {
+      if constexpr (b != Bits::M64) {
+         return; /* M32 builds are intermediate */
+      } else {
+         static const bool disabled =
+            std::getenv("M64_NO_SELF_WEAK_REBASE") != nullptr;
+         if (disabled) { return; }
+
+         DyldInfo<b> *dyld = this->template subcommand<DyldInfo>();
+         if (dyld == nullptr || dyld->weak_bind == nullptr) { return; }
+         if (dyld->rebase == nullptr) { return; }
+
+         /* Slots that dyld ALREADY slides. Adding a second rebase for the same
+          * slot would apply the slide twice. */
+         std::set<const SectionBlob<b> *> already_rebased;
+         for (const RebaseNode<b> *r : dyld->rebase->rebasees) {
+            if (r->blob != nullptr) { already_rebased.insert(r->blob); }
+         }
+
+         const bool dbg = std::getenv("MACHO_BUILD_DEBUG") != nullptr;
+         std::size_t n = 0;
+
+         auto& bindees = dyld->weak_bind->bindees;
+         for (auto it = bindees.begin(); it != bindees.end(); ) {
+            const SectionBlob<b> *slot = (*it)->blob;
+            const SectionBlob<b> *pointee = nullptr;
+            if (auto *nl = dynamic_cast<const NonLazySymbolPointer<b> *>(slot)) {
+               pointee = nl->pointee;
+            } else if (auto *lz = dynamic_cast<const LazySymbolPointer<b> *>(slot)) {
+               pointee = lz->pointee;
+            }
+            /* No in-image answer -> this really is an external weak bind
+             * (e.g. __ZTVN10__cxxabiv1*, supplied by libabiconv). Leave it. */
+            if (pointee == nullptr) { ++it; continue; }
+            /* A lazy slot whose baked value is the stub_helper is a DEFERRED
+             * bind, not a resolved definition; rebasing it would make the call
+             * land in the lazy-binding thunk instead of the function. */
+            if (pointee->section != nullptr &&
+                (pointee->section->sect.flags & SECTION_TYPE) == S_SYMBOL_STUBS) {
+               ++it; continue;
+            }
+            if (already_rebased.count(slot) == 0) {
+               auto *r = RebaseNode<b>::Create(REBASE_TYPE_POINTER);
+               r->blob = slot;
+               dyld->rebase->rebasees.push_back(r);
+               already_rebased.insert(slot);
+            }
+            if (dbg) {
+               fprintf(stderr, "resolve_self_weak_binds: %s -> local rebase\n",
+                       (*it)->sym.c_str());
+            }
+            it = bindees.erase(it);
+            ++n;
+         }
+
+         if (dbg) {
+            fprintf(stderr, "resolve_self_weak_binds: resolved %zu self weak "
+                    "bind(s) to local rebases\n", n);
+         }
+      }
    }
 
    template <Bits b>

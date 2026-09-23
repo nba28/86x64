@@ -151,6 +151,16 @@ namespace MachO {
        * external-vtable/RTTI binds. */
       void divert_narrow_const_binds_to_xrel();
 
+      /* Replace every WEAK bind whose target slot is a SymbolPointer already
+       * resolved to an in-image blob with a plain local REBASE (M64 only).
+       * transform.cc clears MH_WEAK_DEFINES so a translated image cannot satisfy
+       * a NATIVE image's coalesced bind (the cross-ABI weak-def coalesce bug) —
+       * which also stops it satisfying its OWN, leaving C++ linkonce_odr slots
+       * holding unslid preferred-base addresses. Runs after the narrow divert
+       * (an 8-byte rebase would clobber a 4-byte typeinfo field's neighbour).
+       * Kill switch M64_NO_SELF_WEAK_REBASE=1. */
+      void resolve_self_weak_binds();
+
       /* Synthesize the __DATA,__86x64_xrel section from the Dysymtab's lifted
        * classic external relocations (M64 only; no-op otherwise / if empty / if
        * already present). Called at the top of Build so the section is laid out
