@@ -1025,7 +1025,43 @@ namespace MachO {
                xed_decoded_inst_zero_set_mode(&xd, &Instruction<bits>::dstate());
                xed_decoded_inst_set_input_chip(&xd, XED_CHIP_INVALID);
                bool boundary_straddle = false;
-               if (xed_decode(&xd, &img.at<uint8_t>(it), img.size() - it) == XED_ERROR_NONE) {
+               /* ★A CLAIMED JUMP-TABLE SLOT IS NOT A DECODE — it is known DATA
+                * of known length (4), so it cannot straddle anything and this
+                * heuristic must not run on it. The padding-resync branch above
+                * already carries exactly this exemption; without it here, the
+                * LAST entry of a table that ends a function is quietly
+                * preempted: the straddle test decodes the slot bytes as code,
+                * sees them run into the next function symbol, emits a 1-byte
+                * DataBlob, and so never calls `parser` — which is the only
+                * place jump_table_slots is consulted. The entry then ships its
+                * RAW i386 anchor-relative delta, and `translated_anchor +
+                * i386_delta` is a mid-instruction address.
+                *
+                * This is the NORMAL PIC-switch layout, not a corner case: the
+                * table sits inline at the end of its function, so its last slot
+                * always butts against the next function symbol.
+                *
+                * MEASURED, Portal 2 wall 7 — libtogl
+                * D3DToGL::WriteGLSLSamplerDefinitions (i386 0x11880, anchor
+                * 0x1188e, table 0x11960, DetectJumpTables count=4):
+                *   slot 3 @0x1196c = a1 00 00 00, next func symbol 0x11970
+                *   decode `a1 00 00 00 55` = movl 0x55000000,%eax, len 5,
+                *   0x11970 falls inside [0x1196d,0x11971) -> straddle
+                * so only slots 0..2 were re-anchored (0x3d/0x57/0x69 ->
+                * 0x60/0x81/0x96) and slot 3 kept 0xa1. At run time
+                * anchor 0x10019ae7 + 0xa1 = 0x10019b88 = ONE BYTE INTO the
+                * `leal 0x32515(%rip),%ecx` of another case, which decodes as
+                * `orl $0x32515,%eax; jmp <shared tail>` and falls into
+                * `movl %ecx,0x4(%rsp)` WITHOUT EVER SETTING %ecx -> PrintToBuf
+                * got fmt = 0 -> SIGSEGV in the printf-format walk.
+                * Kill switch M64_NO_JT_SLOT_BEATS_FUNCSYM=1. */
+               static const bool jt_slot_wins =
+                  std::getenv("M64_NO_JT_SLOT_BEATS_FUNCSYM") == nullptr;
+               const bool jt_claimed =
+                  jt_slot_wins &&
+                  env.jump_table_slots.find(vmaddr) != env.jump_table_slots.end();
+               if (!jt_claimed &&
+                   xed_decode(&xd, &img.at<uint8_t>(it), img.size() - it) == XED_ERROR_NONE) {
                   const unsigned len = xed_decoded_inst_get_length(&xd);
                   /* straddles if the sym falls INSIDE [vmaddr+1, vmaddr+len) */
                   if (len > 1 && *next_sym_it > vmaddr && *next_sym_it < vmaddr + len) {

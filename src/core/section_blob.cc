@@ -1,6 +1,8 @@
 #include <mach-o/x86_64/reloc.h>
 #include <typeinfo>
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 
 #include "section_blob.hh"
 #include "segment.hh"
@@ -233,6 +235,11 @@ namespace MachO {
          /* unresolved (target outside any parsed blob) — keep the original
           * offset so behaviour is no worse than before the relocation. */
          value = raw;
+      }
+      if (std::getenv("DBG_JTENTRY")) {
+         std::fprintf(stderr, "[jtentry] slot@0x%zx raw=0x%x target=%s anchor=%s -> 0x%x\n",
+                      (size_t)this->loc.vmaddr, (unsigned)raw,
+                      target ? "ok" : "NULL", anchor ? "ok" : "NULL", (unsigned)value);
       }
       img.at<uint32_t>(offset) = value;
    }

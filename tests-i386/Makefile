@@ -1301,6 +1301,13 @@ $(BUILD_DIR)/99_cfnumber_i386_width.i386: $(BUILD_DIR)/99_cfnumber_i386_width.o
 $(BUILD_DIR)/99_subpage_text_fnptr.i386: $(BUILD_DIR)/99_subpage_text_fnptr.o
 	$(LD) $(LDFLAGS_I386) -pagezero_size 0 -seg1addr 0 -e _main -o $@ $<
 
+# 99_lea_index_const links -pie (dropping the suite-wide -no_pie), because the
+# rule it guards applies only to a POSITION-INDEPENDENT image — which is what
+# every Portal 2 dylib is, and what the default -no_pie executable is not. Linked
+# -no_pie the fixture would pass in BOTH arms, i.e. be silently inert.
+$(BUILD_DIR)/99_lea_index_const.i386: $(BUILD_DIR)/99_lea_index_const.o
+	$(LD) $(filter-out -no_pie,$(LDFLAGS_I386)) -pie -e _main -o $@ $<
+
 $(BUILD_DIR)/99_cgl_renderer_check.i386: $(BUILD_DIR)/99_cgl_renderer_check.o
 	@[ -f "$(I386_SYSROOT)/System/Library/Frameworks/OpenGL.framework/OpenGL" ] \
 	  || $(MAKE) --no-print-directory sysroot-gl
