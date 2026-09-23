@@ -11608,6 +11608,19 @@ uint32_t ___dealloc = 0;            /* exported as ____dealloc */
  * seltypes registry from the i386 system frameworks' own __OBJC metadata. */
 static const struct { const char *name; uint32_t mask; } g_cgfloat_sels[] = {
    { "setRowHeight:",            0x1 },  /* NSTableView / NSOutlineView (grid + source list) */
+   /* NSTableColumn's width family — the COLUMN counterpart of setRowHeight:.
+    * An app that builds its columns in code (addTableColumn: + setMinWidth:/
+    * setMaxWidth:, then letting AppKit size them) never declares these, so
+    * unmasked each one read the caller's 4-byte float fused with the next slot.
+    * MEASURED with a native swizzle probe on Quinn's highscore board
+    * (2026-09-23): every bound arrived as a denormal — Rank 4.68e-291, UpDown /
+    * ComparisonValue / Date / ResultCount ~8.53e-304 — so AppKit clamped each
+    * column to width 0 and the headers wrapped one letter per line ("S/c",
+    * "R/e") while the one nib-sized column took the whole table.
+    * (setWidth: is NOT listed: AppKit itself calls it natively, and nothing
+    * measured needs it masked.) Guard: tests-i386 tablecolumn-width. */
+   { "setMinWidth:",             0x1 },  /* NSTableColumn                                     */
+   { "setMaxWidth:",             0x1 },  /* NSTableColumn                                     */
    { "setIndentationPerLevel:",  0x1 },  /* NSOutlineView              (source list)         */
    { "setAlphaValue:",           0x1 },  /* NSView / NSWindow / NSCell                        */
    { "setLineWidth:",            0x1 },  /* NSBezierPath                                      */
@@ -11692,6 +11705,12 @@ static void x64_init_objc1_compat(void) {
    for (unsigned i = 0; i < sizeof g_cgfloat_sels / sizeof g_cgfloat_sels[0]; ++i) {
       cgfloat_mask_insert(sel_registerName(g_cgfloat_sels[i].name),
                           g_cgfloat_sels[i].mask);
+   }
+   /* KILL SWITCH for the NSTableColumn width entries (mask 0 = the pre-fix
+    * fused-double read). Two-arm guard: tests-i386 tablecolumn-width. */
+   if (getenv("M64_NO_CGFLOAT_COLUMN_WIDTH")) {
+      cgfloat_mask_insert(sel_registerName("setMinWidth:"), 0);
+      cgfloat_mask_insert(sel_registerName("setMaxWidth:"), 0);
    }
 }
 
