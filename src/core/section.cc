@@ -1425,6 +1425,33 @@ namespace MachO {
        * UpgradeChecker +[checkOSVersion:] `osVersion = SystemVersion()` -> store
        * into read-only __TEXT -> SIGBUS). */
       xed_category_enum_t last_flow_cat = XED_CATEGORY_INVALID;
+      xed_category_enum_t prev2_flow_cat = XED_CATEGORY_INVALID;
+      /* ★A CALL DOES NOT REVIVE A DEAD FALL-THROUGH. (0b)/(0c) ask whether the
+       * instruction before a branch target ended control flow (RET / uncond
+       * JMP); if it did, the target's only predecessors are its branches and
+       * the JOIN ADOPTs their snapshot instead of intersecting the linear
+       * walk's dead post-epilogue state. That test looked at ONE instruction,
+       * so the compiler's NORETURN-TRAP idiom defeated it:
+       *
+       *     0x79a7e  ret                        <- function exit
+       *     0x79a7f  call ___stack_chk_fail     <- branch-reachable, NEVER returns
+       *     0x79a84  mov 0xc(%ebp),%ebx         <- branch target (3 branches)
+       *
+       * `last_flow_cat` is CALL at 0x79a84, so the join INTERSECTED the target's
+       * (correct, non-empty) snapshot with the epilogue's empty state and lost
+       * the anchor for the whole rest of the function.
+       *
+       * A call sitting between a RET and a branch target is unreachable except
+       * by a branch, and whatever the linear walk carries into it is the
+       * EPILOGUE's state — which describes no execution path that reaches the
+       * target. So the deadness is STICKY ACROSS CALLS: set at RET/uncond JMP,
+       * carried through CALL (and, as before, through alignment NOPs), cleared
+       * by any other instruction. Nothing else changes: a target whose real
+       * predecessor is an ordinary instruction still intersects.
+       * KILL SWITCH M64_NO_PIC_ANCHOR_RET_CALL_DEAD=1. */
+      const bool ret_call_dead =
+         std::getenv("M64_NO_PIC_ANCHOR_RET_CALL_DEAD") == nullptr;
+      bool ft_dead = false;
       for (SectionBlob<bits> *blob : content) {
          auto *inst = dynamic_cast<Instruction<bits> *>(blob);
          if (!inst) {
@@ -1448,6 +1475,11 @@ namespace MachO {
             }
             /* Data interleaved in __text — clear tracking, anchors
              * almost certainly don't survive past it. */
+            if (std::getenv("MACHO_TRACE_ANCHORSLOT") && !anchor_slots.empty()) {
+               fprintf(stderr, "[aslot] CLEAR-datablob vmaddr=0x%zx type=%s nslots=%zu\n",
+                       (size_t)blob->loc.vmaddr, typeid(*blob).name(),
+                       anchor_slots.size());
+            }
             anchors.clear();
             anchor_slots.clear();
             entry_save_slots.clear();
@@ -1487,7 +1519,8 @@ namespace MachO {
                bool no_fallthrough = false;
                if (prev_inst != nullptr) {
                   no_fallthrough = (last_flow_cat == XED_CATEGORY_RET ||
-                                    last_flow_cat == XED_CATEGORY_UNCOND_BR);
+                                    last_flow_cat == XED_CATEGORY_UNCOND_BR ||
+                                    (ret_call_dead && ft_dead));
                }
                if (no_fallthrough) {
                   anchors = snap_it->second;
@@ -1505,12 +1538,22 @@ namespace MachO {
                   bool no_fallthrough = false;
                   if (prev_inst != nullptr) {
                      no_fallthrough = (last_flow_cat == XED_CATEGORY_RET ||
-                                       last_flow_cat == XED_CATEGORY_UNCOND_BR);
+                                       last_flow_cat == XED_CATEGORY_UNCOND_BR ||
+                                       (ret_call_dead && ft_dead));
                   }
+                  const size_t before = anchor_slots.size();
                   if (no_fallthrough) {
                      anchor_slots = ssnap->second;
                   } else {
                      slot_intersect(anchor_slots, ssnap->second);
+                  }
+                  if (std::getenv("MACHO_TRACE_ANCHORSLOT")) {
+                     fprintf(stderr, "[aslot] join  tgt=0x%zx %s cur=%zu snap=%zu -> %zu prevcat=%s prev2=%s\n",
+                             (size_t)inst->loc.vmaddr,
+                             no_fallthrough ? "ADOPT" : "isect", before,
+                             ssnap->second.size(), anchor_slots.size(),
+                             xed_category_enum_t2str(last_flow_cat),
+                             xed_category_enum_t2str(prev2_flow_cat));
                   }
                   branch_slot_snap.erase(ssnap);
                }
@@ -1873,6 +1916,12 @@ namespace MachO {
                   const xed_reg_enum_t src =
                      xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
                   auto a = anchors.find(src);
+                  if (std::getenv("MACHO_TRACE_ANCHORSLOT")) {
+                     fprintf(stderr, "[aslot] store inst=0x%zx %s->(%s,%zd) anchor=%d\n",
+                             (size_t)inst->loc.vmaddr, xed_reg_enum_t2str(src),
+                             xed_reg_enum_t2str(mbase), (ssize_t)sdisp,
+                             a != anchors.end());
+                  }
                   /* Any store to a slot invalidates its ENTRY-save status: the
                    * slot no longer holds the register's function-entry value. */
                   entry_save_slots.erase(slot);
@@ -1894,6 +1943,12 @@ namespace MachO {
                   auto s = anchor_slots.find(slot);
                   const xed_reg_enum_t dst =
                      xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+                  if (std::getenv("MACHO_TRACE_ANCHORSLOT")) {
+                     fprintf(stderr, "[aslot] load  inst=0x%zx (%s,%zd)->%s hit=%d nslots=%zu\n",
+                             (size_t)inst->loc.vmaddr, xed_reg_enum_t2str(mbase),
+                             (ssize_t)sdisp, xed_reg_enum_t2str(dst),
+                             s != anchor_slots.end(), anchor_slots.size());
+                  }
                   if (dst >= XED_REG_EAX && dst <= XED_REG_EDI) {
                      auto es = entry_save_slots.find(slot);
                      const bool entry_restore =
@@ -2199,6 +2254,11 @@ namespace MachO {
                      } else {
                         slot_intersect(slit->second, anchor_slots);
                      }
+                     if (std::getenv("MACHO_TRACE_ANCHORSLOT")) {
+                        fprintf(stderr, "[aslot] snap  br=0x%zx tgt=0x%zx cur=%zu -> snap=%zu\n",
+                                (size_t)inst->loc.vmaddr, (size_t)tgt,
+                                anchor_slots.size(), branch_slot_snap[tgt].size());
+                     }
                   }
                }
             }
@@ -2275,6 +2335,10 @@ namespace MachO {
             xed_decoded_inst_get_branch_displacement(&xedd) == 0;
          if (cat == XED_CATEGORY_RET) {
             if (pending_forward_targets.empty()) {
+               if (std::getenv("MACHO_TRACE_ANCHORSLOT") && !anchor_slots.empty()) {
+                  fprintf(stderr, "[aslot] CLEAR-ret vmaddr=0x%zx nslots=%zu\n",
+                          (size_t)inst->loc.vmaddr, anchor_slots.size());
+               }
                anchors.clear();
                anchor_slots.clear();
                entry_save_slots.clear();
@@ -2307,7 +2371,17 @@ namespace MachO {
           * transparent: skip them so the target still sees the RET that precedes
           * the padding. */
          if (cat != XED_CATEGORY_NOP && cat != XED_CATEGORY_WIDENOP) {
+            prev2_flow_cat = last_flow_cat;
             last_flow_cat = cat;
+            /* Sticky dead-fall-through (see ft_dead's declaration): a RET or an
+             * unconditional JMP ends the fall-through, a CALL placed after one
+             * is the noreturn-trap idiom and keeps it dead, anything else is a
+             * real fall-through again. */
+            if (cat == XED_CATEGORY_RET || cat == XED_CATEGORY_UNCOND_BR) {
+               ft_dead = true;
+            } else if (cat != XED_CATEGORY_CALL) {
+               ft_dead = false;
+            }
          }
          prev_inst = inst;
       }
