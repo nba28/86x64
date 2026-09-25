@@ -3867,13 +3867,22 @@ static int inv_native_type(const char *in, char *out, size_t cap) {
 
 static int inv_reissue(id inv, id target) {
    if (!target || getenv("ABICONV_NO_INVOKE_WIDEN")) { return 0; }
+   /* Only a real (target, selector, ...) invocation. Foundation also runs
+    * BLOCK invocations (XPC reply blocks, idle timers) through -invoke: their
+    * slot 1 is not a SEL, and feeding that garbage to class_getInstanceMethod
+    * poisoned libobjc's method caches -> crashes at 0x4f38ec34 all over. */
+   id sig = ((id (*)(id, SEL))objc_msgSend)(inv, sel_registerName("methodSignature"));
+   if (!sig) { return 0; }
+   unsigned long nargs = ((unsigned long (*)(id, SEL))objc_msgSend)(
+      sig, sel_registerName("numberOfArguments"));
+   if (nargs < 2) { return 0; }
+   const char *t1 = ((const char *(*)(id, SEL, unsigned long))objc_msgSend)(
+      sig, sel_registerName("getArgumentTypeAtIndex:"), 1);
+   if (!t1 || *enc_skip_quals(t1) != ':') { return 0; }
    SEL sel = ((SEL (*)(id, SEL))objc_msgSend)(inv, sel_registerName("selector"));
    if (!sel || !method_is_legacy(class_getInstanceMethod(object_getClass(target), sel))) {
       return 0;
    }
-   id sig = ((id (*)(id, SEL))objc_msgSend)(inv, sel_registerName("methodSignature"));
-   unsigned long nargs = ((unsigned long (*)(id, SEL))objc_msgSend)(
-      sig, sel_registerName("numberOfArguments"));
    const char *rt = ((const char *(*)(id, SEL))objc_msgSend)(
       sig, sel_registerName("methodReturnType"));
    char types[512], one[160];

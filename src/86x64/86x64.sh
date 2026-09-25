@@ -288,8 +288,14 @@ fi
 
 # link wrapper exec. Modern ld (Xcode 15+) requires -platform_version and
 # -syslibroot; derive both from xcrun.
-SDK_VER=$(xcrun --show-sdk-version)
 SDK_PATH=$(xcrun --show-sdk-path)
+# The SDK version stamped into LC_BUILD_VERSION drives AppKit's linked-on-or-
+# after switches. Claiming the host SDK (27.x) opted every legacy app into the
+# newest look — unified title+toolbar that overflows Quinn's six-tab prefs into
+# a » menu, Liquid Glass chrome. An i386 app never saw an SDK past 10.14, so
+# claim Mojave: AppKit keeps the title-above-toolbar layout the app was
+# designed for. Override with M64_WRAPPER_SDK=<ver>.
+WRAPPER_SDK="${M64_WRAPPER_SDK:-10.14}"
 # Reserve header slack between the load commands and the first __TEXT section,
 # matching the MACHO_HEADERPAD the translator gives the dylib (src/core/archive.cc).
 # Without it the wrapper's LCs abut __text (entry _main_wrapper), so any downstream
@@ -300,7 +306,7 @@ SDK_PATH=$(xcrun --show-sdk-path)
 WRAP_HEADERPAD=$(printf '0x%x' "${MACHO_HEADERPAD:-1024}")
 v ld -arch x86_64 \
     -syslibroot "$SDK_PATH" \
-    -platform_version macos 11.0 "$SDK_VER" \
+    -platform_version macos "$WRAPPER_SDK" "$WRAPPER_SDK" \
     -headerpad "$WRAP_HEADERPAD" \
     -rpath "$(dirname $LIBINTERPOSE)" -rpath "$(dirname $ARCHIVE64)" \
     -rpath @loader_path \
