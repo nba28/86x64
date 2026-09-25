@@ -3825,6 +3825,142 @@ static void legacy_cachedisplay_1x_install(void) {
    done = 1;
 }
 
+/* ---- NSInvocation aimed at a LEGACY method with CGFloat ('f') slots ----------
+ * A signature taken from a legacy-registered method keeps the i386 encoding, so
+ * native NSInvocation lays an NSRect out as 4 floats (16 bytes, 2 xmm regs) and
+ * a bare 'f' as a C float. The reverse dispatcher reads that same encoding under
+ * CONV_I386, where 'f' is a CGFloat that arrives as a native DOUBLE (an NSRect is
+ * a 32-byte MEMORY struct). So -invoke delivered garbage: Quinn's board queues
+ * [reflection sourceViewDidChange:img inRect:r] as an invocation, the rect
+ * arrived as ~0 and the reflection repainted {0,0,0,0} forever (stale pieces).
+ * FIX: when the target's method is legacy and the signature carries an 'f',
+ * re-issue through a native invocation whose signature spells 'f' as 'd', each
+ * arg widened with enc_widen(CONV_I386) — the exact inverse of the dispatcher's
+ * enc_narrow(CONV_I386) — and narrow the return back. Pointer slots were already
+ * stored native by bp_invocation_arg; everything else is copied raw.
+ * Kill switch ABICONV_NO_INVOKE_WIDEN=1. */
+static IMP g_inv_invoke, g_inv_invokeWithTarget;
+
+/* i386 types -> native: 'f' -> 'd' outside tag names/quoted class names. */
+static int inv_native_type(const char *in, char *out, size_t cap) {
+   size_t o = 0; int changed = 0;
+   for (const char *p = in; *p; ++p) {
+      if (o + 2 >= cap) { return -1; }
+      if (*p == '"') {                              /* @"Class" name */
+         out[o++] = *p++;
+         while (*p && *p != '"' && o + 2 < cap) { out[o++] = *p++; }
+         if (!*p) { break; }
+      } else if (*p == '{' || *p == '(') {          /* tag up to '=' */
+         out[o++] = *p++;
+         while (*p && *p != '=' && *p != '}' && *p != ')' && o + 2 < cap) {
+            out[o++] = *p++;
+         }
+         if (!*p) { break; }
+      } else if (*p == 'f') {
+         out[o++] = 'd'; changed = 1; continue;
+      }
+      out[o++] = *p;
+   }
+   out[o] = 0;
+   return changed;
+}
+
+static int inv_reissue(id inv, id target) {
+   if (!target || getenv("ABICONV_NO_INVOKE_WIDEN")) { return 0; }
+   SEL sel = ((SEL (*)(id, SEL))objc_msgSend)(inv, sel_registerName("selector"));
+   if (!sel || !method_is_legacy(class_getInstanceMethod(object_getClass(target), sel))) {
+      return 0;
+   }
+   id sig = ((id (*)(id, SEL))objc_msgSend)(inv, sel_registerName("methodSignature"));
+   unsigned long nargs = ((unsigned long (*)(id, SEL))objc_msgSend)(
+      sig, sel_registerName("numberOfArguments"));
+   const char *rt = ((const char *(*)(id, SEL))objc_msgSend)(
+      sig, sel_registerName("methodReturnType"));
+   char types[512], one[160];
+   int changed = inv_native_type(rt, types, sizeof types);
+   if (changed < 0) { return 0; }
+   for (unsigned long i = 0; i < nargs; ++i) {
+      const char *at = ((const char *(*)(id, SEL, unsigned long))objc_msgSend)(
+         sig, sel_registerName("getArgumentTypeAtIndex:"), i);
+      int c = inv_native_type(at, one, sizeof one);
+      if (c < 0 || strlen(types) + strlen(one) + 1 >= sizeof types) { return 0; }
+      changed |= c; strcat(types, one);
+   }
+   if (!changed) { return 0; }                     /* widths already agree */
+
+   id nsig = ((id (*)(id, SEL, const char *))objc_msgSend)(
+      (id)objc_getClass("NSMethodSignature"),
+      sel_registerName("signatureWithObjCTypes:"), types);
+   id ninv = nsig ? ((id (*)(id, SEL, id))objc_msgSend)(
+      (id)objc_getClass("NSInvocation"),
+      sel_registerName("invocationWithMethodSignature:"), nsig) : nil;
+   if (!ninv) { return 0; }
+   SEL s_get = sel_registerName("getArgument:atIndex:");
+   SEL s_set = sel_registerName("setArgument:atIndex:");
+   uint8_t src[256], dst[256];
+   for (unsigned long i = 2; i < nargs; ++i) {
+      const char *at = ((const char *(*)(id, SEL, unsigned long))objc_msgSend)(
+         sig, sel_registerName("getArgumentTypeAtIndex:"), i);
+      size_t isz = 0, nsz = 0; uint8_t sse[8];
+      enc_classify(enc_skip_quals(at), CONV_I386, &isz, &nsz, sse);
+      if (isz > sizeof src || nsz > sizeof dst) { return 0; }
+      memset(src, 0, sizeof src); memset(dst, 0, sizeof dst);
+      ((void (*)(id, SEL, void *, unsigned long))objc_msgSend)(inv, s_get, src, i);
+      if (inv_native_type(at, one, sizeof one) > 0) {
+         enc_widen(enc_skip_quals(at), CONV_I386, src, dst);
+      } else {
+         memcpy(dst, src, sizeof dst);
+      }
+      ((void (*)(id, SEL, void *, unsigned long))objc_msgSend)(ninv, s_set, dst, i);
+   }
+   ((void (*)(id, SEL, SEL))objc_msgSend)(ninv, sel_registerName("setSelector:"), sel);
+   ((void (*)(id, SEL, id))g_inv_invokeWithTarget)(ninv,
+      sel_registerName("invokeWithTarget:"), target);
+
+   if (*enc_skip_quals(rt) != 'v') {
+      memset(src, 0, sizeof src); memset(dst, 0, sizeof dst);
+      ((void (*)(id, SEL, void *))objc_msgSend)(ninv,
+         sel_registerName("getReturnValue:"), src);
+      if (inv_native_type(rt, one, sizeof one) > 0) {
+         enc_narrow(enc_skip_quals(rt), CONV_I386, src, dst);
+      } else {
+         memcpy(dst, src, sizeof dst);
+      }
+      ((void (*)(id, SEL, void *))objc_msgSend)(inv,
+         sel_registerName("setReturnValue:"), dst);
+   }
+   if (BRIDGE_TRACE()) {
+      fprintf(stderr, "[bp] invocation widened %s -> \"%s\"\n", sel_getName(sel), types);
+      fflush(stderr);
+   }
+   return 1;
+}
+
+static void inv_invoke(id self, SEL _cmd) {
+   id target = ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName("target"));
+   if (!inv_reissue(self, target)) { ((void (*)(id, SEL))g_inv_invoke)(self, _cmd); }
+}
+static void inv_invokeWithTarget(id self, SEL _cmd, id target) {
+   if (!inv_reissue(self, target)) {
+      ((void (*)(id, SEL, id))g_inv_invokeWithTarget)(self, _cmd, target);
+   }
+}
+
+static void legacy_invocation_widen_install(void) {
+   static int done = 0;
+   if (done) { return; }
+   if (getenv("ABICONV_INVOKE_WIDEN_INSTALLED")) { done = 1; return; }  /* other copy */
+   Class c = objc_getClass("NSInvocation");
+   if (!c) { return; }
+   Method mi = class_getInstanceMethod(c, sel_registerName("invoke"));
+   Method mt = class_getInstanceMethod(c, sel_registerName("invokeWithTarget:"));
+   if (!mi || !mt) { return; }
+   setenv("ABICONV_INVOKE_WIDEN_INSTALLED", "1", 1);
+   g_inv_invoke = method_setImplementation(mi, (IMP)inv_invoke);
+   g_inv_invokeWithTarget = method_setImplementation(mt, (IMP)inv_invokeWithTarget);
+   done = 1;
+}
+
 /* ---- LEGACY immediate-displayRect compositor co-mark -------------------------
  * A legacy i386 app's animation framework drives per-frame redraw via an
  * IMMEDIATE synchronous -[NSView displayRect:] / displayRectIgnoringOpacity:
@@ -4927,6 +5063,7 @@ static void appkit_compat_install(void) {
    legacy_snapshot_compat_install();
    legacy_lockfocus_1x_install();
    legacy_cachedisplay_1x_install();
+   legacy_invocation_widen_install();
    legacy_displayrect_comark_install();
    legacy_gstate_capture_install();
    legacy_window_chrome_install();
