@@ -35,6 +35,8 @@
  * referenced below resolve at load time even though the SDK stub omits them.
  */
 #include <CoreFoundation/CoreFoundation.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 /* Private CoreFoundation entry points (mach-o: __CFPreferences...). */
 extern CFPropertyListRef
@@ -118,12 +120,38 @@ static int pref_is_system_global_key(CFStringRef key)
 	return 0;
 }
 
+/* The keyboard input-source domain is SYSTEM state the app never owns: HIToolbox
+ * reads AppleEnabledInputSources / AppleDefaultAsciiInputSource from it at
+ * startup, and with the blanket "absent" the process has no enabled layouts and
+ * falls back to U.S. — every translated app then types QWERTY on a Hungarian
+ * QWERTZ keyboard (Quinn's 'y' key answered on the physical Z). Forward the
+ * whole domain, keyed on the DOMAIN (structural), like the global keys above. */
+static int pref_should_forward(CFStringRef key, CFStringRef appID)
+{
+	return pref_is_system_global_key(key)
+	    || (appID && CFEqual(appID, CFSTR("com.apple.HIToolbox")));
+}
+
+/* PREFS_TRACE=1: log every *Copy* read with its verdict (which keys a
+ * framework reads, and which of them the bypass answers "absent"). */
+static void pref_trace(const char *fn, CFStringRef key, CFStringRef appID, int fwd)
+{
+	static int on = -1;
+	if (on < 0) { on = getenv("PREFS_TRACE") != NULL; }
+	if (!on) { return; }
+	char k[128] = "(null)", a[128] = "(null)";
+	if (key) { CFStringGetCString(key, k, sizeof k, kCFStringEncodingUTF8); }
+	if (appID) { CFStringGetCString(appID, a, sizeof a, kCFStringEncodingUTF8); }
+	fprintf(stderr, "[prefs] %s key=%s app=%s -> %s\n", fn, k, a, fwd ? "FORWARD" : "absent");
+}
+
 /* ---- replacements: report "absent" / succeed without the daemon ---- */
 
 static CFPropertyListRef
 x64_pref_copy_app_cc(CFStringRef key, CFStringRef appID, CFURLRef container, CFURLRef configuration)
 {
-	if (pref_is_system_global_key(key)) {
+	pref_trace("x64_pref_copy_app_cc", key, appID, pref_should_forward(key, appID));
+	if (pref_should_forward(key, appID)) {
 		if (!appID) { appID = kCFPreferencesCurrentApplication; }
 		return _CFPreferencesCopyAppValueWithContainer(key, appID, container);
 	}
@@ -134,7 +162,8 @@ x64_pref_copy_app_cc(CFStringRef key, CFStringRef appID, CFURLRef container, CFU
 static CFPropertyListRef
 x64_pref_copy_app_c(CFStringRef key, CFStringRef appID, CFURLRef container)
 {
-	if (pref_is_system_global_key(key)) {
+	pref_trace("x64_pref_copy_app_c", key, appID, pref_should_forward(key, appID));
+	if (pref_should_forward(key, appID)) {
 		if (!appID) { appID = kCFPreferencesCurrentApplication; }
 		return _CFPreferencesCopyAppValueWithContainer(key, appID, container);
 	}
@@ -145,7 +174,8 @@ static CFPropertyListRef
 x64_pref_copy_value_c(CFStringRef key, CFStringRef appID, CFStringRef user, CFStringRef host,
                       CFURLRef container)
 {
-	if (pref_is_system_global_key(key)) {
+	pref_trace("x64_pref_copy_value_c", key, appID, pref_should_forward(key, appID));
+	if (pref_should_forward(key, appID)) {
 		if (!appID) { appID = kCFPreferencesCurrentApplication; }
 		return _CFPreferencesCopyValueWithContainer(key, appID, user, host, container);
 	}
@@ -155,7 +185,8 @@ x64_pref_copy_value_c(CFStringRef key, CFStringRef appID, CFStringRef user, CFSt
 static CFPropertyListRef
 x64_CFPreferencesCopyAppValue(CFStringRef key, CFStringRef applicationID)
 {
-	if (pref_is_system_global_key(key)) {
+	pref_trace("x64_CFPreferencesCopyAppValue", key, applicationID, pref_should_forward(key, applicationID));
+	if (pref_should_forward(key, applicationID)) {
 		if (!applicationID) { applicationID = kCFPreferencesCurrentApplication; }
 		return _CFPreferencesCopyAppValueWithContainer(key, applicationID, NULL);
 	}
@@ -166,7 +197,8 @@ static CFPropertyListRef
 x64_CFPreferencesCopyValue(CFStringRef key, CFStringRef applicationID, CFStringRef userName,
                            CFStringRef hostName)
 {
-	if (pref_is_system_global_key(key)) {
+	pref_trace("x64_CFPreferencesCopyValue", key, applicationID, pref_should_forward(key, applicationID));
+	if (pref_should_forward(key, applicationID)) {
 		if (!applicationID) { applicationID = kCFPreferencesCurrentApplication; }
 		return _CFPreferencesCopyValueWithContainer(key, applicationID, userName,
 		                                            hostName, NULL);

@@ -1663,6 +1663,15 @@ static void enc_copy3(char c, size_t isz, size_t nsz, int fp, int dir,
          double dv; memcpy(&dv, s, 8); float f = (float)dv; memcpy(d, &f, 4);
       } else if (isz == 4 && nsz == 8) {
          memcpy(d, s, 4);                     /* take the low half */
+         /* NSNotFound in an integer FIELD (NSRange.location from
+          * rangeOfString:…): same sentinel remap as return kind 8, else the
+          * i386 `cmp eax,0x7fffffff` never matches (Quinn saw every key
+          * config as "a key appears more than once"). */
+         uint64_t v; memcpy(&v, s, 8);
+         if ((c == 'q' || c == 'Q' || c == 'l' || c == 'L')
+             && v == 0x7fffffffffffffffull) {
+            uint32_t nf = 0x7fffffff; memcpy(d, &nf, 4);
+         }
       } else {
          memcpy(d, s, isz < nsz ? isz : nsz);
       }
