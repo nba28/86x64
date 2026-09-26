@@ -865,7 +865,9 @@ struct objc_super_i386 { uint32_t receiver; uint32_t super_class; };
  * mapped READ but past its file's EOF (faults KERN_MEMORY_ERROR) is rejected.
  * Region protection bits alone do NOT catch that. */
 static int genuine_probe(uintptr_t p, size_t len) {
-   char buf[32];
+   /* One page per read: a 32-byte buffer made a full-page probe 128 syscalls,
+    * paid on every fresh heap page a returned object lands on. */
+   char buf[PAGE_SZ_4K];
    while (len) {
       size_t chunk = len < sizeof buf ? len : sizeof buf;
       mach_vm_size_t got = 0;
@@ -2322,6 +2324,26 @@ static void trace_args(const char *prefix, const char *cls_name,
  * we see in real binaries. Longer lists would need plan extension +
  * trampoline stack spill (sysv ABI > 6 GP args land above rsp).
  */
+/* class_getInstanceMethod is NOT cached by the runtime (150-250 ns under
+ * Rosetta) and the bridge asked it on every send and reverse entry. Per-thread
+ * direct-mapped (class, SEL) -> Method memo, validated on every hit against
+ * class_getMethodImplementation (the runtime's IMP cache, ~3 ns): a method
+ * added to or swizzled onto another slot changes that IMP and forces a fresh
+ * lookup; a swizzle of the SAME Method keeps it correct. Misses (NULL) are
+ * never cached. Hot bridge paths only — install/swizzle code looks up fresh. */
+static Method hot_instance_method(Class c, SEL s) {
+   if (!c || !s) { return class_getInstanceMethod(c, s); }
+   static __thread struct { Class c; SEL s; Method m; } tl[512];
+   unsigned h = (unsigned)((((uintptr_t)c >> 3) ^ ((uintptr_t)s >> 2)) * 2654435761u) >> 23;
+   if (tl[h].c == c && tl[h].s == s &&
+       method_getImplementation(tl[h].m) == class_getMethodImplementation(c, s)) {
+      return tl[h].m;
+   }
+   Method m = class_getInstanceMethod(c, s);
+   if (m) { tl[h].c = c; tl[h].s = s; tl[h].m = m; }
+   return m;
+}
+
 static int sel_has_suffix(const char *s, const char *suf) {
    size_t ls = strlen(s), lf = strlen(suf);
    return ls >= lf && strcmp(s + (ls - lf), suf) == 0;
@@ -2739,7 +2761,7 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
                                    Class lookup, SEL sel, Method pre) {
    Method m = pre;                     /* caller's lookup of (lookup, sel), or NULL */
    if (!m && lookup) {
-      m = class_getInstanceMethod(lookup, sel);
+      m = hot_instance_method(lookup, sel);
    }
 
    /* va_list forms of the format methods (initWithFormat:arguments:,
@@ -2765,7 +2787,7 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
             if (c - k >= 6 && strncasecmp(c - 6, "format", 6) == 0) { fkw = nkw; }
          }
          SEL s2 = sel_registerName(sib);
-         Method m2 = (fkw != ~0u) ? class_getInstanceMethod(lookup, s2) : NULL;
+         Method m2 = (fkw != ~0u) ? hot_instance_method(lookup, s2) : NULL;
          if (m2 && method_getNumberOfArguments(m2) == 2 + nkw) {
             va32 = (const uint32_t *)(uintptr_t)args32[arg_base_idx + nkw];
             va_fmt_kw = fkw;
@@ -6597,7 +6619,7 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
     * the shadow the IMP expects). Precise: fires only where native dispatch would
     * otherwise crash; rmeth is keyed by our own legacy classes. Universal. */
    Class self_cls = real_self ? object_getClass(real_self) : NULL;
-   Method self_m = (sel && self_cls) ? class_getInstanceMethod(self_cls, sel) : NULL;
+   Method self_m = (sel && self_cls) ? hot_instance_method(self_cls, sel) : NULL;
    if (sel && real_self && !object_isClass(real_self) && self_m == NULL) {
       uint64_t imp = legacy_instance_method_imp(object_getClass(real_self), sel);
       if (imp) {
@@ -6636,7 +6658,7 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
          if (KNOB("ABICONV_TAG_TRACE")) {
             fprintf(stderr, "[tag] add sel=%s ret_kind=%d (m=%p) self=%p\n",
                     sel_getName(sel), plan->ret_is_obj,
-                    (void *)class_getInstanceMethod(
+                    (void *)hot_instance_method(
                         real_self ? object_getClass(real_self) : NULL, sel),
                     (void *)real_self);
             fflush(stderr);
@@ -6751,7 +6773,7 @@ void objc_bridge_prep_stret(struct objc_call_plan *plan, const uint32_t *args32)
    }
 
    Class lookup = real_self ? object_getClass(real_self) : NULL;
-   Method m = lookup ? class_getInstanceMethod(lookup, sel) : NULL;
+   Method m = lookup ? hot_instance_method(lookup, sel) : NULL;
    unsigned reg_base = plan_stret_return(plan, m, args32[0],
                                          (uint64_t)(uintptr_t)objc_msgSend);
    const int kind = plan->ret_is_obj;
@@ -6886,7 +6908,7 @@ void objc_bridge_prep_super_stret(struct objc_call_plan *plan,
    if (!type_lookup && real_receiver) {
       type_lookup = object_getClass(real_receiver);
    }
-   Method m = type_lookup ? class_getInstanceMethod(type_lookup, sel) : NULL;
+   Method m = type_lookup ? hot_instance_method(type_lookup, sel) : NULL;
    unsigned reg_base = plan_stret_return(plan, m, args32[0],
                                          (uint64_t)(uintptr_t)objc_msgSendSuper);
    const int kind = plan->ret_is_obj;
@@ -10520,7 +10542,7 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
       if (!m) {
          Method nm = NULL;
          for (Class c = hint; c; c = class_getSuperclass(c)) {
-            Method mm = class_getInstanceMethod(c, sel);
+            Method mm = hot_instance_method(c, sel);
             if (!mm) { break; }
             if (!method_is_legacy(mm)) { nm = mm; break; }
          }
