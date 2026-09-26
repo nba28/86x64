@@ -86,7 +86,7 @@ static int cb_trace(void) {
  * usually harmless heap and occasionally the end of a mapping. Clamping turns
  * a rare crash into a short copy; the tail is zeroed so the callee never reads
  * undefined bytes either way. */
-static uint64_t cb_readable_span(uint64_t p, uint64_t want) {
+uint64_t cb_readable_span(uint64_t p, uint64_t want) {
    mach_vm_address_t a = (mach_vm_address_t)p;
    mach_vm_size_t    rsz = 0;
    vm_region_basic_info_data_64_t info;

@@ -42,6 +42,7 @@
 
 /* objc_slide.c: the i386 init stack's live range, 0 unless it is really ours. */
 extern int _86x64_init_stack_range(uintptr_t *top, uintptr_t *bottom);
+extern uint64_t cb_readable_span(uint64_t p, uint64_t want);   /* cb_bridge.c */
 
 /* Reserve the heap inside the wrapper's low-4GB window [0x80000000,
  * 0xF0000000). Start the scan above the bottom 128 MB so the wrapper's
@@ -327,7 +328,13 @@ static void heap_report_requesters(void)
     * frames and missed the rest of the chain. */
    const uint32_t *sp = (const uint32_t *)__builtin_frame_address(0);
    const char *w = getenv("ABICONV_HEAP_WORDS");
-   const int words = w ? atoi(w) : 2048;   /* 8 KB at 4 bytes/step */
+   int words = w ? atoi(w) : 2048;   /* 8 KB at 4 bytes/step */
+   /* Never read past the stack's own mapping: the main thread runs near the
+    * top of the wrapper's low 16 MB stack, so a fixed 8 KB scan faulted at the
+    * region end and turned an ALLOCATION FAILED report into a SIGSEGV here
+    * (Quinn 2026-09-26, fault 0x82236000 = wrapper stack top). */
+   const uint64_t span = cb_readable_span((uint64_t)(uintptr_t)sp, (uint64_t)words * 4);
+   if ((uint64_t)words * 4 > span) { words = (int)(span / 4); }
    int shown = 0;
    const int maxshow = 40;
    fprintf(stderr, "[heap]   who asked (stack words pointing INTO __TEXT,__text of "
@@ -465,9 +472,23 @@ void *malloc(size_t n) {
       errno = ENOMEM;
       return NULL;
    }
-   /* first-fit reuse (16-aligned blocks always satisfy default alignment) */
+   /* first-fit reuse (16-aligned blocks always satisfy default alignment).
+    *
+    * ⚠ Blocks are never split or coalesced, so a recycled block keeps its whole
+    * capacity. Without a fit cap, a 16-byte request takes a just-freed 4 MB
+    * block, and the next 4 MB request bumps fresh arena: libabiconv mallocs and
+    * frees a 4 MB low stack PER native->i386 callback (cb_bridge, ae_shim) and
+    * 256 KB ones elsewhere, so every callback followed by a long-lived small
+    * allocation leaked 4 MB. Quinn hosting a network game (a CFSocket callback
+    * per packet) exhausted the whole low-4GB window in 4 minutes (2026-09-26).
+    * So: reuse a block only if it wastes at most max(cap, 4 KB). Kill switch
+    * ABICONV_NO_HEAP_FIT_CAP=1 restores the uncapped first fit. */
+   static int fit_cap = -1;
+   if (fit_cap < 0) { fit_cap = getenv("ABICONV_NO_HEAP_FIT_CAP") == NULL; }
+   const size_t slack = cap > 4096 ? cap : 4096;
+   /* ponytail: linear free-list scan; size-class bins if skipped blocks pile up */
    for (struct block **pp = &g_hc->free_list; *pp != NULL; pp = &(*pp)->next) {
-      if (BLK_CAP(*pp) >= cap) {
+      if (BLK_CAP(*pp) >= cap && (!fit_cap || BLK_CAP(*pp) - cap <= slack)) {
          struct block *b = *pp;
          *pp = b->next;
          b->size = BLK_CAP(b);          /* clear FREED: block is live again */
