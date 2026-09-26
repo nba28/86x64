@@ -2327,7 +2327,7 @@ static int sel_has_suffix(const char *s, const char *suf) {
    return ls >= lf && strcmp(s + (ls - lf), suf) == 0;
 }
 
-static int is_varargs_sel(const char *sel_name) {
+static int is_varargs_sel_uncached(const char *sel_name) {
    if (!sel_name) { return 0; }
 
    /* Suffix families that are reliably variadic across Foundation/AppKit,
@@ -2362,6 +2362,21 @@ static int is_varargs_sel(const char *sel_name) {
       }
    }
    return 0;
+}
+
+/* A pure function of the selector name (and a launch-time knob): memoize per
+ * SEL. One 64-bit word per slot, (name << 1) | verdict, so a racing overwrite
+ * can never pair one selector's name with another's verdict. It ran twice per
+ * forward send and cost ~12% of the bridge in suffix compares. */
+static int is_varargs_sel(const char *sel_name) {
+   static uint64_t cache[512];
+   uint64_t key = (uint64_t)(uintptr_t)sel_name << 1;
+   unsigned h = (unsigned)(((uintptr_t)sel_name >> 3) * 2654435761u) & 511u;
+   uint64_t e = __atomic_load_n(&cache[h], __ATOMIC_RELAXED);
+   if (e && (e & ~1ull) == key) { return (int)(e & 1); }
+   int v = is_varargs_sel_uncached(sel_name);
+   __atomic_store_n(&cache[h], key | (uint64_t)v, __ATOMIC_RELAXED);
+   return v;
 }
 
 /* Format-string-taking variadic selectors: stringWithFormat:, initWithFormat:,
@@ -2721,9 +2736,9 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
                                    const uint32_t *args32,
                                    unsigned arg_base_idx,
                                    unsigned reg_base,
-                                   Class lookup, SEL sel) {
-   Method m = NULL;
-   if (lookup) {
+                                   Class lookup, SEL sel, Method pre) {
+   Method m = pre;                     /* caller's lookup of (lookup, sel), or NULL */
+   if (!m && lookup) {
       m = class_getInstanceMethod(lookup, sel);
    }
 
@@ -3378,6 +3393,8 @@ static int patch_tailjmp(void *fn, void *dest) {
  * to tail-jump into our compat_getRGBA, which returns RGBA via CGColor and never
  * raises. Once-per-process; retries until ProKit is loaded. getRGBAImp is the
  * getRed: IMP, so it shares compat_getRGBA's (self,_cmd,r,g,b,a) signature. */
+static int g_prokit_loaded;   /* ProKit (the only known NSColor-slot thief) is in */
+
 static void prokit_color_neutralize(void) {
    static int done;
    if (done) { return; }
@@ -3389,7 +3406,7 @@ static void prokit_color_neutralize(void) {
    s_tried_imgcount = ic;
    /* Process-wide guard: the patch edits shared ProKit code, so once ANY copy
     * has done it the others must not re-walk the symtab. */
-   if (getenv("ABICONV_GETRGBA_PATCHED")) { done = 1; return; }
+   if (getenv("ABICONV_GETRGBA_PATCHED")) { done = 1; g_prokit_loaded = 1; return; }
    /* getRGBAImp + each single-component getter ProKit overrides; all raise the
     * same color-space exception for extended/HDR colors. Patch every one whose
     * symbol resolves; require at least getRGBAImp before declaring success. */
@@ -3420,6 +3437,7 @@ static void prokit_color_neutralize(void) {
       }
       return;                              /* ProKit not loaded yet: retry */
    }
+   g_prokit_loaded = 1;
    int rgba_ok = 0;
    for (unsigned i = 0; i < sizeof patches / sizeof patches[0]; ++i) {
       void *p = (i == 0) ? fn : find_image_symbol("/ProKit", patches[i].sym);
@@ -3451,6 +3469,26 @@ static void appkit_color_compat_reassert(void) {
     * process-global code edit any copy can perform. */
    prokit_color_neutralize();   /* patch getRGBAImp once ProKit has loaded */
    if (!g_color_installed) { return; }
+   /* New images can register NSColor subclasses that inherit a stealable slot
+    * (ProKit). AppKit also realizes some concrete color classes lazily — the
+    * extended-sRGB/HDR NSColorSpaceColor for a system accent color may not
+    * exist until first painted, with NO new image load (s14, raised mid Auto
+    * Layout). So re-sweep when EITHER the image count OR the total registered
+    * class count moves. objc_getClassList(NULL,0) is NOT a cheap count: it
+    * walks every realized class (~0.5 ms in an AppKit process, paid by every
+    * native->app method call). So: the image count is checked on every entry,
+    * everything else on a poll at most every 50 ms — except the slot re-take,
+    * which runs on EVERY entry once ProKit (the thief) is loaded. */
+   static uint32_t s_last_imgcount, s_calls;
+   static int      s_last_clscount;
+   static uint64_t s_next_poll_ns;
+   uint32_t ic = x64_img_count();
+   int poll = ic != s_last_imgcount;
+   if (!poll && (++s_calls & 255u) == 0) {   /* clock read only every 256 calls */
+      uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
+      if (now >= s_next_poll_ns) { s_next_poll_ns = now + 50000000ull; poll = 1; }
+   }
+   if (!poll && !g_prokit_loaded) { return; }
    static SEL s_sels[COLOR_SWZ_SELS];
    for (unsigned si = 0; si < COLOR_SWZ_SELS; ++si) {
       if (!s_sels[si]) { s_sels[si] = sel_registerName(g_color_swz[si].sel); }
@@ -3458,8 +3496,8 @@ static void appkit_color_compat_reassert(void) {
       for (unsigned i = 0;
            i < COLOR_SWZ_MAX && g_color_orig[si][i].cls; ++i) {
          /* Cached Method: a steal (method_setImplementation) edits this same
-          * slot; a category shadowing it is picked up by the 50 ms refresh. */
-         Method m = g_color_orig[si][i].m;
+          * slot; a category shadowing it is picked up by the poll refresh. */
+         Method m = poll ? NULL : g_color_orig[si][i].m;
          if (!m) {
             m = g_color_orig[si][i].m =
                class_getInstanceMethod(g_color_orig[si][i].cls, s);
@@ -3469,26 +3507,7 @@ static void appkit_color_compat_reassert(void) {
          }
       }
    }
-   /* New images can register NSColor subclasses that inherit a stealable slot
-    * (ProKit). AppKit also realizes some concrete color classes lazily — the
-    * extended-sRGB/HDR NSColorSpaceColor for a system accent color may not
-    * exist until first painted, with NO new image load (s14, raised mid Auto
-    * Layout). So re-sweep when EITHER the image count OR the total registered
-    * class count moves. objc_getClassList(NULL,0) is NOT a cheap count: it
-    * walks every realized class (~0.5 ms in an AppKit process, paid by every
-    * native->app method call). The image count is checked on every entry;
-    * the class count is polled at most every 50 ms. The per-entry base-slot
-    * re-take above still runs every time. */
-   static uint32_t s_last_imgcount;
-   static int      s_last_clscount;
-   static uint64_t s_next_poll_ns;
-   uint32_t ic = x64_img_count();
-   uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-   if (ic == s_last_imgcount && now < s_next_poll_ns) { return; }
-   s_next_poll_ns = now + 50000000ull;
-   for (unsigned si = 0; si < COLOR_SWZ_SELS; ++si) {
-      for (unsigned i = 0; i < COLOR_SWZ_MAX; ++i) { g_color_orig[si][i].m = NULL; }
-   }
+   if (!poll) { return; }
    int      cc = objc_getClassList(NULL, 0);
    if (ic != s_last_imgcount || cc != s_last_clscount) {
       s_last_imgcount = ic;
@@ -5224,15 +5243,13 @@ void _86x64_test_appkit_compat_install(void) { appkit_compat_install(); }
 static void appkit_compat_install(void) {
    /* Every installer below waits for a framework's classes, which only
     * appear with an image load: retry when the image count moves, or every
-    * 50 ms (covers dyld listing an image before objc registers its classes).
-    * Running them all on every forward call cost ~20% of the bridge. */
-   static uint32_t s_imgs;
-   static uint64_t s_next_ns;
+    * 1024 calls (covers dyld listing an image before objc registers its
+    * classes). Running them all on every forward call cost ~20% of the bridge;
+    * a call counter is cheaper than reading the clock. */
+   static uint32_t s_imgs, s_calls;
    uint32_t ic = x64_img_count();
-   uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
-   if (ic == s_imgs && now < s_next_ns) { return; }
+   if (ic == s_imgs && (++s_calls & 1023u) != 0) { return; }
    s_imgs = ic;
-   s_next_ns = now + 50000000ull;
 
    legacy_glview_1x_install();
    legacy_snapshot_compat_install();
@@ -6182,6 +6199,7 @@ static int bp_nsstring_nocopy(struct objc_call_plan *plan, const uint32_t *args3
    unsigned long len = (unsigned long)args32[3];
    typedef id (*init_bytes_t)(id, SEL, const void *, unsigned long, unsigned long);
    typedef id (*init_chars_t)(id, SEL, const void *, unsigned long);
+   if (!strstr(s, "NoCopy:")) { return 0; }     /* cheap pre-gate */
    SEL ib = sel_registerName("initWithBytes:length:encoding:");
    id result;
    if (!strcmp(s, "initWithCStringNoCopy:length:freeWhenDone:")) {
@@ -6578,8 +6596,9 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
     * jump straight to the i386 IMP, reusing the i386 frame (args32[0] is already
     * the shadow the IMP expects). Precise: fires only where native dispatch would
     * otherwise crash; rmeth is keyed by our own legacy classes. Universal. */
-   if (sel && real_self && !object_isClass(real_self) &&
-       class_getInstanceMethod(object_getClass(real_self), sel) == NULL) {
+   Class self_cls = real_self ? object_getClass(real_self) : NULL;
+   Method self_m = (sel && self_cls) ? class_getInstanceMethod(self_cls, sel) : NULL;
+   if (sel && real_self && !object_isClass(real_self) && self_m == NULL) {
       uint64_t imp = legacy_instance_method_imp(object_getClass(real_self), sel);
       if (imp) {
          if (BRIDGE_TRACE()) {
@@ -6597,7 +6616,7 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    plan->reg[2] = plan->reg[3] = plan->reg[4] = plan->reg[5] = 0;
 
    fill_args_and_return(plan, args32, /*arg_base_idx=*/2, /*reg_base=*/2,
-                        real_self ? object_getClass(real_self) : NULL, sel);
+                        self_cls, sel, self_m);
 
    /* NSTrackingRectTag/NSToolTipTag creation: the 64-bit tag return must round-trip
     * through the i386 caller's 32-bit slot (it is later passed back to
@@ -6742,7 +6761,7 @@ void objc_bridge_prep_stret(struct objc_call_plan *plan, const uint32_t *args32)
    for (unsigned k = reg_base; k < 6; ++k) { plan->reg[k] = 0; }
 
    fill_args_and_return(plan, args32, /*arg_base_idx=*/3, reg_base,
-                        lookup, sel);
+                        lookup, sel, m);
    /* fill computed a kind for the encoding as if this were a plain send;
     * the stret decision above owns the return. */
    plan->ret_is_obj = kind;
@@ -6824,7 +6843,7 @@ void objc_bridge_prep_super(struct objc_call_plan *plan, const uint32_t *args32)
       type_lookup = object_getClass(real_receiver);
    }
    fill_args_and_return(plan, args32, /*arg_base_idx=*/2, /*reg_base=*/2,
-                        type_lookup, sel);
+                        type_lookup, sel, NULL);
 }
 
 /*
@@ -6877,7 +6896,7 @@ void objc_bridge_prep_super_stret(struct objc_call_plan *plan,
    for (unsigned k = reg_base; k < 6; ++k) { plan->reg[k] = 0; }
 
    fill_args_and_return(plan, args32, /*arg_base_idx=*/3, reg_base,
-                        type_lookup, sel);
+                        type_lookup, sel, NULL);
    plan->ret_is_obj = kind;
 }
 
