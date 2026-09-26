@@ -10,29 +10,6 @@
 
 namespace MachO {
 
-#if 0
-template <typename T>
-size_t leb128_decode(const void *buf, size_t buflen, T& n) {
-   static_assert(std::is_integral<T>());
-   size_t count;
-   std::string name;
-   if constexpr (std::is_unsigned<T>()) {
-         count = uleb128_decode(buf, buflen, &n);
-         name = "uleb";
-      } else {
-      count = sleb128_decode(buf, buflen, &n);
-      name = "sleb";
-   }
-
-   if (count == 0) {
-      throw std::overflow_error(name + "128 overflow");
-   } else if (count > buflen) {
-      throw std::invalid_argument(name + "128 runs past end of buffer");
-   }
-
-   return count;
-}
-#else
 template <typename T>
 size_t leb128_decode(const Image& img, std::size_t offset, T& n) {
    static_assert(std::is_integral<T>());
@@ -58,7 +35,6 @@ size_t leb128_decode(const Image& img, std::size_t offset, T& n) {
 
    return count;
 }
-#endif
 
 template <typename T>
 size_t leb128_size(T n) {
@@ -70,29 +46,6 @@ size_t leb128_size(T n) {
    }
 }
 
-#if 0
-template <typename T>
-size_t leb128_encode(void *buf, size_t buflen, T n) {
-   static_assert(std::is_integral<T>());
-   
-   std::string name;
-   size_t count;
-   
-   if constexpr (std::is_unsigned<T>()) {
-         count = uleb128_encode(buf, buflen, n);
-         name = "uleb128_encode";
-      } else {
-      count = sleb128_encode(buf, buflen, n);
-      name = "sleb128_encode";
-   }
-
-   if (count == 0) {
-      throw std::invalid_argument(name + ": needs more buffer space");
-   }
-
-   return count;
-}
-#else
 template <typename T>
 size_t leb128_encode(Image& img, std::size_t offset, T n) {
    static_assert(std::is_integral<T>());
@@ -121,6 +74,5 @@ size_t leb128_encode(Image& img, std::size_t offset, T n) {
 
    return buflen;
 }
-#endif
 
 }

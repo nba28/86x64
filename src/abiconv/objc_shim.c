@@ -1481,7 +1481,7 @@ static const char *enc_walk(const char *t, const uint8_t *src, uint8_t *dst,
       char close = (c == '{') ? '}' : ')';
       const char *p = t + 1;
       while (*p && *p != '=' && *p != close) { ++p; }   /* skip tag */
-      size_t imax_al = 1, nmax_al = 1;
+      size_t imax_al = 1;
       size_t istart = *i_off, nstart = *n_off;     /* union: all from base */
       if (*p == '=') {
          ++p;
@@ -6291,55 +6291,6 @@ static int bp_deprecated_removefile(struct objc_call_plan *plan,
    }
    return 1;
 }
-/* QUINN_PLAY_TRACE: one focused, low-volume line per event relevant to the
- * three remaining Quinn gameplay-rendering/input symptoms, so a SINGLE the tester
- * play-test disambiguates all three. Called from BOTH bridge directions —
- * forward (i386 -> native/self, objc_bridge_prep) and reverse (native ->
- * legacy IMP, reverse prep) — because the interesting sends split across them:
- *   INPUT (#3, dead board keys/mouse): keyDown:/keyUp:/flagsChanged:/
- *     mouseDown:/mouseDragged: arrive as REVERSE dispatches (AppKit -> the
- *     legacy QuinnController/QuinnMainWindow/board view). If these fire when
- *     The tester presses arrows, input reaches the handler (marshalling/keycode
- *     issue); if not, the responder chain never routes the event.
- *   BOARD (#1, black well + no landed cells): drawRect: is a REVERSE dispatch;
- *     the per-rect draw sub-methods drawBackgroundInRect: (white well,
- *     UNCONDITIONAL) / drawBoardInRect:...(landed cells, gated) /
- *     drawPieceInRect:...(the piece, gated) are FORWARD [self ...] sends from
- *     inside drawRect:. Seeing which fire per tick localizes it: bg fires but
- *     no white => the CGContext fill-color path; drawBoard absent while
- *     drawPiece present => the animation gate suppresses cells; drawBoard
- *     present but no cells => empty board matrix.
- *   SIDEBAR (#2, no NEXT/SCORE): drawRect: on QuinnPlayerInfoView / *InfoCell.
- * The forward getRectsBeingDrawn:count: count is already logged by bp_getrects.
- * Whitelisted by exact selector name (+ any *InfoView/*InfoCell drawRect:), so
- * the log stays tiny across a full session. Env-gated; zero cost when unset. */
-static int quinn_play_trace_enabled(void) {
-   static int v = -1;
-   if (v < 0) { v = KNOB("QUINN_PLAY_TRACE") ? 1 : 0; }
-   return v;
-}
-static void quinn_play_trace(const char *dir, const char *cls, SEL sel) {
-   if (!quinn_play_trace_enabled() || !sel) { return; }
-   const char *s = sel_getName(sel);
-   if (!s) { return; }
-   static const char *const wl[] = {
-      "keyDown:", "keyUp:", "flagsChanged:", "mouseDown:", "mouseDragged:",
-      "mouseUp:", "becomeFirstResponder", "acceptsFirstResponder",
-      "resignFirstResponder", "makeFirstResponder:",
-      "drawRect:", "drawBackgroundInRect:",
-      "drawBoardInRect:boardOpacity:cellDirtyRect:",
-      "drawPieceInRect:boardOpacity:cellDirtyRect:",
-      "getRectsBeingDrawn:count:", "setNeedsDisplay:", "setNeedsDisplayInRect:",
-      "setNeedsDisplayInCellRect:", "setNeedsDisplayInCellRegion:", NULL };
-   int hit = 0;
-   for (int i = 0; wl[i]; ++i) { if (!strcmp(s, wl[i])) { hit = 1; break; } }
-   /* also catch the sidebar's own drawRect: on the PlayerInfo view/cells */
-   if (!hit && !strcmp(s, "drawRect:") && cls &&
-       (strstr(cls, "PlayerInfo") || strstr(cls, "LCDCell"))) { hit = 1; }
-   if (!hit) { return; }
-   fprintf(stderr, "[qpt:%s] %s %s\n", dir, cls ? cls : "(nil)", s);
-   fflush(stderr);
-}
 
 void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
@@ -6455,46 +6406,13 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    _86x64_callring_send((uint64_t)(uintptr_t)real_self,
                         (uint64_t)(uintptr_t)sel, args32[-1]);
 
-   if (BRIDGE_TRACE() || quinn_play_trace_enabled()) {
+   if (BRIDGE_TRACE()) {
       const char *cls_name = "(nil)";
       if (real_self) {
          Class c = object_getClass(real_self);
          if (c) cls_name = class_getName(c);
       }
-      if (BRIDGE_TRACE()) { trace_args("send", cls_name, sel, args32); }
-      quinn_play_trace("fwd", cls_name, sel);
-      /* VIEW-HIERARCHY mutations (QUINN_PLAY_TRACE): translated code
-       * reparenting / hiding views is invisible in the draw-selector traces,
-       * but it is exactly what makes drawn content vanish (the legacy
-       * offscreen-capture idiom reparents views through a hidden window;
-       * animation-end handlers add/remove overlay views). One line per
-       * addSubview: / removeFromSuperview[WithoutNeedingDisplay] /
-       * setHidden: with the ARG's class + the receiver's current window. */
-      if (quinn_play_trace_enabled() && sel) {
-         const char *hsn = sel_getName(sel);
-         int is_add = hsn && !strcmp(hsn, "addSubview:");
-         int is_addpos = hsn && !strcmp(hsn, "addSubview:positioned:relativeTo:");
-         int is_rm  = hsn && (!strcmp(hsn, "removeFromSuperview") ||
-                              !strcmp(hsn, "removeFromSuperviewWithoutNeedingDisplay"));
-         int is_hid = hsn && !strcmp(hsn, "setHidden:");
-         if (is_add || is_addpos || is_rm || is_hid) {
-            id arg0 = (is_add || is_addpos) ? resolve_self(args32[2]) : nil;
-            id win = nil;
-            if (real_self &&
-                ((signed char(*)(id, SEL, SEL))objc_msgSend)(
-                   real_self, sel_registerName("respondsToSelector:"),
-                   sel_registerName("window"))) {
-               win = ((id(*)(id, SEL))objc_msgSend)(real_self,
-                                                    sel_registerName("window"));
-            }
-            fprintf(stderr, "[qpt:hier] %s %s%s%s win=%p%s%u\n",
-                    cls_name, hsn,
-                    arg0 ? " arg=" : "", arg0 ? object_getClassName(arg0) : "",
-                    (void *)win,
-                    is_hid ? " hidden=" : " #", is_hid ? args32[2] : 0u);
-            fflush(stderr);
-         }
-      }
+      trace_args("send", cls_name, sel, args32);
    }
 
    /* i386 block as the receiver of copy/retain/release etc.: handle inline so
@@ -11062,82 +10980,6 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
    }
    x64_cb_enter();   /* a legacy IMP is about to run (balanced in reverse_ret) */
 
-   /* Round-2 Quinn black-board gate trace. The capture proved FastDrawCells
-    * (-> CGContextSetAlpha) is NEVER reached: drawPieceInRect AND drawBoardInRect
-    * both open with `if (self->myPlayer == nil) return;` (myPlayer = QuinnBoardView
-    * ivar @ i386 offset 0x54). self32 is the i386 SHADOW the legacy IMP reads its
-    * ivars from (= get_or_create_shadow(self_,lookup)). For every reverse call into
-    * a *BoardView, log the shadow + myPlayer@0x54 (and, for setPlayer:, the player
-    * being written). This shows whether the shadow is STABLE across the view's
-    * calls and whether the player write ever lands on the shadow the draw guard
-    * reads — i.e. core (translated ivar) vs runtime (legacy-shadow aliasing). */
-   if (KNOB("QUINN_CELL_TRACE") && !object_isClass(self_)) {
-      const char *cn = class_getName(lookup);
-      const char *sn = (sel && mem_readable((uintptr_t)sel, 1)) ? sel_getName(sel)
-                                                                 : "(unreadable)";
-      /* WINDOW-IDENTITY line for every legacy-view drawRect: — discriminates
-       * "draws into the visible game window" from "draws into a detached /
-       * offscreen / hidden host" (the steady-state blank-sidebar question:
-       * all draw calls fire with sane args, so if the content never shows,
-       * either the view isn't parented where we think or something composites
-       * over it). window/superview/isVisible are plain native NSView/NSWindow
-       * getters on the real instance — safe before the legacy IMP runs. */
-      if (sn && !strcmp(sn, "drawRect:") && cn &&
-          (strstr(cn, "Quinn") || strstr(cn, "LCD"))) {
-         id win = ((id(*)(id, SEL))objc_msgSend)(self_, sel_registerName("window"));
-         id sv  = ((id(*)(id, SEL))objc_msgSend)(self_, sel_registerName("superview"));
-         signed char vis = win ? ((signed char(*)(id, SEL))objc_msgSend)(
-                                    win, sel_registerName("isVisible")) : 0;
-         long wnum = win ? ((long(*)(id, SEL))objc_msgSend)(
-                              win, sel_registerName("windowNumber")) : -1;
-         signed char hid = ((signed char(*)(id, SEL))objc_msgSend)(
-            self_, sel_registerName("isHiddenOrHasHiddenAncestor"));
-         fprintf(stderr, "[win] %s win=%p num=%ld vis=%d hiddenAnc=%d sv=%s\n",
-                 cn, (void *)win, wnum, (int)vis, (int)hid,
-                 sv ? object_getClassName(sv) : "(nil)");
-      }
-      int board_cls = cn && strstr(cn, "BoardView");
-      /* Round-3: the board's draw methods are registered but AppKit never calls
-       * drawRect:/drawBoardInRect:/drawPieceInRect: -> the board is never
-       * invalidated/redrawn. The redraw chain is:
-       *   <game tick> -> *[boardDidChange:matrices:] -> [view setNeedsDisplayInCell*]
-       *               -> AppKit -> [view drawRect:] -> FastDrawCells.
-       * Trace the chain regardless of class so we find WHERE it stops: the
-       * model->view notification (boardDidChange) and the view invalidation
-       * (any *NeedsDisplay*), plus the per-move hook. board_cls calls keep the
-       * shadow+myPlayer detail. */
-      int chain_sel = sn && (strstr(sn, "boardDidChange") || strstr(sn, "NeedsDisplay")
-                             || strstr(sn, "pieceDidMove") || strstr(sn, "boardChanged")
-                             || !strcmp(sn, "boardDidChange:matrices:"));
-      if (board_cls || chain_sel) {
-         uint32_t shadow = self32;
-         /* The REAL x86_64 object is the ground-truth instance identity: the
-          * shadow is keyed on it (objc_getAssociatedObject(real,g_ctrl)), so
-          * two calls with the SAME real but DIFFERENT shadow == a shadow-aliasing
-          * bug. myPlayer@0x54 lives on QuinnBoardView (the super) and is written
-          * by -[QuinnBoardView setPlayer:] via the subclass's [super setPlayer:];
-          * drawRect:/drawBoardInRect: read it. Logging real+shadow+myPlayer for
-          * setPlayer: (write) AND drawRect:/drawBoardInRect: (read) shows whether
-          * the write and the read land on the same shadow of the same instance. */
-         uint64_t real64 = (uint64_t)(uintptr_t)shadow_real(shadow);
-         if (board_cls) {
-            uint32_t myplayer = (shadow && mem_readable((uintptr_t)shadow + 0x54, 4))
-                                ? *(const uint32_t *)(uintptr_t)(shadow + 0x54) : 0xBADBAD;
-            fprintf(stderr, "[guard] %s[%s] real=0x%llx shadow=0x%x myPlayer@0x54=0x%x%s\n",
-                    cn ? cn : "?", sn, (unsigned long long)real64, shadow, myplayer,
-                    myplayer == 0 ? "  <-- NIL: board draw will bail" : "");
-            if (sn && (!strcmp(sn, "setPlayer:")))
-               fprintf(stderr, "[guard]   -> setPlayer: writes newPlayer=0x%x into"
-                       " real=0x%llx shadow=0x%x+0x54\n", plan->frame[head + 2],
-                       (unsigned long long)real64, shadow);
-         } else {
-            fprintf(stderr, "[guard] REDRAW-CHAIN: %s[%s] real=0x%llx self32=0x%x\n",
-                    cn ? cn : "?", sn, (unsigned long long)real64, shadow);
-         }
-         fflush(stderr);
-      }
-   }
-
    if (BRIDGE_TRACE()) {
       fprintf(stderr, "[rev] t=%x %s[%s] imp=0x%llx self32=0x%x words=%u kind=%d "
               "%splan=%p lowstack=0x%llx tramp=%p\n",
@@ -11149,7 +10991,6 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
               (void *)_86x64_reverse_imp);
       fflush(stderr);
    }
-   quinn_play_trace("rev", class_getName(lookup), sel);
 }
 
 unsigned __int128 _86x64_reverse_ret(struct reverse_plan *plan,
@@ -11474,52 +11315,6 @@ static struct geo_res geo_call(unsigned idx, const uint32_t *a32) {
               "rectf=[%.2f %.2f %.2f %.2f]\n", e->name,
               a32[0], a32[1], a32[2], a32[3], a32[4], a32[5],
               (double)f1, (double)f2, (double)f3, (double)f4);
-      fflush(stderr);
-   }
-   /* Focused Quinn cell-draw trace (clean signal vs the GEO_PTR_TRACE firehose).
-    * The operative block draw is _QuinnGeneralFastDrawCells: it calls
-    * CGContextSetAlpha ONCE per matrix (function entry), then per OCCUPIED cell
-    * either CGContextDrawImage (sprite cell, slot5=cell image) or
-    * CGContextFillRect (solid 0xFF cell), into the offscreen/current context.
-    * NSRectFill(UsingOperation) is the offscreen clear + the slow board path.
-    * This reveals (a) whether FastDrawCells is reached at all (any SetAlpha),
-    * (b) how many occupied cells it draws per matrix (the count between two
-    * SetAlphas), and (c) whether each cell sprite image unwraps to a real
-    * 64-bit CGImage. Zero output unless QUINN_CELL_TRACE is set. */
-   if (KNOB("QUINN_CELL_TRACE")) {
-      static unsigned q_matrices, q_cells_in_matrix, q_total_cells;
-      const char *n = e->name;
-      if (!strcmp(n, "CGContextSetAlpha")) {
-         if (q_matrices)
-            fprintf(stderr, "[cell]   ^matrix #%u drew %u occupied cells\n",
-                    q_matrices, q_cells_in_matrix);
-         q_matrices++; q_cells_in_matrix = 0;
-         float al; memcpy(&al, &a32[1], 4);
-         fprintf(stderr, "[cell] SetAlpha(#%u) ctx=0x%08x alpha=%.3f\n",
-                 q_matrices, a32[0], (double)al);
-      } else if (!strcmp(n, "CGContextDrawImage")) {
-         q_cells_in_matrix++; q_total_cells++;
-         uint64_t real = geo_cfptr_arg(a32[5]);
-         float x,y,w,h; memcpy(&x,&a32[1],4); memcpy(&y,&a32[2],4);
-         memcpy(&w,&a32[3],4); memcpy(&h,&a32[4],4);
-         fprintf(stderr, "[cell] DrawImage ctx=0x%08x rect=[%.1f %.1f %.1f %.1f]"
-                 " img=0x%08x->0x%llx%s (total=%u)\n", a32[0],
-                 (double)x,(double)y,(double)w,(double)h, a32[5],
-                 (unsigned long long)real, real ? "" : " NULL!", q_total_cells);
-      } else if (!strcmp(n, "CGContextFillRect")) {
-         q_cells_in_matrix++; q_total_cells++;
-         float x,y,w,h; memcpy(&x,&a32[1],4); memcpy(&y,&a32[2],4);
-         memcpy(&w,&a32[3],4); memcpy(&h,&a32[4],4);
-         fprintf(stderr, "[cell] FillRect ctx=0x%08x rect=[%.1f %.1f %.1f %.1f]"
-                 " (total=%u)\n", a32[0],
-                 (double)x,(double)y,(double)w,(double)h, q_total_cells);
-      } else if (!strcmp(n, "NSRectFill") ||
-                 !strcmp(n, "NSRectFillUsingOperation")) {
-         float x,y,w,h; memcpy(&x,&a32[0],4); memcpy(&y,&a32[1],4);
-         memcpy(&w,&a32[2],4); memcpy(&h,&a32[3],4);
-         fprintf(stderr, "[cell] %s rect=[%.1f %.1f %.1f %.1f]\n", n,
-                 (double)x,(double)y,(double)w,(double)h);
-      }
       fflush(stderr);
    }
    char rb = *enc_skip_quals(ret);

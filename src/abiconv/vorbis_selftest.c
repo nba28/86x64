@@ -333,10 +333,6 @@ static int lo32(const void *p, const char *what) {
    return 1;
 }
 
-static void dump_ds(const char *tag, const struct halo_ds *ds) {
-   VS("  %-8s pos=%u base=0x%08x len=%u eof=%u\n",
-      tag, ds->pos, ds->base, ds->len, ds->eof);
-}
 
 /* ---- the run ------------------------------------------------------------ */
 

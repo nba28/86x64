@@ -189,22 +189,6 @@ protected:
    template <typename, typename, typename> friend class trie_map;
 };
 
-#if 0
-template <typename T, typename U>
-class trie_set {
-   using TrieMap = trie_map<T, U, bool>
-public:
-   class iterator {
-   public:
-
-   private:
-      typename trie_map<T, U, bool>::iterator
-   };
-   
-private:
-   trie_map<T, U, bool> map;
-};
-#endif
 
 /* TODO: Need way of decoding and encoding trie.
  * decode() -- needs function to decode value (node gen) and to decode edge (edge gen) 

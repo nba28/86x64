@@ -326,15 +326,6 @@ void ModifyCommand::Update::StripBind::workT(MachO::Archive<b> *archive) {
    if (dyld_info->bind) { workT(dyld_info->bind); }
    if (dyld_info->lazy_bind) { workT(dyld_info->lazy_bind); }
 
-#if 0
-   auto symtab = archive->template subcommand<MachO::Symtab>();
-   if (symtab == nullptr) {
-      throw std::string("missing symbol table");
-   }
-   for (auto str : symtab->strs) {
-      strip(str->str);
-   }
-#endif
 }
 
 template <MachO::Bits b, bool lazy>

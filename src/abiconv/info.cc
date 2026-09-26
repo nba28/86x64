@@ -11,22 +11,6 @@
 #include "typeinfo.hh"
 #include "typeconv.hh"
 
-#if 0
-template <typename Func>
-void for_each(CXCursor root, Func func) {
-   clang_visitChildren(root,
-                       [] (CXCursor c, CXCursor parent, CXClientData client_data) {
-                          Func func = * (Func *) client_data;
-                          return func(c, parent);
-                       },
-                       &func);
-}
-
-template <typename Func>
-void for_each(const CXTranslationUnit& unit, Func func) {
-   for_each(clang_getTranslationUnitCursor(unit), func);
-}
-#endif
 
 struct ParseInfo {
    using Syms = std::unordered_set<std::string>;
@@ -107,7 +91,6 @@ struct ParseInfo {
    CXChildVisitResult print_cursors(CXCursor c, CXCursor p) {
       std::cout << "(" << to_string(c) << "," << to_string(clang_getCursorKind(c)) << ")";
       if (print_types) {
-         CXType type = clang_getCursorType(c);
          if (print_type_kinds) {
             std::cout << " ";
             print_type_kind(clang_getCursorType(c));
@@ -140,7 +123,6 @@ int main(int argc, char *argv[]) {
                    fprintf(f, usage, argv[0]);
                 };
 
-   const char *outpath = nullptr;
    ParseInfo info;
    
    const char *optstring = "ht";

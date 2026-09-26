@@ -123,8 +123,6 @@ static void fixup_translated_dylib_slots(void) {
       const struct mach_header_64 *mh64 = (const struct mach_header_64 *)mh;
       const uint8_t *cmd_ptr = (const uint8_t *)(mh64 + 1);
       int is_translated = 0;
-      uintptr_t data_runtime_addr = 0;
-      uintptr_t data_size = 0;
       uintptr_t abs32_runtime_addr = 0;
       uintptr_t abs32_size = 0;
       /*
@@ -163,10 +161,7 @@ static void fixup_translated_dylib_slots(void) {
                const struct section_64 *sects =
                   (const struct section_64 *)(seg + 1);
                for (uint32_t s = 0; s < seg->nsects; ++s) {
-                  if (strcmp(sects[s].sectname, "__data") == 0) {
-                     data_runtime_addr = sects[s].addr + slide;
-                     data_size = sects[s].size;
-                  } else if (strncmp(sects[s].sectname, "__86x64_abs32",
+                  if (strncmp(sects[s].sectname, "__86x64_abs32",
                                      sizeof(sects[s].sectname)) == 0) {
                      abs32_runtime_addr = sects[s].addr + slide;
                      abs32_size = sects[s].size;

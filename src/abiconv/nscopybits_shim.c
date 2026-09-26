@@ -50,7 +50,6 @@ extern void NSCopyBits(long srcGState, NSRect64 srcRect, NSPoint64 destPoint);
 #define NSCB_TOKEN_BASE 0x67530000L
 #define NSCB_TOKEN_CAP  256
 
-static id  C(const char *n) { return objc_getClass(n); }
 static SEL S(const char *n) { return sel_registerName(n); }
 
 /* i386-cdecl entry: a = &args[0], each a 4-byte i386 slot. */

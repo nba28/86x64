@@ -535,12 +535,6 @@ Rebasify::state_info::state_info(const state_info& other,
    section(other.section),
    text_it(std::find(section->content.begin(), section->content.end(), target))
 {
-#if 0
-   // actually, it's ok if it's out of range
-   if (text_it == section->content.end()) {
-      throw std::invalid_argument("bad target blob");
-   }
-#endif
 }
 
 bool Rebasify::state_info::operator==(const Rebasify::state_info& other) const {

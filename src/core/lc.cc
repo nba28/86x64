@@ -291,15 +291,6 @@ namespace MachO {
       entry = env.add_placeholder(vmaddr);
    }
 
-#if 0
-   template <Bits bits>
-   void EntryPoint<bits>::Parse2(ParseEnv<bits>& env) {
-      Location loc(entry_point.entryoff, 0);
-      Placeholder<bits> *entry = Placeholder<bits>::Parse(loc, env);
-      env.archive.insert(entry, loc, Relation::BEFORE);
-      this->entry = entry;
-   }
-#endif
 
    /* ---- LC_UNIXTHREAD ---- */
 

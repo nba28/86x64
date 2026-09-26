@@ -42,12 +42,6 @@ namespace MachO::opcode {
       }
    }
 
-#if 0
-   int32_t disp32(const SectionBlob<Bits::M32> *src, const SectionBlob<Bits::M32> *dst,
-                  std::size_t new_src_len);
-   int32_t disp32(const SectionBlob<Bits::M64> *src, const SectionBlob<Bits::M64> *dst,
-                  std::size_t new_src_len);
-#endif
    
    opcode_t lea_r11_mem_rip_disp32(const SectionBlob<Bits::M32> *src,
                                    const SectionBlob<Bits::M32> *dst) {

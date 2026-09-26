@@ -2,4 +2,3 @@ abiconv.asm
 abiconv.syms
 info
 syscall_tabgen
-convgen

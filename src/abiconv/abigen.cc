@@ -1008,26 +1008,6 @@ struct ABIConversion {
    }
 
 
-#if 0
-   void emit_function_call(std::ostream& os, Symbols& symbols, const Symbols& ignore_structs) {
-      const std::list<const reg_group *> regs {&rdi, &rsi, &rdx, &rcx, &r8, &r9};
-      emit(os, symbols, ignore_structs, regs.begin(), regs.end(),
-           [] (std::ostream& os, const std::string& sym) {
-              emit_inst(os, "call", sym);
-           });      
-   }
-
-   void emit_system_call(std::ostream& os, Symbols& symbols, const Symbols& ignore_structs) {
-      /* NOTE: %rax isn't really a parameter, though treating it as such preserves it during
-       * transformation process.
-       */
-      const std::list<const reg_group *> regs {&rax, &rdi, &rsi, &rdx, &r10, &r8, &r9};
-      emit(os, symbols, ignore_structs, regs.begin(), regs.end(),
-           [] (std::ostream& os, const std::string& sym) {
-              emit_inst(os, "syscall");
-           });
-   }
-#endif
 
    /* True if `type` (a canonical arg type) is a `va_list`. A va_list is
     * `__builtin_va_list` = `struct __va_list_tag[1]` on x86_64, so as a parameter

@@ -50,8 +50,7 @@ static void usage(FILE *f = stderr) {
 int main(int argc, char *argv[]) {
    progname = argv[0];
 
-   const char *main_optstr = "hi";
-   bool inplace;
+   const char *main_optstr = "h";
 
    /* read main options */
    int optchar;
@@ -61,10 +60,6 @@ int main(int argc, char *argv[]) {
          usage(stdout);
          return 0;
 
-      case 'i':
-         inplace = true;
-         break;
-         
       default:
          usage(stderr);
          return 1;

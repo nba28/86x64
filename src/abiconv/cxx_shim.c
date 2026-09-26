@@ -701,7 +701,6 @@ static int ti_equal(uint32_t a, uint32_t b) {
 #define VMI_FLAGS_UNKNOWN    0x10   /* __flags_unknown_mask sentinel */
 
 static int sk_contained_p(int k)        { return k >= SK_contained_mask; }
-static int sk_public_p(int k)           { return (k & SK_public_mask) != 0; }
 static int sk_contained_public_p(int k) { return (k & SK_contained_public) == SK_contained_public; }
 static int sk_contained_nonvirtual_p(int k) {
    return (k & (SK_contained_mask | SK_virtual_mask)) == SK_contained_mask;

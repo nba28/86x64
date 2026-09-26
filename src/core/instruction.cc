@@ -533,17 +533,6 @@ namespace MachO {
                         &this->memdisp_offset, /*override=*/true);
                   }
 
-#if 0
-                  char pbuf[32];
-                  xed_print_info_t pinfo;
-                  xed_init_print_info(&pinfo);
-                  pinfo.blen = 32;
-                  pinfo.buf = pbuf;
-                  pinfo.p = &xedd;
-                  pinfo.runtime_address = loc.vmaddr;
-                  xed_format_generic(&pinfo);
-                  fprintf(stderr, "%s\n", pbuf);
-#endif
                } else if (basereg == XED_REG_INVALID && indexreg == XED_REG_INVALID &&
                           xed_decoded_inst_get_memory_displacement_width(operands, i) ==
                           sizeof(uint32_t)) {
@@ -2441,11 +2430,6 @@ namespace MachO {
 
       if constexpr (bits == Bits::M32) {
             const auto reg0 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
-#if 0
-            const auto reg1 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1);
-            const auto base_reg = xed_decoded_inst_get_base_reg(&xedd, 0);
-            const auto index_reg = xed_decoded_inst_get_index_reg(&xedd, 0);
-#endif
             
             /*
              * Effective operand width for the iform-rules switch.

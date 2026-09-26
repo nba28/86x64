@@ -96,10 +96,6 @@ static uint32_t rm_wrap(void *nH) {
    rm_record(low, nH);
    return low;
 }
-static void *rm_unwrap(uint32_t low) {          // low Handle -> native Handle
-   void *n = rm_native(low);
-   return n ? n : i386_ptr(low);                // unrecorded: pass through as-is
-}
 
 // ---- Handle-RETURNING: forward + wrap ------------------------------------
 // Handle Get1Resource(ResType, short); GetResource(ResType, short);

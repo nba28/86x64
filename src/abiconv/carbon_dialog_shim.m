@@ -100,10 +100,6 @@ static int dlg_debug(void) {
  * numeric fields little-endian (res16/res32); text/type bytes stay verbatim. */
 typedef struct { int16_t top, left, bottom, right; } CRect;
 static inline int16_t res16(const uint8_t *p) { return (int16_t)(p[0] | (p[1] << 8)); }
-static inline int32_t res32(const uint8_t *p) {
-    return (int32_t)((uint32_t)p[0] | ((uint32_t)p[1] << 8) |
-                     ((uint32_t)p[2] << 16) | ((uint32_t)p[3] << 24));
-}
 
 /* ---- DITL item kinds (classic Dialogs.h) ------------------------------- */
 enum {

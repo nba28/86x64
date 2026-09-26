@@ -802,13 +802,6 @@ target_link_libraries(info libclang)
 add_definitions(${LLVM_DEFINITIONS})
 
 
-add_executable(convgen
-  convgen.cc
-  util.cc
-  )
-target_link_libraries(convgen libclang)
-add_definitions(${LLVM_DEFINITIONS})
-
 add_executable(syscall_tabgen
   syscall_tabgen.cc
   )

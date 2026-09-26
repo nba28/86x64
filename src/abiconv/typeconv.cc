@@ -487,10 +487,6 @@ void conversion::convert_record(std::ostream& os, CXType record, MemoryLocation 
          convert(os, field_type, src, dst);
       }
 
-#if 0
-      std::cerr << to_string(record) << "," << to_string(field_type) << "," << src.index
-                << "," << dst.index << std::endl;
-#endif
 
       /* update src, dst */
       src += sizeof_type(field_type, from_arch);
