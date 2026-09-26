@@ -2727,6 +2727,40 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
       m = class_getInstanceMethod(lookup, sel);
    }
 
+   /* va_list forms of the format methods (initWithFormat:arguments:,
+    * initWithFormat:locale:arguments:, raise:format:arguments:, ...). An i386
+    * va_list is a plain pointer to 4-byte vararg slots, nothing like the
+    * x86_64 __va_list_tag, and passing it raw crashed inside
+    * CFStringCreateWithFormat... (Quinn joining a server). Send the VARIADIC
+    * sibling instead (drop "arguments:") and expand the slots by the format,
+    * as shim_CFStringCreateWithFormatAndArguments does. A legacy (i386) IMP
+    * takes the i386 va_list as-is, so leave it alone. */
+   const uint32_t *va32 = NULL;
+   unsigned va_fmt_kw = 0;               /* keyword index of the format arg */
+   if (m && !method_is_legacy(m) && !KNOB("ABICONV_NO_VALIST_SIBLING")) {
+      const char *sn = sel_getName(sel);
+      size_t ln = strlen(sn);
+      static const char kVa[] = "arguments:";
+      if (ln > sizeof kVa - 1 && ln < 256 && sel_has_suffix(sn, kVa)) {
+         char sib[256];
+         memcpy(sib, sn, ln - (sizeof kVa - 1));
+         sib[ln - (sizeof kVa - 1)] = '\0';
+         unsigned nkw = 0, fkw = ~0u;
+         for (const char *k = sib, *c; (c = strchr(k, ':')); k = c + 1, ++nkw) {
+            if (c - k >= 6 && strncasecmp(c - 6, "format", 6) == 0) { fkw = nkw; }
+         }
+         SEL s2 = sel_registerName(sib);
+         Method m2 = (fkw != ~0u) ? class_getInstanceMethod(lookup, s2) : NULL;
+         if (m2 && method_getNumberOfArguments(m2) == 2 + nkw) {
+            va32 = (const uint32_t *)(uintptr_t)args32[arg_base_idx + nkw];
+            va_fmt_kw = fkw;
+            sel = s2;
+            m = m2;
+            plan->reg[reg_base - 1] = (uint64_t)(uintptr_t)s2;
+         }
+      }
+   }
+
    struct mcur cur = { reg_base, 0, 0 };
    unsigned ai = arg_base_idx;
    unsigned nargs = fill_method_args(plan, args32, &ai, m, sel, &cur);
@@ -2749,9 +2783,18 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
     * _86x64_reverse_imp address won't match the registered IMP) — so consult the
     * SHARED rvariadic registry the registering copy published. lookup/sel are
     * process-global Class/SEL, valid in any copy. */
-   int legacy_va = (m && !is_varargs_sel((const char *)sel))
+   int legacy_va = (m && !va32 && !is_varargs_sel((const char *)sel))
                       ? rvar_contains(lookup, sel) : 0;
-   if (m && (is_varargs_sel((const char *)sel) || legacy_va)) {
+   if (va32) {
+      char fmtbuf[2048];
+      unsigned fslot = reg_base + va_fmt_kw;
+      uint64_t fmt = fslot < 6 ? plan->reg[fslot] : 0;
+      if (fmt && format_cstr(fmt, fmtbuf, sizeof fmtbuf)) {
+         final_pos = fill_format_varargs(plan, va32, /*ai=*/0, final_pos,
+                                         /*gp_cap=*/6 + PLAN_STACK_MAX,
+                                         fmtbuf, &cur);
+      }
+   } else if (m && (is_varargs_sel((const char *)sel) || legacy_va)) {
       char fmtbuf[2048];
       /* the format NSString is the last fixed arg == last GP slot filled */
       uint64_t fmt_slot = (cur.gp > reg_base && cur.gp <= 6)

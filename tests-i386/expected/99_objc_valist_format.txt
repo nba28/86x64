@@ -1,0 +1,4 @@
+a=Alice joined 7/lan
+b=12-x-ff
+c=3.25 pts
+exit_code: 42
