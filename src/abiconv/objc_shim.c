@@ -27,6 +27,8 @@
 #include <objc/runtime.h>
 #include <objc/message.h>
 #include "dyld_image_list.h"
+extern void *x64_lowstack_get(size_t sz);          /* lowstack_pool.c */
+extern void  x64_lowstack_put(void *p, size_t sz);
 extern id objc_retain(id);   /* libobjc ARC entrypoint; not in runtime.h */
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
@@ -9733,13 +9735,13 @@ static uint64_t i386_block_to_native(uint32_t p) {
 
 /* Run an i386 function (cdecl) from native code on a fresh low-4GB stack. */
 static uint32_t blk_call_i386(uint32_t fn, uint32_t nwords, const uint32_t *words) {
-   void *stk = malloc(BLK_LOWSTACK_SZ);
+   void *stk = x64_lowstack_get(BLK_LOWSTACK_SZ);
    if (!stk) { return 0; }
    uint64_t top = ((uint64_t)(uintptr_t)stk + BLK_LOWSTACK_SZ) & ~0xfULL;
    x64_cb_enter();
    uint32_t r = _86x64_call_i386(fn, nwords, words, top);
    x64_cb_leave();
-   free(stk);
+   x64_lowstack_put(stk, BLK_LOWSTACK_SZ);
    return r;
 }
 
@@ -9821,36 +9823,17 @@ uint64_t x64_blk_invoke(uint64_t blockp, const uint64_t *gp, const uint64_t *fp,
 /* ---- the C prep called by _86x64_reverse_imp ---- */
 #define REV_STACK_SZ (512u * 1024u)
 
-/* Per-thread pool of retired reverse-IMP low stacks.
- *
- * A reverse-IMP runs the translated legacy IMP on a private low-4GB stack and,
- * on return, used to free() that stack straight back to the shared low-4GB
- * heap (malloc_shim). But a just-returned IMP frame can still be referenced for
- * an instant: a forward C-shim called from the IMP writes its out-parameter
- * (e.g. FSGetDataForkName -> *HFSUniStr255) back into a buffer on that frame, a
- * method returns a pointer into its frame, etc. If the block has gone back to
- * the general heap, an unrelated allocation repurposes it and the lingering
- * access reads/writes foreign data — read back as 0 it became a translated
- * `ret` to 0 (rip=0); the deep library-open reverse-IMP nesting hit exactly
- * this. Keeping retired stacks in a reverse-stack-ONLY per-thread LIFO pool
- * (never handed to general malloc) closes the window: the memory is only ever
- * reused by another reverse-IMP, LIFO, after the referencing frame is dead. It
- * also removes the malloc/free churn the nesting generates. Per-thread + per
- * libabiconv-copy: each copy frees what it allocated, so the pool is consistent
- * with the stash/LIFO discipline. */
-#define REV_POOL_MAX 128
-static __thread void *g_rev_pool[REV_POOL_MAX];
-static __thread uint32_t g_rev_pool_n;
-
-static void *rev_stack_alloc(void) {
-   if (g_rev_pool_n) { return g_rev_pool[--g_rev_pool_n]; }
-   return malloc(REV_STACK_SZ);
-}
+/* Reverse-IMP low stacks come from the per-thread cache in lowstack_pool.c.
+ * A just-returned IMP frame can still be referenced for an instant (a forward
+ * C-shim writing an out-param into a buffer on it, a returned pointer into it);
+ * a retired stack must never go back to the general heap while that window is
+ * open — once reused by an unrelated allocation, the lingering access became a
+ * translated `ret` to 0 (deep library-open reverse-IMP nesting). The cache only
+ * ever reuses it as another reverse stack, LIFO, after the frame is dead. */
+static void *rev_stack_alloc(void) { return x64_lowstack_get(REV_STACK_SZ); }
 static void rev_stack_free(void *p) {
-   if (!p) { return; }
-   if (KNOB("ABICONV_REVSTACK_LEAK")) { return; }   /* diagnostic: never reuse */
-   if (g_rev_pool_n < REV_POOL_MAX) { g_rev_pool[g_rev_pool_n++] = p; return; }
-   free(p);
+   if (!p || KNOB("ABICONV_REVSTACK_LEAK")) { return; }   /* diagnostic: never reuse */
+   x64_lowstack_put(p, REV_STACK_SZ);
 }
 
 /* Zero-I/O reverse-IMP breadcrumb ring (mirror of cb_bridge's). reverse_prep

@@ -28,6 +28,8 @@
 #include <string.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+extern void *x64_lowstack_get(size_t sz);          /* lowstack_pool.c */
+extern void  x64_lowstack_put(void *p, size_t sz);
 
 /* must match the codes in typeconv.cc (cb_arg_code / cb_ret_code) and the
  * blob layout emitted by cb_sig_emit */
@@ -324,7 +326,7 @@ uint64_t x64_cb_dispatch(uint64_t slot, const uint64_t *gp, const uint64_t *fp,
       fflush(stderr);
    }
 
-   void *stkbuf = malloc(CB_LOWSTACK_SZ);     /* shim malloc -> low-4GB */
+   void *stkbuf = x64_lowstack_get(CB_LOWSTACK_SZ);   /* per-thread cached, low-4GB */
    if (!stkbuf) { return 0; }
    const uint64_t top =
       ((uint64_t)(uintptr_t)stkbuf + CB_LOWSTACK_SZ) & ~0xfULL;
@@ -354,7 +356,7 @@ uint64_t x64_cb_dispatch(uint64_t slot, const uint64_t *gp, const uint64_t *fp,
       }
       free(bounce[k].lo);
    }
-   free(stkbuf);
+   x64_lowstack_put(stkbuf, CB_LOWSTACK_SZ);
    if (cb_trace()) {
       fprintf(stderr, "[cbret] t=%x slot %llu fn 0x%x eax=0x%x\n",
               pthread_mach_thread_np(pthread_self()),

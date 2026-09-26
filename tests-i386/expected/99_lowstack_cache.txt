@@ -1,0 +1,3 @@
+nesting: sorted=1 sentinels_ok=1
+threads: ok=1 heap_after=ok
+exit_code: 42

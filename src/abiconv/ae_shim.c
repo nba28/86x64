@@ -59,6 +59,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+extern void *x64_lowstack_get(size_t sz);          /* lowstack_pool.c */
+extern void  x64_lowstack_put(void *p, size_t sz);
 
 /* i386->translated re-entry primitive + cross-copy nesting bookkeeping, shared
  * with cb_bridge.c / cf_callback_shim.c (objc_reverse.asm / objc_shim.c). */
@@ -211,14 +213,14 @@ static OSErr ae_native_dispatch(const AppleEvent *ev, AppleEvent *reply,
                                              (SRefCon)(uintptr_t)rc32);
    } else {
       /* Bare i386 proc: enter it on a fresh low-4GB stack via the primitive. */
-      void *stk = malloc(AE_LOWSTACK_SZ);
+      void *stk = x64_lowstack_get(AE_LOWSTACK_SZ);
       if (stk) {
          uint64_t top = ((uint64_t)(uintptr_t)stk + AE_LOWSTACK_SZ) & ~0xfULL;
          uint32_t words[3] = { ev32, rep32, rc32 };
          x64_cb_enter();
          uint32_t eax = _86x64_call_i386((uint64_t)fn32, 3, words, top);
          x64_cb_leave();
-         free(stk);
+         x64_lowstack_put(stk, AE_LOWSTACK_SZ);
          err = (OSErr)(int32_t)eax;
       } else {
          err = memFullErr;

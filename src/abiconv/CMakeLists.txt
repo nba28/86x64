@@ -471,6 +471,7 @@ add_library(abiconv SHARED
   cfxml_shim.c
   cf_callback_shim.c
   cb_bridge.c
+  lowstack_pool.c
   iokit_shim.c
   carbon_memory.c
   # mp_memory_shim.c: ONE job — Carbon Multiprocessing Services' MEMORY

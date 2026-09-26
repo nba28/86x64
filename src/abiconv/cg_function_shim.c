@@ -37,6 +37,8 @@
 #include <CoreGraphics/CoreGraphics.h>
 #include <stdint.h>
 #include <stdlib.h>
+extern void *x64_lowstack_get(size_t sz);          /* lowstack_pool.c */
+extern void  x64_lowstack_put(void *p, size_t sz);
 
 /* call an i386 fnptr with `nwords` 4-byte args on a low-4GB stack (cb_bridge.c) */
 extern uint32_t _86x64_call_i386(uint64_t fn, uint64_t nwords,
@@ -60,13 +62,13 @@ static void cgfn_evaluate(void *info, const CGFloat *in, CGFloat *out)
    struct cgfn_ctx *c = (struct cgfn_ctx *)info;
    uint32_t din = c->domain_dim, dout = c->range_dim;
 
-   void *stk     = malloc(CGFN_LOWSTACK_SZ);              /* low-4GB call stack */
+   void *stk     = x64_lowstack_get(CGFN_LOWSTACK_SZ);    /* low-4GB call stack */
    float *in_low  = din  ? (float *)malloc(din  * sizeof(float)) : (float *)0;
    float *out_low = dout ? (float *)malloc(dout * sizeof(float)) : (float *)0;
    if (!stk || (din && !in_low) || (dout && !out_low)) {
       /* degrade, don't crash: give CG a defined (0) colour rather than fault */
       for (uint32_t i = 0; i < dout; i++) { out[i] = 0.0; }
-      free(stk); free(in_low); free(out_low);
+      x64_lowstack_put(stk, CGFN_LOWSTACK_SZ); free(in_low); free(out_low);
       return;
    }
 
@@ -81,7 +83,7 @@ static void cgfn_evaluate(void *info, const CGFloat *in, CGFloat *out)
 
    for (uint32_t i = 0; i < dout; i++) { out[i] = (double)out_low[i]; } /* float -> double */
 
-   free(stk); free(in_low); free(out_low);
+   x64_lowstack_put(stk, CGFN_LOWSTACK_SZ); free(in_low); free(out_low);
 }
 
 /* NATIVE release trampoline; also frees the context. Always installed (so the
@@ -91,12 +93,12 @@ static void cgfn_release(void *info)
    struct cgfn_ctx *c = (struct cgfn_ctx *)info;
    if (!c) { return; }
    if (c->i386_release) {
-      void *stk = malloc(CGFN_LOWSTACK_SZ);
+      void *stk = x64_lowstack_get(CGFN_LOWSTACK_SZ);
       if (stk) {
          uint64_t top = ((uint64_t)(uintptr_t)stk + CGFN_LOWSTACK_SZ) & ~0xfULL;
          uint32_t words[1] = { c->i386_info };
          _86x64_call_i386((uint64_t)c->i386_release, 1, words, top);
-         free(stk);
+         x64_lowstack_put(stk, CGFN_LOWSTACK_SZ);
       }
    }
    free(c);
