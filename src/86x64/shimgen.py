@@ -671,6 +671,8 @@ def main():
         cmd = ["clang", "-dynamiclib", "-arch", "x86_64",
                "-o", shim_path, srcf, *impl_objs,
                "-framework", "Cocoa",
+               "-framework", "Accelerate",   # shimdb/impl/veclib.c
+               "-Wl,-dead_strip_dylibs",
                "-F", fw_dir,  # bundled frameworks (iLifeSlideshow etc.)
                "-install_name", f"{ref_prefix}{shim_name}",
                "-Wl,-dead_strip",

@@ -76,7 +76,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: objc-imp-entry zerofill-stripped-ptr sib-rbp-base-wrap standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn
+.PHONY: cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr sib-rbp-base-wrap standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -513,6 +513,16 @@ sib-rbp-base-wrap: $(BUILD_DIR)/99_sib_ebp_base_neg_wrap.i386
 	    -o $(BUILD_DIR)/99_sib_ebp_base_neg_wrap.$$arm $< >/dev/null 2>&1; \
 	  $(BUILD_DIR)/99_sib_ebp_base_neg_wrap.$$arm; echo "$$arm=$$?"; \
 	done | tr '\n' ' ' | grep -q "on=42 off=139" && echo "sib-rbp-base-wrap: PASS" || { echo "sib-rbp-base-wrap: FAIL"; exit 1; }
+# cstring-tailmerge-ptr: A/B guard that a string-pointer table entry aimed at
+# a tail-merged cstring INTERIOR is relocated (PvZ build-info pointer). ON
+# exits 0; OFF (M64_NO_CSTR_NEIGHBOUR=1 at translate time) exits 8.
+cstring-tailmerge-ptr: $(BUILD_DIR)/99_cstring_tailmerge_ptr.i386
+	@for arm in on off; do \
+	  e=""; [ $$arm = off ] && e="M64_NO_CSTR_NEIGHBOUR=1"; \
+	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_cstring_tailmerge_ptr.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_cstring_tailmerge_ptr.$$arm; echo "$$arm=$$?"; \
+	done | tr '\n' ' ' | grep -q "on=0 off=8" && echo "cstring-tailmerge-ptr: PASS" || { echo "cstring-tailmerge-ptr: FAIL"; exit 1; }
 # objc-imp-entry: A/B guard that an ObjC1 method IMP with no symbol and no
 # frame prologue is relocated (iPhoto's stripped method lists). OFF arm is
 # M64_NO_OBJC_IMP_ENTRY=1 at translate time.
@@ -1485,6 +1495,12 @@ $(BUILD_DIR)/99_code_alias_imm_falsereloc.i386: $(BUILD_DIR)/99_code_alias_imm_f
 	   echo "99_code_alias_imm_falsereloc: ERROR: 0x1f90 outside __text [$$a, $$a+$$z) -- adjust pad"; \
 	   rm -f $@; exit 1; \
 	 fi
+
+# 99_cstring_tailmerge_ptr: same stripped, fixed-address shape as
+# 99_cstring_interior_alias. Overrides %.i386.
+$(BUILD_DIR)/99_cstring_tailmerge_ptr.i386: $(BUILD_DIR)/99_cstring_tailmerge_ptr.o
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
+	strip -x $@
 
 # 99_cstring_interior_alias: STRIP local symbols (Civ IV Steam shape — locals-
 # stripped => have_local_text_syms false => code_alias_is_constant and the

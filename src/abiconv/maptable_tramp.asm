@@ -43,6 +43,23 @@
 	jmp	r11
 %endmacro
 
+	; removed 64-bit Window Manager calls (carbon_window_removed_shim.c)
+	MTSHIM	___SetWindowAlpha,                              _shim_SetWindowAlpha
+	MTSHIM	___ChangeWindowGroupAttributes,                 _shim_ChangeWindowGroupAttributes
+	MTSHIM	___SetWindowGroupParent,                        _shim_SetWindowGroupParent
+	MTSHIM	___CreateQDContextForCollapsedWindowDockTile,   _shim_CreateQDContextForCollapsedWindowDockTile
+	MTSHIM	___ReleaseQDContextForCollapsedWindowDockTile,  _shim_ReleaseQDContextForCollapsedWindowDockTile
+
+	; variadic libSystem calls (posix_shim.c) + UCKeyTranslate (uckey_shim.c)
+	MTSHIM	___shm_open,                 _shim_shm_open
+	MTSHIM	___ioctl,                    _shim_ioctl
+	MTSHIM	___UCKeyTranslate,           _shim_UCKeyTranslate
+
+	; legacy vecLib FFT names (vdsp_legacy_shim.c)
+	MTSHIM	___create_fftsetup,          _shim_create_fftsetup
+	MTSHIM	___destroy_fftsetup,         _shim_destroy_fftsetup
+	MTSHIM	___fft_zip,                  _shim_fft_zip
+
 	; OpenSSL 0.9.x libcrypto on CommonCrypto (openssl_shim.c)
 	MTSHIM	___SHA1,                     _shim_SHA1
 	MTSHIM	___EVP_sha1,                 _shim_EVP_sha1
@@ -831,6 +848,9 @@ _x64_exc_longjmp:
 	MTSHIM	____ZNKSt9type_infoeqERKS_,       _shim_type_info_eq
 	MTSHIM	____ZNKSt9type_infoneERKS_,       _shim_type_info_ne
 	MTSHIM	____ZNKSt9type_infoltERKS_,       _shim_type_info_before
+	MTSHIM	____ZNSt9exceptionD2Ev,           _shim_exception_dtor
+	MTSHIM	____ZNSt9exceptionD1Ev,           _shim_exception_dtor
+	MTSHIM	____ZNKSt9exception4whatEv,       _shim_exception_what
 
 	; Legacy ImageCapture (ICA) Carbon host API (imagecapture_shim.c). Dead C API on
 	; modern macOS (header removed); reached via bare stubs => native 8-byte ret over-pops

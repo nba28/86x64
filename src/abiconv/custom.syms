@@ -817,3 +817,20 @@ _EVP_md5
 _HMAC
 _RAND_pseudo_bytes
 _RAND_bytes
+
+# legacy vecLib FFT names — vdsp_legacy_shim.c via maptable_tramp.asm MTSHIM
+_create_fftsetup
+_destroy_fftsetup
+_fft_zip
+
+# variadic libSystem (posix_shim.c) + UCKeyTranslate (uckey_shim.c) via MTSHIM
+_shm_open
+_ioctl
+_UCKeyTranslate
+
+# removed 64-bit Window Manager calls (carbon_window_removed_shim.c) via MTSHIM
+_SetWindowAlpha
+_ChangeWindowGroupAttributes
+_SetWindowGroupParent
+_CreateQDContextForCollapsedWindowDockTile
+_ReleaseQDContextForCollapsedWindowDockTile

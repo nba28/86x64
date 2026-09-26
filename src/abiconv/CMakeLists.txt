@@ -190,6 +190,22 @@ foreach(s IN LISTS ABICONV_CLOSURE_SOURCES)
   list(APPEND ABICONV_CLOSURE_SOURCE_ARGS --source "${s}")
 endforeach()
 
+# Every Apps32 bundle's main executable joins automatically — a new target
+# (Plants vs. Zombies) was missing from the hand list above, so its imports
+# (CoreAudio AudioGetCurrentHostTime/...) got no bridge and bound raw.
+file(GLOB ABICONV_APPS32_BUNDLES "$ENV{HOME}/projects/translations/Apps32/*.app")
+foreach(app IN LISTS ABICONV_APPS32_BUNDLES)
+  execute_process(COMMAND /usr/libexec/PlistBuddy -c "Print CFBundleExecutable"
+                          "${app}/Contents/Info.plist"
+                  OUTPUT_VARIABLE exe OUTPUT_STRIP_TRAILING_WHITESPACE
+                  ERROR_QUIET RESULT_VARIABLE rc)
+  if(rc EQUAL 0 AND EXISTS "${app}/Contents/MacOS/${exe}")
+    list(APPEND ABICONV_MODERN_TARGETS "${app}/Contents/MacOS/${exe}")
+  endif()
+endforeach()
+list(REMOVE_DUPLICATES ABICONV_MODERN_TARGETS)
+set(ABICONV_APPS32_EXECS "${ABICONV_MODERN_TARGETS}")
+
 set(ABICONV_MODERN_TARGET_ARGS "")
 set(ABICONV_MODERN_TARGET_DEPS "")
 foreach(t IN LISTS ABICONV_MODERN_TARGETS)
@@ -328,6 +344,10 @@ set(ABICONV_LEGACY_TARGETS
     "$ENV{HOME}/projects/translations/Apps32/Pages.app/Contents/MacOS/Pages"
     "$ENV{HOME}/projects/translations/Apps32/Quinn.app/Contents/MacOS/Quinn"
     CACHE STRING "i386 ORIGINAL app executables (Apps32) whose imports define the legacy Carbon/QT shim set")
+# Same Apps32 auto-discovery as the modern pass (a new target like PvZ got
+# no legacy Carbon bridges: SetWindowAlpha/window groups stayed NULL).
+list(APPEND ABICONV_LEGACY_TARGETS ${ABICONV_APPS32_EXECS})
+list(REMOVE_DUPLICATES ABICONV_LEGACY_TARGETS)
 set(ABICONV_LEGACY_TARGET_ARGS "")
 set(ABICONV_LEGACY_TARGET_DEPS "")
 foreach(t IN LISTS ABICONV_LEGACY_TARGETS)
@@ -686,6 +706,9 @@ add_library(abiconv SHARED
   # libstdc++ i386 COW std::string/std::wstring surface (cow_string_tramp.asm
   # keeps its own MTSHIM + MTSHIM_SRET; wired the same way as the other modules).
   cow_string_shim.c
+  # iostream_shim.c: i386 stringstream/ostringstream output + locale/numpunct
+  # (trampolines in cow_string_tramp.asm).
+  iostream_shim.c
   # wchar_shim.c / wchar_tramp.asm: the <wchar.h> wide-string family (wcslen/
   # wcscpy/wcsto*/... — PRESENT native fns static-interpose renames _wcs* ->
   # ___wcs* but abigen's modern pass didn't yet shim). Pointer-widening
@@ -715,6 +738,13 @@ add_library(abiconv SHARED
   # dup-emits them.
   crypto_shim.c
   crypto_tramp.asm
+  # vdsp_legacy_shim.c: pre-vDSP_ FFT names (create_fftsetup/fft_zip) on
+  # modern vDSP (BASS audio). MTSHIMs in maptable_tramp.asm.
+  vdsp_legacy_shim.c
+  # uckey_shim.c: UCKeyTranslate (incomplete-array param, UniCharCount width).
+  uckey_shim.c
+  # carbon_window_removed_shim.c: Window Manager calls 64-bit HIToolbox dropped.
+  carbon_window_removed_shim.c
   # (halo_shim.c / halo_tramp.asm RETIRED: mach_timebase_info / mach_absolute_time
   # are now covered by the universal import-driven modern pass — libSystem maps to
   # <mach/mach_time.h> in includes_auto.h, so abigen emits ___mach_timebase_info /
@@ -779,6 +809,7 @@ target_link_libraries(abiconv System objc
   # SoundManager: sndmgr_shim.c reimplements the classic Sound Manager on the
   # AudioQueue (playback) + AudioServices (SysBeep alert sound) APIs.
   "-framework AudioToolbox"
+  "-framework Accelerate"
   # Legacy shim pass (abiconv_legacy.asm): the SURVIVED (header-deleted but still
   # present) framework functions it marshals resolve their `call _sym` here.
   # Linked so the frameworks are loaded in-process and the flat dynamic_lookup

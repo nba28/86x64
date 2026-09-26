@@ -76,8 +76,11 @@ _cstr:
 	.section __DATA,__data
 	.p2align 2
 	.globl _probe
-_probe:
-	.long	_cstr + 8                    ## a byte-table constant aliasing a cstring INTERIOR
+	.long	0x01000100                   ## Civ-faithful: the constant sits in a
+_probe:                                      ## run of byte-table INTEGERS, never
+	.long	_cstr + 8                    ## next to a string pointer (see
+	.long	0x01000100                   ## 99_cstring_tailmerge_ptr for that shape)
+	.long	0
 	.globl _pstart
 _pstart:
 	.long	_cstr                        ## genuine char* to the string START (must rebase)

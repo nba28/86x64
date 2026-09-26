@@ -352,6 +352,15 @@ namespace MachO {
        * non-cstring target so callers gate only this exact false-positive. */
       bool cstring_interior_alias(const Image& img, std::size_t vmaddr) const;
 
+      /* True iff a 4-byte neighbour (slot +-4) of the data slot at
+       * `slot_vmaddr` points at a __cstring string START. Such a slot is a
+       * string-pointer field, so a cstring-INTERIOR value in it is a
+       * tail-merged literal (ld stores "B" as the suffix of "AB"), not a
+       * byte-table constant. PvZ's build-info pointer; guard
+       * cstring-tailmerge-ptr, OFF arm M64_NO_CSTR_NEIGHBOUR=1. */
+      bool cstring_slot_has_string_neighbour(const Image& img,
+                                             std::size_t slot_vmaddr) const;
+
       /* ZERO-FILL TARGET gate (see section.cc DataParser). True iff `vmaddr`
        * lands in a ZERO-FILL section (S_ZEROFILL / S_GB_ZEROFILL, i.e.
        * __DATA,__bss and __DATA,__common) and NO nlist symbol sits exactly

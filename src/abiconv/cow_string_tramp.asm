@@ -240,3 +240,42 @@
 	MTSHIM_SRET ____ZStplIcSt11char_traitsIcESaIcEESbIT_T0_T1_EPKS3_RKS6_,                   _shim_Ss_opplus_cstr_str
 	MTSHIM_SRET ____ZStplIcSt11char_traitsIcESaIcEESbIT_T0_T1_ERKS6_S8_,                     _shim_Ss_opplus_str_str
 	MTSHIM_SRET ____ZStplIwSt11char_traitsIwESaIwEESbIT_T0_T1_ERKS6_S8_,                     _shim_Sw_opplus_str_str
+
+	; PvZ (PopCap) — see the tail of cow_string_shim.c
+	MTSHIM      ____ZNSs5eraseEN9__gnu_cxx17__normal_iteratorIPcSsEES2_,                   _shim_Ss_erase_iters
+	MTSHIM      ____ZNSs6assignEmc,                                                        _shim_Ss_assign_fill
+	MTSHIM      ____ZNSs6insertEN9__gnu_cxx17__normal_iteratorIPcSsEEc,                    _shim_Ss_insert_iter_ch
+	MTSHIM      ____ZNSs7replaceEN9__gnu_cxx17__normal_iteratorIPcSsEES2_S1_S1_,           _shim_Ss_replace_iter
+	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE5eraseEmm,                               _shim_Sw_erase_range
+	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE9push_backEw,                            _shim_Sw_push_back
+	MTSHIM      ____ZNKSbIwSt11char_traitsIwESaIwEE6rbeginEv,                              _shim_Sw_crbegin
+	MTSHIM      ____ZNKSbIwSt11char_traitsIwESaIwEE4rendEv,                                _shim_Sw_crend
+	MTSHIM      ____ZNSaIcEC2Ev,                                                           _shim_allocator_nop
+	MTSHIM      ____ZNSaIcED2Ev,                                                           _shim_allocator_nop
+	MTSHIM      ____ZNSaIwEC2Ev,                                                           _shim_allocator_nop
+	MTSHIM      ____ZNSaIwEC2ERKS_,                                                        _shim_allocator_nop
+	MTSHIM      ____ZNSaIwED2Ev,                                                           _shim_allocator_nop
+
+	; iostream / locale output surface (iostream_shim.c)
+	MTSHIM      ____ZNSt18basic_stringstreamIcSt11char_traitsIcESaIcEEC1ESt13_Ios_Openmode,  _shim_stringstream_ctor
+	MTSHIM      ____ZNSt18basic_stringstreamIcSt11char_traitsIcESaIcEED1Ev,                  _shim_sstream_dtor
+	MTSHIM      ____ZNSt19basic_ostringstreamIcSt11char_traitsIcESaIcEEC1ESt13_Ios_Openmode, _shim_ostringstream_ctor
+	MTSHIM      ____ZNSt19basic_ostringstreamIcSt11char_traitsIcESaIcEED1Ev,                 _shim_sstream_dtor
+	MTSHIM_SRET ____ZNKSt18basic_stringstreamIcSt11char_traitsIcESaIcEE3strEv,              _shim_sstream_str
+	MTSHIM_SRET ____ZNKSt19basic_ostringstreamIcSt11char_traitsIcESaIcEE3strEv,             _shim_sstream_str
+	MTSHIM_SRET ____ZNKSt15basic_stringbufIcSt11char_traitsIcESaIcEE3strEv,                 _shim_sstream_str
+	MTSHIM      ____ZStlsISt11char_traitsIcEERSt13basic_ostreamIcT_ES5_PKc,                  _shim_ostream_cstr
+	MTSHIM      ____ZNSolsEi,                                                                _shim_ostream_int
+	MTSHIM      ____ZNSolsEPFRSoS_E,                                                         _shim_ostream_manip
+	MTSHIM      ____ZSt4endlIcSt11char_traitsIcEERSt13basic_ostreamIT_T0_ES6_,               _shim_ostream_endl
+	MTSHIM      ____ZNSt6localeC1EPKc,                                                       _shim_locale_ctor
+	MTSHIM      ____ZNSt6localeD1Ev,                                                         _shim_locale_dtor
+	MTSHIM      ____ZNSt6localeaSERKS_,                                                      _shim_locale_assign
+	MTSHIM      ____ZSt9use_facetISt8numpunctIcEERKT_RKSt6locale,                            _shim_use_facet_numpunct
+	; numpunct<char> vtable slots handed out by the facet above
+	MTSHIM      ___np_nop,                                                                   _shim_np_nop
+	MTSHIM      ___np_decimal_point,                                                         _shim_np_decimal_point
+	MTSHIM      ___np_thousands_sep,                                                         _shim_np_thousands_sep
+	MTSHIM_SRET ___np_grouping,                                                              _shim_np_grouping
+	MTSHIM_SRET ___np_truename,                                                              _shim_np_truename
+	MTSHIM_SRET ___np_falsename,                                                             _shim_np_falsename

@@ -78,6 +78,14 @@ UMBRELLA = {
     "DiskArbitration":       ["<DiskArbitration/DiskArbitration.h>"],
     "IOKit":                 ["<IOKit/IOKitLib.h>"],
     "AudioToolbox":          ["<AudioToolbox/AudioToolbox.h>"],
+    # Present-native value-ABI families that were unmapped, so their imports
+    # bound raw (PvZ libbass: CoreAudio AudioGetCurrentHostTime /
+    # AudioGetHostClockFrequency over-popped the i386 frame in static init).
+    "CoreAudio":             ["<CoreAudio/CoreAudio.h>"],
+    "OpenAL":                ["<OpenAL/al.h>", "<OpenAL/alc.h>"],
+    "libz":                  ["<zlib.h>"],
+    "Accelerate":            ["<Accelerate/Accelerate.h>"],
+    "vecLib":                ["<Accelerate/Accelerate.h>"],
     "Carbon":                ["<Carbon/Carbon.h>"],   # present-native Carbon Events etc.
     # AddressBook: still present-native (deprecated). Its kAB*Property/kAB*Label
     # NSString-const data surface is what legacy contact-aware code reads
@@ -118,7 +126,8 @@ def nm_imports_with_framework(binary, arch):
     # nm -m: `(undefined [lazy bound]) external _Sym (from Foundation)`. The
     # bracketed qualifier ([lazy bound]/[weak]/...) is optional, hence [^)]*.
     # `_\S+` skips the i386 `.objc_class_name_X` class refs (handled elsewhere).
-    pat = re.compile(r"\(undefined[^)]*\)\s+external\s+(_\S+)\s+\(from\s+([^)]+)\)")
+    # Weak imports print `weak external` (libbass's ExtAudioFile* family).
+    pat = re.compile(r"\(undefined[^)]*\)\s+(?:weak\s+)?external\s+(_\S+)\s+\(from\s+([^)]+)\)")
     for line in out.splitlines():
         m = pat.search(line)
         if m:

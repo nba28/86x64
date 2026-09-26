@@ -1112,3 +1112,12 @@ uint32_t shim_cxa_pure_virtual(uint32_t *a) {
            "aborting\n");
    fflush(stderr); abort();
 }
+
+/* std::exception base members (PvZ). ~exception() has nothing to release;
+ * what() is the libstdc++ default string, kept in libabiconv's <4GB image. */
+uint32_t shim_exception_dtor(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_exception_what(uint32_t *a) {
+   static const char msg[] = "std::exception";
+   (void)a;
+   return (uint32_t)(uintptr_t)msg;
+}

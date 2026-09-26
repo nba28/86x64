@@ -267,6 +267,43 @@ namespace MachO {
    }
 
    template <Bits bits>
+   bool ParseEnv<bits>::cstring_slot_has_string_neighbour(
+           const Image& img, std::size_t slot_vmaddr) const {
+      static const bool disabled =
+         std::getenv("M64_NO_CSTR_NEIGHBOUR") != nullptr;
+      if (disabled) { return false; }
+      /* file offset of a vmaddr inside a file-backed section, or 0 */
+      const auto file_off = [this](std::size_t va, uint32_t *flags) -> std::size_t {
+         for (Segment<bits> *seg : archive.segments()) {
+            if (!seg->contains_vmaddr(va)) { continue; }
+            for (Section<bits> *sec : seg->sections) {
+               if (!sec->contains_vmaddr(va)) { continue; }
+               const uint32_t st = sec->sect.flags & SECTION_TYPE;
+               if (st == S_ZEROFILL || st == S_GB_ZEROFILL) { return 0; }
+               if (flags) { *flags = sec->sect.flags; }
+               return sec->sect.offset + (va - sec->sect.addr);
+            }
+            return 0;
+         }
+         return 0;
+      };
+      uint32_t slot_flags = 0;
+      if (!file_off(slot_vmaddr, &slot_flags)) { return false; }
+      for (const long d : {-4L, 4L}) {
+         const std::size_t nva = slot_vmaddr + d;
+         uint32_t nflags = 0;
+         const std::size_t no = file_off(nva, &nflags);
+         if (!no || nflags != slot_flags) { continue; }     /* same section only */
+         const uint32_t v = img.at<uint32_t>(no);
+         uint32_t tflags = 0;
+         const std::size_t to = file_off(v, &tflags);
+         if (!to || (tflags & SECTION_TYPE) != S_CSTRING_LITERALS) { continue; }
+         if (!cstring_interior_alias(img, v)) { return true; }   /* a START */
+      }
+      return false;
+   }
+
+   template <Bits bits>
    bool ParseEnv<bits>::cstring_interior_alias(const Image& img,
                                                std::size_t vmaddr) const {
       for (Segment<bits> *seg : archive.segments()) {

@@ -896,3 +896,40 @@ uint32_t shim_list_swap(uint32_t *a) {
     }
     return 0;
 }
+
+/* PvZ (PopCap framework): members its imports reach that the Portal 2 / Civ
+ * audits never needed. Same i386 COW layout helpers as above. */
+static uint32_t g_erase_iters(uint32_t *a, int cw) {    /* erase(first, last) -> iterator */
+    uint32_t *obj = obj_at(a, 0);
+    uint32_t pos = (a[1] - *obj) / cw, n = (a[2] - a[1]) / cw;
+    uint32_t np = str_replace_raw(obj, pos, n, 0, 0, cw);
+    return np + pos * cw;
+}
+static uint32_t g_assign_fill(uint32_t *a, int cw) {    /* assign(n, c) */
+    uint32_t b[5] = { a[0], 0, rep_of(*obj_at(a, 0))->length, a[1], a[2] };
+    return g_replace_aux(b, cw);
+}
+static uint32_t g_insert_iter_ch(uint32_t *a, int cw) { /* insert(iterator, c) -> iterator */
+    uint32_t *obj = obj_at(a, 0);
+    uint32_t pos = (a[1] - *obj) / cw;
+    uint32_t b[5] = { a[0], pos, 0, 1, a[2] };
+    g_replace_aux(b, cw);
+    return *obj + pos * cw;
+}
+uint32_t shim_Ss_erase_iters(uint32_t *a) { return g_erase_iters(a, 1); }
+uint32_t shim_Ss_assign_fill(uint32_t *a) { return g_assign_fill(a, 1); }
+uint32_t shim_Ss_insert_iter_ch(uint32_t *a) { return g_insert_iter_ch(a, 1); }
+uint32_t shim_Sw_erase_range(uint32_t *a) { return g_erase_range(a, 4); }
+uint32_t shim_Sw_push_back(uint32_t *a)   { return g_push_back(a, 4); }
+/* const rbegin()/rend(): a one-pointer reverse_iterator, returned in eax
+ * (Darwin i386 returns small trivially-copyable structs in registers). */
+uint32_t shim_Sw_crbegin(uint32_t *a)     { return g_cend(a, 4); }
+uint32_t shim_Sw_crend(uint32_t *a)       { return g_cbegin(a, 4); }
+/* std::allocator<T> ctors/dtors: stateless, nothing to do. */
+uint32_t shim_allocator_nop(uint32_t *a)  { return a[0]; }
+
+/* Build a narrow i386 std::string into the slot at `obj` from a low-4GB
+ * buffer. For shims that return strings by value (iostream_shim.c). */
+void cow_str_init(uint32_t obj, uint32_t buf, uint32_t n) {
+    str_init_buf((uint32_t *)(uintptr_t)obj, buf, n, 1);
+}

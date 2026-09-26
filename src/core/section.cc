@@ -706,7 +706,8 @@ namespace MachO {
                 * falsely rebased to a translated __text address, corrupting
                 * GCompactDeclInfoNodeArray's table -> NULL name deref crash). */
                if (bits == Bits::M32 && exec &&
-                   env.cstring_interior_alias(img, value)) {
+                   env.cstring_interior_alias(img, value) &&
+                   !env.cstring_slot_has_string_neighbour(img, loc.vmaddr)) {
                   break;   /* mid-cstring alias -> constant */
                }
                /* CODE-target FUNCTION-ENTRY gate (M32, symboled binaries).

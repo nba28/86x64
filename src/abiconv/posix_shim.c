@@ -986,3 +986,17 @@ int32_t shim_fcntl(uint32_t *a) {
    }
    return (int32_t)r;
 }
+
+/* Variadic libSystem calls abigen cannot marshal (PvZ's PopCap framework:
+ * shm_open for its single-instance lock, ioctl on sockets). i386 passes the
+ * optional third argument as one 4-byte slot. */
+#include <sys/mman.h>
+#include <sys/ioctl.h>
+uint32_t shim_shm_open(uint32_t *a) {
+   int fd = shm_open((const char *)(uintptr_t)a[0], (int)a[1], (mode_t)a[2]);
+   return (uint32_t)fd;
+}
+uint32_t shim_ioctl(uint32_t *a) {
+   /* the arg is an int or a pointer into low-4GB i386 memory: both fit */
+   return (uint32_t)ioctl((int)a[0], (unsigned long)a[1], (void *)(uintptr_t)a[2]);
+}
