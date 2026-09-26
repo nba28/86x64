@@ -35,6 +35,7 @@ namespace MachO {
                                       const SectionBlob<Bits::M32> *dst);
 
       inline opcode_t lea_rsp_mem_rsp_4() { return {0x48, 0x8D, 0x64, 0x24, 0x04}; }
+      inline opcode_t lea_rsp_mem_rsp_m4() { return {0x48, 0x8D, 0x64, 0x24, 0xFC}; }   /* lea rsp,[rsp-4] */
 
       opcode_t lea_r32_mem_rip_disp32(xed_reg_enum_t r32);
 
