@@ -4866,7 +4866,13 @@ static void window_title_on_show(id win) {
     * controller carrying a centered NSTextField label with the title string — it
     * renders in the titlebar band regardless of the stock title layout. This is
     * generic (any legacy window), idempotent (install once), and independent of
-    * whether the two-row layout materialized. */
+    * whether the two-row layout materialized.
+    * Only for a process linked against SDK >= 11: below it (86x64.sh now stamps
+    * the wrapper 10.14) AppKit keeps the pre-Big-Sur title row and draws the
+    * title itself, and the label became a second "Quinn" band under the
+    * toolbar. */
+   extern uint32_t dyld_get_program_sdk_version(void);   /* libdyld SPI */
+   if (dyld_get_program_sdk_version() < 0x000B0000) { return; }
    install_titlebar_label(win, name);
 }
 
