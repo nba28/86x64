@@ -287,14 +287,16 @@ namespace MachO {
          }
          return 0;
       };
-      uint32_t slot_flags = 0;
-      if (!file_off(slot_vmaddr, &slot_flags)) { return false; }
-      for (const long d : {-4L, 4L}) {
+      /* The slot's section is the one being parsed, which is not yet listed
+       * in its segment — so take it from current_section, not the archive. */
+      if (current_section == nullptr) { return false; }
+      const auto& cs = current_section->sect;
+      const uint32_t self = img.at<uint32_t>(cs.offset + (slot_vmaddr - cs.addr));
+      for (const long d : {-8L, -4L, 4L, 8L}) {
          const std::size_t nva = slot_vmaddr + d;
-         uint32_t nflags = 0;
-         const std::size_t no = file_off(nva, &nflags);
-         if (!no || nflags != slot_flags) { continue; }     /* same section only */
-         const uint32_t v = img.at<uint32_t>(no);
+         if (nva < cs.addr || nva + 4 > cs.addr + cs.size) { continue; }  /* same section only */
+         const uint32_t v = img.at<uint32_t>(cs.offset + (nva - cs.addr));
+         if (v == self) { continue; }   /* a repeated table word vouches for nothing */
          uint32_t tflags = 0;
          const std::size_t to = file_off(v, &tflags);
          if (!to || (tflags & SECTION_TYPE) != S_CSTRING_LITERALS) { continue; }

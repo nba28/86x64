@@ -352,7 +352,7 @@ namespace MachO {
        * non-cstring target so callers gate only this exact false-positive. */
       bool cstring_interior_alias(const Image& img, std::size_t vmaddr) const;
 
-      /* True iff a 4-byte neighbour (slot +-4) of the data slot at
+      /* True iff a neighbour (slot +-4/+-8, same section, value != this slot's) at
        * `slot_vmaddr` points at a __cstring string START. Such a slot is a
        * string-pointer field, so a cstring-INTERIOR value in it is a
        * tail-merged literal (ld stores "B" as the suffix of "AB"), not a

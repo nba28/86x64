@@ -76,10 +76,11 @@ _cstr:
 	.section __DATA,__data
 	.p2align 2
 	.globl _probe
-	.long	0x01000100                   ## Civ-faithful: the constant sits in a
-_probe:                                      ## run of byte-table INTEGERS, never
-	.long	_cstr + 8                    ## next to a string pointer (see
-	.long	0x01000100                   ## 99_cstring_tailmerge_ptr for that shape)
+	.long	_cstr + 8                    ## Civ-faithful: the byte table REPEATS the
+_probe:                                      ## same word, so no neighbour is a string
+	.long	_cstr + 8                    ## pointer of its own (contrast
+	.long	_cstr + 8                    ## 99_cstring_tailmerge_ptr); _pstart sits
+	.long	0                            ## beyond the +-8 neighbour window
 	.long	0
 	.globl _pstart
 _pstart:

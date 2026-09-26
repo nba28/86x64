@@ -705,6 +705,11 @@ namespace MachO {
                 * 0x01000100 = "00 01 00 01" aliased a __cstring interior and was
                 * falsely rebased to a translated __text address, corrupting
                 * GCompactDeclInfoNodeArray's table -> NULL name deref crash). */
+               if (dbg) {
+                  fprintf(stderr, "[dbgptr]   cstr_interior=%d str_neighbour=%d\n",
+                          (int)env.cstring_interior_alias(img, value),
+                          (int)env.cstring_slot_has_string_neighbour(img, loc.vmaddr));
+               }
                if (bits == Bits::M32 && exec &&
                    env.cstring_interior_alias(img, value) &&
                    !env.cstring_slot_has_string_neighbour(img, loc.vmaddr)) {
