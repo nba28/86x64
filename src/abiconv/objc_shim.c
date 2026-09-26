@@ -9013,8 +9013,38 @@ static int cfstr_payload_ok(uintptr_t sp, uint32_t length, int utf16,
    return mem_readable(sp, (size_t)length + 1) &&
           strnlen((const char *)sp, (size_t)length + 1) == length;
 }
-static struct { uint32_t i386; id real; } g_cfstr_cache[2048];
+/* i386 constant-string record -> its real native string. Insert-only open
+ * addressing (a record is immortal and always maps to the same string), so
+ * readers need no lock: `real` is published before the key. Consulted FIRST
+ * by unwrap_obj_arg_core — a literal used to fall through the whole
+ * classification chain and a linear scan on every use (~100 ns per arg). */
+#define CFSTR_MEMO_CAP 8192u
+static struct { uint32_t i386; id real; } g_cfstr_cache[CFSTR_MEMO_CAP];
 static unsigned       g_cfstr_cache_n;
+
+static inline unsigned cfstr_memo_hash(uint32_t p) {
+   return ((p >> 2) * 2654435761u) & (CFSTR_MEMO_CAP - 1);
+}
+static id cfstr_memo_get(uint32_t p) {
+   unsigned h = cfstr_memo_hash(p);
+   for (unsigned n = 0; n < CFSTR_MEMO_CAP; ++n, h = (h + 1) & (CFSTR_MEMO_CAP - 1)) {
+      uint32_t k = __atomic_load_n(&g_cfstr_cache[h].i386, __ATOMIC_ACQUIRE);
+      if (k == p) { return g_cfstr_cache[h].real; }
+      if (!k) { return (id)0; }
+   }
+   return (id)0;
+}
+static void cfstr_memo_put(uint32_t p, id real) {          /* g_cfstr_lock held */
+   if (g_cfstr_cache_n >= CFSTR_MEMO_CAP / 4 * 3) { return; }
+   unsigned h = cfstr_memo_hash(p);
+   while (g_cfstr_cache[h].i386 && g_cfstr_cache[h].i386 != p) {
+      h = (h + 1) & (CFSTR_MEMO_CAP - 1);
+   }
+   if (g_cfstr_cache[h].i386 == p) { return; }
+   g_cfstr_cache[h].real = real;
+   __atomic_store_n(&g_cfstr_cache[h].i386, p, __ATOMIC_RELEASE);
+   ++g_cfstr_cache_n;
+}
 static os_unfair_lock g_cfstr_lock = OS_UNFAIR_LOCK_INIT;
 
 /* Slide of the loaded image whose mapped segments contain `addr`, or 0 if none
@@ -9071,7 +9101,38 @@ static int image_index_for_addr(uintptr_t addr) {
    return -1;
 }
 
+/* Is `addr` inside some loaded image's __cfstring section? Such a record is
+ * immutable static data for the life of the image, so its classification can
+ * be memoized (unlike a heap object, whose address can be reused). */
+static int addr_in_cfstring_section(uintptr_t addr) {
+   uint32_t nimg = x64_img_count();
+   for (uint32_t i = 0; i < nimg; ++i) {
+      const struct mach_header_64 *mh =
+         (const struct mach_header_64 *)x64_img_header(i);
+      if (!mh || mh->magic != MH_MAGIC_64) { continue; }
+      intptr_t slide = x64_img_slide((const struct mach_header *)mh);
+      const struct load_command *lc =
+         (const struct load_command *)((const uint8_t *)mh + sizeof *mh);
+      for (uint32_t c = 0; c < mh->ncmds; ++c) {
+         if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg =
+               (const struct segment_command_64 *)lc;
+            const struct section_64 *sc = (const struct section_64 *)(sg + 1);
+            for (uint32_t k = 0; k < sg->nsects; ++k, ++sc) {
+               uintptr_t lo = (uintptr_t)((int64_t)sc->addr + (int64_t)slide);
+               if (addr >= lo && addr < lo + (uintptr_t)sc->size) {
+                  return strncmp(sc->sectname, "__cfstring", 16) == 0;
+               }
+            }
+         }
+         lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
+      }
+   }
+   return 0;
+}
+
 static id i386_cfstr_to_real(uint32_t p) {
+   { id hit = p ? cfstr_memo_get(p) : (id)0; if (hit) { return hit; } }
    if (!ptr_ok(p, 16)) { return (id)0; }
    uint32_t cstr, length;
    const uint32_t f4 = *(const uint32_t *)(uintptr_t)(p + 4);
@@ -9154,12 +9215,9 @@ static id i386_cfstr_to_real(uint32_t p) {
    const char *s = (const char *)sp;
 
    os_unfair_lock_lock(&g_cfstr_lock);
-   for (unsigned i = 0; i < g_cfstr_cache_n; ++i) {
-      if (g_cfstr_cache[i].i386 == p) {
-         id r = g_cfstr_cache[i].real;
-         os_unfair_lock_unlock(&g_cfstr_lock);
-         return r;
-      }
+   {
+      id r = cfstr_memo_get(p);            /* another thread won the race */
+      if (r) { os_unfair_lock_unlock(&g_cfstr_lock); return r; }
    }
    /* +1 retained, kept forever (a constant string is immortal). UTF-8 first;
     * fall back to MacRoman so any 8-bit byte still yields a string. */
@@ -9171,11 +9229,7 @@ static id i386_cfstr_to_real(uint32_t p) {
       cf = CFStringCreateWithBytes(NULL, (const UInt8 *)s, length,
                                    kCFStringEncodingMacRoman, false);
    }
-   if (cf && g_cfstr_cache_n < sizeof(g_cfstr_cache) / sizeof(g_cfstr_cache[0])) {
-      g_cfstr_cache[g_cfstr_cache_n].i386 = p;
-      g_cfstr_cache[g_cfstr_cache_n].real = (id)cf;
-      ++g_cfstr_cache_n;
-   }
+   if (cf) { cfstr_memo_put(p, (id)cf); }
    os_unfair_lock_unlock(&g_cfstr_lock);
    return (id)cf;
 }
@@ -9263,6 +9317,7 @@ static uint64_t unwrap_obj_arg_core(uint32_t a) {
        * -> CFStringCreateCopy faulted (Civ IV CreateStandardAlert title). */
       return ~0ULL;
    }
+   { id lit = cfstr_memo_get(a); if (lit) { return (uint64_t)(uintptr_t)lit; } }
    /* Attach THIS copy to the shared proxy arena before any handle test below.
     * x64_objc_wrap has always called arena_init(); unwrap never did, and simply
     * READ g_arena_base/g_arena_end. In a copy whose initializers dyld never ran
@@ -9319,6 +9374,11 @@ static uint64_t unwrap_obj_arg_core(uint32_t a) {
    }
    if (is_real_x86_object(a)) {            /* raw constant x86_64 obj (cfstring) */
       if (utrace) { fprintf(stderr, "[uo] 0x%08x real-obj passthrough\n", a); }
+      if (addr_in_cfstring_section(a)) {  /* static native CFSTR: memoize */
+         os_unfair_lock_lock(&g_cfstr_lock);
+         cfstr_memo_put(a, (id)(uintptr_t)a);
+         os_unfair_lock_unlock(&g_cfstr_lock);
+      }
       return (uint64_t)a;
    }
    id lr = legacy_obj_to_real(a);          /* raw legacy obj/class -> real */
