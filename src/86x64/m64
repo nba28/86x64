@@ -650,6 +650,11 @@ def cmd_resync(args):
                          f"will NOT launch until this is resolved")
     if not args.dry_run:
         good(f"{len(copies)} copies synced + ad-hoc signed")
+    # The replaced copies invalidate the OUTER bundle seal too. The app still
+    # runs locally, but once copied to another Mac (quarantined) Gatekeeper
+    # reports "damaged and can't be opened". Re-seal the whole bundle.
+    if app.suffix == ".app":
+        cmd_sign(args)
 
 
 def _dylib_deps(macho):
