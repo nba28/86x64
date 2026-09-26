@@ -6166,6 +6166,51 @@ static int bp_nsdata_nocopy(struct objc_call_plan *plan, const uint32_t *args32,
    return 1;
 }
 
+/* The NSString siblings of bp_nsdata_nocopy: -initWithCStringNoCopy:length:
+ * freeWhenDone:, -initWithBytesNoCopy:length:encoding:freeWhenDone:,
+ * -initWithCharactersNoCopy:length:freeWhenDone:. With freeWhenDone:YES the
+ * string's __CFStringDeallocate free()s an i386 shim-heap buffer -> malloc
+ * ABORT at pool drain (Quinn, both peers, on "Play" in a network game). Send
+ * the copying init instead, then release the app's buffer ourselves: the app
+ * gave up ownership, and this image's free() is the shim heap's (it ignores
+ * pointers it does not own). */
+static int bp_nsstring_nocopy(struct objc_call_plan *plan, const uint32_t *args32,
+                              id real_self, SEL sel) {
+   if (!sel || !real_self || KNOB("ABICONV_NO_NSSTRING_NOCOPY")) { return 0; }
+   const char *s = sel_getName(sel);
+   void *buf = (void *)(uintptr_t)args32[2];
+   unsigned long len = (unsigned long)args32[3];
+   typedef id (*init_bytes_t)(id, SEL, const void *, unsigned long, unsigned long);
+   typedef id (*init_chars_t)(id, SEL, const void *, unsigned long);
+   SEL ib = sel_registerName("initWithBytes:length:encoding:");
+   id result;
+   if (!strcmp(s, "initWithCStringNoCopy:length:freeWhenDone:")) {
+      if (!args32[4]) { return 0; }             /* NO: never freed -> safe */
+      unsigned long enc = ((unsigned long (*)(id, SEL))objc_msgSend)(
+         (id)objc_getClass("NSString"), sel_registerName("defaultCStringEncoding"));
+      result = ((init_bytes_t)objc_msgSend)(real_self, ib, buf, len, enc);
+   } else if (!strcmp(s, "initWithBytesNoCopy:length:encoding:freeWhenDone:")) {
+      if (!args32[5]) { return 0; }
+      result = ((init_bytes_t)objc_msgSend)(real_self, ib, buf, len,
+                                            (unsigned long)args32[4]);
+   } else if (!strcmp(s, "initWithCharactersNoCopy:length:freeWhenDone:")) {
+      if (!args32[4]) { return 0; }
+      result = ((init_chars_t)objc_msgSend)(
+         real_self, sel_registerName("initWithCharacters:length:"), buf, len);
+   } else {
+      return 0;
+   }
+   free(buf);
+   plan->reg[0]     = result ? x64_objc_wrap((uint64_t)(uintptr_t)result) : 0;
+   plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
+   plan->ret_is_obj = 0;                         /* already a low-4GB handle */
+   if (BRIDGE_TRACE()) {
+      fprintf(stderr, "[bp] NSString %s -> native copy (len=%lu)\n", s, len);
+      fflush(stderr);
+   }
+   return 1;
+}
+
 /* Deprecated -[NSFileManager removeFileAtPath:handler:] (Mac OS X 10.0-era,
  * still called by iPhoto's account-config path cleanup on a background thread)
  * crashes in modern Foundation: its compat impl (_removeFileAtPath:handler:
@@ -6444,6 +6489,8 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
     * COPYING form so native free() never touches shim memory (else -dealloc
     * aborts). */
    if (bp_nsdata_nocopy(plan, args32, real_self, sel))
+      return;
+   if (bp_nsstring_nocopy(plan, args32, real_self, sel))
       return;
 
    /* Deprecated -[NSFileManager removeFileAtPath:handler:] -> modern

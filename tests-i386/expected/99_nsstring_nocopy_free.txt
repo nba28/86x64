@@ -1,0 +1,3 @@
+a=hello b=play d=lan
+drained
+exit_code: 42
