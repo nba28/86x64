@@ -1,0 +1,2 @@
+delim=1 len=16 str=REQ_SERVER_INFO
+exit_code: 42

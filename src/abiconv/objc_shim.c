@@ -1969,6 +1969,70 @@ static int method_is_legacy(Method m) {
 /* Marshal ONE explicit argument from the i386 frame into the plan.
  * enc/conv describe it; *ai is the args32 slot cursor (advanced by the i386
  * width in 4-byte slots). Returns 0 only on overflow (arg dropped). */
+/* ---- `^@` out-params into NATIVE methods -----------------------------------
+ * i386 passes `&local` (a 4-byte slot) for `(id *)` out-params such as
+ * -[NSScanner scanUpToCharactersFromSet:intoString:] or `...error:(NSError **)`.
+ * Passed raw, the native method stores an 8-byte pointer: the i386 code reads
+ * back only the truncated low half (a garbage object) and the next 4 bytes of
+ * its frame are clobbered. (Quinn's server scanned every command into a
+ * truncated string, called it "invalid", then crashed logging it.)
+ * Hand the method an 8-byte temporary instead and, after the call, store what
+ * it wrote into the i386 slot as a 32-bit value (wrapped if >4GB). A sentinel
+ * leaves the slot untouched if the method did not write, as on i386.
+ * Kept on a thread-local stack (calls nest through the reverse bridge); the
+ * plan's spare _pad3 holds this call's base (+1), flushed from the asm return
+ * path. Kill switch ABICONV_NO_OUTPARAM_WB=1. */
+#define OUTPARAM_WB_MAX 64
+#define OUTPARAM_UNSET  0xfeedfacecafebeefULL
+static __thread struct { uint32_t slot; uint64_t val; } g_wb[OUTPARAM_WB_MAX];
+static __thread unsigned g_wb_n;
+uint32_t x64_objc_wrap_ret(uint64_t real);
+
+static uint64_t *outparam_push(struct objc_call_plan *plan, uint32_t slot32) {
+   if (g_wb_n >= OUTPARAM_WB_MAX) { return NULL; }
+   if (!plan->_pad3) { plan->_pad3 = g_wb_n + 1; }
+   g_wb[g_wb_n].slot = slot32;
+   g_wb[g_wb_n].val  = OUTPARAM_UNSET;
+   return &g_wb[g_wb_n++].val;
+}
+
+void objc_bridge_outparam_flush(struct objc_call_plan *plan) {
+   unsigned mark = plan->_pad3 - 1;
+   for (unsigned i = mark; i < g_wb_n; ++i) {
+      uint64_t v = g_wb[i].val;
+      if (v == OUTPARAM_UNSET) { continue; }        /* method did not write */
+      uint32_t out = v == 0 ? 0
+                   : v < 0x100000000ULL ? (uint32_t)v
+                   : x64_objc_wrap_ret(v);
+      *(uint32_t *)(uintptr_t)g_wb[i].slot = out;
+      if (BRIDGE_TRACE()) {
+         fprintf(stderr, "[bp] out-param 0x%08x <- 0x%llx (0x%08x)\n",
+                 g_wb[i].slot, (unsigned long long)v, out);
+      }
+   }
+   g_wb_n = mark;
+   plan->_pad3 = 0;
+}
+
+/* A `^@` that is a single by-ref out-param, not an object ARRAY: no const
+ * qualifier (`r^@` = input list), and no later count/range argument
+ * (getObjects:range:, arrayWithObjects:count:, getObjects:andKeys:count:). */
+/* `full` = this arg's position inside the method's FULL type string (so the
+ * args after it are visible); NULL -> not provable, keep raw passthrough. */
+static __thread const char *g_fma_full_arg;
+static int enc_is_single_outparam(const char *enc) {
+   const char *full = g_fma_full_arg;
+   if (!full || *enc == 'r' || *full == 'r') { return 0; }
+   const char *t = enc_skip_quals(full);
+   if (t[0] != '^' || t[1] != '@') { return 0; }
+   for (const char *p = enc_skip_digits(enc_skip_type(t)); *p;
+        p = enc_skip_digits(enc_skip_type(p))) {
+      const char *q = enc_skip_quals(p);
+      if (strchr("QqIiLl", *q) || !strncmp(q, "{_NSRange", 9)) { return 0; }
+   }
+   return 1;
+}
+
 static int marshal_arg_fwd(struct objc_call_plan *plan, struct mcur *c,
                            const char *enc, int conv,
                            const uint32_t *args32, unsigned *ai) {
@@ -2100,6 +2164,14 @@ static int marshal_arg_fwd(struct objc_call_plan *plan, struct mcur *c,
        * not on the selector. */
       return mcur_put_gp(plan, c, x64_objc_unwrap(args32[(*ai)++]));
    }
+   if (conv == CONV_NATIVE && b == '^' && t[1] == '@' && args32[*ai] &&
+       !getenv("ABICONV_NO_OUTPARAM_WB") && enc_is_single_outparam(enc)) {
+      uint64_t *tmp = outparam_push(plan, args32[*ai]);
+      if (tmp) {
+         (*ai)++;
+         return mcur_put_gp(plan, c, (uint64_t)(uintptr_t)tmp);
+      }
+   }
    /* everything else: int/char/short/BOOL/enum, ^i/^c/^@/^* pointers —
     * one 4-byte slot, GP (raw; genuine i386 pointers already fit <4GB) */
    return mcur_put_gp(plan, c, (uint64_t)args32[(*ai)++]);
@@ -2191,7 +2263,9 @@ static unsigned fill_method_args(struct objc_call_plan *plan,
          continue;
       }
       unsigned ai_before = *ai;
+      g_fma_full_arg = m ? enc_nth_arg(method_getTypeEncoding(m), i - 2) : NULL;
       marshal_arg_fwd(plan, cur, enc, aconv, args32, ai);
+      g_fma_full_arg = NULL;
       if (trace) {
          fprintf(stderr, "[fma]   arg%u slots[%u..%u) t=\"%s\" conv=%s "
                  "gp=%u xmm=%u stk=%zu\n",
@@ -5595,6 +5669,78 @@ static int bp_block_copy(struct objc_call_plan *plan, const uint32_t *args32,
  * (mutableBytes is intentionally NOT handled — it needs write-back; no current
  * target writes through it. See todo_gaps.) */
 static const char nsdata_lowbytes_key;
+
+/* ---- -[NSMutableData mutableBytes] low-4GB shadow with write-back ----------
+ * A native NSMutableData's buffer is >4GB; the i386 app WRITES through the
+ * returned pointer. Hand it a low shadow copy and copy the shadow back into the
+ * real buffer before the object is used again: any later bridged message to it
+ * or any bridged call that passes it as an argument. A length-changing message
+ * invalidates the pointer (NSMutableData contract), so the shadow is flushed and
+ * dropped then. (Quinn's AsyncSocket reads each socket byte into
+ * [buffer mutableBytes]+n: the bytes never reached the NSData, the server saw a
+ * bare "\0" and rejected every command as invalid.)
+ * ponytail: the table RETAINS each shadowed object (a dead object's address
+ * could otherwise be reused and receive a stale flush); bounded LRU of MB_MAX,
+ * the oldest is flushed+released on overflow. */
+#define MB_MAX 64
+static struct { id obj; uint8_t *low; size_t len; } g_mb[MB_MAX];
+static volatile int g_mb_n;
+static os_unfair_lock g_mb_lock = OS_UNFAIR_LOCK_INIT;
+
+static void mb_writeback_locked(int i) {
+   void *nb = ((void *(*)(id, SEL))objc_msgSend)(g_mb[i].obj, sel_registerName("mutableBytes"));
+   size_t nlen = ((unsigned long (*)(id, SEL))objc_msgSend)(g_mb[i].obj, sel_registerName("length"));
+   if (nb) { memcpy(nb, g_mb[i].low, g_mb[i].len < nlen ? g_mb[i].len : nlen); }
+}
+static void mb_drop_locked(int i) {
+   ((void (*)(id, SEL))objc_msgSend)(g_mb[i].obj, sel_registerName("release"));
+   free(g_mb[i].low);
+   g_mb[i] = g_mb[--g_mb_n];
+}
+static int mb_find_locked(id obj) {
+   for (int i = 0; i < g_mb_n; ++i) { if (g_mb[i].obj == obj) { return i; } }
+   return -1;
+}
+/* Before `obj` is used natively: copy its pending shadow back. `drop` when the
+ * message may change the length (the shadow pointer is then invalid). */
+static void mb_flush(id obj, int drop) {
+   if (!g_mb_n || !obj) { return; }
+   os_unfair_lock_lock(&g_mb_lock);
+   int i = mb_find_locked(obj);
+   if (i >= 0) {
+      mb_writeback_locked(i);
+      if (drop) { mb_drop_locked(i); }
+   }
+   os_unfair_lock_unlock(&g_mb_lock);
+}
+static int mb_sel_keeps_pointer(const char *s) {
+   static const char *const keep[] = { "bytes", "length", "mutableBytes",
+      "getBytes:", "getBytes:length:", "getBytes:range:", "isEqualToData:",
+      "isEqual:", "hash", "description", "retain", "release", "autorelease",
+      "retainCount", "class", "isKindOfClass:", "respondsToSelector:",
+      "copy", "mutableCopy", "subdataWithRange:", NULL };
+   for (const char *const *k = keep; *k; ++k) { if (!strcmp(s, *k)) { return 1; } }
+   return 0;
+}
+/* mutableBytes on a native NSMutableData -> low shadow (0 = not handled) */
+static void *mb_shadow(id obj) {
+   void *nb = ((void *(*)(id, SEL))objc_msgSend)(obj, sel_registerName("mutableBytes"));
+   size_t len = ((unsigned long (*)(id, SEL))objc_msgSend)(obj, sel_registerName("length"));
+   if (!nb || (uintptr_t)nb < 0x100000000ULL) { return nb; }   /* already low */
+   uint8_t *low = malloc(len ? len : 1);                        /* low-4GB shim heap */
+   if (!low || (uintptr_t)low >= 0x100000000ULL) { free(low); return NULL; }
+   memcpy(low, nb, len);
+   os_unfair_lock_lock(&g_mb_lock);
+   int i = mb_find_locked(obj);
+   if (i >= 0) { mb_writeback_locked(i); mb_drop_locked(i); }
+   if (g_mb_n == MB_MAX) { mb_writeback_locked(0); mb_drop_locked(0); }
+   ((id (*)(id, SEL))objc_msgSend)(obj, sel_registerName("retain"));
+   g_mb[g_mb_n].obj = obj; g_mb[g_mb_n].low = low; g_mb[g_mb_n].len = len;
+   ++g_mb_n;
+   os_unfair_lock_unlock(&g_mb_lock);
+   return low;
+}
+
 static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
    if (!sel || !real_self) { return 0; }
    /* The raw-buffer accessors that return a >4GB native pointer the app then
@@ -5605,6 +5751,22 @@ static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
     * sized by the matching length accessor. */
    const char *s = sel_getName(sel);
    const char *clsname, *sizesel;
+   if (!strcmp(s, "mutableBytes") && !getenv("ABICONV_NO_MUTABLEBYTES_SHADOW")) {
+      Class mc = objc_getClass("NSMutableData");
+      if (!mc || !((unsigned char (*)(id, SEL, Class))objc_msgSend)(
+                     real_self, sel_registerName("isKindOfClass:"), mc)) {
+         return 0;
+      }
+      void *low = mb_shadow(real_self);
+      if (low && (uintptr_t)low >= 0x100000000ULL) { return 0; }
+      plan->reg[0]     = (uint32_t)(uintptr_t)low;
+      plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
+      plan->ret_is_obj = 0;
+      if (BRIDGE_TRACE()) {
+         fprintf(stderr, "[bp] mutableBytes -> low shadow 0x%08x\n", plan->reg[0]);
+      }
+      return 1;
+   }
    if      (!strcmp(s, "bytes"))      { clsname = "NSData";           sizesel = "length"; }
    else if (!strcmp(s, "bitmapData")) { clsname = "NSBitmapImageRep"; sizesel = "bytesPerPlane"; }
    else { return 0; }
@@ -5628,11 +5790,23 @@ static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
     * read, so a cached early (empty) copy would upload a blank texture; a fresh
     * copy reflects the current pixels (glTexImage2D copies immediately, so no
     * held-pointer contract). */
-   int do_cache = !strcmp(s, "bytes");
+   Class mdc = objc_getClass("NSMutableData");
+   int do_cache = !strcmp(s, "bytes") &&
+      !(mdc && ((unsigned char (*)(id, SEL, Class))objc_msgSend)(
+                   real_self, sel_registerName("isKindOfClass:"), mdc));
    const void *low;
    id cached = do_cache ? objc_getAssociatedObject(real_self, &nsdata_lowbytes_key)
                         : (id)0;
-   if (cached) {
+   int mbi = -1;
+   if (!do_cache && g_mb_n && !strcmp(s, "bytes")) {
+      os_unfair_lock_lock(&g_mb_lock);
+      mbi = mb_find_locked(real_self);
+      if (mbi >= 0) { low = g_mb[mbi].low; }   /* flushed above: same content */
+      os_unfair_lock_unlock(&g_mb_lock);
+   }
+   if (mbi >= 0) {
+      /* low set from the live shadow */
+   } else if (cached) {
       low = (const void *)cached;            /* cached low copy (ASSIGN: opaque ptr) */
    } else {
       const void *nb = ((msg_ptr_t)objc_msgSend)(real_self, sel);
@@ -6006,6 +6180,9 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
 
    id real_self = resolve_self(args32[0]);
    SEL sel = resolve_sel(args32[1]);
+   if (g_mb_n && sel) {   /* pending mutableBytes shadow: write it back first */
+      mb_flush(real_self, !mb_sel_keeps_pointer(sel_getName(sel)));
+   }
 
    /* Mark a lockFocus-family send as LEGACY-originated so the swizzled
     * -[NSImage lockFocus]/lockFocusFlipped: (legacy_lockfocus_1x_install) pins
@@ -7405,8 +7582,8 @@ uint64_t *x64_value_data_shadow(const char *name_no_underscore) {
       if (!shadow) { return NULL; }
       void *addr = dlsym(RTLD_DEFAULT, name_no_underscore);
       if (!addr) { return NULL; }       /* owning framework not loaded yet */
-      *shadow = 0;
-      memcpy(shadow, addr, info > 8 ? 8 : (size_t)info);
+      memset(shadow, 0, info < 8 ? 8 : (size_t)info);
+      memcpy(shadow, addr, (size_t)info);   /* slot sized by abigen */
       return shadow;
    }
    return NULL;
@@ -8649,6 +8826,35 @@ static id legacy_obj_to_real(uint32_t p) {
  * unreliable for detection); key on flags plus an exact NUL-terminated
  * strlen==length match. Cached by constant address (constants are immortal). */
 #define CFSTR_FLAGS_ASCII8 0x7c8u
+/* UTF-16 constant: any non-ASCII char OR an embedded NUL makes the compiler
+ * emit the literal into __ustring as UniChar[length] + a 0 terminator (Quinn's
+ * protocol literals @"REQ_SERVER_INFO\0" end in its NUL message delimiter;
+ * unrecognized, -dataUsingEncoding: went to nil and no message was ever sent). */
+#define CFSTR_FLAGS_UTF16 0x7d0u
+
+static int image_index_for_addr(uintptr_t addr);
+
+/* payload probe. ASCII: exact strnlen == length. UTF-16: the terminator is NOT
+ * reliable — old linkers sized __ustring without the last string's 0 UniChar
+ * (Quinn's is 0x2cd bytes; its final "\x18\0" ends at the section edge and the
+ * next translated section starts there), so require the whole payload to be
+ * readable and to lie inside the SAME image as the record `rec` — the str
+ * field is stored unslid, and an unslid address can land in an unrelated live
+ * image (the ASCII probe's exact strnlen rejects that; without a terminator
+ * only the owning image can). Quinn: the field-separator set built from
+ * foreign bytes made every command scan fail -> "invalid message". */
+static int cfstr_payload_ok(uintptr_t sp, uint32_t length, int utf16,
+                            uintptr_t rec) {
+   if (utf16) {
+      size_t n = (size_t)length * 2;
+      int img = image_index_for_addr(rec);
+      return img >= 0 && mem_readable(sp, n ? n : 1) &&
+             image_index_for_addr(sp) == img &&
+             (n == 0 || image_index_for_addr(sp + n - 1) == img);
+   }
+   return mem_readable(sp, (size_t)length + 1) &&
+          strnlen((const char *)sp, (size_t)length + 1) == length;
+}
 static struct { uint32_t i386; id real; } g_cfstr_cache[2048];
 static unsigned       g_cfstr_cache_n;
 static os_unfair_lock g_cfstr_lock = OS_UNFAIR_LOCK_INIT;
@@ -8682,15 +8888,44 @@ static intptr_t image_slide_for_addr(uintptr_t addr) {
    return 0;
 }
 
+/* index of the loaded image whose mapped segments contain addr, or -1 */
+static int image_index_for_addr(uintptr_t addr) {
+   uint32_t nimg = x64_img_count();
+   for (uint32_t i = 0; i < nimg; ++i) {
+      const struct mach_header_64 *mh =
+         (const struct mach_header_64 *)x64_img_header(i);
+      if (!mh || mh->magic != MH_MAGIC_64) { continue; }
+      intptr_t slide = x64_img_slide((const struct mach_header *)mh);
+      const struct load_command *lc =
+         (const struct load_command *)((const uint8_t *)mh + sizeof *mh);
+      for (uint32_t c = 0; c < mh->ncmds; ++c) {
+         if (lc->cmd == LC_SEGMENT_64) {
+            const struct segment_command_64 *sg =
+               (const struct segment_command_64 *)lc;
+            uintptr_t lo = (uintptr_t)((int64_t)sg->vmaddr + (int64_t)slide);
+            if (sg->vmsize && addr >= lo && addr < lo + (uintptr_t)sg->vmsize) {
+               return (int)i;
+            }
+         }
+         lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
+      }
+   }
+   return -1;
+}
+
 static id i386_cfstr_to_real(uint32_t p) {
    if (!ptr_ok(p, 16)) { return (id)0; }
    uint32_t cstr, length;
-   if (*(const uint32_t *)(uintptr_t)(p + 4) == CFSTR_FLAGS_ASCII8) {
+   const uint32_t f4 = *(const uint32_t *)(uintptr_t)(p + 4);
+   const uint32_t f8 = ptr_ok(p, 32) ? *(const uint32_t *)(uintptr_t)(p + 8) : 0;
+   int utf16 = 0;
+   if (f4 == CFSTR_FLAGS_ASCII8 || f4 == CFSTR_FLAGS_UTF16) {
+      utf16 = (f4 == CFSTR_FLAGS_UTF16);
       /* i386 16-byte CFConstantString: {isa,flags,cstr,length} (4-byte fields). */
       cstr   = *(const uint32_t *)(uintptr_t)(p + 8);
       length = *(const uint32_t *)(uintptr_t)(p + 12);
    } else if (ptr_ok(p, 32) &&
-              *(const uint32_t *)(uintptr_t)(p + 8)  == CFSTR_FLAGS_ASCII8 &&
+              (f8 == CFSTR_FLAGS_ASCII8 || f8 == CFSTR_FLAGS_UTF16) &&
               *(const uint32_t *)(uintptr_t)(p + 12) == 0 &&     /* flags high half */
               *(const uint32_t *)(uintptr_t)(p + 20) == 0) {     /* cstr  high half */
       /* x86_64 32-byte CFConstantString: {isa(8),flags(8),cstr(8),length(8)}.
@@ -8706,6 +8941,7 @@ static id i386_cfstr_to_real(uint32_t p) {
        * on the 32-byte record + ASCII8 flags, not app-specific.) */
       cstr   = *(const uint32_t *)(uintptr_t)(p + 16);
       length = *(const uint32_t *)(uintptr_t)(p + 24);
+      utf16  = (f8 == CFSTR_FLAGS_UTF16);
    } else {
       /* Env-gated reject diagnostic (OBJC_BRIDGE_TRACE): a candidate whose
        * first 8 bytes LOOK like a wrapped-handle isa (0x800xxxxx low /
@@ -8740,14 +8976,12 @@ static id i386_cfstr_to_real(uint32_t p) {
     * "[cfstr] REJECT strnlen cstr=0x10dae5f4 got=2"). For an already-slid
     * record candidate 2 is a double-slide -> fails the probe -> harmless. */
    uintptr_t sp = 0;
-   if (ptr_ok(cstr, (size_t)length + 1) &&
-       strnlen((const char *)(uintptr_t)cstr, (size_t)length + 1) == length) {
+   if (cstr && cfstr_payload_ok((uintptr_t)cstr, length, utf16, (uintptr_t)p)) {
       sp = (uintptr_t)cstr;
    } else {
       intptr_t sl = image_slide_for_addr((uintptr_t)p);
       uintptr_t slid = (uintptr_t)cstr + (uintptr_t)sl;
-      if (sl != 0 && mem_readable(slid, (size_t)length + 1) &&
-          strnlen((const char *)slid, (size_t)length + 1) == length) {
+      if (sl != 0 && cfstr_payload_ok(slid, length, utf16, (uintptr_t)p)) {
          sp = slid;
       } else {
          if (BRIDGE_TRACE()) {
@@ -8771,9 +9005,11 @@ static id i386_cfstr_to_real(uint32_t p) {
    }
    /* +1 retained, kept forever (a constant string is immortal). UTF-8 first;
     * fall back to MacRoman so any 8-bit byte still yields a string. */
-   CFStringRef cf = CFStringCreateWithBytes(NULL, (const UInt8 *)s, length,
-                                            kCFStringEncodingUTF8, false);
-   if (!cf) {
+   CFStringRef cf = utf16
+      ? CFStringCreateWithCharacters(NULL, (const UniChar *)s, length)
+      : CFStringCreateWithBytes(NULL, (const UInt8 *)s, length,
+                                kCFStringEncodingUTF8, false);
+   if (!cf && !utf16) {
       cf = CFStringCreateWithBytes(NULL, (const UInt8 *)s, length,
                                    kCFStringEncodingMacRoman, false);
    }
@@ -8956,7 +9192,13 @@ static uint64_t unwrap_obj_arg_core(uint32_t a) {
    return (uint64_t)a;                      /* nil-ish / already-low passthrough */
 }
 
+static uint64_t unwrap_obj_arg_inner(uint32_t a);
 static uint64_t unwrap_obj_arg(uint32_t a) {
+   uint64_t r = unwrap_obj_arg_inner(a);
+   if (g_mb_n && r) { mb_flush((id)(uintptr_t)r, 0); }   /* shadow -> real */
+   return r;
+}
+static uint64_t unwrap_obj_arg_inner(uint32_t a) {
    uint64_t r = unwrap_obj_arg_core(a);
    if (__builtin_expect(ARGSTR_TRACE(), 0)) {
       char desc[320];

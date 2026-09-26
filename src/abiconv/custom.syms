@@ -808,3 +808,12 @@ _MPAllocateAligned
 _MPAllocate
 _MPFree
 _MPGetAllocatedBlockSize
+
+# OpenSSL 0.9.x libcrypto — hand-shimmed on CommonCrypto in openssl_shim.c /
+# maptable_tramp.asm (the system libcrypto is gone).
+_SHA1
+_EVP_sha1
+_EVP_md5
+_HMAC
+_RAND_pseudo_bytes
+_RAND_bytes

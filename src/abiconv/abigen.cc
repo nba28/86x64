@@ -2066,6 +2066,36 @@ struct ABIGenerator {
     * yields the handle, which the objc bridge unwraps. We only shadow ObjC
     * object pointers (id, NSString *, Class), whose value is always an objc
     * object; a scalar/struct global mis-wrapped this way could corrupt it. */
+   /* true if every field (recursively) is a 1/2/4-byte integer, an array of
+    * such, or a nested record of such: same size and offsets on both ABIs. */
+   static bool abi_neutral_type(CXType t) {
+      t = clang_getCanonicalType(t);
+      switch (t.kind) {
+      case CXType_Bool: case CXType_Char_U: case CXType_UChar:
+      case CXType_Char_S: case CXType_SChar: case CXType_Short:
+      case CXType_UShort: case CXType_Int: case CXType_UInt:
+         return true;
+      case CXType_ConstantArray:
+         return abi_neutral_type(clang_getArrayElementType(t));
+      case CXType_Record:
+         return abi_neutral_record(t);
+      default:
+         return false;
+      }
+   }
+   static bool abi_neutral_record(CXType t) {
+      bool ok = true;
+      clang_Type_visitFields(t, [](CXCursor f, CXClientData d) {
+         bool *okp = static_cast<bool *>(d);
+         if (!abi_neutral_type(clang_getCursorType(f))) {
+            *okp = false;
+            return CXVisit_Break;
+         }
+         return CXVisit_Continue;
+      }, &ok);
+      return ok;
+   }
+
    void handle_var_decl(CXCursor c) {
       /* secondary pass emits no data shadows (see secondary_pass) */
       if (secondary_pass) { return; }
@@ -2136,7 +2166,13 @@ struct ABIGenerator {
           * is lost. Universal: triggers on "small record-value data constant",
           * not an app name. */
          const long long sz = clang_Type_getSizeOf(canon);
-         if (sz < 1 || sz > 8) { return; }
+         /* Wider records too (e.g. `const struct in6_addr in6addr_any`, 16B),
+          * but only when their layout is IDENTICAL on i386 and x86_64 —
+          * 1/2/4-byte integer fields, arrays and nested records of those —
+          * so the native bytes ARE the i386 value. (Quinn's AsyncSocket copied
+          * 16 garbage bytes through a truncated &in6addr_any, the IPv6 bind
+          * failed and the server never started.) */
+         if (sz < 1 || sz > 64 || (sz > 8 && !abi_neutral_record(canon))) { return; }
          info = (unsigned)sz;
          break;
       }
@@ -2212,10 +2248,13 @@ struct ABIGenerator {
       if (secondary_pass) { return; }
       const std::string override_prefix = "__";
       os << "\n\tsegment .data" << std::endl;
-      for (const std::string& s : data_shadow_syms) {
-         const std::string shadow = override_prefix + s; /* ___NSArgumentDomain */
+      for (std::size_t i = 0; i < data_shadow_syms.size(); ++i) {
+         const std::string shadow = override_prefix + data_shadow_syms[i];
          os << "\tglobal " << shadow << std::endl;
-         os << shadow << ": dq 0" << std::endl;
+         os << "\talign 8" << std::endl;
+         /* value slot sized to the datum (>= 8: object/CF handles, scalars) */
+         const unsigned w = data_shadow_info[i] > 8 ? (data_shadow_info[i] + 7) / 8 : 1;
+         os << shadow << ": times " << w << " dq 0" << std::endl;
       }
       std::size_t idx = 0;
       for (const std::string& s : data_shadow_syms) {

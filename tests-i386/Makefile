@@ -658,6 +658,16 @@ jt-cohesion: $(BUILD_DIR)/96_jt_cohesion.i386
 # decrypted to garbage and every highscore was lost on restart.
 # ★The gate runs at TRANSLATE time, so the script translates all three arms
 # itself. It needs the .i386 and the staged libabiconv from the normal rules.
+# openssl-shim: guard for openssl_shim.c. A legacy app's libcrypto 0.9.7 calls
+# (SHA1 / HMAC(EVP_sha1()) / RAND_pseudo_bytes) must reach the CommonCrypto
+# shims; unshimmed, RAND_pseudo_bytes was a raw cross-ABI call (fused return PC
+# -> crash when Quinn's server answered REQ_SERVER_INFO). Links against a
+# built stub with libcrypto.0.9.7's install name. Checks the shims are bound
+# (by content) and correct (SHA1/HMAC test vectors); the classic-jump-table
+# crash itself cannot be rebuilt with ld64-95 (see the script).
+openssl-shim: $(BUILD_DIR) $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL)
+	@bash openssl_shim_test.sh
+
 qword-high-skip: $(BUILD_DIR)/99_qword_high_skip.i386 $(BUILD_DIR)/libabiconv.dylib
 	@bash qword_high_skip_test.sh
 # literal-abs-disp: A/B guard for the LITERAL-POOL absolute-displacement gate.

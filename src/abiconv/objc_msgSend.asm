@@ -72,6 +72,7 @@
    extern _objc_bridge_prep_stret
    extern _objc_bridge_prep_super_stret
    extern _objc_bridge_ret_finish
+   extern _objc_bridge_outparam_flush
    extern _x64_objc_wrap
    extern _x64_objc_wrap_ret
    extern _x64_objc_bounce_cstr
@@ -113,6 +114,7 @@
    mov dword [rsp + 80], 0         ; plan.nstack    = 0
    mov dword [rsp + OFF_NXMM], 0   ; plan.nxmm      = 0
    mov qword [rsp + OFF_TARGET], 0 ; plan.target    = 0
+   mov dword [rsp + OFF_NXMM + 12], 0 ; plan._pad3 = out-param write-back mark (0 = none)
    mov rdi, rsp                    ; &plan
    lea rsi, [rbp + 12]             ; args32 -> first i386 stack arg
    call %2
@@ -179,6 +181,24 @@
    call r10
 %%retsw:
    ;; rbx = &plan (low 32 bits survived any translated re-entry)
+   ;; `^@` out-params: copy the native 8-byte results back into the i386
+   ;; 4-byte slots (see outparam_push in objc_shim.c). Rare: only when the
+   ;; plan recorded one. Preserve the callee's rax/rdx/xmm0/xmm1.
+   cmp dword [rbx + OFF_NXMM + 12], 0
+   je %%nowb
+   push rax
+   push rdx
+   sub rsp, 32
+   movsd [rsp], xmm0
+   movsd [rsp + 8], xmm1
+   mov rdi, rbx
+   call _objc_bridge_outparam_flush
+   movsd xmm0, [rsp]
+   movsd xmm1, [rsp + 8]
+   add rsp, 32
+   pop rdx
+   pop rax
+%%nowb:
    mov ecx, dword [rbx + 52]       ; ret_kind
    test ecx, ecx
    jz %%ret                        ; 0 -> scalar passthrough (rax/rdx)

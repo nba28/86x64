@@ -1,0 +1,4 @@
+i386 len=4 data=4
+native len=4 data=4
+unterminated len=2
+exit_code: 42

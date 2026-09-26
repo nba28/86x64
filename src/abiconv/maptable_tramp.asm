@@ -43,6 +43,13 @@
 	jmp	r11
 %endmacro
 
+	; OpenSSL 0.9.x libcrypto on CommonCrypto (openssl_shim.c)
+	MTSHIM	___SHA1,                     _shim_SHA1
+	MTSHIM	___EVP_sha1,                 _shim_EVP_sha1
+	MTSHIM	___EVP_md5,                  _shim_EVP_md5
+	MTSHIM	___HMAC,                     _shim_HMAC
+	MTSHIM	___RAND_pseudo_bytes,        _shim_RAND_pseudo_bytes
+	MTSHIM	___RAND_bytes,               _shim_RAND_bytes
 	MTSHIM	___NSCreateMapTable,         _shim_NSCreateMapTable
 	MTSHIM	___NSMapGet,                 _shim_NSMapGet
 	MTSHIM	___NSMapInsert,              _shim_NSMapInsert

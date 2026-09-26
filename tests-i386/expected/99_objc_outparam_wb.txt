@@ -1,0 +1,4 @@
+scan=1 canary=11223344
+error=1
+untouched=1
+exit_code: 42
