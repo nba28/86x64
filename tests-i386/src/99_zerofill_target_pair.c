@@ -47,6 +47,13 @@ extern void exit(int);
  * 1 MB so a (small, small) u16 pair can plausibly address into it. */
 static unsigned char g_zf[1024 * 1024];
 
+/* Real Halo KEEPS __common symbols; its bad targets fall BELOW the lowest one.
+ * This global (it survives -x) is that lowest symbol, placed after g_zf, so the
+ * patched target sits in symbol-free space of a section that has symbols.
+ * Without it the section has none at all, which is the stripped shape the gate
+ * deliberately does not judge (see 99_zerofill_stripped_ptr). */
+unsigned char g_zf_anchor[16] __attribute__((section("__DATA,__bss")));
+
 /* A Halo-shaped descriptor: leading pointer, 4CC, then u16 fields. MAGIC makes
  * the record findable in the built binary by the test script. */
 struct rec {
@@ -73,6 +80,7 @@ int main(void)
     * runtime sanity line for anyone who wants to execute the fixture. */
    printf("survived=1\n");
    printf("zf_nonzero=%d\n", (void *)g_zf != 0);
+   printf("anchor=%d\n", (void *)g_zf_anchor != 0);
    printf("ptr_ok=%d\n", g_rec.name != 0 && g_rec.name[0] == 'd');
    printf("ctl_ptr_ok=%d\n", g_ctl.name != 0 && g_ctl.name[0] == 'c');
    printf("neighbours=%d\n", g_rec.f8 == 504 && g_rec.fa == 528 && g_rec.tail == 4);

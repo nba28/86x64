@@ -44,6 +44,11 @@ def ensure_min_plist(target, name):
         f.write(MIN_PLIST.format(name=name))
     return True
 
+def is_macho(p):
+    with open(p, "rb") as f:
+        return f.read(4) in (b'\xcf\xfa\xed\xfe', b'\xce\xfa\xed\xfe',
+                             b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca')
+
 def ensure_top_symlinks(fw, target):
     """A framework root must symlink each DIRECT child of Versions/Current.
     Compat shims sometimes ship the binary only under Versions/A with no
@@ -91,6 +96,29 @@ for fw in frameworks:
     fwname = os.path.basename(fw)[:-len(".framework")]
     if ensure_min_plist(target, fwname):
         fixed.append(("mk-Info.plist", fw))
+    # codesign wants the main binary to be a regular file. Inventor ships
+    # Versions/C/Inventor -> Libraries/libCoin.dylib: swap them so the real
+    # file is the main binary and the library path is the symlink.
+    main = os.path.join(target, fwname)
+    if os.path.islink(main):
+        real = os.path.realpath(main)
+        if os.path.isfile(real) and real.startswith(os.path.realpath(target) + os.sep):
+            os.remove(main)
+            os.rename(real, main)
+            os.symlink(os.path.relpath(main, os.path.dirname(real)), real)
+            fixed.append(("swap-main", main))
+    # Loose non-binary files in the version root are unsealable subcomponents
+    # (ProKitVersion.plist). They belong under Resources/.
+    res = os.path.join(target, "Resources")
+    for entry in os.listdir(target):
+        p = os.path.join(target, entry)
+        if entry == fwname or os.path.islink(p) or not os.path.isfile(p) \
+           or is_macho(p):
+            continue
+        os.makedirs(res, exist_ok=True)
+        if not os.path.exists(os.path.join(res, entry)):
+            os.rename(p, os.path.join(res, entry))
+            fixed.append(("to-Resources", p))
     for entry in os.listdir(fw):
         if entry == "Versions":
             continue
@@ -124,6 +152,12 @@ for fw in frameworks:
                 os.makedirs(os.path.dirname(sd), exist_ok=True)
                 os.rename(p, sd)
                 fixed.append(("archive-dup", p))
+            elif os.path.isfile(p) and not is_macho(p):
+                # a loose file: into Resources/ (see the version-root pass)
+                os.makedirs(os.path.join(target, "Resources"), exist_ok=True)
+                os.rename(p, os.path.join(target, "Resources", entry))
+                fixed.append(("to-Resources", p))
+                continue
             else:
                 os.rename(p, dest)
                 fixed.append(("move-in", p))

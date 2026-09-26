@@ -76,7 +76,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn
+.PHONY: zerofill-stripped-ptr sib-rbp-base-wrap standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -503,6 +503,21 @@ dladdr-shim: $(BUILD_DIR)/99_dladdr_shim.x86_64
 # them. OFF arm is ABICONV_FSSPEC_LEGACY=1.
 carbon-fileops: $(BUILD_DIR)/99_carbon_fileops.x86_64
 	@bash carbon_fileops_test.sh
+# sib-rbp-base-wrap: A/B guard that a scaled-index operand with %ebp as a DATA
+# base keeps the i386 mod-2^32 EA wrap (PvZ libbass). ON exits 42; OFF
+# (M64_SIB_RBP_BASE_WIDE=1 at translate time) faults.
+sib-rbp-base-wrap: $(BUILD_DIR)/99_sib_ebp_base_neg_wrap.i386
+	@for arm in on off; do \
+	  e=""; [ $$arm = off ] && e="M64_SIB_RBP_BASE_WIDE=1"; \
+	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_sib_ebp_base_neg_wrap.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_sib_ebp_base_neg_wrap.$$arm; echo "$$arm=$$?"; \
+	done | tr '\n' ' ' | grep -q "on=42 off=139" && echo "sib-rbp-base-wrap: PASS" || { echo "sib-rbp-base-wrap: FAIL"; exit 1; }
+# zerofill-stripped-ptr: A/B guard that a __data pointer into the zero-fill
+# section of a locals-stripped image is relocated (iPhoto's gettimeofday slot).
+# OFF arm is M64_ZF_GATE_STRIPPED=1 at TRANSLATE time.
+zerofill-stripped-ptr: $(BUILD_DIR)/99_zerofill_stripped_ptr.i386
+	@bash zerofill_stripped_ptr_test.sh
 # zerofill-target-pair: A/B guard that the translator does not "rebase" two
 # adjacent u16 fields whose bytes spell an address into ZERO-FILL memory. Halo CE
 # died on exactly this every run: 'scen' (540,72) -> (27356,4272). The poisonous
@@ -1708,6 +1723,11 @@ $(BUILD_DIR)/99_carbon_fileops.i386: $(BUILD_DIR)/99_carbon_fileops.o
 # a zero-fill target ANCHORED by an object symbol and rejects one in symbol-free
 # space. Overrides %.i386.
 $(BUILD_DIR)/99_zerofill_target_pair.i386: $(BUILD_DIR)/99_zerofill_target_pair.o
+	$(LD) $(LDFLAGS_I386) -x -e _main -o $@ $<
+
+# 99_zerofill_stripped_ptr: linked with -x so its zero-fill section has NO
+# symbol at all — iPhoto's stripped __common. Overrides %.i386.
+$(BUILD_DIR)/99_zerofill_stripped_ptr.i386: $(BUILD_DIR)/99_zerofill_stripped_ptr.o
 	$(LD) $(LDFLAGS_I386) -x -e _main -o $@ $<
 
 # 99_record_field_pair: linked with -x for the same reason — the sibling values

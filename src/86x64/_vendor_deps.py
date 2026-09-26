@@ -175,24 +175,25 @@ def system_fw_exists(kind, name):
         "/usr/lib", "/usr/local/lib", "/System/Library/Frameworks"))
 
 
-def search_sources(kind, name, sources):
-    """Find the original framework dir / dylib file under the source roots."""
+def iter_sources(kind, name, sources):
+    """Every original framework dir / dylib file under the source roots, in
+    search order (per root: the shallow hit first, then a walk)."""
     want = f"{name}.framework" if kind == "framework" else name
+    ok = (lambda h: h.is_dir()) if kind == "framework" else (lambda h: h.is_file())
     for root in sources:
         if not root.is_dir():
             continue
-        # shallow hit first (the common /Library/Frameworks/<Name>.framework)
         direct = root / want
-        if (kind == "framework" and direct.is_dir()) or \
-           (kind == "dylib" and direct.is_file()):
-            return direct
-        # otherwise walk (bounded — frameworks nest only a couple levels)
+        if ok(direct):
+            yield direct
         for hit in root.rglob(want):
-            if kind == "framework" and hit.is_dir():
-                return hit
-            if kind == "dylib" and hit.is_file():
-                return hit
-    return None
+            if hit != direct and ok(hit):
+                yield hit
+
+
+def search_sources(kind, name, sources):
+    """The first original framework dir / dylib file under the source roots."""
+    return next(iter_sources(kind, name, sources), None)
 
 
 def _archs_of(path):
@@ -346,7 +347,7 @@ def vendor(app, sources, dry, native=DEFAULT_NATIVE):
     handled = set()          # (kind, name) already vendored / decided
     vendored, unresolved, dangling = [], {}, {}
 
-    def try_vendor(kind, name, consumer):
+    def try_vendor(kind, name, consumer, removed_system=False):
         """Vendor (kind, name) from the first source root that has it, copying the
         framework/dylib into the bundle (preserving Versions/Current symlinks),
         queueing the copied-in binary for its own dependency recursion. Returns
@@ -356,9 +357,13 @@ def vendor(app, sources, dry, native=DEFAULT_NATIVE):
         left for m64 translate to classify native + rpath-fix to repoint)."""
         if (kind, name) in handled:
             return True                    # already decided this round
-        src = search_sources(kind, name, sources)
-        if src is None:
+        cands = list(iter_sources(kind, name, sources))
+        if not cands:
             return False
+        # Prefer a donor in the consumer's ABI world (i386-bearing or already
+        # translated) wherever one exists — see donor_arch_mismatch.
+        src = next((c for c in cands
+                    if not donor_arch_mismatch(kind, c, app_translated)), cands[0])
         handled.add((kind, name))
         # ★ABI-WORLD CHECK. Donating a native-x86_64-only framework into a
         # bundle of TRANSLATED i386 binaries is never correct and used to fail
@@ -367,6 +372,14 @@ def vendor(app, sources, dry, native=DEFAULT_NATIVE):
         # with an i386 slice, or pre-translate it) is obvious. Override with
         # M64_ALLOW_ARCH_MISMATCH=1.
         bad = donor_arch_mismatch(kind, src, app_translated)
+        if bad and removed_system:
+            # A framework Apple REMOVED from /System is supplied the way every
+            # other system framework is: native, reached through the bridge
+            # (e.g. iLife's /System/Library/Frameworks/IMCore). Only when no
+            # same-ABI donor exists — Python's translated copy still wins above.
+            warn(f"{src.name}: removed system framework, no i386 donor — "
+                 f"vendoring the native copy")
+            bad = None
         if bad and not os.environ.get("M64_ALLOW_ARCH_MISMATCH"):
             warn(f"REFUSING to vendor {src.name}: {bad}")
             warn(f"    donor: {src}")
@@ -452,8 +465,10 @@ def vendor(app, sources, dry, native=DEFAULT_NATIVE):
                 #      short-circuit and are never vendored.
                 hollow = (kind == "framework"
                           and name in HOLLOW_SHELL_SYSTEM_FRAMEWORKS)
-                dead = (not system_dep_loadable(dep)
-                        and not system_fw_exists(kind, name))
+                # Dead = dyld cannot load this exact path. A same-named
+                # framework elsewhere (IMCore moved to PrivateFrameworks) is
+                # not a home: dyld never looks there for this install path.
+                dead = not system_dep_loadable(dep)
                 # A dead absolute /System path whose leaf is ALREADY somewhere in
                 # the bundle (e.g. Python's own Extras hold
                 # libsvn_swig_py-1.0.dylib, recorded with its dead /System install
@@ -465,6 +480,10 @@ def vendor(app, sources, dry, native=DEFAULT_NATIVE):
                     continue
                 if not (hollow or dead):
                     continue
+                if (kind, name) not in handled and \
+                        not try_vendor(kind, name, b.name, removed_system=True):
+                    unresolved[(kind, name)] = {b.name}
+                continue
             elif os.path.exists(dep):
                 continue          # resolves at its absolute path → host-native
             if system_fw_exists(kind, name):

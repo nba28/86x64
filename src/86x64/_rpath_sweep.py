@@ -215,6 +215,11 @@ missing = {}      # framework/dylib name -> set of consumers (not bundled)
 wrong_arch = {}   # bundled name -> set of x86_64 consumers (target is i386-only)
 for bin_path in all_binaries():
     if not is_macho(bin_path): continue
+    # Only the x86_64 slice ever runs. Thin native fat binaries (iLife/iWork
+    # ship ppc/i386/x86_64) up front: otool -L on a fat file lists every
+    # slice under "(architecture X):" headers, and the dead slices break
+    # install_name_tool — which left MobileMe/iLifeMediaBrowser un-swept.
+    _thin_x86_64(bin_path)
     out = subprocess.run(["otool", "-L", str(bin_path)], capture_output=True, text=True, errors="replace").stdout
     consumer_x64 = _has_x86_64(bin_path)
     changes = []

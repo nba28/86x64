@@ -323,6 +323,20 @@ namespace MachO {
                const std::size_t prev = *std::prev(it);
                if (prev >= sec->sect.addr) { return false; }  /* attested */
             }
+            /* The missing anchor is only evidence when the section HAS
+             * symbols to be missing (Halo: its targets sit below the lowest
+             * __common symbol). A section with none at all — a locals-stripped
+             * image (iPhoto's `__data` slot -> &__common+0xac, fed to
+             * gettimeofday) — can attest nothing, so the gate disarms, like
+             * the func-entry gate does for stripped binaries. Guard
+             * zerofill-stripped-ptr; OFF arm M64_ZF_GATE_STRIPPED=1. */
+            static const bool gate_stripped =
+               std::getenv("M64_ZF_GATE_STRIPPED") != nullptr;
+            if (!gate_stripped) {
+               const std::size_t end = sec->sect.addr + sec->sect.size;
+               const auto first = func_syms.lower_bound(sec->sect.addr);
+               if (first == func_syms.end() || *first >= end) { return false; }
+            }
             return true;   /* no anchoring symbol in this section -> constant */
          }
          return false;   /* in segment but between/outside sections */

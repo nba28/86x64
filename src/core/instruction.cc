@@ -3953,6 +3953,20 @@ namespace MachO {
          const bool non_deref =
             cat == XED_CATEGORY_NOP || cat == XED_CATEGORY_WIDENOP ||
             xed_decoded_inst_get_iclass(&xedd) == XED_ICLASS_LEA;
+         /* RBP as the BASE of a scaled-index operand is an ordinary data
+          * register in -fomit-frame-pointer code (PvZ's libbass:
+          * `movss 0xc(%ebp,%esi,4)` with esi = -3). Even as a real frame
+          * pointer it addresses the low-4GB translated stack, so addr32 is
+          * exact there too. Guard 99_sib_ebp_base_neg_wrap; OFF arm
+          * M64_SIB_RBP_BASE_WIDE=1. */
+         static const bool rbp_base_wide =
+            std::getenv("M64_SIB_RBP_BASE_WIDE") != nullptr;
+         auto is_wide_base = [&](xed_reg_enum_t r) {
+            if (!rbp_base_wide && (r == XED_REG_RBP || r == XED_REG_EBP)) {
+               return false;
+            }
+            return is_wide(r);
+         };
          bool want_addr32 = false;
          for (unsigned i = 0; i < nmem && !want_addr32 && !non_deref; ++i) {
             const xed_reg_enum_t base  =
@@ -3960,7 +3974,7 @@ namespace MachO {
             const xed_reg_enum_t index =
                xed_decoded_inst_get_index_reg(aops, i);
             const bool has_scaled_index = (index != XED_REG_INVALID);
-            if (has_scaled_index && !is_wide(base) && !is_wide(index)) {
+            if (has_scaled_index && !is_wide_base(base) && !is_wide(index)) {
                want_addr32 = true;
             }
          }
