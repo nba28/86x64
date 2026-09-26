@@ -462,11 +462,27 @@ namespace MachO {
        * whose entries point at MID-function basic blocks — no func_syms entry —
        * so the exec-target function-entry gate below must not apply there. */
       bool is_text_const_sect = false;
+      /* ObjC1 method lists (__OBJC,__inst_meth/__cls_meth/__cat_*_meth) hold
+       * {name, types, imp} triples after a small header, so a code-target
+       * word there IS a method IMP — a function entry by construction, the
+       * positive evidence the code-entry gate asks for. iPhoto's locals-
+       * stripped methods have no nlist and many no `55 89 e5` prologue, so
+       * 1.7k IMPs stayed raw i386 addresses. Guard objc-imp-entry; OFF arm
+       * M64_NO_OBJC_IMP_ENTRY=1. */
+      bool in_objc_methods = false;
       if (env.current_section != nullptr) {
          const auto& cs = env.current_section->sect;
          in_objc_symbols =
             strncmp(cs.segname, SEG_OBJC, sizeof(cs.segname)) == 0 &&
             strncmp(cs.sectname, "__symbols", sizeof(cs.sectname)) == 0;
+         static const bool objc_imp_off =
+            std::getenv("M64_NO_OBJC_IMP_ENTRY") != nullptr;
+         if (!objc_imp_off &&
+             strncmp(cs.segname, SEG_OBJC, sizeof(cs.segname)) == 0) {
+            const std::string sn(cs.sectname, strnlen(cs.sectname, sizeof(cs.sectname)));
+            in_objc_methods = sn == "__inst_meth" || sn == "__cls_meth" ||
+                              sn == "__cat_inst_meth" || sn == "__cat_cls_meth";
+         }
          is_text_const_sect =
             strncmp(cs.segname, SEG_TEXT, sizeof(cs.segname)) == 0;
       }
@@ -796,6 +812,7 @@ namespace MachO {
                 * __TEXT,__const excluded: its switch jump tables target
                 * basic-block heads, which have neither symbol nor prologue. */
                if (exec && bits == Bits::M32 && !is_text_const_sect &&
+                   !in_objc_methods &&
                    env.code_alias_lacks_entry_evidence(img, value)) {
                   break;   /* mid-function alias, no entry evidence -> constant */
                }

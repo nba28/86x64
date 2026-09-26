@@ -74,7 +74,9 @@ for dirpath, dirnames, filenames in os.walk(APP):
         p = os.path.join(dirpath, d)
         if d.endswith(".framework"):
             frameworks.append(p)
-        elif d.endswith(".app") and p != APP:
+        elif p != APP and (d.endswith(".app") or
+                           os.path.isfile(os.path.join(p, "Contents", "Info.plist"))):
+            # any nested bundle: .app, .plugin, .publisher, .bundle, ...
             apps.append(p)
 
 fixed = []

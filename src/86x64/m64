@@ -1393,6 +1393,13 @@ def cmd_sign(args):
         for d in (app / "Contents" / "Frameworks").glob("*.dylib"):
             subprocess.run(["codesign", "-f", "-s", "-", str(d)],
                            capture_output=True)
+        # Everything in Contents/MacOS is nested code to codesign; a stray
+        # non-Mach-O there (iPhoto ships libRetouch.a) fails the whole bundle
+        # "not signed at all". Sign it on its own (xattr signature).
+        for f in (app / "Contents" / "MacOS").glob("*"):
+            if f.is_file() and not f.is_symlink() and not archs_of(f):
+                subprocess.run(["codesign", "-f", "-s", "-", str(f)],
+                               capture_output=True)
     run(["python3", FIX_SIGNING, str(app)], dry=args.dry_run, check=False)
     run(["codesign", "-f", "-s", "-", "--identifier", ident, str(app)],
         dry=args.dry_run, check=False)

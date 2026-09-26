@@ -71,9 +71,9 @@ def _thin_x86_64(path):
     ('malformed load command') and llvm rejects classic shared libraries. We
     only ever run x86_64, so the other slices are dead weight. Returns True if
     the file was changed."""
+    # No returncode check: lipo exits 1 ("not a mach-o") on fat files whose
+    # ppc7400 slice it cannot parse, yet still lists the archs and thins fine.
     r = subprocess.run(["lipo", "-archs", str(path)], capture_output=True, text=True)
-    if r.returncode != 0:
-        return False
     archs = r.stdout.split()
     if "x86_64" not in archs or archs == ["x86_64"]:
         return False
@@ -95,8 +95,8 @@ def _has_x86_64(path):
     try:
         r = subprocess.run(["lipo", "-archs", str(path)],
                            capture_output=True, text=True)
-        if r.returncode == 0:
-            return "x86_64" in r.stdout.split()
+        if "x86_64" in r.stdout.split():   # listed even when lipo exits 1
+            return True
     except Exception:
         pass
     # lipo can choke on translated dylibs with __LINKEDIT slack; fall back to
