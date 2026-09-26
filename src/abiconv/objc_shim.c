@@ -8141,6 +8141,74 @@ static id shadow_real(uint32_t s) {
    /* A raw legacy i386 instance we've already paired with a real modern R'. */
    return lpair_lookup(s);
 }
+/* ---- shadow reclamation ----
+ * The arena used to be bump-only: every legacy instance EVER created kept its
+ * ~1.1 KB shadow, so ~58k instances over a process's life exhausted 64 MB and
+ * the reverse bridge then ran instance methods with self = nil (Quinn, 40 min
+ * of network play: -[AsyncWritePacket initWithData:timeout:tag:] stored
+ * through a nil [super init]). Each shadow now carries a reaper: an associated
+ * CFData over the block whose bytes-deallocator runs when the real object's
+ * associations are torn down (object_dispose). Freed blocks wait in a FIFO
+ * quarantine (a just-freed shadow may still be read by the dying object's
+ * i386 -dealloc epilogue) and are then reused for the same block size.
+ * Block layout: [need:8][real:8][shadow...]; shadow_real still reads s-8.
+ * Lists are per libabiconv copy (the arena is shared; a copy only reuses the
+ * blocks its own reapers returned, which is always safe). */
+#define SHQ_CAP 256u
+#define SHFREE_BUCKETS 64u
+static os_unfair_lock g_shfree_lock = OS_UNFAIR_LOCK_INIT;
+static uintptr_t g_shq[SHQ_CAP];            /* quarantine ring of block bases */
+static unsigned  g_shq_head, g_shq_n;
+static uintptr_t g_shfree[SHFREE_BUCKETS];  /* free lists: next ptr at base+8 */
+static CFAllocatorRef g_shreap_alloc;
+static char g_shreap_key;
+
+static void shadow_free_push_locked(uintptr_t base) {
+   uint64_t need = *(uint64_t *)base;
+   unsigned b = (unsigned)(need >> 4) & (SHFREE_BUCKETS - 1);
+   *(uint64_t *)(base + 8) = g_shfree[b];     /* the real-object slot is dead */
+   g_shfree[b] = base;
+}
+static void shadow_reap(void *ptr, void *info) {
+   (void)info;
+   uintptr_t base = (uintptr_t)ptr;
+   *(uint64_t *)(base + 8) = 0;               /* stale shadow -> real = nil */
+   os_unfair_lock_lock(&g_shfree_lock);
+   if (g_shq_n == SHQ_CAP) {                  /* oldest leaves quarantine */
+      shadow_free_push_locked(g_shq[g_shq_head]);
+      g_shq_head = (g_shq_head + 1) % SHQ_CAP;
+      --g_shq_n;
+   }
+   g_shq[(g_shq_head + g_shq_n) % SHQ_CAP] = base;
+   ++g_shq_n;
+   os_unfair_lock_unlock(&g_shfree_lock);
+}
+static uintptr_t shadow_free_pop(uint64_t need) {
+   unsigned b = (unsigned)(need >> 4) & (SHFREE_BUCKETS - 1);
+   os_unfair_lock_lock(&g_shfree_lock);
+   uintptr_t *pp = &g_shfree[b];
+   while (*pp && *(uint64_t *)*pp != need) { pp = (uintptr_t *)(*pp + 8); }
+   uintptr_t base = *pp;
+   if (base) { *pp = (uintptr_t)*(uint64_t *)(base + 8); }
+   os_unfair_lock_unlock(&g_shfree_lock);
+   return base;
+}
+static void shadow_attach_reaper(id real, uintptr_t base, uint64_t need) {
+   if (KNOB("ABICONV_NO_SHADOW_RECLAIM")) { return; }
+   if (!g_shreap_alloc) {
+      CFAllocatorContext ctx = { 0 };
+      ctx.deallocate = shadow_reap;
+      CFAllocatorRef a = CFAllocatorCreate(NULL, &ctx);
+      if (!__sync_bool_compare_and_swap(&g_shreap_alloc, NULL, a) && a) { CFRelease(a); }
+   }
+   CFDataRef d = CFDataCreateWithBytesNoCopy(NULL, (const UInt8 *)base,
+                                             (CFIndex)need, g_shreap_alloc);
+   if (!d) { return; }                        /* no reaper: block just leaks */
+   objc_setAssociatedObject(real, &g_shreap_key, (id)d,
+                            OBJC_ASSOCIATION_RETAIN);
+   CFRelease(d);
+}
+
 static uint32_t get_or_create_shadow(id real, Class cls) {
    const void *assoc_key = shadow_assoc_key();
    uint32_t s = (uint32_t)(uintptr_t)objc_getAssociatedObject(real, assoc_key);
@@ -8162,23 +8230,37 @@ static uint32_t get_or_create_shadow(id real, Class cls) {
       if (se && se->instance_size > isz) { isz = se->instance_size; }
    }
    if (isz < 4) { isz = 4; }
-   size_t need = 8 + ((isz + 15) & ~(size_t)15) + SHADOW_SLACK;
-   /* Atomic bump: concurrent reverse-bridge instance creation on multiple
-    * threads (background reachability mgr + main-thread PhotoCDManager) would
-    * otherwise lose-update shadow_cur and hand two instances the same buffer,
-    * so one instance's ivar writes clobber the other's real-object header
-    * (-> object_getClass on a garbage receiver). */
-   uint64_t hdr64 = __atomic_fetch_add(&g_ctrl->shadow_cur, need,
-                                       __ATOMIC_SEQ_CST);
-   if (hdr64 + need > g_ctrl->shadow_end) { return 0; }   /* arena exhausted */
-   uintptr_t hdr = (uintptr_t)hdr64;
+   size_t need = 16 + ((isz + 15) & ~(size_t)15) + SHADOW_SLACK;
+   uintptr_t base = shadow_free_pop(need);       /* a reaped block, if any */
+   if (!base) {
+      /* Atomic bump: concurrent reverse-bridge instance creation on multiple
+       * threads (background reachability mgr + main-thread PhotoCDManager) would
+       * otherwise lose-update shadow_cur and hand two instances the same buffer,
+       * so one instance's ivar writes clobber the other's real-object header
+       * (-> object_getClass on a garbage receiver). */
+      uint64_t b64 = __atomic_fetch_add(&g_ctrl->shadow_cur, need,
+                                        __ATOMIC_SEQ_CST);
+      if (b64 + need > g_ctrl->shadow_end) {                /* arena exhausted */
+         static int warned;
+         if (!warned) {
+            warned = 1;
+            fprintf(stderr, "objc_shim: i386 shadow arena exhausted -- legacy "
+                            "instance methods will see self = nil\n");
+         }
+         return 0;
+      }
+      base = (uintptr_t)b64;
+   }
+   *(uint64_t *)base = need;
+   uintptr_t hdr = base + 8;
    *(uint64_t *)hdr = (uint64_t)real;
    uintptr_t s2 = hdr + 8;
-   memset((void *)s2, 0, isz);
+   memset((void *)s2, 0, need - 16);   /* incl. slack: a reused block is dirty */
    *(uint32_t *)s2 = isa;          /* i386 object's isa slot */
    s = (uint32_t)s2;
    objc_setAssociatedObject(real, assoc_key, (id)(uintptr_t)s,
                             OBJC_ASSOCIATION_ASSIGN);
+   shadow_attach_reaper(real, base, need);
    return s;
 }
 
