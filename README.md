@@ -1,58 +1,56 @@
 # 86x64
-Convert 32-bit i386 executables to 64-bit x86\_64 executables.
-With macOS 10.15, Apple dropped support for running 32-bit executables under 64-bit macOS.
 
-## Development Status
-86x64 is still in a highly experimental stage.
-It can currently translate some simple 32-bit programs to 64 bits -- for examples, see the `tests/` directory.
+A static binary translator that turns 32-bit i386 Mach-O programs (executables,
+dylibs, whole `.app` bundles) into x86_64, so legacy Mac apps that stopped
+running with macOS 10.15 run again — on Apple Silicon under Rosetta 2.
 
-## Getting Started
-These instructions will guide you through setting up 86x64 on your Mac.
+It is not an emulator: each i386 instruction is rewritten once, ahead of time,
+and a runtime library bridges the 32-bit program to today's 64-bit system
+frameworks (Objective-C, CoreFoundation, AppKit, and reimplementations of
+removed APIs such as Carbon, QuickDraw, QuickTime and AGL).
 
-### Prerequisites
-86x64 requires macOS with Command Line Tools installed.
+## Layout
 
-### Installing
+| Path | What |
+|---|---|
+| `src/core`, `include/core` | Mach-O parser/emitter and the per-instruction i386→x86_64 rewriter (XED) |
+| `src/macho-tool` | `macho-tool`, the low-level engine (`rebasify`, `transform`, `convert`, `print`, …) |
+| `src/abiconv` | `libabiconv.dylib`: ObjC forward/reverse bridge, generated C-function bridges (`abigen`), hand-written shims for removed frameworks, the low-4GB heap |
+| `src/86x64` | `m64` (the driver), `86x64.sh` (per-binary pipeline), the launch wrapper, diagnostics and `probes/` |
+| `tests-i386` | i386 fixtures translated and run end to end, plus A/B regression guards |
 
-86x64 can be installed with the usual `cmake ..; make; make install` combo.
+## Build
 
-Obtain a copy of the repository and enter it:
-
-```
-git clone https://github.com/nmosier/86x64.git && cd 86x64
-```
-
-Create a build directory and enter it:
-
-```
-mkdir build && cd build
-```
-
-Configure the build:
+Needs Xcode command line tools, `nasm`, and LLVM/libclang (for `abigen`).
 
 ```
-cmake ..
+git submodule update --init
+cmake -S . -B build -DCMAKE_BUILD_TYPE=Debug
+cmake --build build -j
 ```
 
-Build the project;
+## Use
 
 ```
-make
+m64 translate Some.app          # translate every i386 binary in a bundle, then shim + sign
+m64 retranslate Some.app        # after a translator (core) change
+m64 build abiconv && m64 resync Some.app   # after a runtime-library change
 ```
 
-Install the project:
+`m64 <command> -h` lists the rest (run, sign, forks, macho passthrough, …).
+
+## Tests
 
 ```
-make install
+cd tests-i386
+make            # core fixtures      make objc / make cpp   # ObjC / C++ fixtures
+make <guard>    # one named A/B regression guard (see the Makefile)
 ```
 
-By default, 86x64 files will be installed to `/usr/local/opt/86x64`.
+Modern `ld` no longer links i386, so fixtures link with Snow Leopard's ld64-95
+against an i386 sysroot staged in `/tmp/i386-sysroot` (see `tests-i386/README.md`).
 
-## Usage
+## Credits
 
-## Authors
-- Nicholas Mosier (nmosier)
-
-## Acknowledgements
-- Thanks to michaeljclark for his repository https://github.com/michaeljclark/libSystem-mmap
-
+Originally created by Nicholas Mosier ([nmosier/86x64](https://github.com/nmosier/86x64)).
+Thanks to michaeljclark for https://github.com/michaeljclark/libSystem-mmap.

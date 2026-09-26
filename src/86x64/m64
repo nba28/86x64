@@ -609,7 +609,7 @@ def cmd_retranslate(args):
 # What DOES need care is the opposite thing: a VENDORED golden framework is a
 # translated artifact frozen at whatever commit produced it, so it keeps the
 # binds it was translated with. Re-translate those when the core changes; see
-# the journal entry for Halo's stale ___ResolveAliasFile.
+# halo_target memory for Halo's stale ___ResolveAliasFile.
 
 
 def cmd_resync(args):

@@ -5,7 +5,7 @@
  * ONE JOB: MPAllocateAligned / MPAllocate / MPFree / MPGetAllocatedBlockSize.
  * Nothing else in MP Services (tasks, queues, semaphores, timers) belongs here.
  *
- * WHY (measured, Halo CE 2026-08-08, see the Halo AGL deploy journal):
+ * WHY (measured, Halo CE 2026-08-08, see the Halo AGL journal):
  * these live in CarbonCore and are in abigen's consider-set, so abigen generated
  * a marshalling bridge for each. `LogicalAddress` is `typedef void *`, so the
  * return hits abigen's generic void*-return rule (abigen.cc:1644-1656):
@@ -102,7 +102,7 @@ static int mp_native_passthrough(void)
  * bypasses the free list (malloc_shim.c:329-331), so a program that allocates
  * and frees aligned blocks in a loop would never reclaim any of them — the same
  * non-reclaiming-arena defect that produced the wild `FILE*` (see
- * deploy journal, `shim_FILE` low-4GB arena). MPFree must actually free. */
+ * same journal, `shim_FILE` low-4GB arena). MPFree must actually free. */
 #define MPBLK_MAGIC 0x4d50424bu                /* 'MPBK' */
 struct mpblk_hdr {
    uint32_t size;                              /* exact logical size requested */

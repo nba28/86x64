@@ -108,7 +108,8 @@ uint32_t shim_GetControl32BitValue(uint32_t *args) {
 // only looked harmless: a caller that does not fall back reads it as a hard failure.
 // (Measured: Halo's IDirect3D_Mac::IDirect3D_Mac calls DMGetDisplayIDByGDevice and
 // raises its own unrecoverable-error alert the instant the OSErr is non-zero — see
-// the Halo AGL deploy journal. Same doctrine as the FSSpec fix: a shim that
+// the Halo AGL journal.
+// Same doctrine as the FSSpec fix: a shim that
 // fails is not neutral, and a shim that CAN succeed must.)
 // Structural trigger: "this GDHandle came out of our GDevice registry", never an app.
 // Kill switch M64_NO_DM_DISPLAYID=1 restores the historical paramErr behaviour.

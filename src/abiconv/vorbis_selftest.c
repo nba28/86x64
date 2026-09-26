@@ -63,8 +63,8 @@ uint64_t _86x64_call_i386(uint64_t fn, uint64_t nwords, const uint32_t *words,
 #define VS_STACK_SZ (1u * 1024u * 1024u)
 
 /* ---- i386 anchors (frozen: Apps32/Halo is read-only) ---------------------
- * Derived by disassembly, cross-checked against pcmap; see the journal entry
- * for 5c52740 and src/86x64/pcmap-diff.py.
+ * Derived by disassembly, cross-checked against pcmap; see commit
+ * 5c52740 and src/86x64/pcmap-diff.py.
  *   0x2468ca  the function that installs the callbacks and calls ov_open
  *   0x2469fe  the `call ov_open_callbacks`
  *   0x246a03  the instruction AFTER that call (has a pcmap row; the call
@@ -85,7 +85,7 @@ uint64_t _86x64_call_i386(uint64_t fn, uint64_t nwords, const uint32_t *words,
 
 /*
  * The HEADER PATH, identified by disassembly and cross-checked against the
- * struct layouts they imply (see the journal entry for this commit):
+ * struct layouts they imply (see this file's commit message):
  *   _fetch_headers 0x2d5925 (5 stack args), ov_clear 0x2d6823 (its
  *   `memset(vf,0,0x2c0)` is what CONFIRMS sizeof(OggVorbis_File)=0x2c0).
  * Each entry is resolved from the RETURN SITE of the call that invokes it --
