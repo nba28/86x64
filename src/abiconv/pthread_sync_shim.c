@@ -822,6 +822,60 @@ int32_t shim_pthread_setschedparam(uint32_t *a) {
    return (int32_t)pthread_setschedparam(t, (int)a[1], &sp);
 }
 
+/* ---- thread-introspection _np calls, same token identity ----------------
+ * abigen deep-copied the pthread_t as a struct pointer, i.e. dereferenced our
+ * token (Numbers SFCompatibility: pthread_get_stackaddr_np(0x103) -> SIGSEGV).
+ * The STACK answers describe the stack the i386 code actually runs on -- a
+ * low-4GB region, not the native thread stack -- read from the VM region that
+ * holds this call's own i386 args. Only the calling thread can be described
+ * that way; for another thread the native answer is returned when it fits 32
+ * bits, else 0 (ponytail: record each translated thread's low stack at
+ * create if a target ever asks about a foreign thread). */
+#include <mach/mach_vm.h>
+static int psx_low_stack(uint32_t *a, uint32_t tok, uint64_t *top, uint64_t *size) {
+   if (tok != (uint32_t)pthread_mach_thread_np(pthread_self())) { return 0; }
+   mach_vm_address_t addr = (mach_vm_address_t)(uintptr_t)a;
+   mach_vm_size_t rsz = 0;
+   vm_region_basic_info_data_64_t info;
+   mach_msg_type_number_t cnt = VM_REGION_BASIC_INFO_COUNT_64;
+   mach_port_t obj = MACH_PORT_NULL;
+   if (mach_vm_region(mach_task_self(), &addr, &rsz, VM_REGION_BASIC_INFO_64,
+                      (vm_region_info_t)&info, &cnt, &obj) != KERN_SUCCESS) { return 0; }
+   *top = addr + rsz; *size = rsz;
+   return 1;
+}
+
+/* void *pthread_get_stackaddr_np(pthread_t) -- the stack TOP (highest address). */
+int32_t shim_pthread_get_stackaddr_np(uint32_t *a) {
+   uint64_t top, size;
+   if (psx_low_stack(a, a[0], &top, &size)) { return (int32_t)(uint32_t)top; }
+   pthread_t t = psx_thread_lookup(a[0]);
+   uint64_t v = t ? (uint64_t)(uintptr_t)pthread_get_stackaddr_np(t) : 0;
+   return v >> 32 ? 0 : (int32_t)(uint32_t)v;
+}
+
+/* size_t pthread_get_stacksize_np(pthread_t) */
+int32_t shim_pthread_get_stacksize_np(uint32_t *a) {
+   uint64_t top, size;
+   if (psx_low_stack(a, a[0], &top, &size)) { return (int32_t)(uint32_t)size; }
+   pthread_t t = psx_thread_lookup(a[0]);
+   return t ? (int32_t)(uint32_t)pthread_get_stacksize_np(t) : 0;
+}
+
+/* mach_port_t pthread_mach_thread_np(pthread_t) -- the token IS the port. */
+int32_t shim_pthread_mach_thread_np(uint32_t *a) {
+   return psx_thread_lookup(a[0]) ? (int32_t)a[0] : 0;
+}
+
+/* int pthread_threadid_np(pthread_t, uint64_t *) -- NULL thread = self. */
+int32_t shim_pthread_threadid_np(uint32_t *a) {
+   uint64_t *out = (uint64_t *)(uintptr_t)a[1];
+   if (!out) { return EINVAL; }
+   pthread_t t = a[0] ? psx_thread_lookup(a[0]) : pthread_self();
+   if (!t) { *out = 0; return ESRCH; }
+   return pthread_threadid_np(t, out);
+}
+
 int32_t shim_pthread_getschedparam(uint32_t *a) {
    pthread_t t = psx_thread_lookup(a[0]);
    if (!t) { return ESRCH; }

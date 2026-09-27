@@ -562,6 +562,14 @@ pthread-attr-size: $(BUILD_DIR)/99_pthread_attr_size.i386
 	  -o $(BUILD_DIR)/99_pthread_attr_size.on $< >/dev/null 2>&1; \
 	$(BUILD_DIR)/99_pthread_attr_size.on; r=$$?; \
 	[ $$r = 42 ] && echo "pthread-attr-size: PASS" || { echo "pthread-attr-size: FAIL ($$r)"; exit 1; }
+# pthread-stack-np: guard that the pthread_t-taking _np introspection calls
+# resolve the i386 thread token (stack answers = the i386 stack in use). OFF
+# arm = the previous libabiconv (verified by hand: faults dereferencing the token).
+pthread-stack-np: $(BUILD_DIR)/99_pthread_stack_np.i386
+	@bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	  -o $(BUILD_DIR)/99_pthread_stack_np.on $< >/dev/null 2>&1; \
+	$(BUILD_DIR)/99_pthread_stack_np.on; r=$$?; \
+	[ $$r = 42 ] && echo "pthread-stack-np: PASS" || { echo "pthread-stack-np: FAIL ($$r)"; exit 1; }
 # setjmp-frame: guard that setjmp/longjmp from translated code use the i386
 # 72-byte jmp_buf (libabiconv capture) instead of native _setjmp's 148-byte
 # write over the caller's frame (PvZ saved-esi clobber). Runtime fix: the OFF

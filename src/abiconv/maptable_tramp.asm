@@ -263,6 +263,10 @@
 	MTSHIM	___pthread_cancel,            _shim_pthread_cancel
 	MTSHIM	___pthread_setschedparam,     _shim_pthread_setschedparam
 	MTSHIM	___pthread_getschedparam,     _shim_pthread_getschedparam
+	MTSHIM	___pthread_get_stackaddr_np,  _shim_pthread_get_stackaddr_np
+	MTSHIM	___pthread_get_stacksize_np,  _shim_pthread_get_stacksize_np
+	MTSHIM	___pthread_mach_thread_np,    _shim_pthread_mach_thread_np
+	MTSHIM	___pthread_threadid_np,       _shim_pthread_threadid_np
 	;; pthread_once: the i386 once-control block ({long __sig; opaque} = 8B,
 	;; 4-byte sig) is NOT a valid native os_once_t, and its init routine is an
 	;; i386 void(void) fn ptr. abigen's forward to native pthread_once trips

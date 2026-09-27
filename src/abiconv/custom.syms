@@ -133,6 +133,10 @@ _pthread_kill
 _pthread_cancel
 _pthread_setschedparam
 _pthread_getschedparam
+_pthread_get_stackaddr_np
+_pthread_get_stacksize_np
+_pthread_mach_thread_np
+_pthread_threadid_np
 
 # Resource Manager Handle-boundary entries (rm_shim.c, s35): abigen would forward
 # to native but TRUNCATE the returned >4GB Handle (or pass our low Handle raw to

@@ -109,6 +109,24 @@ for fw in frameworks:
             os.rename(real, main)
             os.symlink(os.path.relpath(main, os.path.dirname(real)), real)
             fixed.append(("swap-main", main))
+    # A swapped main binary's @loader_path deps (libabiconv, placed next to the
+    # translated file) stay in its old dir: link each missing one to the copy
+    # elsewhere in this version (Numbers: Inventor -> Libraries/libabiconv).
+    if os.path.isfile(main) and not os.path.islink(main):
+        libs = run("otool", "-L", main).stdout.splitlines()[1:]
+        for l in libs:
+            dep = l.strip().split(" (")[0]
+            if not dep.startswith("@loader_path/") or "/" in dep[len("@loader_path/"):]:
+                continue
+            name = dep[len("@loader_path/"):]
+            new = os.path.join(target, name)
+            if os.path.lexists(new):
+                continue
+            for d, _, files in os.walk(target):
+                if name in files and not os.path.islink(os.path.join(d, name)):
+                    os.symlink(os.path.relpath(os.path.join(d, name), target), new)
+                    fixed.append(("link-loader-dep", new))
+                    break
     # Loose non-binary files in the version root are unsealable subcomponents
     # (ProKitVersion.plist). They belong under Resources/.
     res = os.path.join(target, "Resources")
