@@ -13,8 +13,7 @@
  * Everything we hand back to the i386 caller (Component/ComponentInstance,
  * Handle/Ptr, GWorldPtr, PixMapHandle, ImageDescriptionHandle) MUST be a
  * 32-bit value, so we allocate it from libabiconv's malloc — whose heap lives
- * entirely in [0x88000000, 0xF0000000) (see malloc_shim.c), i.e. always
- * 32-bit representable. No token table is needed: the real pointer round-trips
+ * entirely below 4 GB (see malloc_shim.c), i.e. always 32-bit representable. No token table is needed: the real pointer round-trips
  * losslessly through the i386 4-byte slot.
  *
  * UNIVERSAL, not iPhoto-specific: any i386 Carbon/QuickTime app that opens a

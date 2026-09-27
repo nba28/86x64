@@ -23,9 +23,9 @@
  * INPUT: a Cocoa window keeps its own mouse/key events, and the app listens for
  * CARBON events on its application target. The window converts each one
  * (CreateEventWithCGEvent) and sends it there, with the location rewritten by
- * cglfs_map_global(): letterbox -> virtual point -> plus the content origin of
- * the app's own window (PvZ keeps an 800x600 Carbon window and converts clicks
- * with GlobalToLocal against it). GetGlobalMouse (osutil_shim.c) and pumped
+ * cglfs_map_global(): letterbox -> virtual point -> plus the content origin
+ * the app's GlobalToLocal subtracts (ci_content_origin; PvZ keeps a hidden
+ * 800x600 Carbon window and converts clicks with GlobalToLocal against it). GetGlobalMouse (osutil_shim.c) and pumped
  * mouse events (carbon_event_appdown.c) use the same mapping.
  *
  * WHY NOT DRAW INTO THE APP'S WINDOW: tried; a Carbon window cannot be resized
@@ -76,6 +76,7 @@ static int trace(void)   /* 1: placement + forwarded events, 2: + every mapping 
 @end
 
 int cglfs_map_global(double *x, double *y);
+extern int ci_content_origin(int16_t *ox, int16_t *oy);   /* classic_input_coords.c */
 
 /* Hand a Cocoa input event to the app as the Carbon event it listens for. */
 static int forward_to_app(NSEvent *ev)
@@ -146,22 +147,7 @@ static void on_main(void (^b)(void))
    if ([NSThread isMainThread]) b(); else dispatch_sync(dispatch_get_main_queue(), b);
 }
 
-/* The app's own window of the virtual size (content, or content plus a
- * Carbon-drawn title bar): the space its GlobalToLocal converts into. */
-static NSWindow *app_window(void)
-{
-   for (NSWindow *win in NSApp.windows) {
-      /* Visible or not: a fullscreen app may hide it, yet its position is
-       * still what the app's GlobalToLocal subtracts. */
-      if (win == g_win) { continue; }
-      NSSize c = [win contentRectForFrameRect:win.frame].size;
-      if (c.width == g_vw && c.height >= g_vh && c.height <= g_vh + 40) { return win; }
-   }
-   return nil;
-}
-
 /* Main thread only: refresh the mapping snapshot from the live geometry. */
-static volatile double g_ox, g_oy;       /* app window content origin, Carbon global */
 static void relayout(void)
 {
    if (!g_win) { return; }
@@ -175,22 +161,9 @@ static void relayout(void)
    g_gx = sr.origin.x;
    g_gy = top - NSMaxY(sr);
    g_scale = k;
-   NSWindow *aw = app_window();
-   if (aw) {
-      const NSRect fr = aw.frame;
-      g_ox = fr.origin.x;
-      g_oy = top - NSMaxY(fr) + (fr.size.height - g_vh);
-   }
    [g_ns update];
-   if (trace() && !aw) {
-      for (NSWindow *x in NSApp.windows)
-         fprintf(stderr, "[cglfs]   candidate %s vis=%d frame=%s content=%s\n",
-                 object_getClassName(x), x.isVisible, NSStringFromRect(x.frame).UTF8String,
-                 NSStringFromSize([x contentRectForFrameRect:x.frame].size).UTF8String);
-   }
    if (trace()) {
-      fprintf(stderr, "[cglfs] layout scale %.3f view@%.0f,%.0f app origin %.0f,%.0f\n",
-              k, g_gx, g_gy, g_ox, g_oy);
+      fprintf(stderr, "[cglfs] layout scale %.3f view@%.0f,%.0f\n", k, g_gx, g_gy);
    }
 }
 
@@ -253,15 +226,18 @@ static void present(CGLContextObj ctx, CGDirectDisplayID dpy)
 int cglfs_map_global(double *x, double *y)
 {
    if (!g_active || g_scale <= 0) { return 0; }
-   if ([NSThread isMainThread] && g_ox == 0 && g_oy == 0) { relayout(); }  /* app window may be new */
    double vx = (*x - g_gx) / g_scale, vy = (*y - g_gy) / g_scale;
    vx = vx < 0 ? 0 : vx > g_vw - 1 ? g_vw - 1 : vx;
    vy = vy < 0 ? 0 : vy > g_vh - 1 ? g_vh - 1 : vy;
+   /* Plus exactly the origin the app's GlobalToLocal will subtract (qd_shim.c),
+    * so GlobalToLocal(mapped) is the virtual point whatever window that is. */
+   int16_t ox = 0, oy = 0;
+   ci_content_origin(&ox, &oy);
    if (trace() > 1) {
-      fprintf(stderr, "[cglfs] map %.0f,%.0f -> virtual %.0f,%.0f + app origin %.0f,%.0f\n",
-              *x, *y, vx, vy, g_ox, g_oy);
+      fprintf(stderr, "[cglfs] map %.0f,%.0f -> virtual %.0f,%.0f + origin %d,%d\n",
+              *x, *y, vx, vy, ox, oy);
    }
-   *x = g_ox + vx; *y = g_oy + vy;
+   *x = ox + vx; *y = oy + vy;
    return 1;
 }
 

@@ -229,9 +229,19 @@ static struct region *add_region(size_t need) {
     * make every later GiB-scale request unsatisfiable. Big-high/small-low keeps
     * the large contiguous span at the top intact for as long as possible. */
    const int from_top = (least > HEAP_SIZE);
+   /* BELOW 2 GB FIRST. Real 32-bit Darwin handed out heap addresses under
+    * 0x80000000, and i386 code leans on it: a pointer is POSITIVE as a signed
+    * int. PvZ's reanim image lookup takes `Image*` or a small id through
+    * `if (id <= 1000) return base + (id-1)*20` (signed): a 0x8xxxxxxx heap
+    * pointer is negative, passes, and the result is wild (SIGSEGV entering
+    * Adventure mode). The upper window is the spill. Guard heap-below-2g;
+    * M64_HEAP_HIGH_FIRST=1 restores the old order. */
+   static int high_first = -1;
+   if (high_first < 0) { high_first = getenv("M64_HEAP_HIGH_FIRST") ? 1 : 0; }
    for (int band = 0; band < (fixed_regions ? 1 : 2); ++band) {
-      const uintptr_t blo = (band == 0) ? HEAP_SCAN_LO : HEAP_OVERFLOW_LO;
-      const uintptr_t bhi = (band == 0) ? HEAP_SCAN_HI : HEAP_OVERFLOW_HI;
+      const int primary_band = (fixed_regions || high_first) ? (band == 0) : (band == 1);
+      const uintptr_t blo = primary_band ? HEAP_SCAN_LO : HEAP_OVERFLOW_LO;
+      const uintptr_t bhi = primary_band ? HEAP_SCAN_HI : HEAP_OVERFLOW_HI;
       for (int pass = 0; pass < 2; ++pass) {
          const size_t rsize = (pass == 0) ? want : least;
          if (pass == 1 && least >= want) { break; }  /* nothing smaller to try */
@@ -253,7 +263,7 @@ static struct region *add_region(size_t need) {
                           g_hc->nregions - 1, (unsigned long long)(uintptr_t)r->base,
                           (unsigned long long)(uintptr_t)r->end,
                           (unsigned long long)(rsize / (1024 * 1024)),
-                          band == 0 ? "primary" : "mmap-overflow");
+                          primary_band ? "high" : "low");
                }
                return r;
             }

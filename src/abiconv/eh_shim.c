@@ -637,8 +637,9 @@ static int eh_scan_lsda(uint32_t lsda_addr, uint32_t region, uint32_t orig_pc,
  * diagnostic path — external RTTI type_info pointers (__ZTI*) are currently
  * truncated native libstdc++ addresses (the typeinfo-truncation family the RTTI
  * agent owns), so a thrown type_info often is NOT readable; never fault on it. */
+extern uint64_t cb_readable_span(uint64_t p, uint64_t want);   /* cb_bridge.c */
 static int eh_ptr_mapped(uint32_t p) {
-   if (p >= 0x88000000u && p < 0xF0000000u) return 1;     /* shim heap */
+   if (cb_readable_span(p, 8) >= 8) return 1;             /* shim heap, anything mapped */
    for (int i = 0; i < g_img_n; i++) {
       struct eh_image *im = &g_imgs[i];
       if (im->text_base && (uintptr_t)p >= im->text_base &&
