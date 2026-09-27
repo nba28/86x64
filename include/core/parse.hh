@@ -394,7 +394,7 @@ namespace MachO {
        * hit is honoured as positive evidence and passes. Measured population in
        * Halo's __DATA,__data: 42 of ~5000 detected words.
        * Kill switch: M64_NO_ZEROFILL_TARGET_GATE. */
-      bool zerofill_target_unattested(std::size_t vmaddr) const;
+      bool zerofill_target_unattested(std::size_t vmaddr, bool sibling = false) const;
 
       /* RECORD-FIELD (neighbour/stride) gate — see section.cc DataParser.
        *
@@ -432,6 +432,12 @@ namespace MachO {
        * the same field of sibling records.
        *
        * Kill switch M64_NO_RECORD_FIELD_GATE=1. */
+      /* PACKED-PAIR FAMILY gate: the word is one of >=3 nearby words sharing
+       * its exact nonzero low 16 bits with differing high halves, at least one
+       * of which addresses nothing -- a table of packed (hi16,lo16) records
+       * (zlib's {op,bits,val} codes), not addresses. */
+      bool packed_pair_family(const Image& img, std::size_t slot_vmaddr,
+                              uint32_t value) const;
       bool record_field_neighbours_are_integers(const Image& img,
                                                 std::size_t slot_vmaddr) const;
 

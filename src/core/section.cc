@@ -859,7 +859,8 @@ namespace MachO {
                 * that looks like a real function entry. */
                if (bits == Bits::M32 && !env.have_classic_local_relocs &&
                    (!exec || !env.code_target_has_entry_evidence(img, value)) &&
-                   env.record_field_neighbours_are_integers(img, loc.vmaddr)) {
+                   (env.record_field_neighbours_are_integers(img, loc.vmaddr) ||
+                    env.packed_pair_family(img, loc.vmaddr, value))) {
                   break;   /* integer field of a record array -> constant */
                }
                /* CLASSIC-RELOC AUTHORITATIVE GATE (M32 classic images). A

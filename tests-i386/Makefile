@@ -533,6 +533,18 @@ cgl-fullscreen: $(BUILD_DIR)/99_cgl_fullscreen.i386
 	$(BUILD_DIR)/99_cgl_fullscreen.ab >/dev/null 2>&1; on=$$?; \
 	M64_NO_CGL_FULLSCREEN_BRIDGE=1 $(BUILD_DIR)/99_cgl_fullscreen.ab >/dev/null 2>&1; off=$$?; \
 	[ "$$on/$$off" = 42/7 ] && echo "cgl-fullscreen: PASS" || { echo "cgl-fullscreen: FAIL (on=$$on off=$$off)"; exit 1; }
+# packed-pair-table: A/B guard that a table of packed (hi16,lo16) words whose
+# members alias an attested zero-fill object stays constant (PvZ zlib lenfix ->
+# "invalid distance too far back"). ON exits 42; OFF (M64_NO_PACKED_FAMILY=1 at
+# translate time) relocates members and exits 1.
+packed-pair-table: $(BUILD_DIR)/99_packed_pair_table.i386
+	@r=$$(for arm in on off; do \
+	  e=""; [ $$arm = off ] && e="M64_NO_PACKED_FAMILY=1"; \
+	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_packed_pair_table.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_packed_pair_table.$$arm; echo "$$arm=$$?"; \
+	done 2>/dev/null | tr '\n' ' '); \
+	[ "$$r" = "on=42 off=1 " ] && echo "packed-pair-table: PASS" || { echo "packed-pair-table: FAIL ($$r)"; exit 1; }
 # setjmp-frame: guard that setjmp/longjmp from translated code use the i386
 # 72-byte jmp_buf (libabiconv capture) instead of native _setjmp's 148-byte
 # write over the caller's frame (PvZ saved-esi clobber). Runtime fix: the OFF

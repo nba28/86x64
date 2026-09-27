@@ -332,7 +332,7 @@ namespace MachO {
    }
 
    template <Bits bits>
-   bool ParseEnv<bits>::zerofill_target_unattested(std::size_t vmaddr) const {
+   bool ParseEnv<bits>::zerofill_target_unattested(std::size_t vmaddr, bool sibling) const {
       static const bool disabled =
          std::getenv("M64_NO_ZEROFILL_TARGET_GATE") != nullptr;
       if (disabled) { return false; }
@@ -371,7 +371,11 @@ namespace MachO {
              * zerofill-stripped-ptr; OFF arm M64_ZF_GATE_STRIPPED=1. */
             static const bool gate_stripped =
                std::getenv("M64_ZF_GATE_STRIPPED") != nullptr;
-            if (!gate_stripped) {
+            /* A SIBLING (record-field column evidence) keeps the armed test:
+             * there symbol absence is one vote among several exact ones, not
+             * the sole verdict on a lone word (record-field-pair's column into
+             * a -x fixture's symbol-free zero-fill). */
+            if (!gate_stripped && !sibling) {
                const std::size_t end = sec->sect.addr + sec->sect.size;
                const auto first = func_syms.lower_bound(sec->sect.addr);
                if (first == func_syms.end() || *first >= end) { return false; }
@@ -452,14 +456,14 @@ namespace MachO {
             fprintf(stderr, "[recfld]   sib %#010x sect=%.16s,%.16s exec=%d "
                     "zf=%d cstr=%d codeint=%d codeconst=%d lacksentry=%d\n",
                     v, segn, secn, (int)in_exec,
-                    (int)zerofill_target_unattested(v),
+                    (int)zerofill_target_unattested(v, true),
                     (int)cstring_interior_alias(img, v),
                     (int)code_interior_alias(v),
                     (int)code_alias_is_constant(v),
                     (int)code_alias_lacks_entry_evidence(img, v));
          }
          if (!in_section) { return false; }         /* addresses nothing: integer */
-         if (zerofill_target_unattested(v)) { return false; }
+         if (zerofill_target_unattested(v, true)) { return false; }
          if (cstring_interior_alias(img, v)) { return false; }
          if (in_exec && code_interior_alias(v)) { return false; }
          return true;                               /* nothing declassifies it */
@@ -510,8 +514,7 @@ namespace MachO {
              * final. Failing to fire on a genuine stride-16 array whose stride-8
              * view contains a pointer is the safe direction to be wrong in. */
             for (std::size_t stride : strides) {
-               int present = 0, aliasing_int = 0;
-               bool pointer_sibling = false;
+               int present = 0, aliasing_int = 0, pointer_siblings = 0;
                for (int k = -3; k <= 3; ++k) {
                   if (k == 0) { continue; }
                   const long long a =
@@ -558,7 +561,7 @@ namespace MachO {
                      break;
                   }
                   if (!in_section) { continue; }       /* not address-shaped */
-                  if (sibling_is_pointerish(w)) { pointer_sibling = true; continue; }
+                  if (sibling_is_pointerish(w)) { ++pointer_siblings; continue; }
                   ++aliasing_int;
                }
                /* Demand the FULL sibling set: a partial one is what a one-off
@@ -567,12 +570,72 @@ namespace MachO {
                   fprintf(stderr, "[recfld] slot=%#zx stride=%zu present=%d "
                           "aliasing_int=%d pointer_sibling=%d%s\n",
                           slot_vmaddr, stride, present, aliasing_int,
-                          (int)pointer_sibling, present < 6 ? "" : "  <- DECIDES");
+                          pointer_siblings, present < 6 ? "" : "  <- DECIDES");
                }
                if (present < 6) { continue; }   /* not a usable hypothesis yet */
-               return !pointer_sibling && aliasing_int >= 3;
+               /* ★PROVEN-INTEGER MAJORITY, not a single-sibling veto. A jump
+                * table's siblings are all basic-block heads, never
+                * mid-instruction (aliasing_int stays 0), and a real pointer
+                * column's siblings are pointers, so >=3 exact mid-instruction /
+                * unattested siblings cannot be either; a packed integer that
+                * merely lands on an instruction boundary (~1 in 3 odds per
+                * word) must not veto them. MEASURED on PvZ's static zlib
+                * `lenfix` ({op,bits,val} words, 0x003c0800 ...): 4 siblings
+                * mid-instruction, 0x000c0800 on a boundary -> 58 codes
+                * "relocated", every inflate of a fixed-Huffman block corrupt
+                * ("invalid distance too far back"). OFF arm:
+                * M64_RECFIELD_STRICT_VETO=1. */
+               static const bool strict_veto =
+                  std::getenv("M64_RECFIELD_STRICT_VETO") != nullptr;
+               if (strict_veto) { return pointer_siblings == 0 && aliasing_int >= 3; }
+               return aliasing_int >= 3 && aliasing_int > pointer_siblings;
             }
             return false;
+         }
+         return false;
+      }
+      return false;
+   }
+
+   template <Bits bits>
+   bool ParseEnv<bits>::packed_pair_family(const Image& img,
+                                           std::size_t slot_vmaddr,
+                                           uint32_t value) const {
+      static const bool disabled =
+         std::getenv("M64_NO_PACKED_FAMILY") != nullptr;
+      if (disabled) { return false; }
+      const uint32_t lo = value & 0xffffu;
+      /* lo==0 is how genuine 64K-aligned addresses look; never evidence. */
+      if (lo == 0) { return false; }
+      const auto addresses_something = [this](uint32_t v) {
+         for (Segment<bits> *seg : archive.segments()) {
+            if (!seg->contains_vmaddr(v)) { continue; }
+            for (Section<bits> *sec : seg->sections) {
+               if (sec->contains_vmaddr(v)) { return true; }
+            }
+            return false;
+         }
+         return false;
+      };
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(slot_vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(slot_vmaddr)) { continue; }
+            if (sec->sect.offset == 0) { return false; }
+            const std::size_t lo_a = sec->sect.addr, hi_a = sec->sect.addr + sec->sect.size;
+            int family = 0, homeless = 0;
+            /* ponytail: fixed +-32-word window; widen only if a measured table
+             * needs it (a wider window samples unrelated neighbours). */
+            for (long k = -32; k <= 32; ++k) {
+               const long long a = (long long)slot_vmaddr + 4 * k;
+               if (k == 0 || a < (long long)lo_a || a + 4 > (long long)hi_a) { continue; }
+               const uint32_t w = img.template at<uint32_t>(
+                  sec->sect.offset + ((std::size_t)a - sec->sect.addr));
+               if ((w & 0xffffu) != lo || (w >> 16) == (value >> 16)) { continue; }
+               ++family;
+               if (!addresses_something(w)) { ++homeless; }
+            }
+            return family >= 3 && homeless >= 1;
          }
          return false;
       }
