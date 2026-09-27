@@ -352,6 +352,11 @@ _NSRectFillListWithGrays
 __dealloc
 __objc_setNilReceiver
 __setjmp
+_setjmp
+_sigsetjmp
+_longjmp
+__longjmp
+_siglongjmp
 _class_nextMethodList
 _objc_exception_extract
 _objc_exception_match

@@ -524,6 +524,15 @@ pic-push-mem: $(BUILD_DIR)/99_pic_push_mem.i386
 	  $(BUILD_DIR)/99_pic_push_mem.$$arm; echo "$$arm=$$?"; \
 	done 2>/dev/null | tr '\n' ' '); \
 	case "$$r" in *"on=42 "*) case "$$r" in *"off=42"*) echo "pic-push-mem: FAIL ($$r)"; exit 1;; esac; echo "pic-push-mem: PASS";; *) echo "pic-push-mem: FAIL ($$r)"; exit 1;; esac
+# setjmp-frame: guard that setjmp/longjmp from translated code use the i386
+# 72-byte jmp_buf (libabiconv capture) instead of native _setjmp's 148-byte
+# write over the caller's frame (PvZ saved-esi clobber). Runtime fix: the OFF
+# arm is a libabiconv built before the fix (verified once by hand: faults).
+setjmp-frame: $(BUILD_DIR)/99_setjmp_frame.i386
+	@bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	  -o $(BUILD_DIR)/99_setjmp_frame.on $< >/dev/null 2>&1; \
+	$(BUILD_DIR)/99_setjmp_frame.on; r=$$?; \
+	[ $$r = 42 ] && echo "setjmp-frame: PASS" || { echo "setjmp-frame: FAIL ($$r)"; exit 1; }
 # prologue-sched-entry: A/B guard that a vtable slot aimed at a function whose
 # frame setup has a scheduled instruction inside it is relocated (PvZ). ON
 # exits 42; OFF (M64_STRICT_PROLOGUE=1 at translate time) faults.

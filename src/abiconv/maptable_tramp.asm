@@ -575,10 +575,17 @@
 ;;   [buf+32] rsp (after the 4-byte i386 ret pop)   [buf+40] resume eip
 ;;   [buf+48] EXC32_MAGIC
 ;; rsp is kept full-width (FC threads run translated code on >4GB stacks);
-;; code addresses are always low-4GB. Restored ONLY by x64_exc_longjmp below
-;; (no iWeb payload imports longjmp; the pair stays consistent by interposing
-;; both ends).
+;; code addresses are always low-4GB. Restored ONLY by x64_exc_longjmp below;
+;; the pair stays consistent by interposing both ends. C setjmp/sigsetjmp take
+;; the same path: abigen's forward to native _setjmp wrote 148 bytes over the
+;; caller's frame (PvZ jmp_buf at ebp-0x60 clobbered the saved esi).
+;; ponytail: the signal mask is not saved/restored; add it if a target
+;; longjmps out of a signal handler.
 	global	____setjmp
+	global	___setjmp
+	global	___sigsetjmp
+___setjmp:
+___sigsetjmp:
 ____setjmp:
 	cmp	qword [rel __dyld_stub_binder_flag],	0
 	je	.l1
@@ -603,6 +610,24 @@ ____setjmp:
 ;; void x64_exc_longjmp(uint64_t *regs, int val) — SysV entry, called by
 ;; shim_objc_exception_throw. Restores the ____setjmp capture; the resumed
 ;; _setjmp call site sees eax=val (nonzero -> NS_HANDLER branch).
+;; i386 longjmp(buf, val) family -> x64_exc_longjmp; val 0 resumes as 1.
+	global	___longjmp
+	global	____longjmp
+	global	___siglongjmp
+___longjmp:
+____longjmp:
+___siglongjmp:
+	cmp	qword [rel __dyld_stub_binder_flag],	0
+	je	.l1
+	mov	rsp,	qword [rel __dyld_stub_binder_flag]
+	add	rsp,	16
+	mov	qword [rel __dyld_stub_binder_flag],	0
+.l1:
+	mov	edi,	dword [rsp + 4]
+	mov	esi,	dword [rsp + 8]
+	mov	eax,	1
+	test	esi,	esi
+	cmovz	esi,	eax
 	global	_x64_exc_longjmp
 _x64_exc_longjmp:
 	mov	eax,	esi

@@ -921,10 +921,15 @@ uint32_t shim_Ss_assign_fill(uint32_t *a) { return g_assign_fill(a, 1); }
 uint32_t shim_Ss_insert_iter_ch(uint32_t *a) { return g_insert_iter_ch(a, 1); }
 uint32_t shim_Sw_erase_range(uint32_t *a) { return g_erase_range(a, 4); }
 uint32_t shim_Sw_push_back(uint32_t *a)   { return g_push_back(a, 4); }
-/* const rbegin()/rend(): a one-pointer reverse_iterator, returned in eax
- * (Darwin i386 returns small trivially-copyable structs in registers). */
-uint32_t shim_Sw_crbegin(uint32_t *a)     { return g_cend(a, 4); }
-uint32_t shim_Sw_crend(uint32_t *a)       { return g_cbegin(a, 4); }
+/* const rbegin()/rend(): a one-pointer reverse_iterator returned through a
+ * hidden sret slot (GCC i386 callers `subl $4,%esp` after the call, i.e. the
+ * callee pops it — MTSHIM_SRET). a[0] = sret, a[1] = this. */
+uint32_t shim_Sw_crbegin(uint32_t *a) {
+    *(uint32_t *)(uintptr_t)a[0] = g_cend(a + 1, 4);   return a[0];
+}
+uint32_t shim_Sw_crend(uint32_t *a) {
+    *(uint32_t *)(uintptr_t)a[0] = g_cbegin(a + 1, 4); return a[0];
+}
 /* std::allocator<T> ctors/dtors: stateless, nothing to do. */
 uint32_t shim_allocator_nop(uint32_t *a)  { return a[0]; }
 

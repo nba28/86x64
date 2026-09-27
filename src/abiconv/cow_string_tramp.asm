@@ -248,8 +248,8 @@
 	MTSHIM      ____ZNSs7replaceEN9__gnu_cxx17__normal_iteratorIPcSsEES2_S1_S1_,           _shim_Ss_replace_iter
 	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE5eraseEmm,                               _shim_Sw_erase_range
 	MTSHIM      ____ZNSbIwSt11char_traitsIwESaIwEE9push_backEw,                            _shim_Sw_push_back
-	MTSHIM      ____ZNKSbIwSt11char_traitsIwESaIwEE6rbeginEv,                              _shim_Sw_crbegin
-	MTSHIM      ____ZNKSbIwSt11char_traitsIwESaIwEE4rendEv,                                _shim_Sw_crend
+	MTSHIM_SRET ____ZNKSbIwSt11char_traitsIwESaIwEE6rbeginEv,                              _shim_Sw_crbegin
+	MTSHIM_SRET ____ZNKSbIwSt11char_traitsIwESaIwEE4rendEv,                                _shim_Sw_crend
 	MTSHIM      ____ZNSaIcEC2Ev,                                                           _shim_allocator_nop
 	MTSHIM      ____ZNSaIcED2Ev,                                                           _shim_allocator_nop
 	MTSHIM      ____ZNSaIwEC2Ev,                                                           _shim_allocator_nop
