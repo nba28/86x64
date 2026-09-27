@@ -546,6 +546,14 @@ packed-pair-table: $(BUILD_DIR)/99_packed_pair_table.i386
 	  $(BUILD_DIR)/99_packed_pair_table.$$arm; echo "$$arm=$$?"; \
 	done 2>/dev/null | tr '\n' ' '); \
 	[ "$$r" = "on=42 off=1 u16off=3 " ] && echo "packed-pair-table: PASS" || { echo "packed-pair-table: FAIL ($$r)"; exit 1; }
+# abigen-arg-extend: static guard that no generated bridge loads a char/short
+# argument into a NARROW register (mov dil, byte [...]). The x86_64 caller must
+# extend sub-32-bit args; GLEngine glColor4ub indexes with %esi (PvZ SIGBUS).
+# Pre-fix abiconv.asm held such loads (OFF arm = the generator before 2026-09-27).
+abigen-arg-extend:
+	@n=$$(cat $(PROJ_ROOT)/build/src/abiconv/abiconv.asm $(PROJ_ROOT)/build/src/abiconv/abiconv_legacy.asm | \
+	  grep -cE "^[[:space:]]+mov[[:space:]]+(dil|sil|dl|cl|r8b|r9b|di|si|dx|cx|r8w|r9w),[[:space:]]+(byte|word)"); \
+	[ "$$n" = 0 ] && echo "abigen-arg-extend: PASS" || { echo "abigen-arg-extend: FAIL ($$n narrow arg loads)"; exit 1; }
 # setjmp-frame: guard that setjmp/longjmp from translated code use the i386
 # 72-byte jmp_buf (libabiconv capture) instead of native _setjmp's 148-byte
 # write over the caller's frame (PvZ saved-esi clobber). Runtime fix: the OFF

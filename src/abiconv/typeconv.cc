@@ -240,6 +240,14 @@ void conversion::convert_int(std::ostream& os, CXTypeKind type_kind, const Locat
             to_width = from_width;
             opcode = "mov";
          }
+      } else if (dst.kind() != Location::Kind::MEM && to_width < reg_width::D) {
+         /* char/short INTO A REGISTER: the x86_64 convention (as Apple's
+          * compilers implement it) has the CALLER extend sub-32-bit args to 32
+          * bits, and callees rely on it -- GLEngine's glColor4ub_Exec indexes a
+          * table with %esi straight away. A plain `mov dil, byte [...]` leaves
+          * bits 8..31 as garbage (PvZ: glColor4ub red=0x8a9f7000 -> SIGBUS). */
+         opcode = get_type_signed(type_kind) ? "movsx" : "movzx";
+         to_width = reg_width::D;
       } else {
          opcode = "mov";
          from_width = to_width;
