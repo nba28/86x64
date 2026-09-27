@@ -554,6 +554,14 @@ abigen-arg-extend:
 	@n=$$(cat $(PROJ_ROOT)/build/src/abiconv/abiconv.asm $(PROJ_ROOT)/build/src/abiconv/abiconv_legacy.asm | \
 	  grep -cE "^[[:space:]]+mov[[:space:]]+(dil|sil|dl|cl|r8b|r9b|di|si|dx|cx|r8w|r9w),[[:space:]]+(byte|word)"); \
 	[ "$$n" = 0 ] && echo "abigen-arg-extend: PASS" || { echo "abigen-arg-extend: FAIL ($$n narrow arg loads)"; exit 1; }
+# pthread-attr-size: guard that abigen marshals Darwin's arch-sized pthread
+# opaque bodies at the i386 size (attr 36, not 56). OFF arm = a libabiconv from
+# before the fix (verified by hand: exits 1, canary overwritten).
+pthread-attr-size: $(BUILD_DIR)/99_pthread_attr_size.i386
+	@bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	  -o $(BUILD_DIR)/99_pthread_attr_size.on $< >/dev/null 2>&1; \
+	$(BUILD_DIR)/99_pthread_attr_size.on; r=$$?; \
+	[ $$r = 42 ] && echo "pthread-attr-size: PASS" || { echo "pthread-attr-size: FAIL ($$r)"; exit 1; }
 # setjmp-frame: guard that setjmp/longjmp from translated code use the i386
 # 72-byte jmp_buf (libabiconv capture) instead of native _setjmp's 148-byte
 # write over the caller's frame (PvZ saved-esi clobber). Runtime fix: the OFF

@@ -455,6 +455,30 @@ bool is_opaque_handle_type(CXType written) {
    return false;
 }
 
+/* Darwin _opaque_pthread_*_t __opaque lengths per arch (sys/_pthread/
+ * _pthread_types.h: __PTHREAD_*_SIZE__ for __LP64__ vs i386). */
+static bool pthread_opaque_lens(CXType record, arch from, arch to,
+                                long long& from_len, long long& to_len) {
+   static const struct { const char *name; long long i386, x64; } k[] = {
+      {"_opaque_pthread_attr_t", 36, 56},       {"_opaque_pthread_cond_t", 24, 40},
+      {"_opaque_pthread_condattr_t", 4, 8},     {"_opaque_pthread_mutex_t", 40, 56},
+      {"_opaque_pthread_mutexattr_t", 8, 8},    {"_opaque_pthread_once_t", 4, 8},
+      {"_opaque_pthread_rwlock_t", 124, 192},   {"_opaque_pthread_rwlockattr_t", 12, 16},
+   };
+   CXString sp = clang_getTypeSpelling(clang_getCanonicalType(record));
+   std::string name = clang_getCString(sp);
+   clang_disposeString(sp);
+   if (name.rfind("struct ", 0) == 0) { name = name.substr(7); }
+   for (const auto& e : k) {
+      if (name == e.name) {
+         from_len = from == arch::i386 ? e.i386 : e.x64;
+         to_len = to == arch::i386 ? e.i386 : e.x64;
+         return true;
+      }
+   }
+   return false;
+}
+
 void conversion::convert_record(std::ostream& os, CXType record, MemoryLocation src,
                                 MemoryLocation dst) {
    record_decl decl(record);
@@ -485,7 +509,34 @@ void conversion::convert_record(std::ostream& os, CXType record, MemoryLocation 
       src.align_field(field_type, from_arch, pack_cap);
       dst.align_field(field_type, to_arch, pack_cap);
 
-      if (is_opaque_handle_type(written)) {
+      long long from_len = 0, to_len = 0;
+      if (field_type.kind == CXType_ConstantArray &&
+          pthread_opaque_lens(record, from_arch, to_arch, from_len, to_len)) {
+         /* Darwin's _opaque_pthread_*_t.__opaque is ARCH-SIZED (the headers
+          * pick __PTHREAD_*_SIZE__ by __LP64__); the parsed x86_64 length on
+          * the i386 side overran the caller's object on copy-back (PvZ: a
+          * 40-byte i386 pthread_attr_t on the stack got 60 bytes -> saved
+          * regs + return address zeroed). Copy the common prefix, zero the
+          * rest of the destination; the state is opaque either way. */
+         const long long n = std::min(from_len, to_len);
+         push(os, rcx, src, dst);
+         push(os, rdi, src, dst);
+         push(os, rsi, src, dst);
+         push(os, rax, src, dst);
+         emit_inst(os, "lea", "rdi", dst.op());
+         emit_inst(os, "lea", "rsi", src.op());
+         emit_inst(os, "mov", "ecx", n);
+         emit_inst(os, "rep movsb");
+         if (to_len > n) {
+            emit_inst(os, "xor", "eax", "eax");
+            emit_inst(os, "mov", "ecx", to_len - n);
+            emit_inst(os, "rep stosb");
+         }
+         pop(os, rax, src, dst);
+         pop(os, rsi, src, dst);
+         pop(os, rdi, src, dst);
+         pop(os, rcx, src, dst);
+      } else if (is_opaque_handle_type(written)) {
          /* Opaque Memory Manager Handle field: marshal the pointer VALUE, do
           * NOT deep-copy/dereference it (see is_opaque_handle_type). */
          os << "\t; opaque Handle field '" << to_string(written)
