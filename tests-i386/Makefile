@@ -76,7 +76,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: pic-push-mem prologue-sched-entry cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr sib-rbp-base-wrap standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn
+.PHONY: pic-push-mem prologue-sched-entry cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g sib-rbp-base-wrap standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -562,6 +562,15 @@ pthread-attr-size: $(BUILD_DIR)/99_pthread_attr_size.i386
 	  -o $(BUILD_DIR)/99_pthread_attr_size.on $< >/dev/null 2>&1; \
 	$(BUILD_DIR)/99_pthread_attr_size.on; r=$$?; \
 	[ $$r = 42 ] && echo "pthread-attr-size: PASS" || { echo "pthread-attr-size: FAIL ($$r)"; exit 1; }
+# heap-below-2g: guard that malloc pointers are positive as signed int32 (real
+# i386 Darwin's heap sat below 2 GB; PvZ range-checks Image* signed). OFF arm =
+# M64_HEAP_HIGH_FIRST=1 at run time.
+heap-below-2g: $(BUILD_DIR)/99_heap_below_2g.i386 $(BUILD_DIR)/libabiconv.dylib
+	@bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	  -o $(BUILD_DIR)/99_heap_below_2g.on $< >/dev/null 2>&1; \
+	$(BUILD_DIR)/99_heap_below_2g.on; on=$$?; \
+	M64_HEAP_HIGH_FIRST=1 $(BUILD_DIR)/99_heap_below_2g.on; off=$$?; \
+	[ $$on = 42 ] && [ $$off = 1 ] && echo "heap-below-2g: PASS" || { echo "heap-below-2g: FAIL (on=$$on off=$$off)"; exit 1; }
 # pthread-stack-np: guard that the pthread_t-taking _np introspection calls
 # resolve the i386 thread token (stack answers = the i386 stack in use). OFF
 # arm = the previous libabiconv (verified by hand: faults dereferencing the token).
@@ -617,6 +626,11 @@ zerofill-stripped-ptr: $(BUILD_DIR)/99_zerofill_stripped_ptr.i386
 # M64_NO_ZEROFILL_TARGET_GATE=1 at TRANSLATE time.
 zerofill-target-pair: $(BUILD_DIR)/99_zerofill_target_pair.i386
 	@bash zerofill_target_pair_test.sh
+# zerofill-code-literal: A/B guard that a __data pointer into symbol-free
+# zero-fill space is relocated when the code addresses that object absolutely
+# (PvZ's global-pointer table). OFF arm is M64_NO_ZF_CODE_LITERAL=1.
+zerofill-code-literal: $(BUILD_DIR)/99_zerofill_code_literal.i386
+	@bash zerofill_code_literal_test.sh
 # jt-spill-slot: A/B guard that a PIC relative-offset switch jump table whose
 # TABLE BASE IS SPILLED TO A FRAME SLOT is still recognised and relocated.
 # DetectJumpTables tracked the base only through registers, lost it across the
@@ -1835,6 +1849,13 @@ $(BUILD_DIR)/99_zerofill_target_pair.i386: $(BUILD_DIR)/99_zerofill_target_pair.
 # 99_zerofill_stripped_ptr: linked with -x so its zero-fill section has NO
 # symbol at all — iPhoto's stripped __common. Overrides %.i386.
 $(BUILD_DIR)/99_zerofill_stripped_ptr.i386: $(BUILD_DIR)/99_zerofill_stripped_ptr.o
+	$(LD) $(LDFLAGS_I386) -x -e _main -o $@ $<
+
+# 99_zerofill_code_literal: -x (symbol-free below g_anchor) and non-PIC so the
+# code stores to g_var through an absolute address. Overrides %.i386.
+$(BUILD_DIR)/99_zerofill_code_literal.o: $(SRC_DIR)/99_zerofill_code_literal.c | $(BUILD_DIR)
+	$(CC_I386) -mdynamic-no-pic -O0 -c -o $@ $<
+$(BUILD_DIR)/99_zerofill_code_literal.i386: $(BUILD_DIR)/99_zerofill_code_literal.o
 	$(LD) $(LDFLAGS_I386) -x -e _main -o $@ $<
 
 # 99_record_field_pair: linked with -x for the same reason — the sibling values

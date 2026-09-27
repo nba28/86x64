@@ -391,10 +391,19 @@ namespace MachO {
        *
        * Deliberately NARROW: zero-fill targets only, M32 only, and only when the
        * image has no local reloc table to speak authoritatively. An exact symbol
-       * hit is honoured as positive evidence and passes. Measured population in
-       * Halo's __DATA,__data: 42 of ~5000 detected words.
+       * hit is honoured as positive evidence and passes, and so is an exact
+       * 32-bit literal of the target in an instruction section (the code
+       * addresses that object absolutely). Measured population in Halo's
+       * __DATA,__data: 42 of ~5000 detected words.
        * Kill switch: M64_NO_ZEROFILL_TARGET_GATE. */
-      bool zerofill_target_unattested(std::size_t vmaddr, bool sibling = false) const;
+      bool zerofill_target_unattested(const Image& img, std::size_t vmaddr,
+                                      bool sibling = false) const;
+      /* Lazily built by zerofill_target_unattested: every aligned-or-not
+       * 4-byte window of the instruction sections whose value lands in a
+       * zero-fill section. */
+      mutable std::set<uint32_t> zf_code_literals;
+      void build_zf_code_literals(const Image& img) const;
+      mutable bool zf_code_literals_built = false;
 
       /* RECORD-FIELD (neighbour/stride) gate — see section.cc DataParser.
        *

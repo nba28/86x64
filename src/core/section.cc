@@ -688,7 +688,7 @@ namespace MachO {
                 * only when no local reloc table can speak authoritatively; an
                 * exact nlist hit passes as positive evidence. */
                if (bits == Bits::M32 && !exec && !env.have_classic_local_relocs &&
-                   env.zerofill_target_unattested(value)) {
+                   env.zerofill_target_unattested(img, value)) {
                   break;   /* unattested zero-fill target -> constant */
                }
                if (exec && in_objc_symbols) {
@@ -3360,7 +3360,9 @@ namespace MachO {
       Location relloc;
       sect.nreloc = relocs.size();
       env.allocate(sect.nreloc * RelocationInfo<bits>::size(), relloc);
-      sect.reloff = relloc.offset;
+      /* No relocations -> reloff 0, like zerofill above: ld rejects a
+       * "non-zero reloff" on a section whose nreloc is 0. */
+      sect.reloff = relocs.empty() ? 0 : relloc.offset;
    }
 
    template <Bits bits>

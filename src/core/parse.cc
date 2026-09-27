@@ -332,7 +332,35 @@ namespace MachO {
    }
 
    template <Bits bits>
-   bool ParseEnv<bits>::zerofill_target_unattested(std::size_t vmaddr, bool sibling) const {
+   void ParseEnv<bits>::build_zf_code_literals(const Image& img) const {
+      std::vector<std::pair<std::size_t, std::size_t>> zf;   /* [lo, hi) */
+      for (Segment<bits> *seg : archive.segments()) {
+         for (Section<bits> *sec : seg->sections) {
+            const uint32_t st = sec->sect.flags & SECTION_TYPE;
+            if (st == S_ZEROFILL || st == S_GB_ZEROFILL) {
+               zf.emplace_back(sec->sect.addr, sec->sect.addr + sec->sect.size);
+            }
+         }
+      }
+      if (zf.empty()) { return; }
+      for (Segment<bits> *seg : archive.segments()) {
+         for (Section<bits> *sec : seg->sections) {
+            if (!(sec->sect.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) ||
+                sec->sect.offset == 0 || sec->sect.size < 4) { continue; }
+            const std::size_t off = sec->sect.offset;
+            for (std::size_t i = 0; i + 4 <= sec->sect.size; ++i) {
+               const uint32_t v = img.at<uint32_t>(off + i);
+               for (const auto& r : zf) {
+                  if (v >= r.first && v < r.second) { zf_code_literals.insert(v); break; }
+               }
+            }
+         }
+      }
+   }
+
+   template <Bits bits>
+   bool ParseEnv<bits>::zerofill_target_unattested(const Image& img, std::size_t vmaddr,
+                                                   bool sibling) const {
       static const bool disabled =
          std::getenv("M64_NO_ZEROFILL_TARGET_GATE") != nullptr;
       if (disabled) { return false; }
@@ -379,6 +407,23 @@ namespace MachO {
                const std::size_t end = sec->sect.addr + sec->sect.size;
                const auto first = func_syms.lower_bound(sec->sect.addr);
                if (first == func_syms.end() || *first >= end) { return false; }
+            }
+            /* The CODE addresses this exact object (`movl %eax, 0x374250`):
+             * as good an anchor as a symbol. ★MEASURED on PvZ, locals-stripped
+             * with its only __common symbols (Mach notify exports) at the END
+             * of the section: a __data table of 1365 pointers to its globals
+             * sat in "symbol-free" space and stayed raw i386 (SIGSEGV after
+             * "Click to start"); 1259 of them are code literals. Halo's
+             * 0x0048021C / 0x005802D0 are not. Guard zerofill-code-literal;
+             * OFF arm M64_NO_ZF_CODE_LITERAL=1. */
+            static const bool no_code_literal =
+               std::getenv("M64_NO_ZF_CODE_LITERAL") != nullptr;
+            if (!no_code_literal) {
+               if (!zf_code_literals_built) {
+                  zf_code_literals_built = true;
+                  build_zf_code_literals(img);
+               }
+               if (zf_code_literals.count(static_cast<uint32_t>(vmaddr))) { return false; }
             }
             return true;   /* no anchoring symbol in this section -> constant */
          }
@@ -456,14 +501,14 @@ namespace MachO {
             fprintf(stderr, "[recfld]   sib %#010x sect=%.16s,%.16s exec=%d "
                     "zf=%d cstr=%d codeint=%d codeconst=%d lacksentry=%d\n",
                     v, segn, secn, (int)in_exec,
-                    (int)zerofill_target_unattested(v, true),
+                    (int)zerofill_target_unattested(img, v, true),
                     (int)cstring_interior_alias(img, v),
                     (int)code_interior_alias(v),
                     (int)code_alias_is_constant(v),
                     (int)code_alias_lacks_entry_evidence(img, v));
          }
          if (!in_section) { return false; }         /* addresses nothing: integer */
-         if (zerofill_target_unattested(v, true)) { return false; }
+         if (zerofill_target_unattested(img, v, true)) { return false; }
          if (cstring_interior_alias(img, v)) { return false; }
          if (in_exec && code_interior_alias(v)) { return false; }
          return true;                               /* nothing declassifies it */
