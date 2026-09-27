@@ -168,6 +168,7 @@ static int ad_view_owns_click(EventRef e) {
  * the real pointer and passes a genuine low pointer through untouched, so it is
  * correct for both. (This bit me on the first cut of this file.) */
 extern uint64_t x64_objc_unwrap(uint32_t h);
+extern int cglfs_map_global(double *x, double *y);   /* cgl_fullscreen_shim.m */
 
 /* OSStatus SendEventToEventTarget(EventRef, EventTargetRef) */
 uint32_t shim_SendEventToEventTarget(uint32_t *args) {
@@ -181,6 +182,22 @@ uint32_t shim_SendEventToEventTarget(uint32_t *args) {
    const int    is_down = (cl == kEventClassMouse && ki == kEventMouseDown);
 
    if (is_down) { ad_ensure_sentinel(); }
+
+   /* A fullscreen CGL surface (cgl_fullscreen_shim.m) is letterboxed and
+    * scaled on the physical screen, while the app reasons in its virtual mode.
+    * Rewrite the event's global location into the app's space once, here,
+    * where every event it pumps passes, before anything routes on it. */
+   if (cl == kEventClassMouse) {
+      HIPoint p;
+      if (GetEventParameter(e, kEventParamMouseLocation, typeHIPoint, NULL,
+                            sizeof p, NULL, &p) == noErr) {
+         double x = p.x, y = p.y;
+         if (cglfs_map_global(&x, &y)) {
+            p.x = x; p.y = y;
+            SetEventParameter(e, kEventParamMouseLocation, typeHIPoint, sizeof p, &p);
+         }
+      }
+   }
 
    const OSStatus r = SendEventToEventTarget(e, t);
 

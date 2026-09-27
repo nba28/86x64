@@ -10,31 +10,39 @@
  * Modern CGL has no fullscreen drawables: CGLSetFullScreen answers 10012
  * (kCGLBadDrawable, "invalid fullscreen drawable") and the app has nowhere to
  * render. cg_display_fullscreen_shim.c already virtualises the mode switch and
- * the capture; this is the drawable half of the same bridge.
+ * the capture (the app believes the screen IS its mode, e.g. 800x600); this is
+ * the drawable half of the same bridge.
  *
- * WHAT IT DOES: CGLSetFullScreen(OnDisplay) presents the context in a
- * borderless window of the display's VIRTUAL size (what the app believes the
- * screen is). When the app has its own visible window of exactly that content
- * size (PvZ's Carbon window, which receives its mouse/keyboard events), the
- * surface is a mouse-transparent CHILD over that window's content: input
- * reaches the app and the pair moves together. Otherwise it sits at the
- * display's origin, so virtual-display and global screen
- * coordinates coincide exactly as cg_display_fullscreen_shim.c arranges for
- * window-owning apps. The context is attached through NSOpenGLContext
- * initWithCGLContextObj: — the same native context, so every CGLFlushDrawable
- * / GL call the app makes lands in the window. CGLClearDrawable detaches and
- * closes it.
+ * WHAT IT DOES: CGLSetFullScreen(OnDisplay) opens a normal window and takes it
+ * into NATIVE macOS fullscreen (its own Space, like any modern fullscreen app;
+ * leaving fullscreen gives an ordinary resizable window). The context's surface
+ * is letterboxed in it at the largest aspect-preserving scale and keeps the
+ * VIRTUAL backing size (kCGLCPSurfaceBackingSize): the app renders exactly the
+ * resolution it chose and the compositor scales it — sharp on Retina.
  *
- * DELIBERATELY NOT DONE: no scaling to fill the physical screen (the mouse
- * mapping would have to scale with it; same scope as the display shim).
+ * INPUT: a Cocoa window keeps its own mouse/key events, and the app listens for
+ * CARBON events on its application target. The window converts each one
+ * (CreateEventWithCGEvent) and sends it there, with the location rewritten by
+ * cglfs_map_global(): letterbox -> virtual point -> plus the content origin of
+ * the app's own window (PvZ keeps an 800x600 Carbon window and converts clicks
+ * with GlobalToLocal against it). GetGlobalMouse (osutil_shim.c) and pumped
+ * mouse events (carbon_event_appdown.c) use the same mapping.
+ *
+ * WHY NOT DRAW INTO THE APP'S WINDOW: tried; a Carbon window cannot be resized
+ * after show (NSCGSPanic), window managers resize it anyway (yabai float), and
+ * the app's window is not what a fullscreen game expects to be in.
  *
  * KILL SWITCH: M64_NO_CGL_FULLSCREEN_BRIDGE=1 forwards to native CGL (the
- * pre-fix 10012). ABI: MTSHIM (rdi -> &i386 args[0]); symbols in custom.syms.
+ * pre-fix 10012). ABICONV_CGLFS_TRACE=1 logs placement and mapping.
+ * ABI: MTSHIM (rdi -> &i386 args[0]); symbols in custom.syms.
  */
 #import <AppKit/AppKit.h>
 #import <OpenGL/OpenGL.h>
+#import <Carbon/Carbon.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
+#include <objc/runtime.h>
 
 extern uint64_t cgl_macro_ctx_native(uint32_t h);
 extern uint64_t x64_objc_unwrap(uint32_t h);
@@ -55,120 +63,206 @@ static int bridge_off(void)
    return v;
 }
 
+static int trace(void)   /* 1: placement + forwarded events, 2: + every mapping */
+{
+   static int v = -1;
+   if (v < 0) { const char *e = getenv("ABICONV_CGLFS_TRACE"); v = e ? atoi(e) ? atoi(e) : 1 : 0; }
+   return v;
+}
+
+/* A borderless window refuses key status by default; a captured display took
+ * the keyboard, so this one must too. */
+@interface CGLFSWindow : NSWindow
+@end
+
+int cglfs_map_global(double *x, double *y);
+
+/* Hand a Cocoa input event to the app as the Carbon event it listens for. */
+static int forward_to_app(NSEvent *ev)
+{
+   CGEventRef cg = ev.CGEvent;
+   EventRef ce = NULL;
+   if (!cg || CreateEventWithCGEvent(NULL, cg, kEventAttributeUserEvent, &ce) != noErr || !ce) {
+      return 0;
+   }
+   if (GetEventClass(ce) == kEventClassMouse) {
+      HIPoint p;
+      if (GetEventParameter(ce, kEventParamMouseLocation, typeHIPoint, NULL, sizeof p,
+                            NULL, &p) == noErr) {
+         double x = p.x, y = p.y;
+         cglfs_map_global(&x, &y);
+         p.x = x; p.y = y;
+         SetEventParameter(ce, kEventParamMouseLocation, typeHIPoint, sizeof p, &p);
+      }
+   }
+   const OSStatus st = SendEventToEventTarget(ce, GetApplicationEventTarget());
+   if (trace()) {
+      fprintf(stderr, "[cglfs] forward NSEvent type %ld -> carbon %.4s/%u -> %d\n",
+              (long)ev.type, (const char *)&(UInt32){ CFSwapInt32HostToBig(GetEventClass(ce)) },
+              (unsigned)GetEventKind(ce), (int)st);
+   }
+   ReleaseEvent(ce);
+   return 1;
+}
+
+@implementation CGLFSWindow
+- (BOOL)canBecomeKeyWindow { return YES; }
+- (BOOL)canBecomeMainWindow { return YES; }
+- (void)sendEvent:(NSEvent *)ev
+{
+   switch (ev.type) {
+   case NSEventTypeKeyDown: case NSEventTypeKeyUp: case NSEventTypeFlagsChanged:
+      /* Keep the system's fullscreen toggle (ctrl-cmd-F) working. */
+      if ((ev.modifierFlags & (NSEventModifierFlagCommand | NSEventModifierFlagControl)) ==
+             (NSEventModifierFlagCommand | NSEventModifierFlagControl)) { break; }
+      forward_to_app(ev);
+      return;
+   case NSEventTypeLeftMouseDown: case NSEventTypeLeftMouseUp: case NSEventTypeLeftMouseDragged:
+   case NSEventTypeRightMouseDown: case NSEventTypeRightMouseUp: case NSEventTypeRightMouseDragged:
+   case NSEventTypeMouseMoved: case NSEventTypeScrollWheel:
+      /* Clicks on the title bar (windowed) stay window management. */
+      if (NSPointInRect(ev.locationInWindow, self.contentLayoutRect)) { forward_to_app(ev); return; }
+      break;
+   default: break;
+   }
+   [super sendEvent:ev];
+}
+@end
+
 /* ponytail: one presented context at a time (the idiom never has two); make it
  * a table keyed by ctx if a target ever flips between fullscreen contexts. */
 static CGLContextObj    g_ctx;
 static NSOpenGLContext *g_ns;
-static NSWindow        *g_win;
+static CGLFSWindow     *g_win;
+static NSView          *g_view;
+static CGFloat          g_vw, g_vh;          /* virtual mode size */
+/* Mapping snapshot, readable from any thread: the view in Carbon global
+ * coordinates (top-left origin, points) and its scale. */
+static volatile double  g_gx, g_gy, g_scale;
+static volatile int     g_active;
 
 static void on_main(void (^b)(void))
 {
    if ([NSThread isMainThread]) b(); else dispatch_sync(dispatch_get_main_queue(), b);
 }
 
-/* The app's own window for this fullscreen: visible, not ours, content exactly
- * the virtual mode size (PvZ keeps an 800x600 Carbon window for input). */
-static NSWindow *app_window(CGFloat w, CGFloat h)
+/* The app's own window of the virtual size (content, or content plus a
+ * Carbon-drawn title bar): the space its GlobalToLocal converts into. */
+static NSWindow *app_window(void)
 {
-   NSWindow *best = nil;
    for (NSWindow *win in NSApp.windows) {
-      if (win == g_win || !win.isVisible) { continue; }
-      /* An NSCarbonWindow reports its whole frame as content (Carbon draws
-       * the title bar itself: PvZ 800x622 for an 800x600 content area). */
+      /* Visible or not: a fullscreen app may hide it, yet its position is
+       * still what the app's GlobalToLocal subtracts. */
+      if (win == g_win) { continue; }
       NSSize c = [win contentRectForFrameRect:win.frame].size;
-      if (c.width == w && c.height >= h && c.height <= h + 40) {
-         best = win; if (win.isKeyWindow) { break; }
-      }
+      if (c.width == g_vw && c.height >= g_vh && c.height <= g_vh + 40) { return win; }
    }
-   return best;
+   return nil;
 }
 
-static CGDirectDisplayID g_dpy;
-static void present(CGLContextObj ctx, CGDirectDisplayID dpy);
-
-/* The app usually shows its window AFTER CGLSetFullScreen (PvZ: NSApp has
- * no windows yet), and a Carbon window posts no key/main notification. Poll
- * from the run loop the app pumps (ReceiveNextEvent runs it) until the host
- * appears. ponytail: 0.25 s x 240 tries; a window-created hook if a target
- * shows its window later than a minute. */
-static void watch_for_host(void)
+/* Main thread only: refresh the mapping snapshot from the live geometry. */
+static volatile double g_ox, g_oy;       /* app window content origin, Carbon global */
+static void relayout(void)
 {
-   static NSTimer *t;
-   if (t) { return; }
-   __block int tries = 0;
-   t = [NSTimer timerWithTimeInterval:0.25 repeats:YES block:^(NSTimer *tm) {
-      if (!g_ctx || g_win.parentWindow || ++tries > 240) { [tm invalidate]; t = nil; return; }
-      present(g_ctx, g_dpy);
-   }];
-   [NSRunLoop.mainRunLoop addTimer:t forMode:NSRunLoopCommonModes];
+   if (!g_win) { return; }
+   const NSRect b = g_win.contentView.bounds;
+   const CGFloat k = MIN(b.size.width / g_vw, b.size.height / g_vh);
+   const NSRect vr = NSMakeRect(floor((b.size.width - g_vw * k) / 2),
+                                floor((b.size.height - g_vh * k) / 2), g_vw * k, g_vh * k);
+   g_view.frame = vr;
+   const NSRect sr = [g_win convertRectToScreen:[g_win.contentView convertRect:vr toView:nil]];
+   const CGFloat top = NSMaxY(NSScreen.screens.firstObject.frame);   /* Carbon: y down */
+   g_gx = sr.origin.x;
+   g_gy = top - NSMaxY(sr);
+   g_scale = k;
+   NSWindow *aw = app_window();
+   if (aw) {
+      const NSRect fr = aw.frame;
+      g_ox = fr.origin.x;
+      g_oy = top - NSMaxY(fr) + (fr.size.height - g_vh);
+   }
+   [g_ns update];
+   if (trace() && !aw) {
+      for (NSWindow *x in NSApp.windows)
+         fprintf(stderr, "[cglfs]   candidate %s vis=%d frame=%s content=%s\n",
+                 object_getClassName(x), x.isVisible, NSStringFromRect(x.frame).UTF8String,
+                 NSStringFromSize([x contentRectForFrameRect:x.frame].size).UTF8String);
+   }
+   if (trace()) {
+      fprintf(stderr, "[cglfs] layout scale %.3f view@%.0f,%.0f app origin %.0f,%.0f\n",
+              k, g_gx, g_gy, g_ox, g_oy);
+   }
 }
 
 static void present(CGLContextObj ctx, CGDirectDisplayID dpy)
 {
-   g_dpy = dpy;
    uint32_t id = dpy;
-   CGFloat w = shim_CGDisplayPixelsWide(&id), h = shim_CGDisplayPixelsHigh(&id);
+   const CGFloat w = shim_CGDisplayPixelsWide(&id), h = shim_CGDisplayPixelsHigh(&id);
    on_main(^{
       [NSApplication sharedApplication];
-      NSWindow *host = app_window(w, h);
-      if (getenv("ABICONV_CGLFS_TRACE")) {
-         fprintf(stderr, "[cglfs] present %gx%g host=%p (%s) key=%p windows=%lu\n", w, h,
-                 (void *)host, host ? NSStringFromRect(host.frame).UTF8String : "-",
-                 (void *)NSApp.keyWindow, (unsigned long)NSApp.windows.count);
-         for (NSWindow *x in NSApp.windows)
-            fprintf(stderr, "[cglfs]   win %p vis=%d frame=%s content=%s\n", (void *)x, x.isVisible,
-                    NSStringFromRect(x.frame).UTF8String,
-                    NSStringFromSize([x contentRectForFrameRect:x.frame].size).UTF8String);
-      }
-      NSRect r;
-      if (host) {
-         /* Draw OVER the app's window, not instead of it: the app's window
-          * keeps the mouse/keyboard (the overlay ignores the mouse), and as a
-          * child the overlay follows it when the user moves it. A host left
-          * partly off-screen is centred -- a MOVE, which is safe on a shown
-          * Carbon window (carbon_window_resize_guard.c). */
-         NSScreen *hs = host.screen ?: NSScreen.mainScreen;
-         if (!NSContainsRect(hs.visibleFrame, host.frame)) { [host center]; }
-         r = [host contentRectForFrameRect:host.frame];
-         r.size.height = h;   /* the content area sits below any Carbon title bar */
-      } else {
+      g_vw = w; g_vh = h;
+      if (!g_win) {
          NSScreen *scr = NSScreen.screens.firstObject;
          for (NSScreen *s in NSScreen.screens)
             if ([s.deviceDescription[@"NSScreenNumber"] unsignedIntValue] == dpy) scr = s;
-         /* AppKit origin is bottom-left: top-left of the display, virtual size. */
-         NSRect f = scr.frame;
-         r = NSMakeRect(f.origin.x, NSMaxY(f) - h, w, h);
-      }
-      if (!g_win) {
-         g_win = [[NSWindow alloc] initWithContentRect:r styleMask:NSWindowStyleMaskBorderless
-                                               backing:NSBackingStoreBuffered defer:NO];
+         const NSRect vf = scr.visibleFrame;
+         const CGFloat k = MIN(1.0, MIN(vf.size.width / w, (vf.size.height - 28) / h));
+         g_win = [[CGLFSWindow alloc]
+            initWithContentRect:NSMakeRect(0, 0, w * k, h * k)
+                      styleMask:NSWindowStyleMaskTitled | NSWindowStyleMaskClosable |
+                                NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
+                        backing:NSBackingStoreBuffered defer:NO];
          g_win.releasedWhenClosed = NO;
-         g_win.contentView.wantsBestResolutionOpenGLSurface = NO;
+         g_win.backgroundColor = NSColor.blackColor;
+         g_win.title = NSProcessInfo.processInfo.processName;
+         g_win.acceptsMouseMovedEvents = YES;
+         g_win.collectionBehavior = NSWindowCollectionBehaviorFullScreenPrimary;
+         g_win.contentAspectRatio = NSMakeSize(w, h);
+         [g_win center];
+         g_view = [[NSView alloc] initWithFrame:NSZeroRect];
+         g_view.wantsBestResolutionOpenGLSurface = NO;
+         [g_win.contentView addSubview:g_view];
+         [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidResizeNotification
+            object:g_win queue:nil usingBlock:^(NSNotification *n) { (void)n; relayout(); }];
+         [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidMoveNotification
+            object:g_win queue:nil usingBlock:^(NSNotification *n) { (void)n; relayout(); }];
       }
-      [g_win setFrame:r display:NO];
-      if (host) {
-         g_win.ignoresMouseEvents = YES;
-         g_win.level = host.level;
-         if (g_win.parentWindow != host) {
-            [g_win.parentWindow removeChildWindow:g_win];
-            [host addChildWindow:g_win ordered:NSWindowAbove];
-         }
-         [g_win orderFront:nil];
-         [host makeKeyAndOrderFront:nil];
-      } else {
-         watch_for_host();
-         g_win.ignoresMouseEvents = NO;
-         g_win.level = NSMainMenuWindowLevel + 1;   /* over the menu bar, like a capture */
-         [g_win orderFront:nil];
-      }
+      [g_win makeKeyAndOrderFront:nil];
+      [NSApp activateIgnoringOtherApps:YES];
       if (g_ctx != ctx) {
          [g_ns clearDrawable];
          g_ns = [[NSOpenGLContext alloc] initWithCGLContextObj:ctx];
          g_ctx = ctx;
       }
-      g_ns.view = g_win.contentView;
+      /* Render at the app's resolution; the compositor scales the surface. */
+      const GLint bs[2] = { (GLint)w, (GLint)h };
+      CGLSetParameter(ctx, kCGLCPSurfaceBackingSize, bs);
+      CGLEnable(ctx, kCGLCESurfaceBackingSize);
+      relayout();
+      g_ns.view = g_view;
       [g_ns update];
+      g_active = 1;
+      /* The app asked for fullscreen: give it its own Space. */
+      if (!(g_win.styleMask & NSWindowStyleMaskFullScreen)) { [g_win toggleFullScreen:nil]; }
    });
+}
+
+/* Global screen point (Carbon: main-screen top-left, y down) -> the app's
+ * space. Returns 0 (point untouched) when no fullscreen surface is up. Safe
+ * from any thread: reads the snapshot relayout() keeps. */
+int cglfs_map_global(double *x, double *y)
+{
+   if (!g_active || g_scale <= 0) { return 0; }
+   if ([NSThread isMainThread] && g_ox == 0 && g_oy == 0) { relayout(); }  /* app window may be new */
+   double vx = (*x - g_gx) / g_scale, vy = (*y - g_gy) / g_scale;
+   vx = vx < 0 ? 0 : vx > g_vw - 1 ? g_vw - 1 : vx;
+   vy = vy < 0 ? 0 : vy > g_vh - 1 ? g_vh - 1 : vy;
+   if (trace() > 1) {
+      fprintf(stderr, "[cglfs] map %.0f,%.0f -> virtual %.0f,%.0f + app origin %.0f,%.0f\n",
+              *x, *y, vx, vy, g_ox, g_oy);
+   }
+   *x = g_ox + vx; *y = g_oy + vy;
+   return 1;
 }
 
 /* CGLError CGLSetFullScreen(CGLContextObj) */
@@ -195,9 +289,9 @@ uint32_t shim_CGLClearDrawable(uint32_t *a)
 {
    CGLContextObj ctx = ctx_in(a[0]);
    if (bridge_off() || !ctx || ctx != g_ctx) return (uint32_t)CGLClearDrawable(ctx);
+   g_active = 0;
    on_main(^{
       [g_ns clearDrawable];
-      [g_win.parentWindow removeChildWindow:g_win];
       [g_win orderOut:nil];
       g_ns = nil; g_ctx = NULL;
    });

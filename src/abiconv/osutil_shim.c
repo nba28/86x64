@@ -79,6 +79,7 @@ extern CG_Point   CGEventGetLocation(CGEventRef event);
 extern void       CFRelease(const void *cf);
 
 extern int ci_content_origin(int16_t *ox, int16_t *oy);   // classic_input_coords.c
+extern int cglfs_map_global(double *x, double *y);        // cgl_fullscreen_shim.m
 
 static void fill_mouse(QDPoint *pt) {
     if (!pt) return;
@@ -86,8 +87,10 @@ static void fill_mouse(QDPoint *pt) {
     CGEventRef e = CGEventCreate(0);
     if (e) {
         CG_Point loc = CGEventGetLocation(e);
-        pt->h = (int16_t)loc.x;   // horizontal = x
-        pt->v = (int16_t)loc.y;   // vertical   = y
+        double x = loc.x, y = loc.y;
+        cglfs_map_global(&x, &y);  // fullscreen surface up: into the app's space
+        pt->h = (int16_t)x;   // horizontal = x
+        pt->v = (int16_t)y;   // vertical   = y
         CFRelease(e);
     }
 }
