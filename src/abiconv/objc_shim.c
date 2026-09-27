@@ -11720,6 +11720,65 @@ static void invoke_legacy_load(const struct legacy_objc_class **defs,
    blk_call_i386((uint32_t)imp, 2, words);
 }
 
+/* CROSS-IMAGE PENDING (iWeb 526/652, Numbers' nib classes): dyld reports the
+ * main dylib BEFORE the frameworks it links, so a class whose superclass lives
+ * in a later image (BLApplication : SFAppApplication) failed its fixpoint and
+ * was dropped for good -> "Unable to find class", nib objects as NSObject.
+ * Unresolved classes and target-less categories wait here and are retried
+ * after every image registers. ponytail: fixed capacity, a linked list if a
+ * target ever overflows it. */
+enum { PEND_CAP = 8192 };
+static const struct legacy_objc_class *g_pend_cls[PEND_CAP];
+static size_t g_pend_ncls;
+static const struct legacy_objc_category *g_pend_cat[PEND_CAP];
+static size_t g_pend_ncat;
+
+static int apply_legacy_category(const struct legacy_objc_category *cat) {
+   Class tgt = objc_getClass((const char *)(uintptr_t)cat->class_name);
+   if (!tgt) { return 0; }
+   if (cat->instance_methods) { reverse_add_methods(tgt, cat->instance_methods); }
+   if (cat->class_methods) {
+      Class meta = object_getClass((id)tgt);
+      if (meta) { reverse_add_methods(meta, cat->class_methods); }
+   }
+   return 1;
+}
+
+static void retry_pending_legacy(void) {
+   if (KNOB("M64_NO_PENDING_LEGACY")) { return; }
+   const struct legacy_objc_class *late[PEND_CAP];
+   size_t nlate = 0;
+   for (int pass = 0; pass < 64; ++pass) {
+      int progress = 0;
+      for (size_t i = 0; i < g_pend_ncls; ) {
+         int r = reverse_register_one(g_pend_cls[i]);
+         if (r == 0) { ++i; continue; }
+         if (r == 1) { late[nlate++] = g_pend_cls[i]; }
+         g_pend_cls[i] = g_pend_cls[--g_pend_ncls];
+         progress = 1;
+      }
+      if (!progress) { break; }
+   }
+   uint32_t cats = 0;
+   for (size_t i = 0; i < g_pend_ncat; ) {
+      if (!apply_legacy_category(g_pend_cat[i])) { ++i; continue; }
+      g_pend_cat[i] = g_pend_cat[--g_pend_ncat];
+      ++cats;
+   }
+   if (nlate && !KNOB("ABICONV_NO_LEGACY_LOAD")) {
+      char reg[PEND_CAP], loaded[PEND_CAP];
+      memset(reg, 1, nlate); memset(loaded, 0, nlate);
+      for (size_t i = 0; i < nlate; ++i) {
+         invoke_legacy_load(late, nlate, reg, loaded, i);
+      }
+   }
+   if ((nlate || cats) && KNOB("ABICONV_OBJC_SLIDE_VERBOSE")) {
+      fprintf(stderr, "objc_shim: late-registered %zu pending classes, %u categories "
+              "(%zu/%zu still pending)\n", nlate, cats, g_pend_ncls, g_pend_ncat);
+      fflush(stderr);
+   }
+}
+
 static void reverse_register_image(const struct mach_header_64 *mh,
                                    intptr_t slide) {
    if (!mh) { return; }
@@ -11760,6 +11819,9 @@ static void reverse_register_image(const struct mach_header_64 *mh,
                        if (r == 1) { ++registered; reg[i] = 1; } }
       }
       if (!progress) { break; }
+   }
+   for (size_t i = 0; i < ndefs; ++i) {
+      if (!done[i] && g_pend_ncls < PEND_CAP) { g_pend_cls[g_pend_ncls++] = defs[i]; }
    }
 
    /* Legacy categories on EXISTING classes: add their instance/class methods
@@ -11824,14 +11886,11 @@ static void reverse_register_image(const struct mach_header_64 *mh,
                     (void *)tgt, cat->instance_methods);
             fflush(stderr);
          }
-         if (!tgt) { continue; }   /* target class not present yet */
-         if (cat->instance_methods) {
-            reverse_add_methods(tgt, cat->instance_methods);
+         if (!tgt) {                /* target class not present yet: retry later */
+            if (g_pend_ncat < PEND_CAP) { g_pend_cat[g_pend_ncat++] = cat; }
+            continue;
          }
-         if (cat->class_methods) {
-            Class meta = object_getClass((id)tgt);
-            if (meta) { reverse_add_methods(meta, cat->class_methods); }
-         }
+         apply_legacy_category(cat);
          ++cats_applied;
       }
    }
@@ -11851,6 +11910,7 @@ static void reverse_register_image(const struct mach_header_64 *mh,
               "applied %u categories\n", registered, ndefs, cats_applied);
       fflush(stderr);
    }
+   retry_pending_legacy();
 }
 
 /* ======================================================================
