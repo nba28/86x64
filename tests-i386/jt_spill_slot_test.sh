@@ -45,11 +45,11 @@ fail=0
 # ---------------------------------------------------------------------------
 det() { # $1 = extra env ; prints the number of tables detected
   env $1 MACHO_TRACE_JUMPTABLE=1 "$MT" transform "$I386" "$BUILD/$NAME.det.out" 2>&1 \
-    | grep -c '^\[jumptable\]'
+    | grep -c '^\[jumptable\] dispatch@'
 }
 n_on=$(det "")
 n_off=$(env M64_NO_JT_SPILL_SLOTS=1 MACHO_TRACE_JUMPTABLE=1 "$MT" transform "$I386" \
-        "$BUILD/$NAME.det.off.out" 2>&1 | grep -c '^\[jumptable\]')
+        "$BUILD/$NAME.det.off.out" 2>&1 | grep -c '^\[jumptable\] dispatch@')
 
 if [ "$n_on" = 2 ]; then
   echo "  ON  detector:       CONTROL + SPILL tables both detected (2)             OK"

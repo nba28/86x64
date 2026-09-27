@@ -42,6 +42,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <unistd.h>
 #include <objc/runtime.h>
 
 extern uint64_t cgl_macro_ctx_native(uint32_t h);
@@ -167,6 +168,33 @@ static void relayout(void)
    }
 }
 
+/* THE CAPTURE SHIELD. A captured display covered every other window, so a
+ * fullscreen game's own windowed-mode Carbon window (PvZ's white 800x600) was
+ * never seen. Keep the app's other on-screen normal-level windows ordered out at
+ * the WindowServer level while the surface is up; the app's view of them
+ * (IsWindowVisible) is untouched. The app shows its window after
+ * CGLSetFullScreen, so this is re-asserted by a timer. */
+extern int CGSMainConnectionID(void);
+/* Exported by HIToolbox, absent from the 64-bit headers. */
+extern WindowRef  GetFrontWindowOfClass(WindowClass c, Boolean mustBeVisible);
+extern WindowRef  GetNextWindowOfClass(WindowRef w, WindowClass c, Boolean mustBeVisible);
+extern CGWindowID HIWindowGetCGWindowID(WindowRef w);
+extern Boolean    IsWindowVisible(WindowRef w);
+extern int CGSOrderWindow(int cid, int wid, int place, int relative);
+static void shield_others(void)
+{
+   if (!g_active || !g_win) { return; }
+   /* The app's own windows are the Window Manager's; AppKit's fullscreen
+    * helpers (backdrop, titlebar) are not and must stay. */
+   for (WindowRef w = GetFrontWindowOfClass(kAllWindowClasses, false); w;
+        w = GetNextWindowOfClass(w, kAllWindowClasses, false)) {
+      const int wid = (int)HIWindowGetCGWindowID(w);
+      if (!wid || wid == (int)g_win.windowNumber || !IsWindowVisible(w)) { continue; }
+      CGSOrderWindow(CGSMainConnectionID(), wid, 0 /* out */, 0);
+      if (trace() > 1) { fprintf(stderr, "[cglfs] shield: ordered out window %d\n", wid); }
+   }
+}
+
 static void present(CGLContextObj ctx, CGDirectDisplayID dpy)
 {
    uint32_t id = dpy;
@@ -186,6 +214,9 @@ static void present(CGLContextObj ctx, CGDirectDisplayID dpy)
                                 NSWindowStyleMaskMiniaturizable | NSWindowStyleMaskResizable
                         backing:NSBackingStoreBuffered defer:NO];
          g_win.releasedWhenClosed = NO;
+         /* Never state-restored: after a crash macOS would offer to "reopen"
+          * a window the app never created itself. */
+         g_win.restorable = NO;
          g_win.backgroundColor = NSColor.blackColor;
          g_win.title = NSProcessInfo.processInfo.processName;
          g_win.acceptsMouseMovedEvents = YES;
@@ -199,6 +230,10 @@ static void present(CGLContextObj ctx, CGDirectDisplayID dpy)
             object:g_win queue:nil usingBlock:^(NSNotification *n) { (void)n; relayout(); }];
          [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidMoveNotification
             object:g_win queue:nil usingBlock:^(NSNotification *n) { (void)n; relayout(); }];
+         /* ponytail: 0.5 s poll; hook ShowWindow if a flash is ever visible. */
+         [NSRunLoop.mainRunLoop addTimer:[NSTimer timerWithTimeInterval:0.5 repeats:YES
+                                            block:^(NSTimer *t) { (void)t; shield_others(); }]
+                                  forMode:NSRunLoopCommonModes];
       }
       [g_win makeKeyAndOrderFront:nil];
       [NSApp activateIgnoringOtherApps:YES];

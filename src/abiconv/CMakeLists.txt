@@ -482,6 +482,7 @@ add_library(abiconv SHARED
   posix_shim.c
   tls_shim.c
   pthread_sync_shim.c
+  coreaudio_hal_shim.c
   cxx_shim.c
   cxx_typeinfo.c
   eh_shim.c

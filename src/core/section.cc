@@ -592,6 +592,21 @@ namespace MachO {
                 * aren't 4-aligned), so only gate non-executable targets. */
                const bool exec =
                   (seg->segment_command.initprot & VM_PROT_EXECUTE) != 0;
+               /* CLASSIC-RELOC AUTHORITATIVE, BOTH WAYS (M32). A slot the
+                * linker recorded a local reloc for IS a pointer: the heuristic
+                * gates below exist for images without that evidence. PvZ's
+                * libbass (dylib based at 0, __DATA,__const table of {fn, fn}
+                * records, every slot relocated) lost 0x91ac to the code-entry
+                * gate (no symbol, no prologue at an -O2 entry) -> jump to 0x91ac.
+                * The no-reloc -> constant half is at the end of this chain.
+                * Kill switch M64_NO_CLASSIC_RELOC_ACCEPT=1. */
+               static const bool reloc_accept_off =
+                  std::getenv("M64_NO_CLASSIC_RELOC_ACCEPT") != nullptr;
+               if (bits == Bits::M32 && env.have_classic_local_relocs && !reloc_accept_off &&
+                   env.local_reloc_addrs.count(loc.vmaddr) != 0) {
+                  is_pointer = true;
+                  break;
+               }
                /* ★NARROWED to ZERO-FILL targets (M32). The rule above — "a real
                 * pointer into data points at an ALIGNED global" — is FALSE for a
                 * pointer into a packed BYTE-RECORD table, which legitimately
@@ -2516,6 +2531,19 @@ namespace MachO {
        * runaway ate the entire 16 MB i386 stack.) Same key, same lifetime rules
        * as stack_tbl. */
       std::map<std::pair<int, ssize_t>, std::size_t> stack_anchor;
+      /* Net %esp movement since the %esp-keyed slots were last valid: `push`/
+       * `pop`/`add|sub $imm,%esp` shift it, so an %esp slot is keyed by
+       * disp + esp_off and survives argument pushes around a call (PvZ
+       * libbass's MOD effect switch: base spilled to 0x14(%esp), four pushes and
+       * `add $0x10,%esp` before the dispatch). Any other %esp write clears the
+       * slots. Kill switch M64_NO_JT_ESP_TRACK=1 (every push/pop/call clears). */
+      ssize_t esp_off = 0;
+      const bool jt_esp_track = std::getenv("M64_NO_JT_ESP_TRACK") == nullptr;
+      const auto slot_key = [&](const xed_operand_values_t *o) {
+         const xed_reg_enum_t b = jt_norm32(xed_decoded_inst_get_base_reg(o, 0));
+         const ssize_t d = xed_decoded_inst_get_memory_displacement(o, 0);
+         return std::pair<int, ssize_t>{ (int)b, b == XED_REG_ESP ? d + esp_off : d };
+      };
       const bool jt_spill = std::getenv("M64_NO_JT_SPILL_SLOTS") == nullptr;
       const bool jt_anchor_spill =
          jt_spill && std::getenv("M64_NO_JT_ANCHOR_SPILL") == nullptr;
@@ -2825,9 +2853,7 @@ namespace MachO {
                   xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID &&
                   (jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)) == XED_REG_EBP ||
                    jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)) == XED_REG_ESP)) {
-            const std::pair<int, ssize_t> key {
-               (int)jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)),
-               xed_decoded_inst_get_memory_displacement(ops, 0) };
+            const std::pair<int, ssize_t> key = slot_key(ops);
             auto tb = tbl_addr.find(reg0);
             if (tb != tbl_addr.end()) { stack_tbl[key] = tb->second; }
             else { stack_tbl.erase(key); }
@@ -2846,13 +2872,8 @@ namespace MachO {
                   xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID &&
                   (jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)) == XED_REG_EBP ||
                    jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)) == XED_REG_ESP) &&
-                  (stack_tbl.count({ (int)jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)),
-                                     xed_decoded_inst_get_memory_displacement(ops, 0) }) ||
-                   stack_anchor.count({ (int)jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)),
-                                        xed_decoded_inst_get_memory_displacement(ops, 0) }))) {
-            const std::pair<int, ssize_t> key {
-               (int)jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)),
-               xed_decoded_inst_get_memory_displacement(ops, 0) };
+                  (stack_tbl.count(slot_key(ops)) || stack_anchor.count(slot_key(ops)))) {
+            const std::pair<int, ssize_t> key = slot_key(ops);
             auto tb = stack_tbl.find(key);
             if (tb != stack_tbl.end()) { tbl_addr[reg0] = tb->second; }
             else                       { tbl_addr.erase(reg0); }
@@ -3064,8 +3085,7 @@ namespace MachO {
                 xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID) {
                const xed_reg_enum_t mb = jt_norm32(xed_decoded_inst_get_base_reg(ops, 0));
                if (mb == XED_REG_EBP || mb == XED_REG_ESP) {
-                  const std::pair<int, ssize_t> dead {
-                     (int)mb, xed_decoded_inst_get_memory_displacement(ops, 0) };
+                  const std::pair<int, ssize_t> dead = slot_key(ops);
                   stack_tbl.erase(dead);
                   stack_anchor.erase(dead);
                }
@@ -3082,12 +3102,51 @@ namespace MachO {
                                                            : std::next(i);
                }
             }
-            /* ... and every %esp-keyed slot dies whenever %esp moves, since the
-             * displacement is then measured from a different place. */
-            if (cat == XED_CATEGORY_PUSH || cat == XED_CATEGORY_POP ||
-                cat == XED_CATEGORY_CALL || cat == XED_CATEGORY_RET ||
-                iform == XED_IFORM_LEAVE ||
-                (jt_norm32(reg0raw) == XED_REG_ESP && jt_reg0_written(&xedd))) {
+            /* ... and %esp moves shift or kill every %esp-keyed slot, since the
+             * displacement is measured from %esp (see esp_off). A cdecl CALL
+             * is net-zero once it returns; only the PIC `call 0` leaves its
+             * push behind. */
+            const xed_iclass_enum_t ic = xed_decoded_inst_get_iclass(&xedd);
+            const bool call0 = iform == XED_IFORM_CALL_NEAR_RELBRz &&
+                               xed_decoded_inst_get_branch_displacement(&xedd) == 0;
+            const bool esp_imm_arith =
+               (ic == XED_ICLASS_ADD || ic == XED_ICLASS_SUB) &&
+               jt_norm32(reg0raw) == XED_REG_ESP &&
+               xed_decoded_inst_get_immediate_width(&xedd) != 0;
+            bool esp_kill;
+            if (!jt_esp_track) {
+               esp_kill = cat == XED_CATEGORY_PUSH || cat == XED_CATEGORY_POP ||
+                          cat == XED_CATEGORY_CALL || cat == XED_CATEGORY_RET ||
+                          iform == XED_IFORM_LEAVE ||
+                          (jt_norm32(reg0raw) == XED_REG_ESP && jt_reg0_written(&xedd));
+            } else if (ic == XED_ICLASS_PUSH || call0) {
+               esp_off -= 4; esp_kill = false;
+            } else if (ic == XED_ICLASS_POP) {
+               esp_off += 4; esp_kill = false;
+            } else if (ic == XED_ICLASS_LEA && jt_norm32(reg0raw) == XED_REG_ESP &&
+                       jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)) == XED_REG_ESP &&
+                       xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID) {
+               /* translated push/pop: `lea -4(%rsp),%rsp` / `lea 4(%rsp),%rsp` */
+               esp_off += xed_decoded_inst_get_memory_displacement(ops, 0);
+               esp_kill = false;
+            } else if (bits == Bits::M64 && cat == XED_CATEGORY_UNCOND_BR &&
+                       xed_decoded_inst_get_branch_displacement(&xedd) != 0 &&
+                       pend_r11 == vmaddr + len) {
+               /* translated call (return address = this jmp's successor): the
+                * callee pops it, so like a native CALL it is net-zero. */
+               esp_off += 4;
+               esp_kill = false;
+            } else if (esp_imm_arith) {
+               const ssize_t imm = (ssize_t)xed_decoded_inst_get_signed_immediate(&xedd);
+               esp_off += (ic == XED_ICLASS_ADD) ? imm : -imm;
+               esp_kill = false;
+            } else {
+               esp_kill = cat == XED_CATEGORY_PUSH || cat == XED_CATEGORY_POP ||
+                          cat == XED_CATEGORY_RET || iform == XED_IFORM_LEAVE ||
+                          (jt_norm32(reg0raw) == XED_REG_ESP && jt_reg0_written(&xedd));
+            }
+            if (esp_kill) {
+               esp_off = 0;
                for (auto i = stack_tbl.begin(); i != stack_tbl.end(); ) {
                   i = (i->first.first == (int)XED_REG_ESP) ? stack_tbl.erase(i)
                                                            : std::next(i);

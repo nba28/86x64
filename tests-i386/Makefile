@@ -76,7 +76,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: pic-push-mem prologue-sched-entry cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g sib-rbp-base-wrap standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn
+.PHONY: pic-push-mem prologue-sched-entry cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept jt-esp-spill-push sib-rbp-base-wrap standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn
 all: run-only
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
@@ -571,6 +571,24 @@ heap-below-2g: $(BUILD_DIR)/99_heap_below_2g.i386 $(BUILD_DIR)/libabiconv.dylib
 	$(BUILD_DIR)/99_heap_below_2g.on; on=$$?; \
 	M64_HEAP_HIGH_FIRST=1 $(BUILD_DIR)/99_heap_below_2g.on; off=$$?; \
 	[ $$on = 42 ] && [ $$off = 1 ] && echo "heap-below-2g: PASS" || { echo "heap-below-2g: FAIL (on=$$on off=$$off)"; exit 1; }
+# classic-reloc-accept: a slot with a classic local reloc is a pointer even when
+# its target has no entry evidence (PvZ libbass {fn,fn} table). OFF arm is
+# M64_NO_CLASSIC_RELOC_ACCEPT=1 at TRANSLATE time (faults).
+classic-reloc-accept: $(BUILD_DIR)/99_classic_reloc_accept.i386 $(BUILD_DIR)/libabiconv.dylib
+	@for arm in on off; do E=""; [ $$arm = off ] && E="M64_NO_CLASSIC_RELOC_ACCEPT=1"; \
+	  env $$E bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_classic_reloc_accept.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_classic_reloc_accept.$$arm; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "classic-reloc-accept: PASS" || { echo "classic-reloc-accept: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
+# jt-esp-spill-push: a PIC table base spilled to an %esp slot survives pushes,
+# a call and `add $imm,%esp` (PvZ libbass MOD switch). OFF arm is
+# M64_NO_JT_ESP_TRACK=1 at TRANSLATE time.
+jt-esp-spill-push: $(BUILD_DIR)/99_jt_esp_spill_push.i386 $(BUILD_DIR)/libabiconv.dylib
+	@for arm in on off; do E=""; [ $$arm = off ] && E="M64_NO_JT_ESP_TRACK=1"; \
+	  env $$E bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_jt_esp_spill_push.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_jt_esp_spill_push.$$arm; eval r_$$arm=$$?; done; \
+	[ $$r_on = 0 ] && [ $$r_off != 0 ] && echo "jt-esp-spill-push: PASS" || { echo "jt-esp-spill-push: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
 # pthread-stack-np: guard that the pthread_t-taking _np introspection calls
 # resolve the i386 thread token (stack answers = the i386 stack in use). OFF
 # arm = the previous libabiconv (verified by hand: faults dereferencing the token).
@@ -2035,3 +2053,10 @@ $(BUILD_DIR)/90_fp_sret_stack_balance.i386: $(BUILD_DIR)/90_fp_sret_stack_balanc
 .PHONY: self-weak-rebase
 self-weak-rebase: cpp
 	@bash self_weak_rebase_test.sh $(MACHO_TOOL) $(LIBABICONV) $(LIBWRAPPER) $(LIBINTERPOSE)
+
+# 99_classic_reloc_accept: -O2 -fomit-frame-pointer (no prologue at the
+# targets), linked -x -pie for 10.5 so the image carries CLASSIC local relocs.
+$(BUILD_DIR)/99_classic_reloc_accept.o: $(SRC_DIR)/99_classic_reloc_accept.c | $(BUILD_DIR)
+	$(CC_I386) -O2 -fomit-frame-pointer -c -o $@ $<
+$(BUILD_DIR)/99_classic_reloc_accept.i386: $(BUILD_DIR)/99_classic_reloc_accept.o
+	$(LD) $(filter-out -no_pie -macos_version_min 10.6,$(LDFLAGS_I386)) -macos_version_min 10.5 -pie -x -no_compact_linkedit -e _main -o $@ $< $(HOME)/projects/Library/SDKs/MacOSX10.6.sdk/usr/lib/crt1.10.5.o
