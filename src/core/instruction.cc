@@ -2647,11 +2647,19 @@ namespace MachO {
                      new Instruction<Bits::M64>(opcode::jmp_r64(XED_REG_RAX));
                   auto insts = call_op(jmp_inst);
                   /* call_op layout: lea, push_r32(r11d) (2 insts), jmp_inst,
-                   * ret_placeholder. Splice mov_inst (preceded by pre_lea for
-                   * the indexed pic_anchored form) right before jmp_inst. */
+                   * ret_placeholder. The target load (preceded by pre_lea for
+                   * the indexed pic_anchored form) goes FIRST: i386 evaluates
+                   * the operand before `call` pushes, so an %esp-based slot
+                   * must be read before the return-address push moves %rsp.
+                   * (PvZ libbass `push x5; call *0x184(%esp)` read 4 bytes too
+                   * low -> jumped onto its own stack.) The push touches only
+                   * r11 and memory, never rax. Kill switch
+                   * M64_CALL_MEM_LOAD_AFTER_PUSH=1 restores the old order. */
+                  static const bool load_after_push =
+                     std::getenv("M64_CALL_MEM_LOAD_AFTER_PUSH") != nullptr;
                   auto it = insts.end();
                   --it; --it;
-                  auto mit = insts.insert(it, mov_inst);
+                  auto mit = insts.insert(load_after_push ? it : insts.begin(), mov_inst);
                   if (pre_lea) { insts.insert(mit, pre_lea); }
                   /* trap a `call [mem]` through a NULL fn-ptr slot (env-gated):
                    * after the 4-byte load into rax, before `jmp rax`. */
