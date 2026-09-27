@@ -599,6 +599,10 @@ add_library(abiconv SHARED
   # gives a truncated ->rend and 0 for every ->disp slot => jmp *0. This returns
   # an i386-layout SHADOW whose disp slots are gli_tramp.asm thunks.
   cgl_macro_shim.c
+  # cgl_fullscreen_shim.m: ONE job — the CGL FULLSCREEN CONTEXT. Modern CGL has
+  # no fullscreen drawables (CGLSetFullScreen -> 10012); present the context in
+  # a window of the display's virtual size instead (PvZ).
+  cgl_fullscreen_shim.m
   # fault_report_shim.c: ONE job — make a fatal fault in translated i386 code
   # speak. The OS unwinder cannot walk a translated frame (and walks NOTHING at
   # all when rip==0), so the call site is otherwise unrecoverable; on a rip==0

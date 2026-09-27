@@ -1056,6 +1056,9 @@ _x64_exc_longjmp:
 	MTSHIM	___CGLDestroyContext,                 _shim_CGLDestroyContext
 	MTSHIM	___CGLGetCurrentContext,              _shim_CGLGetCurrentContext
 	MTSHIM	___CGLSetCurrentContext,              _shim_CGLSetCurrentContext
+	MTSHIM	___CGLSetFullScreen,                  _shim_CGLSetFullScreen
+	MTSHIM	___CGLSetFullScreenOnDisplay,         _shim_CGLSetFullScreenOnDisplay
+	MTSHIM	___CGLClearDrawable,                  _shim_CGLClearDrawable
 	; --- Carbon HIToolbox UI + Display Mgr (carbon_ui_shim.c) ---
 	MTSHIM	___BeginUpdate,                       _shim_BeginUpdate
 	MTSHIM	___FindWindow,                        _shim_FindWindow

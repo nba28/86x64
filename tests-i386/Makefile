@@ -524,6 +524,15 @@ pic-push-mem: $(BUILD_DIR)/99_pic_push_mem.i386
 	  $(BUILD_DIR)/99_pic_push_mem.$$arm; echo "$$arm=$$?"; \
 	done 2>/dev/null | tr '\n' ' '); \
 	case "$$r" in *"on=42 "*) case "$$r" in *"off=42"*) echo "pic-push-mem: FAIL ($$r)"; exit 1;; esac; echo "pic-push-mem: PASS";; *) echo "pic-push-mem: FAIL ($$r)"; exit 1;; esac
+# cgl-fullscreen: A/B guard for the CGL fullscreen-context bridge
+# (cgl_fullscreen_shim.m). ON exits 42; OFF (M64_NO_CGL_FULLSCREEN_BRIDGE=1 at
+# run time) gets native 10012 and exits 7.
+cgl-fullscreen: $(BUILD_DIR)/99_cgl_fullscreen.i386
+	@bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	  -o $(BUILD_DIR)/99_cgl_fullscreen.ab $< >/dev/null 2>&1; \
+	$(BUILD_DIR)/99_cgl_fullscreen.ab >/dev/null 2>&1; on=$$?; \
+	M64_NO_CGL_FULLSCREEN_BRIDGE=1 $(BUILD_DIR)/99_cgl_fullscreen.ab >/dev/null 2>&1; off=$$?; \
+	[ "$$on/$$off" = 42/7 ] && echo "cgl-fullscreen: PASS" || { echo "cgl-fullscreen: FAIL (on=$$on off=$$off)"; exit 1; }
 # setjmp-frame: guard that setjmp/longjmp from translated code use the i386
 # 72-byte jmp_buf (libabiconv capture) instead of native _setjmp's 148-byte
 # write over the caller's frame (PvZ saved-esi clobber). Runtime fix: the OFF
@@ -1667,6 +1676,11 @@ $(BUILD_DIR)/99_carbon_window_compositing.i386: $(BUILD_DIR)/99_carbon_window_co
 # also keeps the fixture independent of `make sysroot-gl` / the SL DVD.
 # Overrides %.i386.
 $(BUILD_DIR)/99_agl_window_drawable.i386: $(BUILD_DIR)/99_agl_window_drawable.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_cgl_fullscreen: CGL is not in the i386 sysroot; dynamic_lookup, bound by
+# static-interpose at translate time. Overrides %.i386.
+$(BUILD_DIR)/99_cgl_fullscreen.i386: $(BUILD_DIR)/99_cgl_fullscreen.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 99_display_fullscreen_bridge: same shape as 99_agl_window_drawable -- neither

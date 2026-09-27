@@ -667,6 +667,9 @@ _CGLCreateContext
 _CGLDestroyContext
 _CGLGetCurrentContext
 _CGLSetCurrentContext
+_CGLSetFullScreen
+_CGLSetFullScreenOnDisplay
+_CGLClearDrawable
 
 # Classic FULLSCREEN DISPLAY-MODE family (cg_display_fullscreen_shim.c /
 # cg_display_tramp.asm). Hand-shimmed because PERFORMING the classic
