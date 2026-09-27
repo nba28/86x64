@@ -623,19 +623,40 @@ namespace MachO {
             if (!sec->contains_vmaddr(slot_vmaddr)) { continue; }
             if (sec->sect.offset == 0) { return false; }
             const std::size_t lo_a = sec->sect.addr, hi_a = sec->sect.addr + sec->sect.size;
-            int family = 0, homeless = 0;
-            /* ponytail: fixed +-32-word window; widen only if a measured table
-             * needs it (a wider window samples unrelated neighbours). */
+            int family = 0, homeless = 0, pairs = 0, pairs_homeless = 0, near = 0;
+            uint32_t his[17]; int nhi = 0;
+            /* A u16 PAIR: nonzero high half, small low half. A real pointer's
+             * low half is ~uniform, so <1/16 of a pointer column looks like
+             * this; a u16 array ({16,16} {33,49} ...) is nothing else. */
+            const auto is_pair = [](uint32_t w) {
+               return (w >> 16) != 0 && (w & 0xffffu) < 0x1000u;
+            };
+            /* ponytail: fixed windows (+-32 family, +-8 pairs); widen only if a
+             * measured table needs it (wider windows sample unrelated data). */
             for (long k = -32; k <= 32; ++k) {
                const long long a = (long long)slot_vmaddr + 4 * k;
                if (k == 0 || a < (long long)lo_a || a + 4 > (long long)hi_a) { continue; }
                const uint32_t w = img.template at<uint32_t>(
                   sec->sect.offset + ((std::size_t)a - sec->sect.addr));
+               if (k >= -8 && k <= 8) { ++near; }
+               if (k >= -8 && k <= 8 && is_pair(w)) {
+                  ++pairs;
+                  if (!addresses_something(w)) { ++pairs_homeless; }
+                  if (std::find(his, his + nhi, w >> 16) == his + nhi) { his[nhi++] = w >> 16; }
+               }
                if ((w & 0xffffu) != lo || (w >> 16) == (value >> 16)) { continue; }
                ++family;
                if (!addresses_something(w)) { ++homeless; }
             }
-            return family >= 3 && homeless >= 1;
+            if (family >= 3 && homeless >= 1) { return true; }
+            /* u16-ARRAY run (PvZ zlib lext/dbase: 0x00100010 = {16,16}). */
+            static const bool no_pairs = std::getenv("M64_NO_U16_PAIR_RUN") != nullptr;
+            /* Dense runs need no homeless member: >=75% of the (up to 16)
+             * neighbours pair-shaped with >=3 distinct high halves is ~1e-6 for
+             * a pointer column even at a section edge, and pointers into one
+             * 64K-aligned buffer share a single high half. */
+            return !no_pairs && is_pair(value) && pairs >= 6 &&
+                   (pairs_homeless >= 1 || (4 * pairs >= 3 * near && nhi >= 3));
          }
          return false;
       }
