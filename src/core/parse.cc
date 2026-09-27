@@ -629,7 +629,11 @@ namespace MachO {
              * low half is ~uniform, so <1/16 of a pointer column looks like
              * this; a u16 array ({16,16} {33,49} ...) is nothing else. */
             const auto is_pair = [](uint32_t w) {
-               return (w >> 16) != 0 && (w & 0xffffu) < 0x1000u;
+               /* both halves small and nonzero: a float (0x3f800000) or a
+                * 64K-aligned value is not a u16 pair (PvZ __data records of
+                * {char *, float...} otherwise demoted the string pointer). */
+               const uint32_t h = w >> 16, l = w & 0xffffu;
+               return h != 0 && h < 0x1000u && l != 0 && l < 0x1000u;
             };
             /* ponytail: fixed windows (+-32 family, +-8 pairs); widen only if a
              * measured table needs it (wider windows sample unrelated data). */
@@ -649,6 +653,18 @@ namespace MachO {
                if (!addresses_something(w)) { ++homeless; }
             }
             if (family >= 3 && homeless >= 1) { return true; }
+            /* A word aimed at the START of a C string is a string pointer. */
+            for (Segment<bits> *s2 : archive.segments()) {
+               if (!s2->contains_vmaddr(value)) { continue; }
+               for (Section<bits> *c2 : s2->sections) {
+                  if (c2->contains_vmaddr(value) &&
+                      (c2->sect.flags & SECTION_TYPE) == S_CSTRING_LITERALS &&
+                      !cstring_interior_alias(img, value)) {
+                     return false;
+                  }
+               }
+               break;
+            }
             /* u16-ARRAY run (PvZ zlib lext/dbase: 0x00100010 = {16,16}). */
             static const bool no_pairs = std::getenv("M64_NO_U16_PAIR_RUN") != nullptr;
             /* Dense runs need no homeless member: >=75% of the (up to 16)
