@@ -3073,6 +3073,49 @@ namespace MachO {
                    * std::runtime_error subclass and is catchable up the
                    * stack, unlike abort()/assert().
                    */
+                  /* PIC-anchored `push disp(%anchor[,idx,s])`: this case
+                   * returns before the generic pic_anchored rewrite below, so
+                   * reach the resolved slot directly, exactly like the
+                   * CALL_NEAR_MEMv case: the anchor register is dead in M64.
+                   * (libbass `pushl key(%ebx)` -> pthread_getspecific read
+                   * code bytes as the key.) Guard pic-push-mem; OFF arm
+                   * M64_NO_PIC_PUSH_MEM=1. */
+                  static const bool no_pic_push =
+                     std::getenv("M64_NO_PIC_PUSH_MEM") != nullptr;
+                  if (pic_anchored && memdisp && !no_pic_push &&
+                      effective_width != 16) {
+                     const xed_operand_values_t *pops =
+                        xed_decoded_inst_operands_const(&xedd);
+                     const xed_reg_enum_t idxreg =
+                        xed_decoded_inst_get_index_reg(pops, 0);
+                     typename SectionBlob<Bits::M32>::SectionBlobs insts;
+                     if (idxreg == XED_REG_INVALID) {
+                        /* mov r11d, [rip+slot] */
+                        opcode_t b = {0x44, 0x8B, 0x1D, 0, 0, 0, 0};
+                        auto mov_inst = new Instruction<Bits::M64>(b);
+                        mov_inst->memidx = 0;
+                        mov_inst->memdisp_absolute = false;
+                        env.resolve(memdisp, &mov_inst->memdisp);
+                        mov_inst->memdisp_offset = memdisp_offset;
+                        insts.push_back(mov_inst);
+                     } else {
+                        /* lea r11,[rip+base]; addr32 mov r11d,[r11+idx*s] */
+                        std::size_t m = 0;
+                        while (m < instbuf.size() && instbuf[m] != 0xFF) { ++m; }
+                        const uint8_t sib = instbuf.at(m + 2);
+                        auto pre_lea = new Instruction<Bits::M64>(
+                           opcode::lea_r11_mem_rip_disp32());
+                        pre_lea->memidx = 0;
+                        env.resolve(memdisp, &pre_lea->memdisp);
+                        pre_lea->memdisp_offset = memdisp_offset;
+                        insts.push_back(pre_lea);
+                        opcode_t b = {0x67, 0x45, 0x8B, 0x1C,
+                                      (uint8_t)((sib & 0xF8) | 0x03)};
+                        insts.push_back(new Instruction<Bits::M64>(b));
+                     }
+                     insts.splice(insts.end(), push_r32(XED_REG_R11D));
+                     return insts;
+                  }
                   opcode_t mov_buf = instbuf;
                   std::size_t modrm_idx = 1;
                   while (modrm_idx < mov_buf.size()) {

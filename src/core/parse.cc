@@ -839,6 +839,20 @@ namespace MachO {
              img.template at<uint8_t>(fo + 2) == 0xe5) {
             return true;
          }
+         /* GCC may schedule an instruction between the two halves of the
+          * frame setup: PvZ's vtable targets `push %ebp; mov $3,%edx;
+          * mov %esp,%ebp` (a regparm arg). Accept `mov %esp,%ebp` within the
+          * next 12 bytes after the push. Guard prologue-sched-entry; OFF arm
+          * M64_STRICT_PROLOGUE=1. */
+         static const bool strict_prologue =
+            std::getenv("M64_STRICT_PROLOGUE") != nullptr;
+         if (!strict_prologue && fo + 14 <= img.size() &&
+             img.template at<uint8_t>(fo) == 0x55) {
+            for (std::size_t k = fo + 1; k < fo + 13; ++k) {
+               if (img.template at<uint8_t>(k) == 0x89 &&
+                   img.template at<uint8_t>(k + 1) == 0xe5) { return true; }
+            }
+         }
          /* (b) an i386 C++ ABI ADJUSTOR THUNK entry: adjust the `this` pointer
           * in place on the stack, then tail-`jmp` to the real override —
           *    83 /0|/5 44|6c 24 <disp8> <imm8>          add|sub $imm8, disp8(%esp)
