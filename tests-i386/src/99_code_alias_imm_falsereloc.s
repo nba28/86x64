@@ -21,15 +21,21 @@
 ## `movl 0x88(%rbx),%ebx` (rbx=0, addr=0x88) — the exact deterministic crash.
 ##
 ## LOCALS-STRIPPED (Civ Steam shape) so imm32_code_alias_is_constant's symboled
-## discriminator is disarmed and only the prologue-byte evidence remains. The
-## build rule asserts 0x1f90 really aliases __text AND that 55 89 e5 sits at it,
-## so the alias trap is armed (fail the BUILD loudly if layout drifts).
+## discriminator is disarmed and only the prologue-byte evidence remains.
+## ALIAS is the integer: the build rule links once, measures the vmaddr where
+## _marker's 55 89 e5 landed, and reassembles with -defsym ALIAS=<it> (an imm32
+## keeps the layout), then asserts the bytes sit there, so the alias trap is
+## armed whatever the linker's __text placement.
 ##
-## A/B: store the integer 0x1f90 into a field, read it back, require it equals
-## the LITERAL 0x1f90. Exit 0 = preserved (correct). exit 8 = wrongly relocated
-## (the 31de727 regression: the field holds a slid __text address, not 0x1f90).
+## A/B: store the integer ALIAS into a field, read it back, require it equals
+## the LITERAL ALIAS. Exit 0 = preserved (correct). exit 8 = wrongly relocated
+## (the 31de727 regression: the field holds a slid __text address, not ALIAS).
 ## A negative control stores a genuine data-symbol pointer that MUST still
 ## relocate (so the fix must narrow, not blanket-disable, the code-target admit).
+
+	.ifndef ALIAS
+	.set ALIAS, 0x1f90                   ## first-pass placeholder
+	.endif
 
 	.section __TEXT,__text,regular,pure_instructions
 	.globl _main
@@ -40,9 +46,9 @@ _main:
 	movl	$_node, %ebx
 
 	## ---- A: integer constant aliasing __text @ 55 89 e5 — must stay literal
-	movl	$0x1f90, 0x88(%ebx)          ## c7 83 88 00 00 00  90 1f 00 00
+	movl	$ALIAS, 0x88(%ebx)           ## c7 83 88 00 00 00  <imm32>
 	movl	0x88(%ebx), %ecx
-	cmpl	$0x1f90, %ecx                ## must still be the literal integer
+	cmpl	$ALIAS, %ecx                 ## must still be the literal integer
 	jne	Lbad_a
 
 	## ---- B (negative control): a genuine DATA-symbol pointer stored into a
@@ -70,10 +76,8 @@ Lbad_b:
 	calll	_exit
 	ud2
 
-	## The prologue-byte marker MUST land at vmaddr 0x1f90 (asserted by the build
-	## rule via __text section geometry — symbol-independent). 0x40 of padding
-	## after _main's short body places it there; if the body length drifts the
-	## build rule fails and prints the actual address.
+	## The prologue-byte marker; its vmaddr becomes ALIAS (see the header). The
+	## build rule finds it by content within __text, symbol-independent.
 	##
 	## _marker is LOCAL (no .globl) so `strip -x` removes its nlist — matching
 	## Civ's ACTUAL shape: the boost hash constant aliases a coincidental

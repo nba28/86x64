@@ -3,20 +3,11 @@
 set -u
 cd "$(dirname "$0")"
 ROOT=$(cd .. && pwd)
-B=build; SRC=src/99_openssl_shim.c
+B=build
 SYSROOT=/tmp/i386-sysroot
-LD=$HOME/projects/Library/Toolchains/sl-ld64/ld-i386
 LIB=${LIBABICONV:-$ROOT/build/src/abiconv/libabiconv.dylib}
 [ -f "$SYSROOT/usr/lib/libSystem.dylib" ] || [ -f "$SYSROOT/usr/lib/libSystem.B.dylib" ] || { echo "SKIP openssl-shim (no i386 sysroot)"; exit 0; }
-# Link-time stand-in for /usr/lib/libcrypto.0.9.7.dylib (the real one refuses
-# direct linking). Same install name, so the binary imports exactly like Quinn.
-printf 'void SHA1(void){} void EVP_sha1(void){} void HMAC(void){} void RAND_pseudo_bytes(void){}\n' > $B/crypto_stub.c
-clang -arch i386 -isysroot "$SYSROOT" -mmacosx-version-min=10.6 -c $B/crypto_stub.c -o $B/crypto_stub.o || exit 1
-$LD -arch i386 -dylib -macos_version_min 10.6 -syslibroot "$SYSROOT" -lSystem \
-    -install_name /usr/lib/libcrypto.0.9.7.dylib -o $B/libcrypto.0.9.7.dylib $B/crypto_stub.o || exit 1
-clang -arch i386 -isysroot "$SYSROOT" -mmacosx-version-min=10.6 -c $SRC -o $B/99_openssl_shim.o || exit 1
-$LD -arch i386 -macos_version_min 10.6 -no_pie -syslibroot "$SYSROOT" -lSystem \
-    $B/libcrypto.0.9.7.dylib -e _main -o $B/99_openssl_shim.i386 $B/99_openssl_shim.o || exit 1
+[ -f $B/99_openssl_shim.i386 ] || { echo "FAIL openssl-shim (run via: make openssl-shim)"; exit 1; }
 arm() {  # $1 = libabiconv, $2 = out suffix
    bash $ROOT/src/86x64/86x64.sh -m $ROOT/build/src/macho-tool/macho-tool -l "$1" \
       -w $ROOT/build/src/86x64/libwrapper.a -i $ROOT/build/src/86x64/libinterpose.dylib \

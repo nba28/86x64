@@ -848,8 +848,19 @@ jt-cohesion: $(BUILD_DIR)/96_jt_cohesion.i386
 # built stub with libcrypto.0.9.7's install name. Checks the shims are bound
 # (by content) and correct (SHA1/HMAC test vectors); the classic-jump-table
 # crash itself cannot be rebuilt with ld64-95 (see the script).
-openssl-shim: $(BUILD_DIR) $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL)
+openssl-shim: $(BUILD_DIR) $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL) $(BUILD_DIR)/99_openssl_shim.i386
 	@bash openssl_shim_test.sh
+
+# Link-time stand-in for /usr/lib/libcrypto.0.9.7.dylib (the real one refuses
+# direct linking). Same install name, so 99_openssl_shim imports exactly like
+# Quinn. Overrides %.i386 for the fixture.
+$(BUILD_DIR)/libcrypto.0.9.7.dylib: | $(BUILD_DIR)
+	printf 'void SHA1(void){} void EVP_sha1(void){} void HMAC(void){} void RAND_pseudo_bytes(void){}\n' > $(BUILD_DIR)/crypto_stub.c
+	$(CC_I386) -c $(BUILD_DIR)/crypto_stub.c -o $(BUILD_DIR)/crypto_stub.o
+	$(LD) -arch i386 -dylib -macos_version_min 10.6 -syslibroot $(I386_SYSROOT) -lSystem \
+	    -install_name /usr/lib/libcrypto.0.9.7.dylib -o $@ $(BUILD_DIR)/crypto_stub.o
+$(BUILD_DIR)/99_openssl_shim.i386: $(BUILD_DIR)/99_openssl_shim.o $(BUILD_DIR)/libcrypto.0.9.7.dylib
+	$(LD) $(LDFLAGS_I386) $(BUILD_DIR)/libcrypto.0.9.7.dylib -e _main -o $@ $<
 
 qword-high-skip: $(BUILD_DIR)/99_qword_high_skip.i386 $(BUILD_DIR)/libabiconv.dylib
 	@bash qword_high_skip_test.sh
@@ -1639,30 +1650,27 @@ $(BUILD_DIR)/99_stripped_fnptr_field_start.i386: $(BUILD_DIR)/99_stripped_fnptr_
 
 # 99_code_alias_imm_falsereloc: STRIP local symbols (Civ IV Steam shape — locals-
 # stripped => imm32_code_alias_is_constant's symboled discriminator disarmed, only
-# the 55-89-e5 prologue-byte evidence remains). ASSERT the integer 0x1f90 falls
-# inside __text AND that the prologue bytes 55 89 e5 sit exactly at it (the alias
-# trap the test springs). Guards against 31de727's over-relocation: an integer
-# CONSTANT aliasing a prologue-byte __text address must NOT be relocated when
-# stored into a field (the Civ boost-registry rc=139 deterministic-crash root).
-# Overrides %.i386.
-$(BUILD_DIR)/99_code_alias_imm_falsereloc.i386: $(BUILD_DIR)/99_code_alias_imm_falsereloc.o
-	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
-	strip -x $@
-	@a=$$(otool -l $@ | awk '/sectname __text$$/{s=1;next} s&&$$1=="addr"{print $$2;exit}'); \
-	 z=$$(otool -l $@ | awk '/sectname __text$$/{s=1;next} s&&$$1=="size"{print $$2;exit}'); \
-	 o=$$(otool -l $@ | awk '/sectname __text$$/{s=1;next} s&&$$1=="offset"{print $$2;exit}'); \
-	 if [ $$((a)) -le $$((0x1f90)) ] && [ $$((0x1f90)) -lt $$((a + z)) ]; then \
-	   fo=$$((o + 0x1f90 - a)); \
-	   b=$$(xxd -s $$fo -l 3 -p $@); \
-	   if [ "$$b" = "5589e5" ]; then \
-	     echo "  99_code_alias_imm_falsereloc: 0x1f90 aliases __text w/ 55 89 e5 -- trap armed"; \
-	   else \
-	     echo "99_code_alias_imm_falsereloc: ERROR: bytes at 0x1f90 = $$b, not 55 89 e5 -- adjust pad"; \
-	     rm -f $@; exit 1; \
-	   fi; \
+# the 55-89-e5 prologue-byte evidence remains). The integer ALIAS must alias
+# __text exactly at those bytes (the alias trap the test springs), and where
+# __text lands depends on the linker, so: link once, measure _marker's vmaddr by
+# content, reassemble with -defsym ALIAS=<it> (an imm32, so the layout is
+# unchanged), relink, and ASSERT the bytes sit at ALIAS. Guards against
+# 31de727's over-relocation: an integer CONSTANT aliasing a prologue-byte __text
+# address must NOT be relocated when stored into a field (the Civ boost-registry
+# rc=139 deterministic-crash root). Overrides %.i386.
+CODE_ALIAS_MARKER = python3 text_addr_of.py
+$(BUILD_DIR)/99_code_alias_imm_falsereloc.i386: $(SRC_DIR)/99_code_alias_imm_falsereloc.s | $(BUILD_DIR)
+	$(CC_I386) -c $< -o $(BUILD_DIR)/99_code_alias_imm_falsereloc.o
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $(BUILD_DIR)/99_code_alias_imm_falsereloc.o
+	@m=$$($(CODE_ALIAS_MARKER) $@ 5589e59090) || { rm -f $@; exit 1; }; \
+	 $(CC_I386) -c -Wa,-defsym,ALIAS=$$m $< -o $(BUILD_DIR)/99_code_alias_imm_falsereloc.o && \
+	 $(LD) $(LDFLAGS_I386) -e _main -o $@ $(BUILD_DIR)/99_code_alias_imm_falsereloc.o && \
+	 strip -x $@ && \
+	 if [ "$$($(CODE_ALIAS_MARKER) $@ 5589e59090)" = "$$m" ] && \
+	    otool -tv $@ | grep -q "movl	\$$$$m, 0x88(%ebx)"; then \
+	   echo "  99_code_alias_imm_falsereloc: ALIAS=$$m aliases __text w/ 55 89 e5 -- trap armed"; \
 	 else \
-	   echo "99_code_alias_imm_falsereloc: ERROR: 0x1f90 outside __text [$$a, $$a+$$z) -- adjust pad"; \
-	   rm -f $@; exit 1; \
+	   echo "99_code_alias_imm_falsereloc: ERROR: marker moved or ALIAS not in code"; rm -f $@; exit 1; \
 	 fi
 
 # 99_prologue_sched_entry: stripped, fixed-address. Overrides %.i386.
@@ -1975,12 +1983,13 @@ $(BUILD_DIR)/99_csmem_handle_family.i386: $(BUILD_DIR)/99_csmem_handle_family.o
 # NSLookupAndBindSymbol / NSAddressOfSymbol trio is absent from the i386 sysroot
 # and libabiconv exports a ___NS<name> shim for each, so `undefined
 # dynamic_lookup` lets static-interpose bind them at translate time — the exact
-# route Civilization IV.dylib takes. `-export_dynamic` is what makes this fixture
-# a PROVIDER: its own `_PyInt_AsLong` has to be visible to the RTLD_DEFAULT
-# search the resolver uses to ask "does a translated image define this?".
+# route Civilization IV.dylib takes. The fixture is a PROVIDER: its own
+# `_PyInt_AsLong` must be in the executable's export trie, visible to the
+# RTLD_DEFAULT search the resolver uses to ask "does a translated image define
+# this?". The SL linker exports an executable's globals by default.
 # Overrides %.i386.
 $(BUILD_DIR)/99_translated_provider_defer.i386: $(BUILD_DIR)/99_translated_provider_defer.o
-	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -export_dynamic -e _main -o $@ $<
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 99_low_native_thunk: the fixture dlopens a NATIVE x86_64 helper, which in a
 # translated process gets mapped BELOW 4GB -- the case `fnptr_lookup_result` used
