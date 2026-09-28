@@ -43,14 +43,6 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_AddFolderRouting": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_AddIconToSuite": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_AddImageDescriptionExtension": {
   "first_seen_fw": "QuickTime",
   "stub": "function"
@@ -103,31 +95,11 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_AllocContig": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_AllocCursor": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_Allocate": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_AllowPurgePixels": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_AppendMenuItemText": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
  "_ApplyThemeBackground": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_AreFloatingWindowsVisible": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
@@ -147,10 +119,6 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_BackPixPat": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_BeginMediaEdits": {
   "first_seen_fw": "QuickTime",
   "stub": "function"
@@ -161,10 +129,6 @@
  },
  "_BeginUpdate": {
   "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_BlockMoveData": {
-  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_CC_MD5": {
@@ -215,18 +179,6 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_CTabChanged": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_CalcVis": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_CalcVisBehind": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_CallDrawingNotifications": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
@@ -259,24 +211,8 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_ChangeWindowPropertyAttributes": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_CharExtra": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_CharWidth": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_CheckPictureRecording": {
   "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_CheckUpdate": {
-  "first_seen_fw": "Carbon",
   "stub": "function"
  },
  "_ChooseMovieClock": {
@@ -295,14 +231,6 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_ClipAbove": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_ClipRect": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_ClockGetRate": {
   "first_seen_fw": "QuickTime",
   "stub": "function"
@@ -313,10 +241,6 @@
  },
  "_ClockSetTimeBase": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_CloneWindow": {
-  "first_seen_fw": "Carbon",
   "stub": "function"
  },
  "_CloseDataBrowserContainer": {
@@ -331,24 +255,8 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_ClosePoly": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_CloseRgn": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_CodecManagerVersion": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_Color2Index": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_ColorBit": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_CompAdd": {
@@ -395,14 +303,6 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_ComponentFunctionImplemented": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_ComponentSetTarget": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
  "_CompressImage": {
   "first_seen_fw": "QuickTime",
   "stub": "function"
@@ -429,10 +329,6 @@
  },
  "_ConvertTimeScale": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_CopyBits": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_CopyCStringToPascal": {
@@ -471,14 +367,6 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
- "_CopyPixMap": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_CopyPixPat": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_CopyTrackSettings": {
   "first_seen_fw": "QuickTime",
   "stub": "function"
@@ -489,10 +377,6 @@
  },
  "_CopyUserData": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_CopyWindowAlternateTitle": {
-  "first_seen_fw": "Carbon",
   "stub": "function"
  },
  "_CountImageDescriptionExtensionType": {
@@ -636,10 +520,6 @@
   "stub": "function"
  },
  "_CreateTabsControl": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_CreateWindowFromResource": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
@@ -1015,10 +895,6 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
- "_DateToSeconds": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
  "_DecompressImage": {
   "first_seen_fw": "QuickTime",
   "stub": "function"
@@ -1047,10 +923,6 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_DeltaPoint": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_DirCreate": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
@@ -1063,27 +935,11 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_DisposeCCursor": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_DisposeCIcon": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_DisposeDrag": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_DisposeGDevice": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_DisposeGWorld": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_DisposeIconSuite": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -1104,10 +960,6 @@
   "stub": "function"
  },
  "_DisposePort": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_DisposeScreenBuffer": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -1139,10 +991,6 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_DrawChar": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_DrawControlInCurrentPort": {
   "first_seen_fw": "Carbon",
   "stub": "function"
@@ -1156,10 +1004,6 @@
   "stub": "function"
  },
  "_DrawPicture": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_DrawString": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -1267,27 +1111,11 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_EraseArc": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_EraseOval": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_ErasePoly": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_EraseRect": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_EraseRgn": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_EraseRoundRect": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -1331,10 +1159,6 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_FSMakeFSSpec": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
  "_FSMatchAlias": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
@@ -1347,27 +1171,11 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
- "_FSpCreateResFile": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
  "_FSpMakeFSRef": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
- "_FSpOpenOrphanResFile": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_FSpOpenRF": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
  "_FSpOpenResFile": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_FSpResourceFileAlreadyOpen": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -1839,60 +1647,12 @@
   "first_seen_fw": "CoreMedia",
   "stub": "function"
  },
- "_FillArc": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_FillCArc": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_FillCOval": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_FillCPoly": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_FillCRect": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_FillCRgn": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_FillCRoundRect": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_FillOval": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_FillPoly": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_FillRgn": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_FillRoundRect": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_FindCodec": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_FindFolderRouting": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_FindWindowOfClass": {
-  "first_seen_fw": "Carbon",
   "stub": "function"
  },
  "_FixExp2": {
@@ -1975,24 +1735,8 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_FlushIconRefs": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_FlushIconRefsByVolume": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
  "_FlushVol": {
   "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_FollowFinderAlias": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_FontMetrics": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_ForEachIconDo": {
@@ -2003,27 +1747,11 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_FrameArc": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_FrameOval": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_FramePoly": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_FrameRect": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_FrameRgn": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_FrameRoundRect": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -2043,16 +1771,8 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_GDeviceChanged": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_GetAlertStage": {
   "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetAliasInfo": {
-  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_GetAppFont": {
@@ -2061,10 +1781,6 @@
  },
  "_GetApplicationTextEncoding": {
   "first_seen_fw": "CarbonShim",
-  "stub": "function"
- },
- "_GetAvailableWindowPositioningBounds": {
-  "first_seen_fw": "Carbon",
   "stub": "function"
  },
  "_GetBackColor": {
@@ -2083,28 +1799,8 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_GetCCursor": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetCIcon": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetCPixel": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_GetClip": {
   "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetComponentIconSuite": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_GetComponentVersion": {
-  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_GetCompressionInfo": {
@@ -2251,10 +1947,6 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_GetDefFontSize": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_GetDefaultOutputVolume": {
   "first_seen_fw": "Carbon",
   "stub": "function"
@@ -2275,27 +1967,11 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_GetFNum": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetFPos": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_GetFolderName": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
  "_GetFontFamilyFromMenuSelection": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
  "_GetFontInfo": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetFontName": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -2327,36 +2003,12 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_GetIcon": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetIconFromSuite": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetIconRefFromFile": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_GetIconSizesFromIconRef": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetIconSuite": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_GetImageDescriptionCTable": {
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
  "_GetImageDescriptionExtension": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_GetIndPattern": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_GetItemCmd": {
@@ -2369,10 +2021,6 @@
  },
  "_GetItemStyle": {
   "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetLabel": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_GetLastUserEventTime": {
@@ -2413,10 +2061,6 @@
  },
  "_GetMaxCompressionSize": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_GetMaxDevice": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_GetMaxLoadedTimeInMovie": {
@@ -2703,19 +2347,11 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_GetNewCWindow": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_GetNewControl": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
  "_GetNewMBar": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetNewWindow": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
@@ -2739,27 +2375,11 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_GetOutlinePreferred": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_GetParamText": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_GetPattern": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetPen": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_GetPixBounds": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetPixDepth": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -2767,19 +2387,7 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_GetPixPat": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_GetPixRowBytes": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetPixel": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetPixelsState": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -2787,15 +2395,7 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_GetPortBackPixPat": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_GetPortBounds": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetPortChExtra": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -2803,51 +2403,11 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_GetPortFillPixPat": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetPortFracHPenLocation": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_GetPortGrafProcs": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_GetPortHiliteColor": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetPortOpColor": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetPortPenLocation": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetPortPenMode": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetPortPenPixPat": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetPortPenSize": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetPortPenVisibility": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_GetPortPixMap": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetPortSpExtra": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -2875,28 +2435,8 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_GetPreserveGlyph": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_GetPrevTrackForCompositing": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_GetQDGlobalsArrow": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetQDGlobalsRandomSeed": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetQDGlobalsScreenBits": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetQDGlobalsThePort": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_GetQDPlayIndex": {
@@ -2923,20 +2463,8 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
- "_GetSubTable": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_GetSuiteLabel": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_GetSysBeepVolume": {
   "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetSysFont": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_GetTabContentRect": {
@@ -3147,23 +2675,7 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_GetVRefNum": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_GetWTitle": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_GetWVariant": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowContentColor": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowContentPattern": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
@@ -3171,59 +2683,7 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_GetWindowGreatestAreaDevice": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowOwnerCount": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowPic": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowPort": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowPropertyAttributes": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowProxyAlias": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowProxyFSSpec": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowProxyIcon": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_GetWindowRegion": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowRetainCount": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowStructurePort": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowStructureWidths": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowUserState": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_GetWindowWidgetHilite": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
@@ -3233,10 +2693,6 @@
  },
  "_GoToEndOfMovie": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_GrafDevice": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_GraphicsExportCanTranscode": {
@@ -3691,24 +3147,12 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_HCreate": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_HCreateResFile": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
  "_HDelete": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_HGRectNull": {
   "first_seen_fw": "Helium",
-  "stub": "function"
- },
- "_HGetFInfo": {
-  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_HIDPIGetScaleFactor": {
@@ -3729,34 +3173,6 @@
  },
  "_HMSetMenuHelpFromBalloonRsrc": {
   "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_HOpen": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_HOpenDF": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_HOpenRF": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_HOpenResFile": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_HRstFLock": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_HSetFInfo": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_HSetFLock": {
-  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_HandleControlClick": {
@@ -3791,20 +3207,8 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_HideFloatingWindows": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_HidePen": {
   "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_HiliteColor": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_HiliteWindowFrameForDrag": {
-  "first_seen_fw": "Carbon",
   "stub": "function"
  },
  "_HitTestThemeScrollBarArrows": {
@@ -3827,26 +3231,6 @@
   "first_seen_fw": "IOKit",
   "stub": "function"
  },
- "_IconFamilyToIconSuite": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_IconIDToRgn": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_IconRefToRgn": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_IconSuiteToIconFamily": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_IconSuiteToRgn": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_ImageTranscoderBeginSequence": {
   "first_seen_fw": "QuickTime",
   "stub": "function"
@@ -3859,16 +3243,8 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_Index2Color": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_InitContextualMenus": {
   "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_InitGDevice": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_InsertEmptyMovieSegment": {
@@ -3935,32 +3311,8 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_InvertArc": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_InvertColor": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_InvertOval": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_InvertPoly": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_InvertRect": {
   "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_InvertRoundRect": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_IsAliasFile": {
-  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_IsControlEnabled": {
@@ -3987,38 +3339,6 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_IsOutline": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_IsPortClipRegionEmpty": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_IsPortColor": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_IsPortOffscreen": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_IsPortPictureBeingDefined": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_IsPortPolyBeingDefined": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_IsPortRegionBeingDefined": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_IsPortVisibleRegionEmpty": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_IsScrapMovie": {
   "first_seen_fw": "QuickTime",
   "stub": "function"
@@ -4035,32 +3355,12 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_IsValidPort": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_IsWindowCollapsable": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_IsWindowModified": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_IsWindowPathSelectClick": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_IsWindowUpdatePending": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
  "_KeyScript": {
   "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_KillPoly": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_LAddColumn": {
@@ -4099,55 +3399,7 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
- "_LMGetCursorNew": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMGetDeviceList": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMGetFractEnable": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMGetHiliteMode": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMGetHiliteRGB": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMGetLastFOND": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMGetLastSPExtra": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMGetMainDevice": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMGetQDColors": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_LMGetQDErr": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMGetScrHRes": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMGetScrVRes": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMGetTheGDevice": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -4155,75 +3407,11 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_LMGetWidthListHand": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMGetWidthTabHandle": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_LMGetWordRedraw": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_LMSetCursorNew": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMSetDeviceList": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMSetFractEnable": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMSetHiliteMode": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMSetHiliteRGB": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMSetLastFOND": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMSetLastSPExtra": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMSetMainDevice": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMSetQDColors": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_LMSetQDErr": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMSetScrHRes": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMSetScrVRes": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMSetTheGDevice": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMSetWidthListHand": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LMSetWidthTabHandle": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -4240,10 +3428,6 @@
   "stub": "function"
  },
  "_LineTo": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_LoadIconCache": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -4479,24 +3663,12 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
- "_MakeITable": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_MakeImageDescriptionForEffect": {
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
  "_MakeImageDescriptionForPixMap": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_MakeRGBPat": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_MapPoly": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_MapQDRectToCGSRect": {
@@ -4899,10 +4071,6 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
- "_MovePortTo": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_MoveTo": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
@@ -5279,14 +4447,6 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
- "_NavAskDiscardChanges": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_NavAskSaveChanges": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_NavChooseFile": {
   "first_seen_fw": "Carbon",
   "stub": "function"
@@ -5299,15 +4459,7 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_NavChooseVolume": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_NavCompleteSave": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_NavCustomAskSaveChanges": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
@@ -5323,16 +4475,8 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_NavLibraryVersion": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_NavLoad": {
   "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_NavNewFolder": {
-  "first_seen_fw": "Carbon",
   "stub": "function"
  },
  "_NavPutFile": {
@@ -5343,19 +4487,7 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
- "_NavTranslateFile": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_NavUnload": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_NewAlias": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_NewAliasMinimal": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -5371,19 +4503,11 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_NewGDevice": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_NewGWorld": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_NewGWorldFromPtr": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_NewIconSuite": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -5431,22 +4555,6 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_NewPixMap": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_NewPixPat": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_NewScreenBuffer": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_NewTempScreenBuffer": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_NewTimeBase": {
   "first_seen_fw": "QuickTime",
   "stub": "function"
@@ -5461,14 +4569,6 @@
  },
  "_NewUserDataFromHandle": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_NewWindow": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_NoPurgePixels": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_NoteAlert": {
@@ -5739,18 +4839,6 @@
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
  },
- "_OffscreenVersion": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_OffsetPoly": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_OpColor": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_OpenDataBrowserContainer": {
   "first_seen_fw": "Carbon",
   "stub": "function"
@@ -5761,26 +4849,6 @@
  },
  "_OpenMovieStorage": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_OpenPicture": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_OpenPoly": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_OpenRFPerm": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_OpenRgn": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_OverrideIconRefFromResource": {
-  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_PBCatSearchSync": {
@@ -5836,10 +4904,6 @@
   "stub": "function"
  },
  "_PBHGetFInfoSync": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_PBHGetVInfoSync": {
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
@@ -5911,35 +4975,11 @@
   "first_seen_fw": "AppKit",
   "stub": "function"
  },
- "_PaintArc": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PaintBehind": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_PaintOne": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_PaintOval": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PaintPoly": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_PaintRect": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_PaintRgn": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PaintRoundRect": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -5959,15 +4999,7 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_PenPixPat": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_PenSize": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PicComment": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -5975,59 +5007,11 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_PixMap32Bit": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PixPatChanged": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_PlayThemeSound": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_PlotCIcon": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PlotCIconHandle": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PlotIcon": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PlotIconHandle": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PlotIconID": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_PlotIconMethod": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PlotIconRef": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PlotIconSuite": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PlotSICNHandle": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PortChanged": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PortSize": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -6044,22 +5028,6 @@
   "stub": "function"
  },
  "_ProtectCursor": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_ProtectEntry": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PtInIconID": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PtInIconRef": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_PtInIconSuite": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -6367,10 +5335,6 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_QDDone": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_QDError": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
@@ -6379,39 +5343,11 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_QDGetDirtyRegion": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_QDGetNativeWindowFromPort": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_QDGlobalToLocalPoint": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_QDGlobalToLocalRect": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_QDGlobalToLocalRegion": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_QDIsPortBuffered": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_QDLocalToGlobalPoint": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_QDLocalToGlobalRect": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_QDLocalToGlobalRegion": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -6428,18 +5364,6 @@
   "stub": "function"
  },
  "_QDPictRelease": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_QDSetDirtyRegion": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_QDSwapPort": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_QDTextBounds": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -7047,34 +5971,6 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_Random": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_ReadIconFile": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_RealColor": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_RealFont": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_RectInIconID": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_RectInIconRef": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_RectInIconSuite": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_RegisterAppearanceClient": {
   "first_seen_fw": "Carbon",
   "stub": "function"
@@ -7083,28 +5979,12 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_RegisterIconRefFromIconFile": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_RegisterIconRefFromResource": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
  "_ReleaseMenu": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_ReleaseWindow": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
  "_RemoveDataBrowserTableViewColumn": {
   "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_RemoveFolderRouting": {
-  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_RemoveImageDescriptionExtension": {
@@ -7139,35 +6019,11 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_ReserveEntry": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_ResetAlertStage": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_ReshapeCustomWindow": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_ResizeWindow": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_ResolveAlias": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
- "_ResolveAliasFile": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
  "_RetainMenu": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_RetainWindow": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
@@ -7911,36 +6767,8 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_ScreenRes": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_ScrollRect": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_ScrollWindowRect": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_ScrollWindowRegion": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_SectRegionWithPortClipRegion": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SectRegionWithPortVisibleRegion": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_SelectMovieAlternates": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_SetA5": {
-  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_SetAutoTrackAlternatesEnabled": {
@@ -7955,24 +6783,12 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_SetCPixel": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetClientID": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_SetClip": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_SetControlPopupMenuID": {
   "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_SetCurrentA5": {
-  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_SetCursor": {
@@ -8051,10 +6867,6 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_SetDeviceAttribute": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_SetDialogFont": {
   "first_seen_fw": "Carbon",
   "stub": "function"
@@ -8081,14 +6893,6 @@
  },
  "_SetEventMask": {
   "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_SetFScaleDisable": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetFractEnable": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_SetGDevice": {
@@ -8295,79 +7099,11 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_SetOutlinePreferred": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPixelsState": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_SetPort": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_SetPortBackPixPat": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortBits": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortClipRegion": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortFillPixPat": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortFracHPenLocation": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_SetPortGrafProcs": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortOpColor": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortPenMode": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortPenPixPat": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortPenSize": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortPix": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortTextFace": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortTextFont": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortTextMode": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortTextSize": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetPortVisibleRegion": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -8379,27 +7115,11 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_SetPreserveGlyph": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetQDError": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetQDGlobalsArrow": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_SetSoundPreference": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
  "_SetStdCProcs": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SetSuiteLabel": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -8515,15 +7235,7 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_SetWindowClass": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_SetWindowContentColor": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_SetWindowContentPattern": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
@@ -8531,23 +7243,7 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_SetWindowPic": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_SetWindowProxyCreatorAndType": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_SetWindowProxyFSSpec": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_SetWindowStandardState": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_SetWindowUserState": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
@@ -8556,10 +7252,6 @@
   "stub": "function"
  },
  "_ShowDragHilite": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_ShowFloatingWindows": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
@@ -8605,10 +7297,6 @@
  },
  "_SoundComponentSetInfo": {
   "first_seen_fw": "CarbonSound",
-  "stub": "function"
- },
- "_SpaceExtra": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_SpriteMediaCountImages": {
@@ -8707,36 +7395,12 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_StdBits": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
  "_StretchBits": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_StringWidth": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_SubtractTime": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_SwapPortPicSaveHandle": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SwapPortPolySaveHandle": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SwapPortRegionSaveHandle": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_SyncCGContextOriginWithPort": {
-  "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
  "_TCGetSourceRef": {
@@ -9179,15 +7843,7 @@
   "first_seen_fw": "CoreServices",
   "stub": "function"
  },
- "_TrackBox": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_TrackDrag": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_TrackGoAway": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
@@ -9199,19 +7855,7 @@
   "first_seen_fw": "QuickTime",
   "stub": "function"
  },
- "_TrackWindowProxyDrag": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_TransitionWindowAndParent": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
  "_TrimRect": {
-  "first_seen_fw": "ApplicationServices",
-  "stub": "function"
- },
- "_TruncString": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
@@ -9487,10 +8131,6 @@
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
  },
- "_UnmountVol": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
  "_UnprotectCursor": {
   "first_seen_fw": "ApplicationServices",
   "stub": "function"
@@ -9505,10 +8145,6 @@
  },
  "_UnsignedFixMulDiv": {
   "first_seen_fw": "QuickTime",
-  "stub": "function"
- },
- "_UpdateAlias": {
-  "first_seen_fw": "CoreServices",
   "stub": "function"
  },
  "_UpdateControls": {
@@ -9919,14 +8555,6 @@
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
- "_WindowPathSelect": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_WriteIconFile": {
-  "first_seen_fw": "CoreServices",
-  "stub": "function"
- },
  "_XMLParseAddAttribute": {
   "first_seen_fw": "QuickTime",
   "stub": "function"
@@ -9988,14 +8616,6 @@
   "stub": "function"
  },
  "_ZoomRegion": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_ZoomWindow": {
-  "first_seen_fw": "Carbon",
-  "stub": "function"
- },
- "_ZoomWindowIdeal": {
   "first_seen_fw": "Carbon",
   "stub": "function"
  },
@@ -29019,18 +27639,6 @@
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
  },
- "_create_fftsetup": {
-  "first_seen_fw": "Accelerate",
-  "stub": "function"
- },
- "_ctoz": {
-  "first_seen_fw": "vecLib",
-  "stub": "function"
- },
- "_destroy_fftsetup": {
-  "first_seen_fw": "Accelerate",
-  "stub": "function"
- },
  "_difftime": {
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
@@ -29115,10 +27723,6 @@
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
  },
- "_dotpr": {
-  "first_seen_fw": "vecLib",
-  "stub": "function"
- },
  "_dyld_stub_binder": {
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
@@ -29159,23 +27763,7 @@
   "first_seen_fw": "Accelerate",
   "stub": "function"
  },
- "_fft_zip": {
-  "first_seen_fw": "vecLib",
-  "stub": "function"
- },
  "_fft_zop": {
-  "first_seen_fw": "vecLib",
-  "stub": "function"
- },
- "_fft_zrip": {
-  "first_seen_fw": "Accelerate",
-  "stub": "function"
- },
- "_fft_zrop": {
-  "first_seen_fw": "vecLib",
-  "stub": "function"
- },
- "_fft_zropt": {
   "first_seen_fw": "vecLib",
   "stub": "function"
  },
@@ -34003,10 +32591,6 @@
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
  },
- "_vadd": {
-  "first_seen_fw": "vecLib",
-  "stub": "function"
- },
  "_valloc": {
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
@@ -34027,16 +32611,8 @@
   "first_seen_fw": "libSystem.B.dylib",
   "stub": "function"
  },
- "_vmul": {
-  "first_seen_fw": "vecLib",
-  "stub": "function"
- },
  "_voucher_mach_msg_set": {
   "first_seen_fw": "libSystem.B.dylib",
-  "stub": "function"
- },
- "_vsmul": {
-  "first_seen_fw": "Accelerate",
   "stub": "function"
  },
  "_write": {
@@ -34613,14 +33189,6 @@
  },
  "_xpc_retain": {
   "first_seen_fw": "libSystem.B.dylib",
-  "stub": "function"
- },
- "_ztoc": {
-  "first_seen_fw": "vecLib",
-  "stub": "function"
- },
- "_zvcma": {
-  "first_seen_fw": "vecLib",
   "stub": "function"
  },
  "_zvmul": {

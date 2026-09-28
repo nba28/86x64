@@ -2111,6 +2111,15 @@ $(BUILD_DIR)/90_fp_sret_stack_balance.i386: $(BUILD_DIR)/90_fp_sret_stack_balanc
 self-weak-rebase: cpp
 	@bash self_weak_rebase_test.sh $(MACHO_TOOL) $(LIBABICONV) $(LIBWRAPPER) $(LIBINTERPOSE)
 
+# shimgen-translated-skip: two-arm guard for src/86x64/shimgen.py — a TRANSLATED
+# image (links libabiconv) must never have its missing binds collected into a
+# native ShimAuto stub / observed.json (that pollution is what needs a
+# libabiconv bridge / `m64 reinterpose`, never a native-ABI stub). Fully
+# self-contained (builds its own fake-framework fixtures; no i386 sysroot).
+.PHONY: shimgen-translated-skip
+shimgen-translated-skip:
+	@bash shimgen_translated_skip_test.sh
+
 # 99_classic_reloc_accept: -O2 -fomit-frame-pointer (no prologue at the
 # targets), linked -x -pie for 10.5 so the image carries CLASSIC local relocs.
 $(BUILD_DIR)/99_classic_reloc_accept.o: $(SRC_DIR)/99_classic_reloc_accept.c | $(BUILD_DIR)
