@@ -1,0 +1,5 @@
+devices: found
+plugin: ok
+hid interface: ok
+queue: ok
+exit_code: 0

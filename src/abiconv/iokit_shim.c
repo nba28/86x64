@@ -48,15 +48,9 @@
 #include <stdint.h>
 #include <string.h>
 
-/* objc_shim.c: 32-bit proxy-arena handle -> real 64-bit ref (non-handles pass
- * through zero-extended), and the reverse (64-bit ref -> low-4GB handle). */
-extern uint64_t x64_objc_unwrap(uint32_t h);
-extern uint32_t x64_objc_wrap(uint64_t real);
-
-/* cb_bridge.c: bind an i386 callback fn-ptr to a native trampoline. The sig
- * layout + codes MUST match cb_bridge.c (x64_cb_sig / CBA_* / CBR_*). */
-struct iok_cb_sig { uint32_t nargs; uint32_t ret_kind; uint8_t arg_kinds[16]; };
-extern uint64_t x64_cb_wrap(uint32_t fn32, const struct iok_cb_sig *sig);
+/* x64_objc_[un]wrap (proxy-arena handles) and x64_cb_wrap (i386 callback ->
+ * native trampoline). */
+#include "cb_bridge.h"
 
 /* Tokens live in the i386 kernel-reserved top (> LOW_REGION_END 0xF0000000,
  * < 0xFFFFFFFF) so they can never collide with a real low-4GB pointer from
@@ -263,20 +257,6 @@ uint32_t shim_IOServiceMatching(uint32_t *a)
    return d ? x64_objc_wrap((uint64_t)(uintptr_t)d) : 0;
 }
 
-/* A real, EMPTY io_iterator_t: a valid iterator over a matching set that
- * matches nothing, so IOIteratorNext returns 0 immediately and
- * IOObjectRelease disposes it — the caller walks a genuine (just empty)
- * device list. MACH_PORT_NULL mainPort = default; the matching dict is
- * consumed by IOServiceGetMatchingServices. */
-static io_iterator_t iok_empty_iterator(void)
-{
-   io_iterator_t it = MACH_PORT_NULL;
-   CFMutableDictionaryRef m = IOServiceNameMatching("86x64-match-nothing");
-   if (m)
-      IOServiceGetMatchingServices(MACH_PORT_NULL, m, &it);
-   return it;
-}
-
 /* kern_return_t IOServiceAddMatchingNotification(
  *    IONotificationPortRef notifyPort, const io_name_t notificationType,
  *    CFDictionaryRef matching CF_RELEASES_ARGUMENT,
@@ -284,24 +264,15 @@ static io_iterator_t iok_empty_iterator(void)
  *    io_iterator_t *notification);
  * i386 frame: notifyPort[0] type[1] matching[2] callback[3] refCon[4] out[5].
  *
- * DELIBERATE graceful-degrade (structural, not app-specific): a matching
- * notification's whole point is to hand the app io_service_t devices, and the
- * canonical consumer pattern (Apple HID Utilities and kin) immediately opens
- * each device via IOCreatePlugInInterfaceForService — a COM-style plug-in API
- * that is NOT bridged (raw native bind in translated binaries; bridging it
- * means a CFPlugIn vtable bridge + retranslate). Forwarding for real would
- * enumerate this machine's REAL HID devices and walk the app straight into
- * that un-bridged call with an i386 frame -> undefined native behavior. Until
- * the plug-in surface is bridged, register NOTHING natively and hand back
- * kIOReturnSuccess + a real EMPTY iterator: the app arms its handler, walks
- * "no devices yet", and proceeds — the classic no-gamepad/no-camera case
- * every hot-plug consumer already handles. (No hot-plug events are lost that
- * the app could have survived processing.) We honor the API's refcount
- * contract: one reference of `matching` is consumed. */
+ * REAL forward. The canonical consumer (Apple HID Utilities and kin) walks the
+ * returned iterator and opens each device through IOCreatePlugInInterface-
+ * ForService, which iokit_com_shim.c now bridges (it used to be a raw native
+ * call, so this handed back an EMPTY iterator on purpose). The callback
+ * void (*)(void *refcon, io_iterator_t) binds through x64_cb_wrap; the
+ * matching dict is a proxy handle (unwrap; the callee consumes the ref). */
 uint32_t shim_IOServiceAddMatchingNotification(uint32_t *a)
 {
    uint32_t port_tok = a[0];
-   uint32_t matching = a[2];
    uint32_t iter_out = a[5];
 
    if ((port_tok & TOK_MASK) != TOK_PORT_BASE)
@@ -310,14 +281,22 @@ uint32_t shim_IOServiceAddMatchingNotification(uint32_t *a)
    if (i >= IOK_MAX_SLOTS || !g_slots[i].in_use || !g_slots[i].port)
       return kIOReturnBadArgument;
 
-   /* Callee consumes one ref of the matching dict (CF_RELEASES_ARGUMENT). */
-   CFDictionaryRef md = (CFDictionaryRef)(uintptr_t)x64_objc_unwrap(matching);
-   if (md)
-      CFRelease(md);
-
+   static const x64_cb_sig matching_sig =
+      { .nargs = 2, .ret_kind = CBR_VOID, .arg_kinds = { CBA_PTR, CBA_I32 } };
+   IOServiceMatchingCallback cb = NULL;
+   if (a[3]) {
+      cb = (IOServiceMatchingCallback)(uintptr_t)x64_cb_wrap(a[3], &matching_sig);
+      if (!cb)
+         return kIOReturnNoResources;   /* trampoline slots exhausted */
+   }
+   io_iterator_t it = MACH_PORT_NULL;
+   kern_return_t kr = IOServiceAddMatchingNotification(
+       g_slots[i].port, (const char *)(uintptr_t)a[1],
+       (CFDictionaryRef)(uintptr_t)x64_objc_unwrap(a[2]), cb,
+       (void *)(uintptr_t)a[4], &it);
    if (iter_out)
-      *(uint32_t *)(uintptr_t)iter_out = (uint32_t)iok_empty_iterator();
-   return kIOReturnSuccess;
+      *(uint32_t *)(uintptr_t)iter_out = (uint32_t)it;
+   return (uint32_t)kr;
 }
 
 /* kern_return_t IOServiceAddInterestNotification(
@@ -347,9 +326,10 @@ uint32_t shim_IOServiceAddInterestNotification(uint32_t *a)
    if (i >= IOK_MAX_SLOTS || !g_slots[i].in_use || !g_slots[i].port)
       return kIOReturnBadArgument;
 
-   /* CBA_PTR=2, CBA_I32=0, CBR_VOID=0 (cb_bridge.c). Static: x64_cb_wrap
-    * keeps the sig POINTER in its binding. */
-   static const struct iok_cb_sig interest_sig = { 4, 0, { 2, 0, 0, 2 } };
+   /* Static: x64_cb_wrap keeps the sig POINTER in its binding. */
+   static const x64_cb_sig interest_sig =
+      { .nargs = 4, .ret_kind = CBR_VOID,
+        .arg_kinds = { CBA_PTR, CBA_I32, CBA_I32, CBA_PTR } };
    IOServiceInterestCallback cb = NULL;
    if (cb32) {
       uint64_t tramp = x64_cb_wrap(cb32, &interest_sig);

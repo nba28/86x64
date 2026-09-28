@@ -333,6 +333,46 @@
 	MTSHIM	___CFRunLoopAddSource,               _shim_CFRunLoopAddSource
 	MTSHIM	___CFRunLoopRemoveSource,            _shim_CFRunLoopRemoveSource
 
+	;; IOKit CFPlugIn (COM) interfaces: the entry points plus one i386-callable
+	;; trampoline per bridged interface method, referenced from the i386
+	;; vtables of the low-4GB proxies. See iokit_com_shim.c.
+	MTSHIM	___IOCreatePlugInInterfaceForService, _shim_IOCreatePlugInInterfaceForService
+	MTSHIM	___IODestroyPlugInInterface,          _shim_IODestroyPlugInInterface
+	MTSHIM	___iokcom_QueryInterface, _shim_iokcom_QueryInterface
+	MTSHIM	___iokcom_AddRef, _shim_iokcom_AddRef
+	MTSHIM	___iokcom_Release, _shim_iokcom_Release
+	MTSHIM	___iokcom_Probe, _shim_iokcom_Probe
+	MTSHIM	___iokcom_Start, _shim_iokcom_Start
+	MTSHIM	___iokcom_Stop, _shim_iokcom_Stop
+	MTSHIM	___iokcom_createAsyncEventSource, _shim_iokcom_createAsyncEventSource
+	MTSHIM	___iokcom_getAsyncEventSource, _shim_iokcom_getAsyncEventSource
+	MTSHIM	___iokcom_createAsyncPort, _shim_iokcom_createAsyncPort
+	MTSHIM	___iokcom_getAsyncPort, _shim_iokcom_getAsyncPort
+	MTSHIM	___iokcom_open, _shim_iokcom_open
+	MTSHIM	___iokcom_close, _shim_iokcom_close
+	MTSHIM	___iokcom_setRemovalCallback, _shim_iokcom_setRemovalCallback
+	MTSHIM	___iokcom_getElementValue, _shim_iokcom_getElementValue
+	MTSHIM	___iokcom_setElementValue, _shim_iokcom_setElementValue
+	MTSHIM	___iokcom_queryElementValue, _shim_iokcom_queryElementValue
+	MTSHIM	___iokcom_startAllQueues, _shim_iokcom_startAllQueues
+	MTSHIM	___iokcom_stopAllQueues, _shim_iokcom_stopAllQueues
+	MTSHIM	___iokcom_allocQueue, _shim_iokcom_allocQueue
+	MTSHIM	___iokcom_allocOutputTransaction, _shim_iokcom_allocOutputTransaction
+	MTSHIM	___iokcom_setReport, _shim_iokcom_setReport
+	MTSHIM	___iokcom_getReport, _shim_iokcom_getReport
+	MTSHIM	___iokcom_copyMatchingElements, _shim_iokcom_copyMatchingElements
+	MTSHIM	___iokcom_setInterruptReportHandlerCallback, _shim_iokcom_setInterruptReportHandlerCallback
+	MTSHIM	___iokcom_q_create, _shim_iokcom_q_create
+	MTSHIM	___iokcom_q_dispose, _shim_iokcom_q_dispose
+	MTSHIM	___iokcom_q_addElement, _shim_iokcom_q_addElement
+	MTSHIM	___iokcom_q_removeElement, _shim_iokcom_q_removeElement
+	MTSHIM	___iokcom_q_hasElement, _shim_iokcom_q_hasElement
+	MTSHIM	___iokcom_q_start, _shim_iokcom_q_start
+	MTSHIM	___iokcom_q_stop, _shim_iokcom_q_stop
+	MTSHIM	___iokcom_q_getNextEvent, _shim_iokcom_q_getNextEvent
+	MTSHIM	___iokcom_q_setEventCallout, _shim_iokcom_q_setEventCallout
+	MTSHIM	___iokcom_q_getEventCallout, _shim_iokcom_q_getEventCallout
+
 	;; Variadic AppKit alert panels (abigen skips ALL variadic functions, so
 	;; the raw binds passed arena handles straight into native AppKit, which
 	;; then ran objc_msgSend on a handle). objc_shim.c alert_panel_common.

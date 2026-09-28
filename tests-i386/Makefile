@@ -1792,6 +1792,14 @@ $(BUILD_DIR)/99_cgl_shadow_objc_arg.i386: $(BUILD_DIR)/99_cgl_shadow_objc_arg.o
 $(BUILD_DIR)/39_xml_memget_alloc.i386: $(BUILD_DIR)/39_xml_memget_alloc.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 99_iokit_hid_plugin: IOKit is not in the i386 sysroot — compile against the
+# host SDK headers under -arch i386 and leave the IOKit/CF imports as undefined
+# dynamic_lookup binds (static-interpose -> libabiconv's ___IO* shims).
+$(BUILD_DIR)/99_iokit_hid_plugin.o: $(SRC_DIR)/99_iokit_hid_plugin.c | $(BUILD_DIR)
+	clang -arch i386 -isysroot $(HOST_SDK) -mmacosx-version-min=10.6 -c $< -o $@
+$(BUILD_DIR)/99_iokit_hid_plugin.i386: $(BUILD_DIR)/99_iokit_hid_plugin.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # 49_cgrect_byval: CoreGraphics isn't in the i386 sysroot, so the CG geometry
 # predicates (CGRectIsEmpty / CGPointEqualToPoint / CGRectContainsPoint) are
 # undefined dynamic_lookup imports resolved at translate time by static-interpose

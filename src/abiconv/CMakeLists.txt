@@ -497,6 +497,7 @@ add_library(abiconv SHARED
   cb_bridge.c
   lowstack_pool.c
   iokit_shim.c
+  iokit_com_shim.c
   carbon_memory.c
   # mp_memory_shim.c: ONE job — Carbon Multiprocessing Services' MEMORY
   # allocators (MPAllocateAligned/MPAllocate/MPFree/MPGetAllocatedBlockSize) on
