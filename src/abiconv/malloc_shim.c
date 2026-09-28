@@ -144,6 +144,14 @@ static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
 
 /* Attach to the shared control block, creating it if we are the first copy.
  * Idempotent; safe to call at the top of every entry point. */
+/* ABICONV_HEAP_TRACE, read once: free() is on every translated deallocation
+ * and runs under the heap lock, so a getenv() scan there is not free. */
+static int heap_trace(void) {
+   static int t = -1;
+   if (__builtin_expect(t < 0, 0)) { t = getenv("ABICONV_HEAP_TRACE") != NULL; }
+   return t;
+}
+
 static void heap_init(void) {
    if (g_hc) { return; }
    os_unfair_lock_lock(&g_init_lock);
@@ -257,7 +265,7 @@ static struct region *add_region(size_t need) {
                r->base = (char *)(uintptr_t)addr;
                r->cur  = r->base;
                r->end  = r->base + rsize;
-               if (getenv("ABICONV_HEAP_TRACE")) {
+               if (heap_trace()) {
                   fprintf(stderr,
                           "[heap] region %d: [0x%llx,0x%llx) %llu MB  band=%s\n",
                           g_hc->nregions - 1, (unsigned long long)(uintptr_t)r->base,
@@ -443,7 +451,7 @@ static void *bump(size_t cap, size_t align) {
     * principle as fault_report_shim.c. */
    {
       static int reported = 0;
-      if (!reported || getenv("ABICONV_HEAP_TRACE")) {
+      if (!reported || heap_trace()) {
          reported = 1;
          size_t freebytes = 0;
          for (int i = 0; i < g_hc->nregions; ++i) {
@@ -509,7 +517,7 @@ void *malloc(size_t n) {
    /* Large-allocation trail: the SEQUENCE of big requests distinguishes a
     * legitimate one-off reservation from a doubling probe (and a doubling probe
     * from a garbage size produced by a mistranslated length). */
-   if (cap >= (64UL << 20) && getenv("ABICONV_HEAP_TRACE")) {
+   if (cap >= (64UL << 20) && heap_trace()) {
       fprintf(stderr, "[heap] large malloc %llu bytes (0x%llx) -> %p\n",
               (unsigned long long)cap, (unsigned long long)cap, p);
    }
@@ -533,7 +541,7 @@ void free(void *p) {
     * Ignore the second free, exactly as a hardened allocator would. */
    if (b->size & BLK_FREED_BIT) {
       static _Atomic unsigned warned;
-      if (getenv("ABICONV_HEAP_TRACE") &&
+      if (heap_trace() &&
           __c11_atomic_fetch_add(&warned, 1, __ATOMIC_RELAXED) < 32) {
          fprintf(stderr, "[heap] double-free ignored: p=%p cap=%llu\n",
                  p, (unsigned long long)BLK_CAP(b));
@@ -546,7 +554,7 @@ void free(void *p) {
     * a use-after-free read shows 0xCD bytes instead of stale/zero data — this
     * distinguishes UAF from an explicit zero write at the fault site. Off
     * unless ABICONV_HEAP_TRACE is set. */
-   if (getenv("ABICONV_HEAP_TRACE")) { memset(p, 0xCD, BLK_CAP(b)); }
+   if (heap_trace()) { memset(p, 0xCD, BLK_CAP(b)); }
    b->next = g_hc->free_list;
    g_hc->free_list = b;
    os_unfair_lock_unlock(&g_hc->lock);

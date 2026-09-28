@@ -92,7 +92,15 @@ uint32_t shim_GetKeys(uint32_t *a) {
    if (gk) gk(km);                              /* real keyboard state ... */
    else    memset(km, 0, 16);                   /* ... or a clean empty map */
 
-   if (getenv("ABICONV_KEYS_TRACE")) {
+   /* Polled every frame: read the knobs once. */
+   static int trace = -1;
+   static const char *hold;
+   if (__builtin_expect(trace < 0, 0)) {
+      hold = getenv("ABICONV_HOLD_KEYS");
+      trace = getenv("ABICONV_KEYS_TRACE") != NULL;
+   }
+
+   if (trace) {
       static int reg;
       if (!reg) { reg = 1; atexit(gk_summary); }
       gk_calls++;
@@ -115,7 +123,6 @@ uint32_t shim_GetKeys(uint32_t *a) {
       }
    }
 
-   const char *hold = getenv("ABICONV_HOLD_KEYS");
    if (!hold || !*hold) return 0;               /* default: transparent */
 
    const char *ms_s = getenv("ABICONV_HOLD_KEYS_MS");
@@ -133,7 +140,7 @@ uint32_t shim_GetKeys(uint32_t *a) {
       while (*p == ',' || *p == ' ' || *p == '\t') p++;
    }
 
-   if (getenv("ABICONV_KEYS_TRACE")) {
+   if (trace) {
       fprintf(stderr, "[keys] GetKeys forced ABICONV_HOLD_KEYS=%s (win=%llums)\n",
               hold, (unsigned long long)win);
    }

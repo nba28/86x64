@@ -43,7 +43,9 @@ void shim_qsort(uint32_t *a)
    const uint32_t n = a[1], w = a[2];
    int32_t (*cmp)(uint64_t, uint64_t) = (void *)(uintptr_t)x64_cb_wrap(a[3], &k_sig2);
    if (!base || n < 2 || !w || !cmp) { return; }
-   if (getenv("M64_NO_QSORT_SHIM")) { qsort(base, n, w, (int (*)(const void *, const void *))cmp); return; }
+   static int off = -1;
+   if (off < 0) { off = getenv("M64_NO_QSORT_SHIM") != NULL; }
+   if (off) { qsort(base, n, w, (int (*)(const void *, const void *))cmp); return; }
    uint32_t *idx = malloc((size_t)n * sizeof *idx);
    uint8_t  *tmp = malloc((size_t)n * w);
    if (!idx || !tmp) {   /* degrade to the bridge rather than leave it unsorted */
