@@ -11,8 +11,8 @@ provides on the RUNNING system:
     a bundled binary (a broken one aborts the prober).
 
 The real implementations of removed symbols are written ONCE, by hand, as
-ordinary compilable source under shimdb/impl/ (e.g. memory.c -> BlockMoveData,
-appkit.m -> NSFlippableView). shimgen compiles that pool, then for each app
+ordinary compilable source under shimdb/impl/ (e.g. appkit.m -> NSFlippableView,
+videotoolbox.c -> VTDecompressionSessionRelease). shimgen compiles that pool, then for each app
 links only the objects that provide a symbol the app actually binds and
 -dead_strips the rest, so each shim carries solely the required impls. A
 removed symbol with no curated impl YET gets a LOUD last-resort stub (function
@@ -671,7 +671,6 @@ def main():
         cmd = ["clang", "-dynamiclib", "-arch", "x86_64",
                "-o", shim_path, srcf, *impl_objs,
                "-framework", "Cocoa",
-               "-framework", "Accelerate",   # shimdb/impl/veclib.c
                "-Wl,-dead_strip_dylibs",
                "-F", fw_dir,  # bundled frameworks (iLifeSlideshow etc.)
                "-install_name", f"{ref_prefix}{shim_name}",

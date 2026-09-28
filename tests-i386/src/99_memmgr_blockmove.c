@@ -1,8 +1,8 @@
 /* 99_memmgr_blockmove — the classic Memory Manager block primitives, removed
- * from modern macOS and implemented ONCE in shimdb/impl/memory.c (libabiconv's
- * i386 glue calls that same code). Overlapping moves in both directions, the
- * Uncached variants, BlockZero, and a NEGATIVE count: classic Size is signed,
- * so it must be a no-op (an unsigned read would memmove 4 GB). Exit 0 = ok. */
+ * from modern macOS and implemented in libabiconv (carbon_memory.c).
+ * Overlapping moves in both directions, the Uncached variants, BlockZero, and
+ * a NEGATIVE count: classic Size is signed, so it must be a no-op
+ * (an unsigned read would memmove 4 GB). Exit 0 = ok. */
 #include <stdlib.h>
 #include <string.h>
 

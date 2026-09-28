@@ -33,14 +33,13 @@
 # Kill switch ABICONV_FSSPEC_LEGACY=1 restores the historical stub behaviour; the
 # test runs both arms and requires them to DIFFER, so the guard cannot pass inertly.
 #
-# Self-contained: compiles carbon_fsspec_shim.c (+ its shimdb/impl/fsspec.c) as x86_64 (the arch it really runs
+# Self-contained: compiles carbon_fsspec_shim.c as x86_64 (the arch it really runs
 # as under Rosetta) with -pagezero_size 0x1000 so the FSSpec/FSRef/path buffers can
 # be mapped in the low 4GB — the shims read their addresses from 32-bit i386 slots.
 set -u
 
 PROJ_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 SRC="$PROJ_ROOT/src/abiconv/carbon_fsspec_shim.c"
-IMPL="$PROJ_ROOT/src/86x64/shimdb/impl"   # the implementation the glue calls
 ASM="$PROJ_ROOT/src/abiconv/maptable_tramp.asm"
 [ -f "$SRC" ] || { echo "SKIP fsspec-resolve (no $SRC)"; exit 0; }
 
@@ -241,7 +240,7 @@ EOF
 # the fail() helper needs stdarg
 sed -i '' 's/#include <stdint.h>/#include <stdarg.h>\n#include <stdint.h>/' "$TMP/t.c"
 
-cc -arch x86_64 -o "$TMP/t" "$TMP/t.c" "$SRC" "$IMPL/fsspec.c" -I "$IMPL" -Wl,-pagezero_size,0x1000 \
+cc -arch x86_64 -o "$TMP/t" "$TMP/t.c" "$SRC" -Wl,-pagezero_size,0x1000 \
    -framework CoreServices -Wno-deprecated-declarations 2> "$TMP/cc.log" \
    || { echo "FAIL fsspec-resolve (cc error)"; sed 's/^/    /' "$TMP/cc.log" | head -20; exit 1; }
 
