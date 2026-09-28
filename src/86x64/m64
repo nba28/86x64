@@ -928,10 +928,10 @@ def _links_libabiconv(macho):
 
 
 def _shim_exports(lib):
-    """The set of symbols libabiconv currently EXPORTS (defined, external), as
-    `nm -gU` prints them — leading underscore(s) intact, exactly the form the
-    static-interpose match tests against. This is the authoritative "shimmable
-    set": whatever is in here is what a FRESH retranslate would route to."""
+    """The libabiconv exports a raw import can be ROUTED to: `nm -gU` names
+    (leading underscores intact, the form static-interpose matches), minus the
+    bridge of every name in the `libabiconv.nulljump` sidecar. Those bridges have
+    no native target on this OS, and static-interpose never routes to them."""
     exports = set()
     try:
         p = subprocess.run(["nm", "-gU", str(lib)], capture_output=True,
@@ -942,6 +942,11 @@ def _shim_exports(lib):
         f = line.split()
         if f:
             exports.add(f[-1])          # `<addr> <type> <name>` → last field
+    nulljump = Path(lib).with_name("libabiconv.nulljump")
+    if nulljump.exists():
+        exports -= {INTERPOSE_PREFIX + n for n in nulljump.read_text().split()}
+    else:
+        warn(f"no {nulljump.name} beside {lib}: NULL-jump bridges count as shims")
     return exports
 
 
