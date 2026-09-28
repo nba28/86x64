@@ -403,6 +403,12 @@ namespace MachO {
       return !env.code_target_has_entry_evidence(img, (std::size_t) imm_val);
    }
 
+   /* An i386 value that can name a pointer operand: past the first page and
+    * in the low 2GB. The floor stays 0x1000 even for a base-0 dylib (DataParser
+    * uses min(0x1000, lowest section) for data words): in instruction operands,
+    * small integer immediates vastly outnumber pointers into the first page. */
+   static inline bool ptr32_range(std::size_t v) { return v >= 0x1000 && v < 0x80000000U; }
+
    /* The same rule for the disp32 of a BASE-register operand, where disp is
     * far more often a struct offset or extent than a table address (Civ IV
     * `lea 0x27ec(%ecx),%edx`, a free-list terminator). A load/store at
@@ -418,7 +424,7 @@ namespace MachO {
       static const bool access_entry_rule =
          std::getenv("M64_MEMDISP_ACCESS_ENTRY_RULE") != nullptr;
       if (disabled || bits != Bits::M32) { return false; }
-      if (disp < 0x1000 || disp >= 0x80000000U) { return false; }
+      if (!ptr32_range(disp)) { return false; }
       if (!is_lea && !access_entry_rule && env.vmaddr_in_instructions_sect(disp)) {
          return true;
       }
@@ -437,7 +443,7 @@ namespace MachO {
    static bool field_store_code_target_is_fnptr(const Image& img,
                                                 ParseEnv<bits>& env,
                                                 uint32_t value) {
-      if (value < 0x1000 || value >= 0x80000000U) { return false; }
+      if (!ptr32_range(value)) { return false; }
       if (!env.vmaddr_in_instructions_sect(value)) { return false; }
       if (env.func_syms.count(value) != 0) { return true; }
       if ((value & 0xfffU) == 0) { return false; }
@@ -468,7 +474,7 @@ namespace MachO {
          const std::size_t toff = value - sc.vmaddr + sc.fileoff;
          if (toff + 4 > sc.fileoff + sc.filesize || toff + 4 > img.size()) { return false; }
          const uint32_t tword = img.template at<uint32_t>(toff);
-         return tword >= 0x1000 && tword < 0x80000000U && env.vmaddr_in_image(tword);
+         return ptr32_range(tword) && env.vmaddr_in_image(tword);
       }
       return false;
    }
@@ -518,7 +524,7 @@ namespace MachO {
 
       /* A value that could name something in this image. */
       auto image_addr = [&](std::size_t v) {
-         return v >= 0x1000 && v < 0x80000000U && env.vmaddr_in_image(v);
+         return ptr32_range(v) && env.vmaddr_in_image(v);
       };
       /* Bind this->memdisp to the table at `addr`; an address inside a blob
        * (a zerofill extent, a packed const table) resolves to blob + offset. */
@@ -662,7 +668,7 @@ namespace MachO {
                 * so there it is always the arithmetic (Portal 2 libtogl
                 * `lea 0x88e4(,%eax,4)` = GL_STATIC_DRAW + 4*bool). */
                const bool lea_const = iclass == XED_ICLASS_LEA && !fixed_load;
-               if (!lea_const && disp >= 0x1000 && (std::size_t) disp < 0x80000000U && !memdisp) {
+               if (!lea_const && ptr32_range((std::size_t) disp) && !memdisp) {
                   capture_table(i, (std::size_t) disp);
                }
 
@@ -747,7 +753,7 @@ namespace MachO {
             if (fixed_load && bits == Bits::M32 &&
                 xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
                const uint32_t imm_val = img.template at<uint32_t>(loc.offset + imm_idx);
-               imm_is_ptr = imm_val >= 0x1000 && imm_val < 0x80000000U &&
+               imm_is_ptr = ptr32_range(imm_val) &&
                   !imm32_code_alias_is_constant(img, env, imm_val) &&
                   (env.imm_bounds_relocated_table(imm_val) ||
                    ((imm_val & 3) == 0 && env.vmaddr_in_writable_data(imm_val)));
@@ -806,7 +812,7 @@ namespace MachO {
             const std::size_t imm_off = instbuf.size() - sizeof(uint32_t);
             const uint32_t value = img.template at<uint32_t>(loc.offset + imm_off);
             bool ptr_target = false;
-            if (value >= 0x1000 && value < 0x80000000U) {
+            if (ptr32_range(value)) {
                ptr_target = env.vmaddr_in_const_section(value);
                if (!ptr_target && (value & 3) == 0) {
                   ptr_target = points_at_pointer(img, env, value);
@@ -850,7 +856,7 @@ namespace MachO {
             const std::size_t imm_off = instbuf.size() - sizeof(uint32_t);
             const uint32_t value = img.template at<uint32_t>(loc.offset + imm_off);
             bool cap = false;
-            if (value >= 0x1000 && value < 0x80000000U) {
+            if (ptr32_range(value)) {
                cap = (value & 3) == 0 && fixed_load && env.vmaddr_in_writable_data(value);
                if (!cap && (instbuf.at(1) & 0x38) == 0x38) {
                   cap = field_store_code_target_is_fnptr(img, env, value);
