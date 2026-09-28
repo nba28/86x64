@@ -29,9 +29,13 @@ trap 'rm -rf "$TMP"' EXIT
 fail() { echo "FAIL sub-framework: $1"; exit 1; }
 
 echo 'int helium_render(void){return 42;}' > "$TMP/r.c"
-clang -arch i386 -isysroot "$SYSROOT" -mmacosx-version-min=10.6 -dynamiclib \
-   -Wl,-umbrella,Helium -install_name "@rpath/HeliumRender" \
-   -o "$TMP/HeliumRender" "$TMP/r.c" 2>/dev/null \
+# i386 links need Snow Leopard's ld64-95 (modern ld dropped -arch i386).
+LD="${LD:-$HOME/projects/Library/Toolchains/sl-ld64/ld-i386}"; [ -x "$LD" ] || LD=ld
+clang -arch i386 -isysroot "$SYSROOT" -mmacosx-version-min=10.6 -c \
+   -o "$TMP/r.o" "$TMP/r.c" 2>/dev/null &&
+"$LD" -arch i386 -dylib -macos_version_min 10.6 -syslibroot "$SYSROOT" -lSystem \
+   -umbrella Helium -install_name "@rpath/HeliumRender" \
+   -o "$TMP/HeliumRender" "$TMP/r.o" 2>/dev/null \
    || fail "could not build i386 sub-framework fixture"
 
 otool -arch i386 -l "$TMP/HeliumRender" | grep -q "LC_SUB_FRAMEWORK" \

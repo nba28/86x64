@@ -59,9 +59,15 @@ chmod +x build/dyld_multicopy_fixture.x86_64
 cp -f "$LIBABICONV" build/libabiconv_copy2.dylib
 codesign -f -s - build/libabiconv_copy2.dylib >/dev/null 2>&1
 
-ACTUAL="$(ABICONV_RUN_INITS=1 DYLD_MULTICOPY_LIB="$PWD/build/libabiconv_copy2.dylib" \
-          build/dyld_multicopy_fixture.x86_64 2>/dev/null)"
+# ABICONV_NO_XCOPY_CLAIM: the per-process image claim (dyld-multicopy-reprocess)
+# now stops the second copy from re-scanning at all, so the skip under test is
+# only reached with the claim off. The verbose log proves it was reached.
+ACTUAL="$(ABICONV_NO_XCOPY_CLAIM=1 ABICONV_OBJC_SLIDE_VERBOSE=1 ABICONV_RUN_INITS=1 \
+          DYLD_MULTICOPY_LIB="$PWD/build/libabiconv_copy2.dylib" \
+          build/dyld_multicopy_fixture.x86_64 2>build/dyld_multicopy_fixture.err)"
 EC=$?
+grep -q "func_lookup shim artifact" build/dyld_multicopy_fixture.err \
+   || fail "the second copy never reached the artifact skip (guard inert)"
 EXPECTED="dyld patched: yes
 copy2: loaded
 slot: artifact-skipped"

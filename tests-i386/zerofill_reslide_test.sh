@@ -64,8 +64,10 @@ OBJC_SLIDE_O="$PROJ_ROOT/build/src/abiconv/CMakeFiles/abiconv.dir/objc_slide.c.o
 [ -f "$OBJC_SLIDE_O" ] || OBJC_SLIDE_O="$(dirname "$LIBABICONV")/CMakeFiles/abiconv.dir/objc_slide.c.o"
 [ -f "$OBJC_SLIDE_O" ] || { echo "SKIP zerofill-reslide (objc_slide.c.o not found; build the project first)"; exit 0; }
 
+# objc_slide.c's image-list helpers live in their own object (dyld_image_list.c).
+IMGLIST_O="$(dirname "$OBJC_SLIDE_O")/dyld_image_list.c.o"
 clang -arch x86_64 -o build/zerofill_reslide_test \
-   src/zerofill_reslide_fixture.c "$OBJC_SLIDE_O" \
+   src/zerofill_reslide_fixture.c "$OBJC_SLIDE_O" "$IMGLIST_O" \
    2>build/zerofill_reslide_cc.log || { sed 's/^/    /' build/zerofill_reslide_cc.log; fail compile; }
 codesign -f -s - build/zerofill_reslide_test >/dev/null 2>&1
 

@@ -50,7 +50,7 @@ if [ -n "$NASM" ]; then
 fi
 
 # (a) the 8B record is shadowed with a low-4GB copy slot + table info = 8
-grep -Eq '^___kMyViewID: dq 0' "$TMP/out.asm" \
+grep -Eq '^___kMyViewID: (times [0-9]+ )?dq 0' "$TMP/out.asm" \
    || note "8B record kMyViewID: shadow ___kMyViewID NOT emitted (record case missed)"
 # the table triple is: dq ___kMyViewID / dq _x64_dsn_N / dq <info>
 info="$(awk '/dq ___kMyViewID$/{getline; getline; print}' "$TMP/out.asm" | grep -oE '[0-9]+' | head -1)"

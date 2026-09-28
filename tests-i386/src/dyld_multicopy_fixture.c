@@ -41,12 +41,19 @@ static volatile unsigned int g_dyld[2] = { 0x8fe01000u, 0x8fe01008u };
  * plain section attribute would produce S_REGULAR, which wrap_mod_init_funcs
  * ignores). NULL entries are skipped by the collector, so nothing runs from
  * here at load. */
+/* SL ld64-95 rejects a symbol inside __mod_init_func, so the slot is an
+ * assembler-local label reached through a pointer in __data. */
 __asm__(".section __DATA,__mod_init_func,mod_init_funcs\n"
-        ".globl _g_extra_slot\n"
         ".p2align 2\n"
-        "_g_extra_slot:\n"
-        ".long 0\n");
-extern void (*volatile g_extra_slot)(void);
+        "Lextra_slot:\n"
+        ".long 0\n"
+        ".data\n"
+        ".globl _g_extra_slot_p\n"
+        ".p2align 2\n"
+        "_g_extra_slot_p:\n"
+        ".long Lextra_slot\n");
+extern void (*volatile *g_extra_slot_p)(void);
+#define g_extra_slot (*g_extra_slot_p)
 
 int main(void) {
    unsigned int shim = g_dyld[1];
