@@ -40,6 +40,7 @@ extern id objc_retain(id);   /* libobjc ARC entrypoint; not in runtime.h */
 #include <pthread.h>
 #include <time.h>
 #include <os/lock.h>
+#include <malloc/malloc.h>
 
 /* Low-4GB search window — same range the wrapper/malloc shim use. */
 #define LOW_REGION_BASE 0x080000000UL
@@ -2355,7 +2356,9 @@ static const struct fma_plan *fma_get(Method m, SEL sel, struct fma_plan *slow) 
    static int no_cache = -1;
    if (__builtin_expect(no_cache < 0, 0)) { no_cache = KNOB("M64_NO_FMA_CACHE") != NULL; }
    if (m && !no_cache) {
-      if (__builtin_expect(!t_fma, 0)) { t_fma = calloc(FMA_WAYS, sizeof *t_fma); }
+      if (__builtin_expect(!t_fma, 0)) {   /* native zone: calloc here is the i386 low heap */
+         t_fma = malloc_zone_calloc(malloc_default_zone(), FMA_WAYS, sizeof *t_fma);
+      }
       if (t_fma) {
          const uint32_t gen = __atomic_load_n(&g_seltypes_gen, __ATOMIC_ACQUIRE);
          const IMP imp = method_getImplementation(m);
@@ -7103,53 +7106,53 @@ static volatile int      g_shadows_done;    /* a full pass has completed */
 static volatile int      g_shadows_partial; /* >=1 dlsym miss: retry on new images */
 static volatile uint32_t g_shadows_imgs;    /* x64_img_count() at last pass */
 
-/* Populate ONE data-shadow table — ours, or that of a sibling libabiconv copy.
- * `track_pending` records object globals that are still nil at populate time
- * (NSApp) for later lazy refresh; only meaningful for our OWN table, since the
- * pending arrays are per-copy state. Returns 1 if any dlsym missed. */
-static int x64_fill_shadow_table(void **tbl, uint64_t n, int track_pending,
-                                 intptr_t delta) {
-   int partial = 0;
-   if (track_pending) { g_ps_n = 0; }   /* this pass rebuilds the pending list */
-   for (uint64_t i = 0; i < n; ++i) {
-      /* `tbl` is ALWAYS our own (fully fixed-up) table; for a sibling copy we
-       * merely shift the destination by the image delta. Never read the
-       * sibling's own table: when this runs from a constructor the sibling may
-       * not have been rebased yet, so its entries would still hold raw file
-       * values and we would scribble through wild pointers. */
-      uint64_t *shadow = (uint64_t *)((uintptr_t)tbl[3 * i] + delta);
-      const char *name = (const char *)tbl[3 * i + 1];   /* our copy's string */
-      const uint64_t info = (uint64_t)tbl[3 * i + 2];
-      if (!shadow || !name) { continue; }
-      void *addr = dlsym(RTLD_DEFAULT, name);   /* &realvar */
-      if (!addr) { partial = 1; continue; }     /* framework not loaded YET */
-      if (info != 0) {
-         /* SCALAR data constant: the i386 code derefs &shadow ONCE to read the
-          * value, so the shadow must hold a low-4GB COPY of the value bytes
-          * (info = byte width, 1..8). No handle wrap — the bits ARE the datum. */
-         *shadow = 0;
-         memcpy(shadow, addr, (size_t)info);
-         continue;
-      }
-      uint64_t v = *(uint64_t *)addr;           /* the object pointer */
-      if (v >= 0x100000000ULL) {
-         *shadow = x64_objc_wrap(v);            /* 32-bit handle, zero-extended */
-      } else if (v != 0) {
-         *shadow = (uint32_t)v;                 /* already low; pass through */
-      } else {
-         /* nil at constructor time: a mutable object global set later (NSApp).
-          * Pinning it now would leave the i386 single-deref reading nil; record
-          * it for lazy refresh from the forward bridge. */
-         *shadow = 0;
-         if (track_pending && g_ps_n < X64_MAX_PENDING_SHADOWS) {
-            g_ps_shadow[g_ps_n] = shadow;
-            g_ps_addr[g_ps_n]   = addr;
-            g_ps_name[g_ps_n]   = name;
-            g_ps_n++;
-         }
+/* &realvar per table index, once dlsym found it. A pass dlsym's only the
+ * entries still missing: re-resolving all ~5000 names on every image load while
+ * the table was partial cost Quinn 8 full passes (40k dlsym) at launch, and
+ * each pass repeated for every sibling copy. */
+static void **g_shadow_addr;
+
+/* Write shadow `i` of the table at image delta `delta` (0 = ours) from its
+ * resolved address. `track_pending` records object globals still nil (NSApp)
+ * for later lazy refresh; only meaningful for our OWN table, since the pending
+ * arrays are per-copy state. */
+static void x64_write_shadow(uint64_t i, intptr_t delta, int track_pending) {
+   void **tbl = x64_data_shadows;
+   /* `tbl` is ALWAYS our own (fully fixed-up) table; for a sibling copy we
+    * merely shift the destination by the image delta. Never read the
+    * sibling's own table: when this runs from a constructor the sibling may
+    * not have been rebased yet, so its entries would still hold raw file
+    * values and we would scribble through wild pointers. */
+   uint64_t *shadow = (uint64_t *)((uintptr_t)tbl[3 * i] + delta);
+   const char *name = (const char *)tbl[3 * i + 1];   /* our copy's string */
+   const uint64_t info = (uint64_t)tbl[3 * i + 2];
+   void *addr = g_shadow_addr[i];
+   if (!shadow || !name || !addr) { return; }
+   if (info != 0) {
+      /* SCALAR data constant: the i386 code derefs &shadow ONCE to read the
+       * value, so the shadow must hold a low-4GB COPY of the value bytes
+       * (info = byte width, 1..8). No handle wrap — the bits ARE the datum. */
+      *shadow = 0;
+      memcpy(shadow, addr, (size_t)info);
+      return;
+   }
+   uint64_t v = *(uint64_t *)addr;           /* the object pointer */
+   if (v >= 0x100000000ULL) {
+      *shadow = x64_objc_wrap(v);            /* 32-bit handle, zero-extended */
+   } else if (v != 0) {
+      *shadow = (uint32_t)v;                 /* already low; pass through */
+   } else {
+      /* nil at populate time: a mutable object global set later (NSApp).
+       * Pinning it now would leave the i386 single-deref reading nil; record
+       * it for lazy refresh from the forward bridge. */
+      *shadow = 0;
+      if (track_pending && g_ps_n < X64_MAX_PENDING_SHADOWS) {
+         g_ps_shadow[g_ps_n] = shadow;
+         g_ps_addr[g_ps_n]   = addr;
+         g_ps_name[g_ps_n]   = name;
+         g_ps_n++;
       }
    }
-   return partial;
 }
 
 /* Fill the shadow table of every OTHER libabiconv copy mapped in this process.
@@ -7181,7 +7184,13 @@ static const uint8_t *x64_image_uuid(const struct mach_header_64 *h) {
    return NULL;
 }
 
-static void x64_populate_sibling_tables(int *partial_io) {
+/* Sibling copies already given a full fill (by mach header): later passes
+ * write them only the newly resolved entries. */
+#define X64_MAX_SIBLINGS 64
+static const void *g_filled_sibs[X64_MAX_SIBLINGS];
+static unsigned    g_nfilled_sibs;
+
+static void x64_populate_sibling_tables(const uint8_t *fresh) {
    Dl_info self_info;
    if (!dladdr((void *)&g_shadows_done, &self_info) || !self_info.dli_fbase) { return; }
    const struct mach_header_64 *self_hdr =
@@ -7191,7 +7200,8 @@ static void x64_populate_sibling_tables(int *partial_io) {
    /* our table symbols as offsets from our own mach header */
    const uintptr_t cnt_off = (uintptr_t)&x64_data_shadows_count - (uintptr_t)self_hdr;
    const int verbose = KNOB("ABICONV_OBJC_SLIDE_VERBOSE") != NULL;
-   for (uint32_t i = 0, n = x64_img_count(); i < n; ++i) {
+   const uint64_t n = x64_data_shadows_count;
+   for (uint32_t i = 0, ni = x64_img_count(); i < ni; ++i) {
       const struct mach_header_64 *hdr =
          (const struct mach_header_64 *)x64_img_header(i);
       if (!hdr || hdr == self_hdr) { continue; }
@@ -7201,16 +7211,20 @@ static void x64_populate_sibling_tables(int *partial_io) {
        * constant needing no fixup, so reading it proves its __DATA is mapped and
        * really is our build before we write a single shadow. */
       const uint64_t *cnt = (const uint64_t *)((uintptr_t)hdr + cnt_off);
-      if (*cnt != x64_data_shadows_count) { continue; }
+      if (*cnt != n) { continue; }
       const intptr_t delta = (intptr_t)((uintptr_t)hdr - (uintptr_t)self_hdr);
-      if (x64_fill_shadow_table(x64_data_shadows, x64_data_shadows_count, 0, delta)) {
-         if (partial_io) { *partial_io = 1; }
+      int seen = 0;
+      for (unsigned k = 0; k < g_nfilled_sibs; ++k) {
+         if (g_filled_sibs[k] == hdr) { seen = 1; break; }
       }
+      for (uint64_t j = 0; j < n; ++j) {
+         if (!seen || fresh[j]) { x64_write_shadow(j, delta, 0); }
+      }
+      if (!seen && g_nfilled_sibs < X64_MAX_SIBLINGS) { g_filled_sibs[g_nfilled_sibs++] = hdr; }
       if (verbose) {
          const char *path = x64_img_path(i);
-         fprintf(stderr, "objc_shim: filled %llu data-constant shadows in "
-                         "sibling copy %s\n",
-                 (unsigned long long)x64_data_shadows_count,
+         fprintf(stderr, "objc_shim: filled %s data-constant shadows in "
+                         "sibling copy %s\n", seen ? "new" : "all",
                  path ? path : "(unnamed)");
          fflush(stderr);
       }
@@ -7219,21 +7233,38 @@ static void x64_populate_sibling_tables(int *partial_io) {
 
 static void x64_populate_data_shadows(void) {
    const uint64_t n = x64_data_shadows_count;
-   /* Serialize: the bridge drives this from any thread, and a pass rebuilds the
-    * pending list from scratch. Re-running is otherwise harmless — x64_objc_wrap
-    * dedups through the shared map, so a re-wrap yields the SAME handle the
-    * translated code already holds. */
+   /* Serialize: the bridge drives this from any thread. Re-running is otherwise
+    * harmless — x64_objc_wrap dedups through the shared map, so a re-wrap
+    * yields the SAME handle the translated code already holds. */
    os_unfair_lock_lock(&g_shadow_pop_lock);
    g_shadows_imgs = x64_img_count();
-   int partial = x64_fill_shadow_table(x64_data_shadows, n, 1, 0);
-   x64_populate_sibling_tables(&partial);
+   /* NATIVE zone, not calloc: inside libabiconv calloc is the i386 low-heap
+    * shim, which this constructor-time path must not depend on. */
+   malloc_zone_t *z = malloc_default_zone();
+   if (!g_shadow_addr) { g_shadow_addr = malloc_zone_calloc(z, n ? n : 1, sizeof *g_shadow_addr); }
+   uint8_t *fresh = malloc_zone_calloc(z, n ? n : 1, 1);
+   int partial = 0;
+   uint64_t newly = 0;
+   if (g_shadow_addr && fresh) {
+      void **tbl = x64_data_shadows;
+      for (uint64_t i = 0; i < n; ++i) {
+         const char *name = (const char *)tbl[3 * i + 1];
+         if (g_shadow_addr[i] || !tbl[3 * i] || !name) { continue; }
+         void *addr = dlsym(RTLD_DEFAULT, name);   /* &realvar */
+         if (!addr) { partial = 1; continue; }     /* framework not loaded YET */
+         g_shadow_addr[i] = addr; fresh[i] = 1; ++newly;
+         x64_write_shadow(i, 0, 1);
+      }
+      x64_populate_sibling_tables(fresh);
+   }
+   malloc_zone_free(z, fresh);
    g_ps_remaining    = g_ps_n;
    g_shadows_partial = partial;
    g_shadows_done    = 1;
    os_unfair_lock_unlock(&g_shadow_pop_lock);
    if (KNOB("ABICONV_OBJC_SLIDE_VERBOSE")) {
-      fprintf(stderr, "objc_shim: populated %llu data-constant shadows%s "
-                      "(copy @%p)\n",
+      fprintf(stderr, "objc_shim: populated %llu new of %llu data-constant shadows%s "
+                      "(copy @%p)\n", (unsigned long long)newly,
               (unsigned long long)n, partial ? " [PARTIAL: retry on new images]" : "",
               (void *)&g_shadows_done);
       fflush(stderr);
