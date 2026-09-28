@@ -71,8 +71,8 @@ static int trace(void)   /* 1: placement + forwarded events, 2: + every mapping 
    return v;
 }
 
-/* A borderless window refuses key status by default; a captured display took
- * the keyboard, so this one must too. */
+/* A captured display took the keyboard: the surface window takes key/main
+ * status and hands input to the app as Carbon events. */
 @interface CGLFSWindow : NSWindow
 @end
 
@@ -80,12 +80,12 @@ int cglfs_map_global(double *x, double *y);
 extern int ci_content_origin(int16_t *ox, int16_t *oy);   /* classic_input_coords.c */
 
 /* Hand a Cocoa input event to the app as the Carbon event it listens for. */
-static int forward_to_app(NSEvent *ev)
+static void forward_to_app(NSEvent *ev)
 {
    CGEventRef cg = ev.CGEvent;
    EventRef ce = NULL;
    if (!cg || CreateEventWithCGEvent(NULL, cg, kEventAttributeUserEvent, &ce) != noErr || !ce) {
-      return 0;
+      return;
    }
    if (GetEventClass(ce) == kEventClassMouse) {
       HIPoint p;
@@ -104,7 +104,6 @@ static int forward_to_app(NSEvent *ev)
               (unsigned)GetEventKind(ce), (int)st);
    }
    ReleaseEvent(ce);
-   return 1;
 }
 
 @implementation CGLFSWindow

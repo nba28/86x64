@@ -12,8 +12,8 @@
  * AudioComponentInstanceNew, handles cross as x64_objc_wrap tokens, and the
  * AudioUnit calls unwrap them. Property values with pointers are converted:
  * MakeConnection {AudioUnit, u32, u32} and SetRenderCallback {proc, refCon}.
- * Render/notify callbacks get an i386-layout AudioBufferList over low buffers,
- * the same lowering as coreaudio_ioproc_shim.c, and the samples are copied back.
+ * Render/notify callbacks and AudioConverterFillComplexBuffer get i386-layout
+ * AudioBufferLists (coreaudio_abl.h).
  * Kill switch M64_NO_AU_SHIM=1 (the Component Manager keeps its fake instance).
  * ABI: MTSHIM (rdi -> &i386 args[0]); symbols in custom.syms.
  */
@@ -23,19 +23,10 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
-#include <stdio.h>
+#include "cb_bridge.h"
+#include "coreaudio_abl.h"
 
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-
-#define X64_CB_MAX_ARGS 16
-typedef struct {
-   uint32_t nargs, ret_kind;
-   uint8_t  arg_kinds[X64_CB_MAX_ARGS];
-   uint32_t arg_sizes[X64_CB_MAX_ARGS];
-} x64_cb_sig;
-extern uint64_t x64_cb_wrap(uint32_t fn32, const x64_cb_sig *sig);
-extern uint32_t x64_objc_wrap(uint64_t real);
-extern uint64_t x64_objc_unwrap(uint32_t h);
 
 #define P(x)   ((void *)(uintptr_t)(x))
 #define P32(p) ((uint64_t)(uint32_t)(uintptr_t)(p))
@@ -114,24 +105,19 @@ int au_close(uint32_t inst, uint32_t *result)
 
 /* ---- render / notify callbacks ----------------------------------------- */
 
-typedef struct { uint32_t nch, size, data; } buf32;
-#define MAX_BUFS 16
 typedef struct {
    uint32_t fn32, ref32;
    uint32_t (*call)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
-   /* low scratch */
-   struct { uint32_t n; buf32 b[MAX_BUFS]; } *abl;
-   AudioUnitRenderActionFlags *flags;
+   abl_low  io;                                /* low list + sample buffers */
+   AudioUnitRenderActionFlags *flags;          /* low scratch */
    AudioTimeStamp *ts;
-   void    *data[MAX_BUFS];
-   uint32_t cap[MAX_BUFS];
 } au_cb;
 
 #define MAX_CBS 32
 static au_cb  g_cb[MAX_CBS];
 static int    g_ncb;
 /* six plain words in, OSStatus out */
-static const x64_cb_sig k_sig6 = { 6, 1, { 0 }, { 0 } };
+static const x64_cb_sig k_sig6 = { 6, CBR_I32, { CBA_I32 }, { 0 } };
 
 static au_cb *cb_new(uint32_t fn32, uint32_t ref32)
 {
@@ -143,17 +129,16 @@ static au_cb *cb_new(uint32_t fn32, uint32_t ref32)
    if (!e && g_ncb < MAX_CBS) {
       e = &g_cb[g_ncb++];
       e->fn32 = fn32; e->ref32 = ref32;
-      e->call = (void *)(uintptr_t)x64_cb_wrap(fn32, &k_sig6);
-      if (getenv("ABICONV_AU_TRACE")) { fprintf(stderr, "[au] render cb fn=%#x ref=%#x\n", fn32, ref32); }
-      e->abl   = calloc(1, sizeof *e->abl);     /* libabiconv malloc = low 4GB */
-      e->flags = calloc(1, sizeof *e->flags);
+      e->call  = (void *)(uintptr_t)x64_cb_wrap(fn32, &k_sig6);
+      e->flags = calloc(1, sizeof *e->flags);     /* libabiconv malloc = low 4GB */
       e->ts    = calloc(1, sizeof *e->ts);
    }
    os_unfair_lock_unlock(&g_lock);
    return e;
 }
 
-/* AURenderCallback shape, shared by render callbacks and render notifies. */
+/* AURenderCallback shape, shared by render callbacks and render notifies (a
+ * post-render notify sees the rendered samples, so they are carried in). */
 static OSStatus au_render_tramp(void *ctx, AudioUnitRenderActionFlags *flags,
                                 const AudioTimeStamp *ts, UInt32 bus, UInt32 frames,
                                 AudioBufferList *io)
@@ -161,56 +146,11 @@ static OSStatus au_render_tramp(void *ctx, AudioUnitRenderActionFlags *flags,
    au_cb *e = ctx;
    if (flags) { *e->flags = *flags; }
    if (ts)    { *e->ts = *ts; }
-   uint32_t n = 0;
-   if (io) {
-      n = io->mNumberBuffers < MAX_BUFS ? io->mNumberBuffers : MAX_BUFS;
-      e->abl->n = n;
-      for (uint32_t i = 0; i < n; ++i) {
-         const AudioBuffer *s = &io->mBuffers[i];
-         if (e->cap[i] < s->mDataByteSize) {   /* grows once, off the steady state */
-            free(e->data[i]);
-            e->data[i] = malloc(s->mDataByteSize);
-            e->cap[i]  = e->data[i] ? s->mDataByteSize : 0;
-         }
-         const uint32_t sz = e->cap[i] ? s->mDataByteSize : 0;
-         e->abl->b[i].nch  = s->mNumberChannels;
-         e->abl->b[i].size = sz;
-         e->abl->b[i].data = (uint32_t)(uintptr_t)e->data[i];
-         if (sz) {
-            if (s->mData) { memcpy(e->data[i], s->mData, sz); } else { memset(e->data[i], 0, sz); }
-         }
-      }
-   }
+   abl32 *l32 = abl_lower(&e->io, io, 1);
    const OSStatus r = (OSStatus)e->call(e->ref32, flags ? P32(e->flags) : 0, ts ? P32(e->ts) : 0,
-                                        bus, frames, io ? P32(e->abl) : 0);
+                                        bus, frames, P32(l32));
    if (flags) { *flags = *e->flags; }
-   static int trace = -1;
-   if (trace < 0) { trace = getenv("ABICONV_AU_TRACE") != NULL; }
-   if (trace && io && n) {
-      static unsigned calls;
-      if ((calls++ % 400) == 0) {
-         const int16_t *s16 = P(e->abl->b[0].data);
-         const float   *f32 = P(e->abl->b[0].data);
-         int pk16 = 0; float pkf = 0;
-         for (uint32_t k = 0; s16 && k < e->abl->b[0].size / 4; ++k) {
-            int v = s16[k] < 0 ? -s16[k] : s16[k]; if (v > pk16) { pk16 = v; }
-            float f = f32[k] < 0 ? -f32[k] : f32[k]; if (f > pkf && f < 1e6f) { pkf = f; }
-         }
-         fprintf(stderr, "[au] render fn=%#x flags=%#x bus=%u frames=%u n=%u size=%u data=%#x r=%d peak16=%d peakf=%.3f\n",
-                 e->fn32, (unsigned)*e->flags, (unsigned)bus, (unsigned)frames, n,
-                 e->abl->b[0].size, e->abl->b[0].data, (int)r, pk16, pkf);
-      }
-   }
-   for (uint32_t i = 0; io && i < n; ++i) {
-      AudioBuffer *d = &io->mBuffers[i];
-      void *src = P(e->abl->b[i].data);          /* the callback may point at its own buffer */
-      const uint32_t sz = e->abl->b[i].size;
-      d->mNumberChannels = e->abl->b[i].nch;
-      if (!d->mData) { d->mData = src; d->mDataByteSize = sz; }   /* low memory is native memory too */
-      else if (src && d->mData != src) {
-         memcpy(d->mData, src, sz < d->mDataByteSize ? sz : d->mDataByteSize);
-      }
-   }
+   if (l32)   { abl_raise(&e->io, io); }
    return r;
 }
 
@@ -282,12 +222,12 @@ uint32_t shim_AudioUnitRemoveRenderNotify(uint32_t *a)
  * Same family: the input proc and both buffer lists are i386-layout. The
  * converter handle crosses as the generated bridges' wrap token. */
 /* five plain words in, OSStatus out */
-static const x64_cb_sig k_sig5 = { 5, 1, { 0 }, { 0 } };
+static const x64_cb_sig k_sig5 = { 5, CBR_I32, { CBA_I32 }, { 0 } };
 typedef struct {
-   uint32_t fn32, user32, conv32;
+   uint32_t user32, conv32;
    uint32_t (*call)(uint64_t, uint64_t, uint64_t, uint64_t, uint64_t);
    uint32_t *packets;                              /* low scratch */
-   struct { uint32_t n; buf32 b[MAX_BUFS]; } *abl;
+   abl32    *abl;
    uint32_t *desc;                                 /* i386 AudioStreamPacketDescription * */
 } acfill_ctx;
 
@@ -297,12 +237,10 @@ static OSStatus acfill_tramp(AudioConverterRef conv, UInt32 *packets, AudioBuffe
    (void)conv;
    acfill_ctx *c = vctx;
    *c->packets = packets ? *packets : 0;
-   const uint32_t n = io ? (io->mNumberBuffers < MAX_BUFS ? io->mNumberBuffers : MAX_BUFS) : 0;
+   const uint32_t n = io ? (io->mNumberBuffers < ABL32_MAX ? io->mNumberBuffers : ABL32_MAX) : 0;
    c->abl->n = n;
-   for (uint32_t i = 0; i < n; ++i) {
-      c->abl->b[i].nch = io->mBuffers[i].mNumberChannels;
-      c->abl->b[i].size = io->mBuffers[i].mDataByteSize;
-      c->abl->b[i].data = 0;                       /* the proc points it at its data */
+   for (uint32_t i = 0; i < n; ++i) {             /* the proc points data at its own */
+      c->abl->b[i] = (buf32){ io->mBuffers[i].mNumberChannels, io->mBuffers[i].mDataByteSize, 0 };
    }
    *c->desc = 0;
    const OSStatus r = (OSStatus)c->call(c->conv32, P32(c->packets), io ? P32(c->abl) : 0,
@@ -330,15 +268,11 @@ uint32_t shim_AudioConverterFillComplexBuffer(uint32_t *a)
       tc->desc    = calloc(1, sizeof *tc->desc);
    }
    acfill_ctx c = *tc;                              /* reentrancy-safe copy of the pointers */
-   c.fn32 = a[1]; c.user32 = a[2]; c.conv32 = a[0];
+   c.user32 = a[2]; c.conv32 = a[0];
    c.call = (void *)(uintptr_t)x64_cb_wrap(a[1], &k_sig5);
-   static int traced;
-   if (!traced && getenv("ABICONV_AU_TRACE")) {
-      traced = 1; fprintf(stderr, "[au] acfill proc=%#x user=%#x conv=%#x\n", a[1], a[2], a[0]);
-   }
    const uint32_t *o32 = P(a[4]);
-   const uint32_t n = o32 ? (o32[0] < MAX_BUFS ? o32[0] : MAX_BUFS) : 0;
-   struct { UInt32 n; AudioBuffer b[MAX_BUFS]; } out;
+   const uint32_t n = o32 ? (o32[0] < ABL32_MAX ? o32[0] : ABL32_MAX) : 0;
+   struct { UInt32 n; AudioBuffer b[ABL32_MAX]; } out;
    out.n = n;
    for (uint32_t i = 0; i < n; ++i) {
       out.b[i].mNumberChannels = o32[1 + 3 * i];

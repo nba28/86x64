@@ -14,16 +14,10 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define X64_CB_MAX_ARGS 16
-typedef struct {
-   uint32_t nargs, ret_kind;
-   uint8_t  arg_kinds[X64_CB_MAX_ARGS];
-   uint32_t arg_sizes[X64_CB_MAX_ARGS];
-} x64_cb_sig;
-extern uint64_t x64_cb_wrap(uint32_t fn32, const x64_cb_sig *sig);
+#include "cb_bridge.h"
 
-/* two plain words in, int out (CBR_I32SX = 4) */
-static const x64_cb_sig k_sig2 = { 2, 4, { 0 }, { 0 } };
+/* two plain words in, int out */
+static const x64_cb_sig k_sig2 = { 2, CBR_I32SX, { CBA_I32 }, { 0 } };
 
 typedef struct {
    uint8_t *base;

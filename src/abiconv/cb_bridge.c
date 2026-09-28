@@ -28,31 +28,14 @@
 #include <string.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
+#include "cb_bridge.h"
 extern void *x64_lowstack_get(size_t sz);          /* lowstack_pool.c */
 extern void  x64_lowstack_put(void *p, size_t sz);
-
-/* must match the codes in typeconv.cc (cb_arg_code / cb_ret_code) and the
- * blob layout emitted by cb_sig_emit */
-#define X64_CB_MAX_ARGS 16
-typedef struct {
-   uint32_t nargs;
-   uint32_t ret_kind;
-   uint8_t  arg_kinds[X64_CB_MAX_ARGS];
-   uint32_t arg_sizes[X64_CB_MAX_ARGS];  /* CBA_PTR_REC pointee size | COPYBACK */
-} x64_cb_sig;
-
-enum { CBA_I32 = 0, CBA_I64 = 1, CBA_PTR = 2, CBA_OBJ = 3,
-       CBA_F32 = 4, CBA_F64 = 5, CBA_PTR_REC = 6 };
-#define CBA_SIZE_COPYBACK 0x80000000u
-enum { CBR_VOID = 0, CBR_I32 = 1, CBR_PTR = 2, CBR_OBJ = 3, CBR_I32SX = 4,
-       CBR_I64 = 5 };
 
 /* returns the i386 result as edx:eax combined in rax: the low 32 bits are the
  * usual eax result, the high 32 the edx half of a 64-bit (long long) return. */
 uint64_t _86x64_call_i386(uint64_t fn, uint64_t nwords,
                           const uint32_t *words, uint64_t lowstack_top);
-uint32_t x64_objc_wrap(uint64_t real);     /* objc_shim.c */
-uint64_t x64_objc_unwrap(uint32_t h);      /* objc_shim.c */
 void     x64_cb_enter(void);               /* objc_shim.c: cross-copy depth */
 void     x64_cb_leave(void);
 
