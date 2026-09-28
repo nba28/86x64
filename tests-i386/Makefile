@@ -58,9 +58,13 @@ CXX_I386 := clang++ -arch i386 -isysroot $(HOST_SDK) -mmacosx-version-min=10.6
 LDFLAGS_I386_CPP := $(LDFLAGS_I386) -lstdc++ -dead_strip_dylibs
 
 # Every fixture run gets a deadline: a hang (e.g. a broken OFF arm spinning)
-# fails the fixture with exit_code 142 instead of blocking the suite.
+# fails the fixture with exit_code 137 instead of blocking the suite. The timer
+# lives in a watchdog PARENT: an alarm() armed before exec would survive into
+# the fixture as a live ITIMER_REAL (65_const_struct_ro_copyback reads it).
 FIXTURE_DEADLINE ?= 30
-RUN_FIXTURE := perl -e 'alarm shift; exec @ARGV or exit 127' $(FIXTURE_DEADLINE)
+RUN_FIXTURE := perl -e 'my $$t = shift; my $$p = fork; if (!$$p) { exec @ARGV or exit 127 } \
+    $$SIG{ALRM} = sub { kill "KILL", $$p }; alarm $$t; waitpid($$p, 0); \
+    exit($$? & 127 ? 128 + ($$? & 127) : $$? >> 8)' $(FIXTURE_DEADLINE)
 
 SRC_DIR      := src
 EXPECTED_DIR := expected

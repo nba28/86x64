@@ -61,7 +61,7 @@ int main(void) {
          && old.it_value.tv_sec == 0 && old.it_interval.tv_sec == 0;
 
    printf("const-struct copy-back: %s\n", ok ? "ok" : "FAIL");
-   if (!ok) {   /* seen once under load (2026-09-28), never reproduced */
+   if (!ok) {   /* old.value!=0: something armed ITIMER_REAL before main */
       printf("  rc1=%d rc2=%d back.value=%ld.%06ld old.value=%ld old.interval=%ld\n",
              rc1, rc2, back.it_value.tv_sec, back.it_value.tv_usec,
              old.it_value.tv_sec, old.it_interval.tv_sec);
