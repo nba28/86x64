@@ -515,10 +515,25 @@ def main():
 
     # fw_name -> {"dep_path": ..., "missing": set(), "dependents": [...]}
     plan = {}
+    skipped_translated = 0
     for rel in targets:
         binary = os.path.join(app, rel)
         if not os.path.isfile(binary):
             print(f"!! no such binary: {rel}")
+            continue
+        # A TRANSLATED image (i386 rewritten to x86_64 by macho-tool) is never
+        # a shimgen job: its calls still carry i386-frame semantics, so a
+        # missing symbol there needs a libabiconv bridge / `m64 reinterpose`,
+        # not a native-ABI stub (a stub's 8-byte `ret` over-pops the caller's
+        # 4-byte-return frame — the s28 ABI family). Skip it BEFORE its binds
+        # are collected — collecting them here is what polluted observed.json
+        # / *ShimAuto.m with translated-only symbols (DateToSeconds, NewAlias,
+        # ResolveAlias, create_fftsetup: only translated QuickTime/iMovie bind
+        # these raw). This is the single enumeration point every caller
+        # (`m64 shim`'s target list, or shimgen.py invoked directly) funnels
+        # through, so filtering here covers all of them.
+        if is_translated_consumer(binary):
+            skipped_translated += 1
             continue
         # objdump's per-bind short name strips the ".dylib" suffix (and any
         # trailing version component), so key the map under those variants
@@ -603,6 +618,11 @@ def main():
                                        "dependents": []})
             ent["missing"] |= missing
             ent["dependents"].append((binary, dep))
+
+    if skipped_translated:
+        print(f"skipped {skipped_translated} translated image(s): missing "
+              f"symbols there need a libabiconv bridge / `m64 reinterpose`, "
+              f"never a shimgen stub")
 
     # Build the curated-impl pool (shimdb/impl/*) once: symbol -> object file.
     impl_provided = build_impl_index(fw_dir)
@@ -720,16 +740,10 @@ def main():
         flat_sign(shim_path)
         print(f"generated {shim_name}: {len(covered)} impl + "
               f"{len(uncovered)} stub = {len(M)} symbols")
+        # ent["dependents"] only ever holds NATIVE consumers: translated images
+        # are filtered out of the enumeration loop above before binds are even
+        # collected, so they can never reach here to redirect.
         for binary, dep in ent["dependents"]:
-            # A TRANSLATED consumer (links libabiconv) must never be redirected to
-            # a native ShimAuto: its i386 4-byte-return calls over-pop the stub's
-            # 8-byte `ret` (s28 ABI family). Leave its dep as-is; libabiconv's
-            # ___X marshalling shims (static-interpose) cover the removed symbols.
-            # The shim is still generated + signed for any NATIVE dependents.
-            if is_translated_consumer(binary):
-                print(f"  skip redirect (translated consumer, defer to "
-                      f"libabiconv): {os.path.basename(binary)} -> {shim_name}")
-                continue
             redirect_dep(app, binary, dep, f"{ref_prefix}{shim_name}")
 
     with open(OBSERVED_PATH, "w") as f:
