@@ -1846,8 +1846,10 @@ static void patch_dyld_section(const struct mach_header_64 *mh64, intptr_t slide
              * the shim. wrap_mod_init_funcs has already recovered + collected the
              * real __mod_init_func[0] initializer (it sees the >4GB legacyDyldLookup
              * clobber and restores the on-disk value), so overwriting the live slot
-             * at +8 here does not lose it. The proper cure is a 16-byte __dyld at
-             * translate time; see the known-gaps list. */
+             * at +8 here does not lose it. Current translations pad __dyld to
+             * 16 bytes (Archive::widen_classic_dyld_section), so there both
+             * dyld's +8 write and ours stay inside the section; the overlap
+             * above only applies to older translations. */
             uint32_t *slot = (uint32_t *)base;
             slot[0] = (uint32_t)(uintptr_t)&_86x64_dyld_noop;        /* lazy binder (4B view) */
             slot[1] = (uint32_t)(uintptr_t)&_86x64_dyld_func_lookup; /* func_lookup (4B view) */

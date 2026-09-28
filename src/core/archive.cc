@@ -238,6 +238,9 @@ namespace MachO {
        * only, no-op when nothing is self-satisfiable. */
       resolve_self_weak_binds();
 
+      /* Before any layout-dependent inject: shifts everything after __dyld. */
+      widen_classic_dyld_section();
+
       /* Inject our runtime-bind metadata section (classic external relocs that
        * dyld can't process + the diverted narrow __const binds above) before
        * laying out, so it shares __DATA's layout and its XrelBlob::Emit can read
@@ -1129,6 +1132,35 @@ namespace MachO {
          blob->segment = data_seg;
          insert_section_before_zerofill(data_seg, sect);
          invalidate_segments_cache();
+      }
+   }
+
+   template <Bits b>
+   void Archive<b>::widen_classic_dyld_section() {
+      if constexpr (b != Bits::M64) {
+         return;
+      } else {
+         /* A classic (pre-10.5 crt) __DATA,__dyld is two 4-byte slots:
+          * lazy-binder, func_lookup. The host dyld treats the section as two
+          * 8-byte pointers and stamps its native func_lookup at __dyld+8, which
+          * in an 8-byte section is the NEXT section's first slot (Halo/Civ IV:
+          * __mod_init_func[0] or __nl_symbol_ptr[0]). Pad it to 16 bytes so
+          * that write lands inside __dyld. The i386 crt still reads its 4-byte
+          * view at +4, which objc_slide.c patch_dyld_section rewrites.
+          * Idempotent: a re-parse sees 16 bytes and adds nothing. */
+         for (Segment<b> *seg : segments()) {
+            for (Section<b> *s : seg->sections) {
+               if (s->name() != "__dyld") { continue; }
+               std::size_t sz = 0;
+               for (const SectionBlob<b> *sb : s->content) { sz += sb->size(); }
+               for (; sz < 16; sz += 4) {
+                  auto *pad = Immediate<b>::Create(0);
+                  pad->section = s;
+                  pad->segment = seg;
+                  s->content.push_back(pad);
+               }
+            }
+         }
       }
    }
 

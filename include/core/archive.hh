@@ -229,6 +229,10 @@ namespace MachO {
        * slide_data_fnptrs's by-value scan. Same gating as inject_cpin_section. */
       void inject_dptr_section();
 
+      /* Pad a classic 8-byte __DATA,__dyld to 16 bytes so the host dyld's
+       * 8-byte func_lookup write at +8 stays inside it. M64 only; idempotent. */
+      void widen_classic_dyld_section();
+
       template <template <Bits> class Blob>
       Blob<b> *find_blob(std::size_t vmaddr) const {
          for (Segment<b> *segment : segments()) {
