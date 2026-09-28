@@ -23,8 +23,8 @@
 #
 # ★THREE ARMS:
 #   on        shipped config              -> subjects preserved, table untouched
-#   off       M64_NO_QWORD_HIGH_SKIP=1    -> subjects REBASED (defect reproduced)
-#   nocohesion M64_NO_JT_COHESION=1       -> subjects REBASED too. Proves the OFF
+#   off       M64_NO_QWORD_HIGH_SKIP=1    -> subject A REBASED (defect reproduced; B see below)
+#   nocohesion M64_NO_JT_COHESION=1       -> subject A REBASED too. Proves the OFF
 #             arm is not inert for some unrelated reason: the whole gate being
 #             disabled must look exactly like this one skip being disabled.
 #
@@ -154,8 +154,13 @@ check() {   # <arm> <want_rc> <want_subject> <want_table> <description>
   fi
 }
 
-check off        1 0 12 "skip disarmed -> u64 low halves REBASED (defect reproduced)"
-check nocohesion 1 0 12 "whole gate disarmed -> same corruption (OFF arm is not inert)"
+# Subject B stays preserved in the OFF arms: it has a full stride-8 sibling set
+# (4 proven-interior words vs 1 boundary), so the record-field gate's majority
+# rule (PvZ lenfix, M64_RECFIELD_STRICT_VETO) also protects it. Subject A is
+# the first record of __TEXT,__const, has no full sibling set, and only the
+# qword-high skip protects it — that is the defect the OFF arms reproduce.
+check off        1 1 12 "skip disarmed -> subject A REBASED (defect reproduced)"
+check nocohesion 1 1 12 "whole gate disarmed -> same corruption (OFF arm is not inert)"
 check on        42 2 12 "u64 low halves preserved, jump table left alone"
 
 if [ "$fail" = 0 ]; then echo "qword-high-skip: PASS"; else echo "qword-high-skip: FAIL"; fi
