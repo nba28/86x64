@@ -269,6 +269,10 @@
 	MTSHIM	___pthread_threadid_np,       _shim_pthread_threadid_np
 	MTSHIM	___AudioHardwareGetProperty,  _shim_AudioHardwareGetProperty
 	MTSHIM	___AudioDeviceGetProperty,    _shim_AudioDeviceGetProperty
+	MTSHIM	___AudioDeviceAddIOProc,      _shim_AudioDeviceAddIOProc
+	MTSHIM	___AudioDeviceRemoveIOProc,   _shim_AudioDeviceRemoveIOProc
+	MTSHIM	___AudioDeviceStart,          _shim_AudioDeviceStart
+	MTSHIM	___AudioDeviceStop,           _shim_AudioDeviceStop
 	;; pthread_once: the i386 once-control block ({long __sig; opaque} = 8B,
 	;; 4-byte sig) is NOT a valid native os_once_t, and its init routine is an
 	;; i386 void(void) fn ptr. abigen's forward to native pthread_once trips

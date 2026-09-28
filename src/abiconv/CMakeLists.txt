@@ -483,6 +483,7 @@ add_library(abiconv SHARED
   tls_shim.c
   pthread_sync_shim.c
   coreaudio_hal_shim.c
+  coreaudio_ioproc_shim.c
   cxx_shim.c
   cxx_typeinfo.c
   eh_shim.c

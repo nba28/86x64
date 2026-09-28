@@ -848,3 +848,7 @@ _CreateQDContextForCollapsedWindowDockTile
 _ReleaseQDContextForCollapsedWindowDockTile
 _AudioHardwareGetProperty
 _AudioDeviceGetProperty
+_AudioDeviceAddIOProc
+_AudioDeviceRemoveIOProc
+_AudioDeviceStart
+_AudioDeviceStop
