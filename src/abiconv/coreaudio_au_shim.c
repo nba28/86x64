@@ -184,6 +184,23 @@ static OSStatus au_render_tramp(void *ctx, AudioUnitRenderActionFlags *flags,
    const OSStatus r = (OSStatus)e->call(e->ref32, flags ? P32(e->flags) : 0, ts ? P32(e->ts) : 0,
                                         bus, frames, io ? P32(e->abl) : 0);
    if (flags) { *flags = *e->flags; }
+   static int trace = -1;
+   if (trace < 0) { trace = getenv("ABICONV_AU_TRACE") != NULL; }
+   if (trace && io && n) {
+      static unsigned calls;
+      if ((calls++ % 400) == 0) {
+         const int16_t *s16 = P(e->abl->b[0].data);
+         const float   *f32 = P(e->abl->b[0].data);
+         int pk16 = 0; float pkf = 0;
+         for (uint32_t k = 0; s16 && k < e->abl->b[0].size / 4; ++k) {
+            int v = s16[k] < 0 ? -s16[k] : s16[k]; if (v > pk16) { pk16 = v; }
+            float f = f32[k] < 0 ? -f32[k] : f32[k]; if (f > pkf && f < 1e6f) { pkf = f; }
+         }
+         fprintf(stderr, "[au] render fn=%#x flags=%#x bus=%u frames=%u n=%u size=%u data=%#x r=%d peak16=%d peakf=%.3f\n",
+                 e->fn32, (unsigned)*e->flags, (unsigned)bus, (unsigned)frames, n,
+                 e->abl->b[0].size, e->abl->b[0].data, (int)r, pk16, pkf);
+      }
+   }
    for (uint32_t i = 0; io && i < n; ++i) {
       AudioBuffer *d = &io->mBuffers[i];
       void *src = P(e->abl->b[i].data);          /* the callback may point at its own buffer */

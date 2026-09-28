@@ -1257,7 +1257,12 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
       return;
    }
 
-   if (ignore_structs.find(to_string(pointee)) != ignore_structs.end()) {
+   /* A void pointee is recognised by its canonical KIND, not its spelling:
+    * `volatile void *` (OSAtomicTestAndSet/ClearBarrier) missed the name list,
+    * was deep-copied as a 'volatile void' temporary, and the atomic op flipped a
+    * bit in the COPY (PvZ: every sound's play-request bit stayed set, no SFX). */
+   if (ignore_structs.find(to_string(pointee)) != ignore_structs.end() ||
+       pointee_canon.kind == CXType_Void) {
       /* A `void *` arg is opaque, so it may carry a PROXY-ARENA HANDLE: an i386
        * object the bridge wrapped into a 32-bit low-4GB handle (CFTypeRef stored
        * into a CF collection as `const void *`, e.g. CFDictionaryAddValue's key/
