@@ -418,9 +418,6 @@ namespace MachO {
       struct UndefStub { std::size_t vmaddr; std::size_t offset; uint32_t symidx;
                          std::string name; };
       std::vector<UndefStub> undef;
-      std::size_t weak_marked = 0;
-
-      std::size_t entered = 0;
       for (Segment<bits> *seg : env.archive.segments()) {
          for (Section<bits> *section : seg->sections) {
             const auto& sect = section->sect;
@@ -442,7 +439,6 @@ namespace MachO {
                if ((nl.n_type & N_TYPE) == N_SECT && nl.n_value != 0) {
                   /* DEFINED: redirect the call site straight to the function. */
                   env.jump_table_targets[stub_vmaddr] = nl.n_value;
-                  ++entered;
                } else if ((nl.n_type & N_TYPE) == N_UNDF) {
                   /* UNDEFINED external: trampoline + bound slot (built below). */
                   std::string sym_name;
@@ -462,7 +458,6 @@ namespace MachO {
                      if (it != undef_by_name.end() &&
                          !(it->second->nlist.n_desc & N_WEAK_REF)) {
                         it->second->nlist.n_desc |= N_WEAK_REF;
-                        ++weak_marked;
                      }
                   }
                   if (!already_synthesized) {
@@ -480,22 +475,6 @@ namespace MachO {
                                      /*records=*/static_cast<const void *>(undef.data()));
       }
 
-      if ((entered || !undef.empty() || weak_marked) && getenv("MACHO_TOOL_DEBUG")) {
-         fprintf(stderr, "lift_jump_table_targets: redirected %zu defined "
-                 "self-modifying CALL-stub(s) to their functions; %zu undefined "
-                 "stub(s) %s; %zu import(s) marked weak (NULL-tolerant load)\n",
-                 entered, undef.size(),
-                 already_synthesized ? "already trampolined (reparse)"
-                                     : "got NULL-checking diagnostic trampolines",
-                 weak_marked);
-         /* Ordered list: trampoline #i (== __jt_tramp slot i) traps for this
-          * symbol if it is REMOVED and genuinely called. A crash at __jt_tramp
-          * PC -> (PC - section base)/stub-stride == i -> this name. */
-         for (std::size_t i = 0; i < undef.size(); ++i) {
-            fprintf(stderr, "  weak-import jt_tramp[%zu] -> %s\n",
-                    i, undef[i].name.empty() ? "<anon>" : undef[i].name.c_str());
-         }
-      }
    }
 
    /* Build the __TEXT,__jt_tramp trampolines + __DATA,__jt_ptrs bound slots for

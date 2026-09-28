@@ -1,7 +1,6 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
-#include <execinfo.h>
 #include <unistd.h>
 #include "parse.hh"
 #include "section_blob.hh"
@@ -65,13 +64,6 @@ namespace MachO {
          return nullptr;
       }
 
-      static const char *trace_str = std::getenv("MACHO_TRACE_PLACEHOLDER");
-      static const std::size_t trace_vmaddr = trace_str ? std::strtoull(trace_str, nullptr, 0) : 0;
-      if (trace_vmaddr && vmaddr == trace_vmaddr) {
-         fprintf(stderr, "add_placeholder(0x%zx) called; backtrace:\n", vmaddr);
-         void *bt[20]; int n = backtrace(bt, 20);
-         backtrace_symbols_fd(bt, n, STDERR_FILENO);
-      }
       auto it = placeholders.find(vmaddr);
       if (it == placeholders.end()) {
          Placeholder<bits> *placeholder = Placeholder<bits>::Parse(Location(0, vmaddr), *this);
@@ -469,13 +461,6 @@ namespace MachO {
          std::getenv("M64_NO_RECORD_FIELD_GATE") != nullptr;
       if (disabled) { return false; }
 
-      /* Debug probe: M64_DBG_RECFIELD=<hex slot vmaddr> traces every stride and
-       * every sibling verdict for that one slot. Inert unless set. */
-      static const char *rfdbgenv = std::getenv("M64_DBG_RECFIELD");
-      static const std::size_t rfdbgaddr =
-         rfdbgenv ? (std::size_t)strtoull(rfdbgenv, nullptr, 0) : 0;
-      const bool rfdbg = (rfdbgenv != nullptr && slot_vmaddr == rfdbgaddr);
-
       /* ★"Is this SIBLING a pointer?" — and the naive form of that question is a
        * TRAP, which cost me a full build+retranslate cycle to see. Asking merely
        * "does the value land in a mapped section" answers YES for every sibling
@@ -509,10 +494,9 @@ namespace MachO {
        * refuses to declassify it and `pointer_sibling` vetoes — which is exactly
        * the separation between a record array and a jump table that this gate
        * exists to draw. */
-      const auto sibling_is_pointerish = [this, &img, rfdbg](uint32_t v) -> bool {
+      const auto sibling_is_pointerish = [this, &img](uint32_t v) -> bool {
          if (v == 0) { return false; }              /* neutral, handled by caller */
          bool in_section = false, in_exec = false;
-         const char *segn = "-", *secn = "-";
          for (Segment<bits> *seg : archive.segments()) {
             if (!seg->contains_vmaddr(v)) { continue; }
             for (Section<bits> *sec : seg->sections) {
@@ -520,20 +504,9 @@ namespace MachO {
                in_section = true;
                in_exec = (sec->sect.flags & S_ATTR_PURE_INSTRUCTIONS) ||
                          (sec->sect.flags & S_ATTR_SOME_INSTRUCTIONS);
-               segn = sec->sect.segname; secn = sec->sect.sectname;
                break;
             }
             break;
-         }
-         if (rfdbg) {
-            fprintf(stderr, "[recfld]   sib %#010x sect=%.16s,%.16s exec=%d "
-                    "zf=%d cstr=%d codeint=%d codeconst=%d lacksentry=%d\n",
-                    v, segn, secn, (int)in_exec,
-                    (int)zerofill_target_unattested(img, v, true),
-                    (int)cstring_interior_alias(img, v),
-                    (int)code_interior_alias(v),
-                    (int)code_alias_is_constant(v),
-                    (int)code_alias_lacks_entry_evidence(img, v));
          }
          if (!in_section) { return false; }         /* addresses nothing: integer */
          if (zerofill_target_unattested(img, v, true)) { return false; }
@@ -639,12 +612,6 @@ namespace MachO {
                }
                /* Demand the FULL sibling set: a partial one is what a one-off
                 * struct near a section edge looks like. */
-               if (rfdbg) {
-                  fprintf(stderr, "[recfld] slot=%#zx stride=%zu present=%d "
-                          "aliasing_int=%d pointer_sibling=%d%s\n",
-                          slot_vmaddr, stride, present, aliasing_int,
-                          pointer_siblings, present < 6 ? "" : "  <- DECIDES");
-               }
                if (present < 6) { continue; }   /* not a usable hypothesis yet */
                /* ★PROVEN-INTEGER MAJORITY, not a single-sibling veto. A jump
                 * table's siblings are all basic-block heads, never

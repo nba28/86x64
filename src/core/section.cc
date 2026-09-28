@@ -54,19 +54,6 @@ namespace MachO {
    static bool SectionIsNopPaddedCstringPool(const Image& img,
                                              std::size_t fileoff,
                                              std::size_t size) {
-      const bool trace = std::getenv("MACHO_TRACE_CSTRPOOL") != nullptr;
-#define CSTRPOOL_REJECT(why, POS)                                           \
-      do {                                                                  \
-         if (trace) {                                                       \
-            const std::size_t pos_ = (POS);                                 \
-            fprintf(stderr, "[cstrpool] reject @0x%zx: %s [", pos_, (why)); \
-            for (std::size_t k = 0; k < 12 && pos_ + k < fileoff + size; ++k) \
-               fprintf(stderr, "%02x ", img.template at<uint8_t>(pos_ + k)); \
-            fprintf(stderr, "]\n");                                         \
-         }                                                                  \
-         return false;                                                      \
-      } while (0)
-
       if (size == 0 || fileoff + size > img.size()) { return false; }
 
       std::size_t strings = 0;
@@ -104,18 +91,17 @@ namespace MachO {
             while (j < size) {
                const uint8_t c = img.at<uint8_t>(fileoff + j);
                if (c == 0x00) { break; }
-               if (!(c >= 0x20 && c < 0x7f)) { CSTRPOOL_REJECT("nonprintable in run", fileoff + j); }
+               if (!(c >= 0x20 && c < 0x7f)) { return false; }   /* nonprintable in run */
                ++j;
             }
-            if (j == size) { CSTRPOOL_REJECT("unterminated tail run", fileoff + i); }
+            if (j == size) { return false; }   /* unterminated tail run */
             ++strings;
             i = j + 1;                /* step over the terminating NUL */
             continue;
          }
-         CSTRPOOL_REJECT("neither NOP padding nor printable string", fileoff + i);
+         return false;   /* neither NOP padding nor printable string */
       }
       return strings > 0;
-#undef CSTRPOOL_REJECT
    }
 
    template <Bits bits>
@@ -201,10 +187,6 @@ namespace MachO {
          }
       default:
          /* Unknown types (S_INTERPOSING, S_DTRACE_DOF, ...) pass through verbatim. */
-         if (std::getenv("MACHO_BUILD_DEBUG")) {
-            fprintf(stderr, "section %.16s flags=0x%x stype=0x%x — falling back to byte DataBlob parse\n",
-                    sect.sectname, (unsigned)flags, (unsigned)stype);
-         }
          return new Section<bits>(img, offset, env, DataBlob<bits>::Parse);
       }
    }
@@ -407,12 +389,6 @@ namespace MachO {
    template <Bits bits>
    void Section<bits>::Parse1(const Image& img, ParseEnv<bits>& env) {
       env.current_section = this;
-      /* gated: m64 pipes macho-tool's stderr, and flooding it under Rosetta
-       * has aborted the tool */
-      if (std::getenv("MACHO_TOOL_DEBUG")) {
-         fprintf(stderr, "parse: %.16s,%.16s vmaddr=0x%zx size=%zu\n",
-                 sect.segname, sect.sectname, (size_t)sect.addr, (size_t)sect.size);
-      }
 
       /* claim PIC switch tables before the sweep decodes them as code */
       DetectJumpTables(img, env);
