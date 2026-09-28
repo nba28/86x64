@@ -1,0 +1,63 @@
+/*
+ * qsort_shim.c — ONE job: qsort with an i386 comparator.
+ *
+ * Native qsort compares against TEMPORARY copies of elements (a pivot on its
+ * own, high, stack). The generic callback bridge bounces a high pointer into a
+ * low buffer, but for `const void *` it cannot know the element width, so the
+ * comparator read garbage (PvZ's sound-instance sort: **a deref -> SIGSEGV).
+ * Here native qsort_r sorts an INDEX array and the i386 comparator only ever
+ * sees pointers into the caller's own (low) array; the result is applied with
+ * one permutation. Kill switch M64_NO_QSORT_SHIM=1 (generic bridge).
+ * ABI: MTSHIM (rdi -> &i386 args[0]); symbol in custom.syms.
+ */
+#include <stdint.h>
+#include <stdlib.h>
+#include <string.h>
+
+#define X64_CB_MAX_ARGS 16
+typedef struct {
+   uint32_t nargs, ret_kind;
+   uint8_t  arg_kinds[X64_CB_MAX_ARGS];
+   uint32_t arg_sizes[X64_CB_MAX_ARGS];
+} x64_cb_sig;
+extern uint64_t x64_cb_wrap(uint32_t fn32, const x64_cb_sig *sig);
+
+/* two plain words in, int out (CBR_I32SX = 4) */
+static const x64_cb_sig k_sig2 = { 2, 4, { 0 }, { 0 } };
+
+typedef struct {
+   uint8_t *base;
+   uint32_t width;
+   int32_t (*cmp)(uint64_t, uint64_t);
+} qctx;
+
+static int by_index(void *vc, const void *pa, const void *pb)
+{
+   const qctx *c = vc;
+   const uint32_t ia = *(const uint32_t *)pa, ib = *(const uint32_t *)pb;
+   return c->cmp((uint32_t)(uintptr_t)(c->base + (size_t)ia * c->width),
+                 (uint32_t)(uintptr_t)(c->base + (size_t)ib * c->width));
+}
+
+/* void qsort(void *base, size_t n, size_t width, int (*cmp)(const void *, const void *)) */
+void shim_qsort(uint32_t *a)
+{
+   uint8_t *base = (uint8_t *)(uintptr_t)a[0];
+   const uint32_t n = a[1], w = a[2];
+   int32_t (*cmp)(uint64_t, uint64_t) = (void *)(uintptr_t)x64_cb_wrap(a[3], &k_sig2);
+   if (!base || n < 2 || !w || !cmp) { return; }
+   if (getenv("M64_NO_QSORT_SHIM")) { qsort(base, n, w, (int (*)(const void *, const void *))cmp); return; }
+   uint32_t *idx = malloc((size_t)n * sizeof *idx);
+   uint8_t  *tmp = malloc((size_t)n * w);
+   if (!idx || !tmp) {   /* degrade to the bridge rather than leave it unsorted */
+      free(idx); free(tmp);
+      qsort(base, n, w, (int (*)(const void *, const void *))cmp);
+      return;
+   }
+   for (uint32_t i = 0; i < n; ++i) { idx[i] = i; }
+   qctx c = { base, w, cmp };
+   qsort_r(idx, n, sizeof *idx, &c, by_index);
+   for (uint32_t i = 0; i < n; ++i) { memcpy(tmp + (size_t)i * w, base + (size_t)idx[i] * w, w); }
+   memcpy(base, tmp, (size_t)n * w);
+   free(idx); free(tmp);
+}

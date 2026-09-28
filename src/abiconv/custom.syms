@@ -853,3 +853,15 @@ _AudioDeviceRemoveIOProc
 _AudioDeviceStart
 _AudioDeviceStop
 _AudioDeviceGetPropertyInfo
+_AudioUnitSetProperty
+_AudioUnitGetProperty
+_AudioUnitInitialize
+_AudioUnitUninitialize
+_AudioOutputUnitStart
+_AudioOutputUnitStop
+_AudioUnitGetParameter
+_AudioUnitSetParameter
+_AudioUnitAddRenderNotify
+_AudioUnitRemoveRenderNotify
+_AudioConverterFillComplexBuffer
+_qsort

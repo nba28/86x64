@@ -274,6 +274,18 @@
 	MTSHIM	___AudioDeviceRemoveIOProc,   _shim_AudioDeviceRemoveIOProc
 	MTSHIM	___AudioDeviceStart,          _shim_AudioDeviceStart
 	MTSHIM	___AudioDeviceStop,           _shim_AudioDeviceStop
+	MTSHIM	___AudioUnitSetProperty, _shim_AudioUnitSetProperty
+	MTSHIM	___AudioUnitGetProperty, _shim_AudioUnitGetProperty
+	MTSHIM	___AudioUnitInitialize, _shim_AudioUnitInitialize
+	MTSHIM	___AudioUnitUninitialize, _shim_AudioUnitUninitialize
+	MTSHIM	___AudioOutputUnitStart, _shim_AudioOutputUnitStart
+	MTSHIM	___AudioOutputUnitStop, _shim_AudioOutputUnitStop
+	MTSHIM	___AudioUnitGetParameter, _shim_AudioUnitGetParameter
+	MTSHIM	___AudioUnitSetParameter, _shim_AudioUnitSetParameter
+	MTSHIM	___AudioUnitAddRenderNotify, _shim_AudioUnitAddRenderNotify
+	MTSHIM	___AudioUnitRemoveRenderNotify, _shim_AudioUnitRemoveRenderNotify
+	MTSHIM	___AudioConverterFillComplexBuffer, _shim_AudioConverterFillComplexBuffer
+	MTSHIM	___qsort, _shim_qsort
 	;; pthread_once: the i386 once-control block ({long __sig; opaque} = 8B,
 	;; 4-byte sig) is NOT a valid native os_once_t, and its init routine is an
 	;; i386 void(void) fn ptr. abigen's forward to native pthread_once trips

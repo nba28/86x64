@@ -32,6 +32,19 @@
 #include <string.h>
 #include <os/lock.h>
 
+/* coreaudio_au_shim.c: AudioUnit component types ('au..') -> AudioComponent. */
+extern int au_find_next(uint32_t prev, const uint32_t *cd, uint32_t *out);
+extern int au_open(uint32_t comp, uint32_t *inst);
+extern int au_close(uint32_t inst, uint32_t *result);
+static uint32_t au_open_default(uint32_t type, uint32_t sub, int *handled)
+{
+   const uint32_t cd[5] = { type, sub, 0, 0, 0 };
+   uint32_t comp = 0, inst = 0;
+   *handled = au_find_next(0, cd, &comp);
+   if (*handled && comp) { au_open(comp, &inst); }
+   return inst;
+}
+
 extern void *malloc(size_t);
 extern void  free(void *);
 
@@ -177,6 +190,8 @@ static cm_component *find_first(cm_ostype t, cm_ostype s, cm_ostype m)
 /* ComponentInstance OpenDefaultComponent(OSType type, OSType subType); */
 uint32_t shim_OpenDefaultComponent(uint32_t *a)
 {
+   int au; uint32_t ai = au_open_default(a[0], a[1], &au);
+   if (au) { return ai; }
    cm_component *c = find_first(a[0], a[1], 0);
    return c ? open_component(c, a[1]) : 0;
 }
@@ -184,6 +199,8 @@ uint32_t shim_OpenDefaultComponent(uint32_t *a)
 /* OSErr OpenADefaultComponent(OSType type, OSType subType, ComponentInstance *ci); */
 uint32_t shim_OpenADefaultComponent(uint32_t *a)
 {
+   int au; uint32_t ai = au_open_default(a[0], a[1], &au);
+   if (au) { put_u32(a[2], ai); return ai ? cmNoErr : cmCantOpenErr; }
    cm_component *c = find_first(a[0], a[1], 0);
    uint32_t inst = c ? open_component(c, a[1]) : 0;
    put_u32(a[2], inst);
@@ -193,6 +210,8 @@ uint32_t shim_OpenADefaultComponent(uint32_t *a)
 /* ComponentInstance OpenComponent(Component aComponent); */
 uint32_t shim_OpenComponent(uint32_t *a)
 {
+   uint32_t ai;
+   if (au_open(a[0], &ai)) { return ai; }
    cm_component *c = (cm_component *)i386_ptr(a[0]);
    return c ? open_component(c, c->subtype) : 0;
 }
@@ -200,6 +219,8 @@ uint32_t shim_OpenComponent(uint32_t *a)
 /* OSErr OpenAComponent(Component aComponent, ComponentInstance *ci); */
 uint32_t shim_OpenAComponent(uint32_t *a)
 {
+   uint32_t ai;
+   if (au_open(a[0], &ai)) { put_u32(a[1], ai); return ai ? cmNoErr : cmCantOpenErr; }
    cm_component *c = (cm_component *)i386_ptr(a[0]);
    uint32_t inst = c ? open_component(c, c->subtype) : 0;
    put_u32(a[1], inst);
@@ -207,7 +228,12 @@ uint32_t shim_OpenAComponent(uint32_t *a)
 }
 
 /* ComponentResult CloseComponent(ComponentInstance ci); */
-uint32_t shim_CloseComponent(uint32_t *a) { return close_instance(a[0]); }
+uint32_t shim_CloseComponent(uint32_t *a)
+{
+   uint32_t r;
+   if (au_close(a[0], &r)) { return r; }
+   return close_instance(a[0]);
+}
 
 /* Component FindNextComponent(Component prev, ComponentDescription *looking);
  * ComponentDescription (i386) = 5 x UInt32: type,subType,manuf,flags,flagsMask. */
@@ -215,6 +241,8 @@ uint32_t shim_FindNextComponent(uint32_t *a)
 {
    uint32_t prev = a[0];
    uint32_t *cd  = (uint32_t *)i386_ptr(a[1]);
+   uint32_t au;
+   if (au_find_next(prev, cd, &au)) { return au; }
    cm_ostype t = cd ? cd[0] : 0, s = cd ? cd[1] : 0, m = cd ? cd[2] : 0;
 
    /* Resume after `prev` (a g_components[] address) if given. */

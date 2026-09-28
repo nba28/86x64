@@ -484,6 +484,8 @@ add_library(abiconv SHARED
   pthread_sync_shim.c
   coreaudio_hal_shim.c
   coreaudio_ioproc_shim.c
+  coreaudio_au_shim.c
+  qsort_shim.c
   cxx_shim.c
   cxx_typeinfo.c
   eh_shim.c
