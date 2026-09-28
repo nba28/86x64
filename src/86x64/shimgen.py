@@ -521,17 +521,9 @@ def main():
         if not os.path.isfile(binary):
             print(f"!! no such binary: {rel}")
             continue
-        # A TRANSLATED image (i386 rewritten to x86_64 by macho-tool) is never
-        # a shimgen job: its calls still carry i386-frame semantics, so a
-        # missing symbol there needs a libabiconv bridge / `m64 reinterpose`,
-        # not a native-ABI stub (a stub's 8-byte `ret` over-pops the caller's
-        # 4-byte-return frame — the s28 ABI family). Skip it BEFORE its binds
-        # are collected — collecting them here is what polluted observed.json
-        # / *ShimAuto.m with translated-only symbols (DateToSeconds, NewAlias,
-        # ResolveAlias, create_fftsetup: only translated QuickTime/iMovie bind
-        # these raw). This is the single enumeration point every caller
-        # (`m64 shim`'s target list, or shimgen.py invoked directly) funnels
-        # through, so filtering here covers all of them.
+        # A translated image's calls carry the i386 ABI: a missing symbol there
+        # needs a libabiconv bridge (`m64 reinterpose`), never a native-ABI stub
+        # (its 8-byte `ret` over-pops the caller). Skip before collecting binds.
         if is_translated_consumer(binary):
             skipped_translated += 1
             continue
@@ -739,9 +731,6 @@ def main():
         flat_sign(shim_path)
         print(f"generated {shim_name}: {len(covered)} impl + "
               f"{len(uncovered)} stub = {len(M)} symbols")
-        # ent["dependents"] only ever holds NATIVE consumers: translated images
-        # are filtered out of the enumeration loop above before binds are even
-        # collected, so they can never reach here to redirect.
         for binary, dep in ent["dependents"]:
             redirect_dep(app, binary, dep, f"{ref_prefix}{shim_name}")
 
