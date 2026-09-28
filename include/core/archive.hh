@@ -51,6 +51,11 @@ namespace MachO {
        * Archive::synthesize_dyld_info. */
       bool synthesize_dyld_info_enabled = false;
 
+      /* Built by Transform from the opposite-width archive (the M32 pass), so
+       * it still holds that pass's constant/pointer verdicts. See
+       * inject_cpin_section. */
+      bool from_transform = false;
+
       virtual uint32_t magic() const override { return header.magic; }
       virtual uint32_t& magic() override { return header.magic; }
       virtual Bits bits() const override { return b; }

@@ -1133,20 +1133,14 @@ namespace MachO {
       if constexpr (b != Bits::M64) {
          return; /* the M32 pass IS the provenance; only its output records it */
       } else {
+         /* Only the archive Transform just built still holds the M32 verdicts.
+          * A re-parse carries the table as a live ConstPinBlob (re-resolved by
+          * its Parse, re-emitted by Emit); re-deriving it there would fold in
+          * the ungated re-parse's verdicts. A native image never had an M32
+          * pass at all (`change-deps` on a native dylib must not grow it). */
+         if (!from_transform) { return; }
          Segment<b> *data_seg = segment(SEG_DATA);
          if (data_seg == nullptr) { return; }
-
-         /* Idempotent: a reparse carries the table as a live ConstPinBlob whose
-          * Parse re-resolved every slot — Emit re-emits it correctly. Injecting
-          * a second copy would also be WRONG, not merely redundant: by then the
-          * constants are pinned, so re-deriving the set from this parse would
-          * fold in whatever the (ungated) re-parse decided. The FIRST M64 build
-          * is the only one that still holds the M32 verdicts. */
-         for (Segment<b> *seg : segments()) {
-            for (Section<b> *s : seg->sections) {
-               if (s->name() == "__86x64_cpin") { return; }
-            }
-         }
 
          /* A constant can only be MISTAKEN for a pointer if its value aliases
           * the translated image, which starts at this archive's M64 base
@@ -1190,26 +1184,8 @@ namespace MachO {
             }
          }
 
-         /* Emit EVEN WHEN EMPTY for our own translated output (it links
-          * libabiconv, or will by the next stage): an empty table is valid
-          * ground truth — "the M32 pass pinned nothing" — and arming the gate
-          * with it is correct. Anything that does NOT link libabiconv (a native
-          * binary run through `macho-tool modify` in an unrelated flow) keeps
-          * the old behavior and gets no section at all. Mirrors
-          * inject_abs32_section's rule. */
-         if (blob->ents.empty()) {
-            bool links_abiconv = false;
-            for (const DylibCommand<b> *dc :
-                    this->template subcommands<DylibCommand>()) {
-               if (dc->dylib_cmd.cmd == LC_LOAD_DYLIB &&
-                   dc->name.find("libabiconv") != std::string::npos) {
-                  links_abiconv = true;
-                  break;
-               }
-            }
-            if (!links_abiconv) { delete blob; return; }
-         }
-
+         /* Emitted EVEN WHEN EMPTY: "the M32 pass pinned nothing" is valid
+          * ground truth and arms the re-parse gate. */
          auto *sect = Section<b>::Synthetic(SEG_DATA, "__86x64_cpin",
                                             S_REGULAR, /*align=*/2);
          sect->segment = data_seg;
@@ -1557,7 +1533,8 @@ namespace MachO {
    }
 
    template <Bits b>
-   Archive<b>::Archive(const Archive<opposite<b>>& other, TransformEnv<opposite<b>>& env)
+   Archive<b>::Archive(const Archive<opposite<b>>& other, TransformEnv<opposite<b>>& env):
+      from_transform(true)
    {
       env(other.header, header);
       for (const auto lc : other.load_commands) {
