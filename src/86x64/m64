@@ -71,6 +71,7 @@ def _resolve_build_root():
 BUILD, _OTHER_BUILD = _resolve_build_root()
 MACHO_TOOL = BUILD / "src" / "macho-tool" / "macho-tool"
 LIBABICONV = BUILD / "src" / "abiconv" / "libabiconv.dylib"
+LIBINTERPOSE = BUILD / "src" / "86x64" / "libinterpose.dylib"
 
 
 def warn_if_build_ambiguous():
@@ -613,20 +614,24 @@ def cmd_retranslate(args):
 
 
 def cmd_resync(args):
-    """Copy the freshly-built libabiconv.dylib over every copy in a bundle."""
+    """Copy the freshly-built runtime (libabiconv + libinterpose) over every copy in a bundle."""
     require(LIBABICONV)
+    require(LIBINTERPOSE)
     warn_if_build_ambiguous()
     app = Path(args.app)
-    copies = list(app.rglob("libabiconv.dylib"))
-    # Name the SOURCE, not just the count: "4 copies synced" is exactly the
-    # reassuring message you get when you have just deployed the wrong build.
-    info(f"resync libabiconv -> {len(copies)} copies in {app.name}")
-    info(f"  source: {LIBABICONV}")
-    for c in copies:
+    copies = []
+    for src in (LIBABICONV, LIBINTERPOSE):
+        found = list(app.rglob(src.name))
+        copies += [(src, c) for c in found]
+        # Name the SOURCE, not just the count: "4 copies synced" is exactly the
+        # reassuring message you get when you have just deployed the wrong build.
+        info(f"resync {src.stem} -> {len(found)} copies in {app.name}")
+        info(f"  source: {src}")
+    for src, c in copies:
         if args.dry_run:
-            print("  dry-run: cp", LIBABICONV, c)
+            print("  dry-run: cp", src, c)
             continue
-        shutil.copy2(LIBABICONV, c)
+        shutil.copy2(src, c)
         subprocess.run(["codesign", "-f", "-s", "-", str(c)],
                        capture_output=True)
         # ⚠A FRAMEWORK SEALS ITS CONTENTS. Replacing a libabiconv copy INSIDE
@@ -1552,7 +1557,7 @@ def build_parser():
 
     # resync
     s = sub.add_parser("resync",
-                       help="copy the freshly-built libabiconv.dylib over every "
+                       help="copy the freshly-built libabiconv + libinterpose over every "
                             "copy inside a bundle (+ ad-hoc sign)")
     s.add_argument("app")
     common(s); s.set_defaults(func=cmd_resync)
