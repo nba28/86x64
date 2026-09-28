@@ -57,14 +57,6 @@ extern uint64_t x64_objc_unwrap(uint32_t h);
 
 #define PTR(i) ((void *)(uintptr_t)a[(i)])
 
-static int sa_debug(void) {
-    static int v = -1;
-    if (v < 0) v = getenv("CARBON_DIALOG_TRACE") != NULL ||
-                   getenv("CARBON_ALERT_TRACE") != NULL;
-    return v;
-}
-#define SA(...) do { if (sa_debug()) { fprintf(stderr, "[stdalert] " __VA_ARGS__); fflush(stderr); } } while (0)
-
 /* ---- classic constants (Dialogs.h, 10.6 SDK) --------------------------- */
 enum { kAlertStopAlert = 0, kAlertNoteAlert = 1, kAlertCautionAlert = 2, kAlertPlainAlert = 3 };
 enum { kAlertStdAlertOKButton = 1, kAlertStdAlertCancelButton = 2,
@@ -276,10 +268,8 @@ static NSInteger run_alert_modal(StdAlert *s) {
     if ([NSThread isMainThread]) classic();
     else dispatch_sync(dispatch_get_main_queue(), classic);
     if (item >= 1 && item <= 3) {
-        SA("classic Carbon alert -> item %d\n", item);
         return (NSInteger)item;
     }
-    SA("classic Carbon alert unavailable -> AppKit fallback\n");
     return run_ns_alert(s);
 }
 
@@ -301,8 +291,6 @@ uint32_t shim_CreateStandardAlert(uint32_t *a) {
     cfarg_to_cstr(a[2], s->explanation, sizeof s->explanation, &wd);
     read_param(s, (const uint8_t *)PTR(3));
     if (outAlert) *outAlert = wrap_ptr(s);
-    SA("CreateStandardAlert type=%d error='%s' expl='%s' cancel=%d other=%d -> %p\n",
-       s->alertType, s->error, s->explanation, s->hasCancel, s->hasOther, s);
     return 0;
 }
 
@@ -316,7 +304,6 @@ uint32_t shim_RunStandardAlert(uint32_t *a) {
     if (!s) { if (outItemHit) *outItemHit = kAlertStdAlertOKButton; return -50 /*paramErr*/; }
     NSInteger hit = run_alert_modal(s);
     if (outItemHit) *outItemHit = (int16_t)hit;
-    SA("RunStandardAlert -> item %ld\n", (long)hit);
     s->magic = 0;
     free(s);                                     /* Run* owns the dispose */
     return 0;
@@ -350,7 +337,6 @@ uint32_t shim_StandardAlert(uint32_t *a) {
     s.defaultButton = kAlertStdAlertOKButton;
     NSInteger hit = run_alert_modal(&s);
     if (outItemHit) *outItemHit = (int16_t)hit;
-    SA("StandardAlert type=%d error='%s' -> item %ld\n", s.alertType, s.error, (long)hit);
     return 0;
 }
 
@@ -377,7 +363,6 @@ uint32_t shim_GetStandardAlertDefaultParams(uint32_t *a) {
     *(uint16_t *)(parm + PARM_cancelButton)  = 0;
     *(uint16_t *)(parm + PARM_position)      = 0;            /* kWindowDefaultPosition */
     *(uint32_t *)(parm + PARM_flags)         = 0;
-    SA("GetStandardAlertDefaultParams(v=%u)\n", version);
     return 0;
 }
 

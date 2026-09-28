@@ -92,8 +92,6 @@ extern void carbon_ensure_foreground(void);
  * to the caller's modal. */
 #define CLASSIC_ALERT_PROOF_SECS 3.0
 
-#define CA(...) CCW_LOG(__VA_ARGS__)
-
 /* ================= classic metrics (Mac OS X HIG, Aqua alert) ============== */
 enum {
     AL_W          = 420,   /* classic alert width                          */
@@ -162,7 +160,6 @@ static CCWStatus key_handler(void *call, CCWEventRef ev, void *ud) {
     for (int i = 0; i < a->nbtn; i++) {
         if ((want == 1 && a->btn[i].isDefault) || (want == 2 && a->btn[i].isCancel)) {
             ccw_button_fire(&a->btn[i]);
-            CA("key %d -> item %d\n", ch, a->result);
             return 0;
         }
     }
@@ -248,7 +245,7 @@ int carbon_classic_alert_run(int alertType, const char *message, const char *inf
     /* ---- real Carbon window (movable modal = classic draggable alert) ---- */
     CCWWindowRef win = ccw_create_window(kCCWMovableModalWindow, 0,
                                          a->contentW, a->contentH, "");
-    if (!win) { CA("CreateNewWindow failed for every window class\n"); free(a); return 0; }
+    if (!win) { free(a); return 0; }   /* CreateNewWindow failed for every window class */
     a->win = win;
     for (int i = 0; i < a->nbtn; i++) a->btn[i].win = win;
 
@@ -277,7 +274,6 @@ int carbon_classic_alert_run(int alertType, const char *message, const char *inf
     if (ccw_DisposeWindow) ccw_DisposeWindow(win);
 
     int item = live ? (a->result ? a->result : a->btn[0].item) : 0;
-    CA("classic alert -> item %d (live=%d)\n", item, live);
     free(a);
     return item;
 }

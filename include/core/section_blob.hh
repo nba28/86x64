@@ -715,10 +715,9 @@ namespace MachO {
     * `mov r11,[rip+slot]` to its __jt_ptrs slot (like the old jmp) and the `jz`
     * to the ud2. (An earlier inline-name-after-ud2 variant was rejected: convert
     * SHIFTS the __jt_tramp layout, so the name bytes mis-decoded as code and
-    * corrupted the trampolines.) The removed symbol's name is surfaced at
-    * TRANSLATE time (MACHO_TOOL_DEBUG log in lift_jump_table_targets) and is
-    * recoverable from a crash by mapping the faulting __jt_tramp PC to the Nth
-    * trampoline == Nth weak-import. `name` below is retained for a future
+    * corrupted the trampolines.) The removed symbol's name is recoverable from a
+    * crash by mapping the faulting __jt_tramp PC to the Nth trampoline == Nth
+    * weak-import (src/86x64/jtnames.py). `name` below is retained for a future
     * reparse-stable runtime name table (see the known-gaps list); it is NOT emitted.
     *
     * Re-synthesis is skipped once the section exists (idempotent), and the

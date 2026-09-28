@@ -426,12 +426,7 @@ namespace MachO {
 
       default:
          /* Unknown LC_*_DYLIB variant — best effort: allocate a counter
-          * id (treat as load). Logs once if MACHO_BUILD_DEBUG is set. */
-         if (std::getenv("MACHO_BUILD_DEBUG")) {
-            fprintf(stderr,
-                    "DylibCommand::AssignID: unknown cmd 0x%x; treating as LC_LOAD_DYLIB\n",
-                    (unsigned)dylib_cmd.cmd);
-         }
+          * id (treat as load). */
          id = env.dylib_counter();
          break;
       }

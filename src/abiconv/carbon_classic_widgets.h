@@ -90,10 +90,6 @@ extern uint32_t   (*ccw_GetEventKind)(CCWEventRef);
 /* Resolve the natives once.  Returns 1 if the substrate can be used at all
  * (window creation + HIView creation + a modal state are all present). */
 int  ccw_available(void);
-/* CARBON_ALERT_TRACE / CARBON_DIALOG_TRACE tracing, shared by all users. */
-int  ccw_trace(void);
-void ccw_log(const char *fmt, ...) __attribute__((format(printf, 1, 2)));
-#define CCW_LOG(...) do { if (ccw_trace()) ccw_log(__VA_ARGS__); } while (0)
 
 /* ---- classic text (Lucida Grande — the real classic system font) -------- */
 CTFontRef ccw_font(double size, int bold);

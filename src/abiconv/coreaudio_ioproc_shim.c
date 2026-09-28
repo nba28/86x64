@@ -9,7 +9,7 @@
  *
  * Here the native side gets OUR IOProc; per cycle it lowers both lists and the
  * timestamps, calls the i386 proc through x64_cb_wrap with an all-word
- * signature, then raises the output samples back into CoreAudio's buffers. Kill switch M64_NO_HAL_IOPROC_SHIM=1 (generic bridge).
+ * signature, then raises the output samples back into CoreAudio's buffers.
  * ABI: MTSHIM (rdi -> &i386 args[0]); symbols in custom.syms.
  */
 #include <CoreAudio/CoreAudio.h>
@@ -37,13 +37,6 @@ typedef struct {
 } ioproc_ent;
 static ioproc_ent     g_ent[MAX_PROCS];
 static os_unfair_lock g_lock = OS_UNFAIR_LOCK_INIT;
-
-static int off(void)
-{
-   static int v = -1;
-   if (v < 0) { v = getenv("M64_NO_HAL_IOPROC_SHIM") != NULL; }
-   return v;
-}
 
 #define P32(p) ((uint64_t)(uint32_t)(uintptr_t)(p))
 
@@ -75,10 +68,6 @@ static ioproc_ent *find(AudioDeviceID dev, uint32_t fn32)
 /* OSStatus AudioDeviceAddIOProc(AudioDeviceID, AudioDeviceIOProc, void *) */
 uint32_t shim_AudioDeviceAddIOProc(uint32_t *a)
 {
-   if (off()) {
-      return (uint32_t)AudioDeviceAddIOProc(a[0], (AudioDeviceIOProc)(uintptr_t)
-                                            x64_cb_wrap(a[1], &k_sig7), (void *)(uintptr_t)a[2]);
-   }
    os_unfair_lock_lock(&g_lock);
    ioproc_ent *e = find(a[0], a[1]);
    if (!e) {
@@ -97,7 +86,7 @@ uint32_t shim_AudioDeviceAddIOProc(uint32_t *a)
 /* OSStatus AudioDeviceRemoveIOProc(AudioDeviceID, AudioDeviceIOProc) */
 uint32_t shim_AudioDeviceRemoveIOProc(uint32_t *a)
 {
-   ioproc_ent *e = off() ? NULL : find(a[0], a[1]);
+   ioproc_ent *e = find(a[0], a[1]);
    if (!e) {
       return (uint32_t)AudioDeviceRemoveIOProc(a[0], (AudioDeviceIOProc)(uintptr_t)
                                                x64_cb_wrap(a[1], &k_sig7));
@@ -111,7 +100,7 @@ uint32_t shim_AudioDeviceRemoveIOProc(uint32_t *a)
 static AudioDeviceIOProc native_proc(uint32_t dev, uint32_t fn32)
 {
    if (!fn32) { return NULL; }
-   if (!off() && find(dev, fn32)) { return hal_ioproc; }
+   if (find(dev, fn32)) { return hal_ioproc; }
    return (AudioDeviceIOProc)(uintptr_t)x64_cb_wrap(fn32, &k_sig7);
 }
 uint32_t shim_AudioDeviceStart(uint32_t *a) { return (uint32_t)AudioDeviceStart(a[0], native_proc(a[0], a[1])); }

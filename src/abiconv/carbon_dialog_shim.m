@@ -84,13 +84,6 @@ extern int carbon_classic_alert_run(int alertType, const char *message, const ch
 #define PTR(i) ((void *)(uintptr_t)a[(i)])
 #define DLOG_NO_ERR (0)
 
-static int dlg_debug(void) {
-    static int v = -1;
-    if (v < 0) v = getenv("CARBON_DIALOG_TRACE") != NULL;
-    return v;
-}
-#define DLG(...) do { if (dlg_debug()) { fprintf(stderr, "[dialog] " __VA_ARGS__); fflush(stderr); } } while (0)
-
 /* ---- classic geometry -------------------------------------------------
  * DLOG/DITL/ALRT are big-endian ON DISK, but the modern macOS Resource Manager
  * BYTE-SWAPS every 16-/32-bit numeric field to host (little-endian) order when
@@ -312,7 +305,6 @@ static void parse_ditl(Dialog *d, const uint8_t *p, long len) {
         it->index = d->nitems + 1;         /* classic item numbers are 1-based */
         d->nitems++;
     }
-    DLG("parsed DITL: %d items\n", d->nitems);
 }
 
 /* ======================= CLASSIC Carbon materialization ==================
@@ -338,9 +330,7 @@ static int build_classic(Dialog *d) {
          * to Return and Escape instead of a stale 0. */
         d->defaultItem = ccd_default_item(d->cd);
         d->cancelItem  = ccd_cancel_item(d->cd);
-        DLG("classic Carbon dialog materialized (%dx%d, %d items, default=%d cancel=%d)\n",
-            w, h, d->nitems, d->defaultItem, d->cancelItem);
-    } else DLG("classic Carbon dialog unavailable -> AppKit fallback\n");
+    }
     return d->cd != NULL;
 }
 
@@ -502,7 +492,7 @@ uint32_t shim_GetNewDialog(uint32_t *a) {
     __block Dialog *d = NULL;
     long dlen = 0;
     uint8_t *dlog = load_resource('DLOG', dlogID, &dlen);
-    if (!dlog || dlen < 22) { free(dlog); DLG("GetNewDialog %d: no DLOG\n", dlogID); return 0; }
+    if (!dlog || dlen < 22) { free(dlog); return 0; }
     /* DLOG: Rect bounds(8) | SInt16 procID(2) | Boolean visible(1)+filler(1) |
      *       Boolean goAway(1)+filler(1) | SInt32 refCon(4) | SInt16 itemsID(2) |
      *       Str255 title | ... */
@@ -516,7 +506,7 @@ uint32_t shim_GetNewDialog(uint32_t *a) {
 
     long ilen = 0;
     uint8_t *ditl = load_resource('DITL', itemsID, &ilen);
-    if (!ditl) { DLG("GetNewDialog %d: no DITL %d\n", dlogID, itemsID); return 0; }
+    if (!ditl) { return 0; }
 
     d = (Dialog *)calloc(1, sizeof *d);
     if (!d) { free(ditl); return 0; }
@@ -533,7 +523,6 @@ uint32_t shim_GetNewDialog(uint32_t *a) {
     if (!classic) on_main_sync(^{ build_window(d, d->title); });
     if (!d->cd && !d->win) { free(d); return 0; }
     set_front_dialog(d);        /* the newest dialog is the ModalDialog target */
-    DLG("GetNewDialog %d -> DITL %d, %d items, dialog=%p\n", dlogID, itemsID, d->nitems, d);
     return wrap_ptr(d);
 }
 
@@ -565,11 +554,9 @@ uint32_t shim_ModalDialog(uint32_t *a) {
         });
         if (item > 0) {
             if (itemHit) *itemHit = (int16_t)item;
-            DLG("ModalDialog (classic Carbon) -> item %d\n", item);
             return 0;
         }
         if (!d->win) { if (itemHit) *itemHit = 1; return 0; }
-        DLG("ModalDialog: classic pump dead -> AppKit fallback\n");
     }
 
     on_main_sync(^{
@@ -583,7 +570,6 @@ uint32_t shim_ModalDialog(uint32_t *a) {
     });
     if (hit <= 0) hit = 1;                       /* safety: never 0 */
     if (itemHit) *itemHit = (int16_t)hit;
-    DLG("ModalDialog -> item %ld\n", (long)hit);
     return 0;
 }
 
@@ -688,7 +674,6 @@ uint32_t shim_GetDialogItemText(uint32_t *a) {
     if (!it) { p255[0] = 0; return 0; }
     sync_item_from_view(it);                       /* pull live user entry */
     cstr_to_pstr(it->text, p255);
-    DLG("GetDialogItemText -> '%s'\n", it->text);
     return 0;
 }
 
@@ -699,7 +684,6 @@ uint32_t shim_SetDialogItemText(uint32_t *a) {
     if (!it || !p255) return 0;
     char c[256]; pstr_to_cstr(p255, c, sizeof c);
     set_item_text(it, c);
-    DLG("SetDialogItemText '%s'\n", c);
     return 0;
 }
 
@@ -744,7 +728,6 @@ uint32_t shim_DisposeDialog(uint32_t *a) {
     d->magic = 0;
     d->win = nil;
     free(d);
-    DLG("DisposeDialog %p\n", d);
     return 0;
 }
 
@@ -840,7 +823,7 @@ static uint32_t run_alert(uint32_t *a, const char *kind) {
         classic = carbon_classic_alert_run(0 /*stop*/, [msgCopy UTF8String], NULL,
                                            "OK", NULL, NULL, 1, 0);
     });
-    if (classic >= 1) { DLG("%s(%d) -> classic item %d\n", kind, alrtID, classic); return 1; }
+    if (classic >= 1) { return 1; }
     on_main_sync(^{
         carbon_ensure_window_host();
         NSAlert *al = [[NSAlert alloc] init];
@@ -848,7 +831,6 @@ static uint32_t run_alert(uint32_t *a, const char *kind) {
         [al addButtonWithTitle:@"OK"];
         hit = ([al runModal] == NSAlertFirstButtonReturn) ? 1 : 1;
     });
-    DLG("%s(%d) -> %ld\n", kind, alrtID, (long)hit);
     return (uint32_t)hit;
 }
 /* StopAlert is MTSHIM'd to us and Halo's validation loop uses it. The old stub

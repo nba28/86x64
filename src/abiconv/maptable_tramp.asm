@@ -1332,10 +1332,8 @@ _x64_exc_longjmp:
 	;; resolution after its settings dialog and dies. See
 	;; carbon_window_resize_guard.c.
 	MTSHIM	___SetWindowBounds,                  _shim_SetWindowBounds
-	;; ShowWindow/IsWindowVisible/HideWindow: hold a window's FIRST show until the
-	;; app draws a frame, so the sizing it does before that frame is still a
-	;; PRE-SHOW resize (free) rather than a post-show one (NSCGSPanic on
-	;; kDocumentWindowClass). See carbon_window_deferred_show.c.
+	;; ShowWindow/IsWindowVisible/HideWindow: unwrap the WindowRef handle and
+	;; forward. See carbon_window_show_shim.c.
 	MTSHIM	___ShowWindow,                       _shim_ShowWindow
 	MTSHIM	___IsWindowVisible,                  _shim_IsWindowVisible
 	MTSHIM	___HideWindow,                       _shim_HideWindow

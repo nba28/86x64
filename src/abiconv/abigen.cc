@@ -843,15 +843,6 @@ struct ABIConversion {
       return true;
    }
 
-   /* Kill-switch for the 4th struct-return classifier below: M64_NO_ABIGEN_SRET_GAP=1
-    * restores the pre-fix behaviour (no hidden-sret slot for the MEMORY-on-i386 /
-    * REGISTER-on-x86_64 family), so the tests-i386 guard can A/B the fix rather
-    * than pass inertly. Read once. */
-   static bool sret_gap_disabled() {
-      static const bool off = getenv("M64_NO_ABIGEN_SRET_GAP") != nullptr;
-      return off;
-   }
-
    /* ★ 4th struct-return classifier: the return is MEMORY on i386 but REGISTER
     * on x86_64 — the shape none of the three above claim, and the one that made
     * every declared arg read 4 bytes low.
@@ -866,8 +857,8 @@ struct ABIConversion {
     *     xmm0/xmm1 per eightbyte class). NO hidden pointer, so rdi is NOT
     *     consumed and the native INTEGER args do NOT shift.
     *
-    * Members measured with ABIGEN_SRET_GAP_TRACE=1 (5 in the modern pass, 0 in
-    * the legacy pass), spanning all three x86_64 return-register shapes:
+    * Members (5 in the modern pass, 0 in the legacy pass), spanning all three
+    * x86_64 return-register shapes:
     *   all-INTEGER 2 eightbytes  lldiv, CFUUIDGetUUIDBytes           rax:rdx
     *   homogeneous-FP 2 eightbytes  __sincos_stret, __sincospi_stret xmm0:xmm1
     *   MIXED INTEGER+SSE  CFAbsoluteTimeGetGregorianDate             rax + xmm0
@@ -889,7 +880,6 @@ struct ABIConversion {
     * conversion (byval_flat_convert only runs i386->x86_64) and is left on the
     * pre-existing path. Triggers on the STRUCTURAL return shape, never a name. */
    bool mem32_reg64_return(byval_plan *out = nullptr) const {
-      if (sret_gap_disabled()) { return false; }
       const CXType ret = clang_getCanonicalType(clang_getResultType(function_type));
       if (ret.kind != CXType_Record) { return false; }
       byval_plan plan;
@@ -1072,9 +1062,6 @@ struct ABIConversion {
        * asm in the output. This keeps abigen robust when fed large framework
        * umbrella headers. The symbol is only consumed (erased) on success. */
       std::ostringstream os;
-      if (getenv("ABIGEN_TRACE")) {
-         std::cerr << "abigen: emitting " << sym << std::endl;
-      }
       try {
          emit_body(os, ignore_structs, override_prefix);
       } catch (const std::exception& e) {
@@ -1089,29 +1076,17 @@ struct ABIConversion {
        * (unassemblable). Such functions are almost always internals the i386 app
        * does not call across the boundary anyway; skip any shim over the cap (it
        * over-pops exactly as it did before — no regression) rather than emit a
-       * pathological body. Default 1200 lines; override with ABIGEN_MAX_SHIM_LINES
-       * (0 disables the cap). */
-      {
-         static const long cap = [] {
-            const char *e = getenv("ABIGEN_MAX_SHIM_LINES");
-            return e ? std::strtol(e, nullptr, 10) : 1200;
-         }();
-         if (cap > 0) {
-            const std::string body = os.str();
-            const long nlines = std::count(body.begin(), body.end(), '\n');
-            if (nlines > cap) {
-               std::cerr << "abigen: skipping " << sym << ": shim too large ("
-                         << nlines << " lines > " << cap << " cap)" << std::endl;
-               return;
-            }
-            symbols.erase(sym);
-            final_os << body;
-            emit_native_slot(final_os, emitted_slots, slot_order);
-            return;
-         }
+       * pathological body (cap: 1200 lines). */
+      const long cap = 1200;
+      const std::string body = os.str();
+      const long nlines = std::count(body.begin(), body.end(), '\n');
+      if (nlines > cap) {
+         std::cerr << "abigen: skipping " << sym << ": shim too large ("
+                   << nlines << " lines > " << cap << " cap)" << std::endl;
+         return;
       }
       symbols.erase(sym);
-      final_os << os.str();
+      final_os << body;
       emit_native_slot(final_os, emitted_slots, slot_order);
    }
 
@@ -1196,30 +1171,6 @@ struct ABIConversion {
          !fp_sret && !fp_reg && !int_reg_ret && mem32_reg64_return(&mrs_plan);
       const CXType ret_canon =
          clang_getCanonicalType(clang_getResultType(function_type));
-      /* BLAST-RADIUS DIAGNOSTIC (ABIGEN_SRET_GAP_TRACE=1, inert otherwise).
-       * Report every record return that NONE of the three classifiers above
-       * claimed. The known gap is the family that is MEMORY on i386 (>8 bytes,
-       * so the callee takes a hidden sret pointer as its implicit first stack
-       * arg) but REGISTER on x86_64 (<=16 bytes) and not homogeneous-FP: for
-       * those we emit no hidden-sret slot, so every declared argument is read 4
-       * bytes low and the return conversion is wrong. Counting them is what
-       * decides whether this is a footnote or systematic. */
-      if (ret_canon.kind == CXType_Record && !fp_sret && !fp_reg && !int_reg_ret &&
-          !mem_reg_sret && getenv("ABIGEN_SRET_GAP_TRACE")) {
-         const size_t sz32 = sizeof_type(ret_canon, arch::i386);
-         bool classified = true;
-         size_t sz64 = 0;
-         try {
-            sz64 = byval_classify(ret_canon).sz64;
-         } catch (const std::invalid_argument&) {
-            classified = false;      /* union/packed: byval_classify declines it */
-         }
-         const bool gap = classified && sz32 > 8 && sz64 <= 16;
-         std::cerr << "[abigen-sret-gap] " << (gap ? "GAP  " : "other")
-                   << " i386=" << sz32 << " x86_64=";
-         if (classified) { std::cerr << sz64; } else { std::cerr << "declined"; }
-         std::cerr << " " << sym << "\n";
-      }
       /* Native return buffer. fp_sret needs one because rdi must point at it;
        * mem_reg_sret needs one because the value arrives in REGISTERS and must be
        * captured to memory IMMEDIATELY after the call (the out-param copy-backs
@@ -1774,11 +1725,8 @@ struct ABIConversion {
        * 4-byte-per-call leak changes no returned VALUE: 50_cgaffine_sret
        * exercises this exact family and passes on values alone. Guard
        * 90_fp_sret_stack_balance measures the caller's esp instead and was RED
-       * (exit 1 of 15: value ok, all three esp checks failed).
-       * Kill-switch M64_NO_FP_SRET_POP8=1 restores the old 4-byte pop so that
-       * guard can A/B this rather than pass inertly. */
-      const bool pop_hidden_ptr =
-         mem_reg_sret || (fp_sret && !getenv("M64_NO_FP_SRET_POP8"));
+       * (exit 1 of 15: value ok, all three esp checks failed). */
+      const bool pop_hidden_ptr = mem_reg_sret || fp_sret;
       emit_inst(os, "mov", "r11d", "dword [rsp]");
       emit_inst(os, "add", "rsp", pop_hidden_ptr ? "8" : "4");
       emit_inst(os, "jmp", "r11");
@@ -2167,11 +2115,6 @@ struct ABIGenerator {
          return; /* not in the consider set */
       }
       symbols.erase(sym); /* consume so a re-declaration isn't shadowed twice */
-      if (getenv("ABIGEN_TRACE")) {
-         std::cerr << "abigen: data shadow " << sym
-                   << (info ? " (scalar " : " (object")
-                   << (info ? std::to_string(info) + "B)" : ")") << std::endl;
-      }
       data_shadow_syms.push_back(sym);
       data_shadow_info.push_back(info);
    }
@@ -2187,9 +2130,6 @@ struct ABIGenerator {
          already.insert(sym);
          data_shadow_syms.push_back(sym);
          data_shadow_info.push_back(0);   /* object / CF handle-wrap */
-         if (getenv("ABIGEN_TRACE")) {
-            std::cerr << "abigen: forced object data shadow " << sym << std::endl;
-         }
       }
 
       /* Compiler-runtime SCALAR data symbols that no public header declares, so
@@ -2211,10 +2151,6 @@ struct ABIGenerator {
          already.insert(s.sym);
          data_shadow_syms.push_back(s.sym);
          data_shadow_info.push_back(s.size);
-         if (getenv("ABIGEN_TRACE")) {
-            std::cerr << "abigen: forced scalar data shadow " << s.sym
-                      << " (" << s.size << "B)" << std::endl;
-         }
       }
    }
 

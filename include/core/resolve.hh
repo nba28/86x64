@@ -42,16 +42,6 @@ namespace MachO {
       using TodoMap = std::map<T, std::list<TodoNode>>;
       
       void add(const T& key, U *pointee) {
-         if constexpr (std::is_integral_v<T>) {
-            if ((std::size_t)key == 0xf602d1 && std::getenv("DBG_RES602")) {
-               auto fit = found.find(key);
-               std::cerr << "[res602] add(" << name << ") key=0xf602d1 pointee="
-                         << (const void*)pointee << " lazy=" << (int)lazy
-                         << " preexisting_found="
-                         << (fit!=found.end() ? (const void*)fit->second : (const void*)nullptr)
-                         << " todo_present=" << (todo.find(key)!=todo.end()) << "\n";
-            }
-         }
          if constexpr (!lazy) {
                auto todo_it = todo.find(key);
                if (todo_it != todo.end()) {
@@ -70,26 +60,9 @@ namespace MachO {
              * triggers: contiguous sections (e.g. __TEXT,__text ending at
              * the same vmaddr where __TEXT,__symbol_stub begins) producing
              * a one-past-end blob in section A and a starts-here blob in
-             * section B; or overlapping ranges in the input. The assert
-             * was unconditional which is brittle for real-world binaries
-             * — keep the first registration (likely the section that owns
-             * the address) and warn instead of crashing.
+             * section B; or overlapping ranges in the input. Keep the first
+             * registration (likely the section that owns the address).
              */
-            /*
-             * iPhoto Parse hit this ~18K times; the per-call cerr was real
-             * I/O cost without diagnostic value (the policy is fixed:
-             * keep first, drop new). Gate behind RESOLVER_VERBOSE so the
-             * info is available when actually investigating, silent
-             * otherwise.
-             */
-            static const bool verbose = std::getenv("RESOLVER_VERBOSE") != nullptr;
-            if (verbose) {
-               std::cerr << "Resolver(" << name << "): duplicate key with different pointee — keeping first; "
-                         << "key=0x" << std::hex << key << std::dec
-                         << " old=" << static_cast<const void *>(found_it->second)
-                         << " new=" << static_cast<const void *>(pointee)
-                         << std::endl;
-            }
             return;
          }
          found.insert({key, pointee});
@@ -114,14 +87,6 @@ namespace MachO {
 
       void resolve(const T& key, const U **pointer,
                    std::shared_ptr<functor> callback = std::make_shared<noop>()) {
-         if constexpr (std::is_integral_v<T>) {
-            if ((std::size_t)key == 0xf602d1 && std::getenv("DBG_RES602")) {
-               auto fit = found.find(key);
-               std::cerr << "[res602] resolve(" << name << ") key=0xf602d1 found="
-                         << (fit!=found.end() ? (const void*)fit->second : (const void*)nullptr)
-                         << "\n";
-            }
-         }
          auto found_it = found.find(key);
          if (found_it != found.end()) {
             *pointer = found_it->second;
@@ -202,15 +167,6 @@ namespace MachO {
       void do_resolve() {
          for (auto todo_it = todo.begin(); todo_it != todo.end(); todo_it = todo.erase(todo_it)) {
             // for (auto todo_it = todo.begin(); todo_it != todo.end(); ++todo_it) {
-            if constexpr (std::is_integral_v<T>) {
-               if ((std::size_t)todo_it->first == 0xf602d1 && std::getenv("DBG_RES602")) {
-                  auto fit = found.find(todo_it->first);
-                  std::cerr << "[res602] do_resolve(" << name << ") key=0xf602d1 todo_empty="
-                            << todo_it->second.empty() << " found="
-                            << (fit!=found.end() ? (const void*)fit->second : (const void*)nullptr)
-                            << "\n";
-               }
-            }
             if (!todo_it->second.empty()) {
                auto found_it = found.find(todo_it->first);
                if (found_it != found.end()) {

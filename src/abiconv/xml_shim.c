@@ -49,13 +49,6 @@
 /* malloc/free/realloc resolve, same-image, to libabiconv's low-4GB heap
  * (malloc_shim.c), so every pointer handed back is 32-bit representable. */
 
-static int g_xml_trace = -1;
-static int xml_trace(void) {
-   if (g_xml_trace < 0)
-      g_xml_trace = getenv("ABICONV_XML_TRACE") ? 1 : 0;
-   return g_xml_trace;
-}
-
 /* ---- the four allocator trampolines' C bodies (MTSHIM C-impl ABI) ---------
  * Each receives a = &i386_args[0]; returns the 4-byte i386 value in eax. The
  * pointer args are low-4GB i386 pointers, zero-extended into the dword slots. */
@@ -115,26 +108,12 @@ int shim_xmlMemGet(uint32_t *a) {
 
    /* The trampolines live in libabiconv's __TEXT, which loads in the low-4GB
     * window (like every translated image — the dlsym/cb thunk pools rely on
-    * the same). If that ever fails the stored ptr would truncate; warn but
-    * still write (returning -1 would only reinstate the original assert). */
-   if ((t_free | t_malloc | t_realloc | t_strdup) >> 32) {
-      if (xml_trace())
-         fprintf(stderr, "[xml] WARNING: allocator trampoline >4GB "
-                 "(free=%p malloc=%p) — stored ptr will truncate\n",
-                 (void *)t_free, (void *)t_malloc);
-   }
+    * the same), so the stored 32-bit pointers do not truncate. */
 
    if (p_free)    *p_free    = (uint32_t)t_free;
    if (p_malloc)  *p_malloc  = (uint32_t)t_malloc;
    if (p_realloc) *p_realloc = (uint32_t)t_realloc;
    if (p_strdup)  *p_strdup  = (uint32_t)t_strdup;
-
-   if (xml_trace())
-      fprintf(stderr, "[xml] xmlMemGet -> free=0x%x malloc=0x%x realloc=0x%x "
-              "strdup=0x%x (out @ %p %p %p %p)\n",
-              (uint32_t)t_free, (uint32_t)t_malloc, (uint32_t)t_realloc,
-              (uint32_t)t_strdup, (void *)p_free, (void *)p_malloc,
-              (void *)p_realloc, (void *)p_strdup);
 
    return 0;       /* report success; the four trampolines are now stored */
 }

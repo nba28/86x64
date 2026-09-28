@@ -238,29 +238,12 @@ namespace MachO {
 
    template <Bits bits>
    void Segment<bits>::Emit(Image& img, std::size_t offset) const {
-      static const bool emit_debug = std::getenv("MACHO_EMIT_DEBUG") != nullptr;
-      if (emit_debug) {
-         fprintf(stderr,
-                 "Segment::Emit %.16s offset=0x%zx nsects=%u sections.size()=%zu cmdsize=%u\n",
-                 segment_command.segname, offset,
-                 (unsigned)segment_command.nsects, sections.size(),
-                 (unsigned)segment_command.cmdsize);
-      }
       img.at<segment_command_t<bits>>(offset) = segment_command;
       offset += sizeof(segment_command_t<bits>);
 
-      std::size_t sect_i = 0;
       for (const Section<bits> *sect : sections) {
-         if (emit_debug) {
-            fprintf(stderr,
-                    "  sect[%zu]=%p name=%.16s sz=0x%zx\n",
-                    sect_i, (void*)sect,
-                    sect ? sect->sect.sectname : "<null>",
-                    (size_t)(sect ? sect->sect.size : 0));
-         }
          sect->Emit(img, offset);
          offset += sect->size();
-         ++sect_i;
       }
 
       /* Write back a sectionless segment's verbatim payload at its fileoff,

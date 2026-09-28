@@ -698,7 +698,7 @@ add_library(abiconv SHARED
   classic_input_coords.c
   carbon_event_appdown.c
   carbon_window_resize_guard.c
-  carbon_window_deferred_show.c
+  carbon_window_show_shim.c
   tec_shim.c
   py_shim.c
   quicktime_movie_shim.c

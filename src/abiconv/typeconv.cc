@@ -147,11 +147,6 @@ void record_decl::populate_fields() {
                   break;
 
                default:
-                  if (getenv("ABIGEN_DEBUG_MEMBERS")) {
-                     auto ks = clang_getCursorKindSpelling(clang_getCursorKind(c));
-                     std::cerr << "  member kind: " << clang_getCString(ks) << std::endl;
-                     clang_disposeString(ks);
-                  }
                   /* Any attribute cursor (aligned, objc_boxable, availability,
                    * deprecated, swift_name, ...) is a hint that does NOT change
                    * the C field layout libclang already computed for us — clang

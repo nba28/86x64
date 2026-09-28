@@ -100,13 +100,6 @@ static int cw_disabled(void)
    return v;
 }
 
-static int cw_trace(void)
-{
-   static int v = -1;
-   if (v < 0) v = getenv("ABICONV_WINDOW_TRACE") != NULL;
-   return v;
-}
-
 // OSStatus CreateNewWindow(WindowClass, WindowAttributes, const Rect *contentBounds,
 //                          WindowRef *outWindow)
 uint32_t shim_CreateNewWindow(uint32_t *a)
@@ -125,53 +118,6 @@ uint32_t shim_CreateNewWindow(uint32_t *a)
    *out = 0;
    uint32_t want = cw_disabled() ? attrs : (attrs | kWinCompositing);
 
-   /* ---- kDocumentWindowClass cannot be RESIZED once shown on this macOS ----
-    *
-    * Measured 2026-08-23 (probes/attrresize.m + classagl.m), holding attributes
-    * constant and varying only the class. A SetWindowBounds that changes the
-    * SIZE of an already-shown window:
-    *
-    *    survives : kAlert(1) kMovableAlert(2) kModal(3) kMovableModal(4)
-    *               kFloating(5) kHelp(8) kSheet(9) kToolbar(10) kOverlay(12)
-    *    SIGILL   : kDocument(6) kPlain(11) kSheetAlert(13) kAltPlain(14)
-    *               kSimple(15) kDrawer(16)            (NSCGSPanic, a trap)
-    *
-    * So the panic is NOT "a shown Carbon window can never be resized" -- an
-    * earlier belief of mine, measured only ever on kDocumentWindowClass. Apps
-    * that size their window after showing it (Halo does, to apply the
-    * resolution chosen in its settings dialog) therefore break purely because
-    * of the class they picked.
-    *
-    * kMovableModalWindowClass is the substitute: verified to create, to accept
-    * an aglSetWindowRef attach with a hardware renderer, to SURVIVE the
-    * post-show resize, and to keep GL live afterwards -- while still being a
-    * titled, movable, user-draggable window like a document window.
-    *
-    * ⚠OPT-IN (M64_DOC_WINDOW_CLASS_SUB=1). This changes window chrome for every
-    * document window in the process, which is the right trade for a full-screen
-    * game and the wrong one for a document editor, so it does not default on
-    * until each target says it wants it. */
-   if (cls == 6 /*kDocumentWindowClass*/) {
-      const char *sub = getenv("M64_DOC_WINDOW_CLASS_SUB");
-      if (sub && *sub) {
-         /* The value selects WHICH survivor to use; "1" (or any non-numeric
-          * truthy value) keeps the historical default of kMovableModal(4).
-          *
-          * ⚠The class is NOT a free choice: measured 2026-08-23, substituting
-          * kMovableModal(4) makes Halo's menu backdrop render as torn grey
-          * blocks even with the resize suppressed -- i.e. the CLASS breaks its
-          * 3D rendering, independently of any resize. Surviving classes still
-          * to be tried: kModal(3) kFloating(5) kAlert(1) kMovableAlert(2)
-          * kHelp(8) kSheet(9) kToolbar(10) kOverlay(12). */
-         long want = strtol(sub, NULL, 10);
-         if (want <= 1 || want > 16) want = 4;
-         if (cw_trace())
-            fprintf(stderr, "[win] class kDocument(6) -> %ld: kDocument cannot "
-                            "be resized once shown\n", want);
-         cls = (uint32_t)want;
-      }
-   }
-
    WindowRef w = NULL;
    int32_t   st = n_CreateNewWindow(cls, want, bnds, &w);
 
@@ -181,10 +127,6 @@ uint32_t shim_CreateNewWindow(uint32_t *a)
       w = NULL;
       st = n_CreateNewWindow(cls, kWinCompositing | (attrs & kWinStdHandler), bnds, &w);
    }
-
-   if (cw_trace())
-      fprintf(stderr, "[win] CreateNewWindow(cls=%u attr=0x%08x->0x%08x) st=%d w=%p\n",
-              cls, attrs, want, (int)st, (void *)w);
 
    if (st == 0 && w) {
       // Mirror the abigen bridge's out-parameter rule: a native ref above 4GB

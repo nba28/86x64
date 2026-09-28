@@ -14,7 +14,6 @@
  * MakeConnection {AudioUnit, u32, u32} and SetRenderCallback {proc, refCon}.
  * Render/notify callbacks and AudioConverterFillComplexBuffer get i386-layout
  * AudioBufferLists (coreaudio_abl.h).
- * Kill switch M64_NO_AU_SHIM=1 (the Component Manager keeps its fake instance).
  * ABI: MTSHIM (rdi -> &i386 args[0]); symbols in custom.syms.
  */
 #include <AudioUnit/AudioUnit.h>
@@ -30,13 +29,6 @@
 
 #define P(x)   ((void *)(uintptr_t)(x))
 #define P32(p) ((uint64_t)(uint32_t)(uintptr_t)(p))
-
-static int off(void)
-{
-   static int v = -1;
-   if (v < 0) { v = getenv("M64_NO_AU_SHIM") != NULL; }
-   return v;
-}
 
 static AudioUnit au_in(uint32_t h) { return (AudioUnit)(uintptr_t)x64_objc_unwrap(h); }
 
@@ -76,7 +68,7 @@ static AudioComponent comp_native(uint32_t h)
  * ComponentDescription, 5 x u32 — the same layout as AudioComponentDescription. */
 int au_find_next(uint32_t prev, const uint32_t *cd, uint32_t *out)
 {
-   if (off() || !cd || !is_au_type(cd[0])) { return 0; }
+   if (!cd || !is_au_type(cd[0])) { return 0; }
    AudioComponentDescription d = { cd[0], cd[1], cd[2], cd[3], cd[4] };
    AudioComponent c = AudioComponentFindNext(prev ? comp_native(prev) : NULL, &d);
    *out = c ? comp_handle(c) : 0;
@@ -86,7 +78,7 @@ int au_find_next(uint32_t prev, const uint32_t *cd, uint32_t *out)
 /* OpenAComponent on a handle we issued: 1 = handled (*inst set, 0 on failure). */
 int au_open(uint32_t comp, uint32_t *inst)
 {
-   AudioComponent c = off() ? NULL : comp_native(comp);
+   AudioComponent c = comp_native(comp);
    if (!c) { return 0; }
    AudioComponentInstance u = NULL;
    *inst = (AudioComponentInstanceNew(c, &u) == noErr && u) ? x64_objc_wrap((uint64_t)(uintptr_t)u) : 0;
@@ -96,7 +88,6 @@ int au_open(uint32_t comp, uint32_t *inst)
 /* CloseComponent on an AU instance: 1 = handled. */
 int au_close(uint32_t inst, uint32_t *result)
 {
-   if (off()) { return 0; }
    AudioUnit u = au_in(inst);
    if ((uintptr_t)u == inst) { return 0; }   /* not one of our wrapped handles */
    *result = (uint32_t)AudioComponentInstanceDispose(u);

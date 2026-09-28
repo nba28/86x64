@@ -147,10 +147,6 @@ namespace MachO {
                   if (slot != 0) { env.const_pin_slots.insert(slot); }
                }
                env.have_const_pins = true;
-               if (std::getenv("MACHO_BUILD_DEBUG")) {
-                  fprintf(stderr, "const-pin lift: %zu pinned constant slot(s) "
-                          "from __DATA,__86x64_cpin\n", env.const_pin_slots.size());
-               }
             }
          }
       }
@@ -193,26 +189,10 @@ namespace MachO {
           * blobs; it uses LC_DYLD_INFO bind/rebase, which is unaffected.
           * So stranded placeholders are non-fatal — warn and continue. Was:
           * threw std::logic_error, which blocked modify on iPhoto run23. */
-         static const bool verbose = std::getenv("MACHO_PARSE_VERBOSE") != nullptr;
-         if (verbose) {
-            for (const auto& p : env.placeholders) {
-               std::size_t vmaddr = p.first;
-               const char *where = "outside any segment";
-               for (const Segment<b> *seg : segments()) {
-                  if (vmaddr >= seg->segment_command.vmaddr &&
-                      vmaddr <  seg->segment_command.vmaddr + seg->segment_command.vmsize) {
-                     where = seg->segment_command.segname;
-                     break;
-                  }
-               }
-               fprintf(stderr, "stranded placeholder vmaddr=0x%zx (%s)\n", vmaddr, where);
-            }
-         }
          if (env.placeholders.size() > 0) {
             fprintf(stderr,
                     "warning: %zu stranded placeholder(s) at parse; "
-                    "originating Immediate values preserved verbatim "
-                    "(set MACHO_PARSE_VERBOSE=1 for per-placeholder addresses).\n",
+                    "originating Immediate values preserved verbatim.\n",
                     env.placeholders.size());
          }
          env.placeholders.clear();
@@ -392,14 +372,7 @@ namespace MachO {
       }
       
       /* build each command */
-      static const bool build_debug = std::getenv("MACHO_BUILD_DEBUG") != nullptr;
-      for (size_t i = 0; i < load_commands.size(); ++i) {
-         LoadCommand<b> *lc = load_commands[i];
-         if (build_debug) {
-            fprintf(stderr,
-                    "Build: lc[%zu] cmd=0x%x size=%u\n",
-                    i, (unsigned)lc->cmd(), (unsigned)lc->size());
-         }
+      for (LoadCommand<b> *lc : load_commands) {
          lc->Build(env);
       }
 
@@ -486,9 +459,6 @@ namespace MachO {
             if (r->blob != nullptr) { already_rebased.insert(r->blob); }
          }
 
-         const bool dbg = std::getenv("MACHO_BUILD_DEBUG") != nullptr;
-         std::size_t n = 0;
-
          auto& bindees = dyld->weak_bind->bindees;
          for (auto it = bindees.begin(); it != bindees.end(); ) {
             const SectionBlob<b> *slot = (*it)->blob;
@@ -514,18 +484,9 @@ namespace MachO {
                dyld->rebase->rebasees.push_back(r);
                already_rebased.insert(slot);
             }
-            if (dbg) {
-               fprintf(stderr, "resolve_self_weak_binds: %s -> local rebase\n",
-                       (*it)->sym.c_str());
-            }
             it = bindees.erase(it);
-            ++n;
          }
 
-         if (dbg) {
-            fprintf(stderr, "resolve_self_weak_binds: resolved %zu self weak "
-                    "bind(s) to local rebases\n", n);
-         }
       }
    }
 
@@ -539,9 +500,6 @@ namespace MachO {
 
          auto *dysymtab = this->template subcommand<Dysymtab>();
          if (dysymtab == nullptr) { return; }
-
-         const bool dbg = std::getenv("MACHO_BUILD_DEBUG") != nullptr;
-         std::size_t moved = 0;
 
          /* SAFETY NET. inject_xrel_section is idempotent: if this image ALREADY
           * carries a __86x64_xrel section (a re-Build of an already-translated
@@ -557,10 +515,6 @@ namespace MachO {
          if (const Segment<b> *data_seg = segment(SEG_DATA)) {
             for (const Section<b> *s : data_seg->sections) {
                if (s->name() == "__86x64_xrel") {
-                  if (dbg) {
-                     fprintf(stderr, "divert_narrow_const_binds_to_xrel: image "
-                             "already has __DATA,__86x64_xrel; skipping divert\n");
-                  }
                   return;
                }
             }
@@ -693,7 +647,6 @@ namespace MachO {
                   e.orig_vmaddr = slot->loc.vmaddr;   /* diagnostic */
                   dysymtab->xrel_entries.push_back(std::move(e));
                   it = bindees.erase(it);
-                  ++moved;
                } else {
                   ++it;
                }
@@ -704,10 +657,6 @@ namespace MachO {
          if (dyld->weak_bind != nullptr) { divert(dyld->weak_bind->bindees, true); }
          if (dyld->lazy_bind != nullptr) { divert(dyld->lazy_bind->bindees, false); }
 
-         if (dbg) {
-            fprintf(stderr, "divert_narrow_const_binds_to_xrel: moved %zu "
-                    "4-byte __const bind(s) to xrel_entries\n", moved);
-         }
       }
    }
 
@@ -739,9 +688,8 @@ namespace MachO {
          }
 
          auto *blob = XrelBlob<b>::Create();
-         std::size_t skipped = 0;
          for (const auto& e : dysymtab->xrel_entries) {
-            if (e.slot == nullptr) { ++skipped; continue; } /* slot didn't resolve */
+            if (e.slot == nullptr) { continue; } /* slot didn't resolve */
             typename XrelBlob<b>::Ent ent;
             ent.slot = e.slot;
             ent.addend = e.addend;
@@ -766,10 +714,6 @@ namespace MachO {
          insert_section_before_zerofill(data_seg, sect);
          invalidate_segments_cache();
 
-         if (std::getenv("MACHO_BUILD_DEBUG")) {
-            fprintf(stderr, "inject_xrel_section: %zu entries (%zu unresolved "
-                    "skipped) -> __DATA,__86x64_xrel\n", blob->ents.size(), skipped);
-         }
       }
    }
 
@@ -1029,14 +973,6 @@ namespace MachO {
             }
             i = rec_end;
          }
-         if (std::getenv("MACHO_BUILD_DEBUG")) {
-            fprintf(stderr, "collect_eh_lsda_pairs: %zu FDE LSDA pairs\n",
-                    eh_lsda_pairs.size());
-            for (const auto& pr : eh_lsda_pairs) {
-               fprintf(stderr, "  pc-begin(orig_func)=0x%zx lsda_off=0x%zx\n",
-                       pr.first, pr.second);
-            }
-         }
       }
    }
 
@@ -1084,10 +1020,6 @@ namespace MachO {
          blob->segment = data_seg;
          insert_section_before_zerofill(data_seg, sect);
          invalidate_segments_cache();
-         if (std::getenv("MACHO_BUILD_DEBUG")) {
-            fprintf(stderr, "inject_pcmap_section: %zu instructions -> "
-                    "__DATA,__86x64_pcmap\n", blob->ents.size());
-         }
       }
    }
 
@@ -1193,10 +1125,6 @@ namespace MachO {
          blob->segment = data_seg;
          insert_section_before_zerofill(data_seg, sect);
          invalidate_segments_cache();
-         if (std::getenv("MACHO_BUILD_DEBUG")) {
-            fprintf(stderr, "inject_abs32_section: %zu abs32 site(s) -> "
-                    "__DATA,__86x64_abs32\n", blob->ents.size());
-         }
       }
    }
 
@@ -1290,10 +1218,6 @@ namespace MachO {
          blob->segment = data_seg;
          insert_section_before_zerofill(data_seg, sect);
          invalidate_segments_cache();
-         if (std::getenv("MACHO_BUILD_DEBUG")) {
-            fprintf(stderr, "inject_cpin_section: %zu pinned constant slot(s) -> "
-                    "__DATA,__86x64_cpin\n", blob->ents.size());
-         }
       }
    }
 
@@ -1351,10 +1275,6 @@ namespace MachO {
          blob->segment = data_seg;
          insert_section_before_zerofill(data_seg, sect);
          invalidate_segments_cache();
-         if (std::getenv("MACHO_BUILD_DEBUG")) {
-            fprintf(stderr, "inject_ehlsda_section: %zu functions -> "
-                    "__DATA,__86x64_ehlsda\n", blob->ents.size());
-         }
       }
    }
 
@@ -1390,8 +1310,6 @@ namespace MachO {
          auto *symtab   = this->template subcommand<Symtab>();
          auto *dysymtab = this->template subcommand<Dysymtab>();
          if (symtab == nullptr || dysymtab == nullptr) { return; }
-
-         const bool dbg = std::getenv("MACHO_BUILD_DEBUG") != nullptr;
 
          /* (1) ordinal -> DylibCommand. dyld's two-level library ordinal counts
           * every dylib-loading command in load-command order, 1-based (matching
@@ -1446,8 +1364,6 @@ namespace MachO {
             return false;
          };
 
-         std::size_t n_bind = 0, n_lazy = 0, n_rebase = 0, n_export = 0, n_weak = 0;
-
          /* (3) Symbol-pointer sections (S_{NON_,}LAZY_SYMBOL_POINTERS): each slot
           * maps through the indirect symbol table to a symbol or a local/abs
           * sentinel. External undef -> BIND (eager: we route lazy imports
@@ -1479,7 +1395,7 @@ namespace MachO {
                       * only if it actually holds an internal pointer (skip
                       * null-valued slots). ABS = absolute (never slides). */
                      if ((isym & INDIRECT_SYMBOL_ABS) == 0 && sp_has_pointee(blob)) {
-                        add_rebase(blob); ++n_rebase;
+                        add_rebase(blob);
                      }
                      continue;
                   }
@@ -1516,7 +1432,6 @@ namespace MachO {
                      bind->bindees.push_back(
                         BindNode<b, false>::Create(BIND_TYPE_POINTER, 0, dylib, special,
                                                    nl->string->str, flags, blob));
-                     ++n_bind;
 
                      /* Weak-coalesced external (N_WEAK_REF): the C++ runtime
                       * weak externals — operator new/delete (__Znwm/__Znam/
@@ -1556,12 +1471,11 @@ namespace MachO {
                            BindNode<b, false>::Create(BIND_TYPE_POINTER, 0, nullptr,
                                                       /*dylib_special=*/0, nl->string->str,
                                                       /*flags=*/0, blob, /*weak=*/true));
-                        ++n_weak;
                      }
                   } else {
                      /* Defined symbol referenced by a non-lazy pointer = an
                       * internal sliding pointer. */
-                     add_rebase(blob); ++n_rebase;
+                     add_rebase(blob);
                   }
                }
             }
@@ -1586,7 +1500,7 @@ namespace MachO {
                for (SectionBlob<b> *blob : sect->content) {
                   auto *nlp = dynamic_cast<NonLazySymbolPointer<b> *>(blob);
                   if (nlp == nullptr || nlp->pointee == nullptr) { continue; }
-                  add_rebase(blob); ++n_rebase;
+                  add_rebase(blob);
                }
             }
          }
@@ -1602,11 +1516,6 @@ namespace MachO {
           * below — the synthesized rebase nodes were appended in-place to the
           * existing stream via the `rebase` alias). */
          if (rebase_only) {
-            if (dbg) {
-               fprintf(stderr,
-                       "synthesize_dyld_info: rebase_only merged %zu rebase into "
-                       "existing LC_DYLD_INFO\n", n_rebase);
-            }
             return;
          }
 
@@ -1621,7 +1530,6 @@ namespace MachO {
             }
             auto *node = RegularExportNode<b>::Create(eflags, nl->value);
             export_info->trie.insert(nl->string->str, node);
-            ++n_export;
          }
 
          auto *dyld = DyldInfo<b>::Create(rebase, bind, weak_bind, lazy_bind, export_info);
@@ -1632,11 +1540,6 @@ namespace MachO {
                               static_cast<LoadCommand<b> *>(symtab));
          load_commands.insert(pos, dyld);
 
-         if (dbg) {
-            fprintf(stderr,
-                    "synthesize_dyld_info: %zu bind, %zu weak, %zu lazy, %zu rebase, "
-                    "%zu export\n", n_bind, n_weak, n_lazy, n_rebase, n_export);
-         }
       }
    }
 
@@ -1646,21 +1549,10 @@ namespace MachO {
       img.at<mach_header_t<b>>(0) = header;
 
       /* emit load commands */
-      static const bool emit_debug = std::getenv("MACHO_EMIT_DEBUG") != nullptr;
       std::size_t offset = sizeof(header);
-      std::size_t i = 0;
       for (LoadCommand<b> *lc : load_commands) {
-         if (emit_debug) {
-            fprintf(stderr,
-                    "Archive::Emit lc[%zu] cmd=0x%x size=%u @ offset=0x%zx\n",
-                    i, (unsigned)lc->cmd(), (unsigned)lc->size(), offset);
-         }
          lc->Emit(img, offset);
          offset += lc->size();
-         ++i;
-      }
-      if (emit_debug) {
-         fprintf(stderr, "Archive::Emit completed all %zu LCs\n", load_commands.size());
       }
    }
 

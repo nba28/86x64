@@ -133,15 +133,7 @@ uint32_t shim_ZSt15set_new_handler(uint32_t *a) {
    return prev;                    /* contract: return the PREVIOUS handler */
 }
 
-/* Diagnostic hook (env ABICONV_CXX_ALLOC_DIAG): the i386 caller's return
- * address is the 4-byte slot just BELOW the arg block the MTSHIM handed us
- * (a[-1] = the i386 cdecl return addr pushed before the args). Printing it on a
- * pathological alloc names the Civ.dylib call site that requested the size, so a
- * huge size can be classified (genuine app request vs mis-marshalled count). */
-static const uint32_t *g_cxx_alloc_args;   /* set by shim_* before cxx_alloc */
-
-/* Safe 4-byte read of an i386 (low-4GB) address — the diag scans stack words
- * that may or may not be pointers; a fault here would eat the forensic dump. */
+/* Safe 4-byte read of an i386 (low-4GB) address that may not be mapped. */
 static int cxx_diag_read32(uint32_t addr, uint32_t *out) {
    vm_size_t n = 0;
    return addr >= 0x1000 &&
@@ -150,87 +142,7 @@ static int cxx_diag_read32(uint32_t addr, uint32_t *out) {
           n == 4;
 }
 
-/* Forensic capture at pathological-alloc time (env ABICONV_CXX_ALLOC_DIAG):
- * the abort ALWAYS fires with the garbage present, and the i386 caller's whole
- * frame chain is intact on the (low-4GB) stack — so dump it here instead of
- * chasing the Heisenbug with breakpoints (which perturb timing and hide it).
- *  - a[-1] = i386 return addr (the caller's call site);
- *  - a hex window of the i386 stack above the arg block (caller frame+locals);
- *  - any stack word that points at a BITMAPINFOHEADER (biSize==0x28) is
- *    dumped: for the Civ HBITMAP_Mac ctor that is the descriptor whose
- *    biWidth/biHeight fed the garbage size;
- *  - the saved-EBP chain (translated code keeps i386 frame linkage) names the
- *    game-code call chain that BUILT the descriptor.  Diagnostic only. */
-static void cxx_alloc_dump(const uint32_t *a, uint32_t size, const char *which) {
-   uint32_t ret = a ? a[-1] : 0;
-   fprintf(stderr, "[cxx-diag] %s(%u = %#x) BIG; i386 caller ret=%#x args@%p\n",
-           which, size, size, ret, (const void *)a);
-   if (!a) { fflush(stderr); return; }
-   uint32_t base = (uint32_t)(uintptr_t)a;
-   /* stack window: ret slot .. +0x140 above the args */
-   for (int off = -4; off < 0x140; off += 32) {
-      fprintf(stderr, "  stk %+05x:", off);
-      for (int k = 0; k < 8; k++) {
-         uint32_t v = 0;
-         if (cxx_diag_read32(base + (uint32_t)(off + 4*k), &v))
-            fprintf(stderr, " %08x", v);
-         else
-            fprintf(stderr, " ????????");
-      }
-      fprintf(stderr, "\n");
-   }
-   /* BITMAPINFO candidates referenced from the window */
-   for (int off = -4; off < 0x140; off += 4) {
-      uint32_t v = 0, h0 = 0;
-      if (!cxx_diag_read32(base + (uint32_t)off, &v)) continue;
-      if (!cxx_diag_read32(v, &h0) || h0 != 0x28) continue;
-      fprintf(stderr, "  BMI@stk%+05x -> %#x:", off, v);
-      for (int k = 0; k < 12; k++) {
-         uint32_t w = 0;
-         cxx_diag_read32(v + 4*(uint32_t)k, &w);
-         fprintf(stderr, " %08x", w);
-      }
-      fprintf(stderr, "\n");
-   }
-   /* frame walk: the Civ HBITMAP_Mac ctor frame is ebp = args+0x6c (4 saved
-    * regs + 0x5c locals in the current translation); from there follow the
-    * generic saved-ebp chain. Harmless garbage if the caller is a different
-    * fn — the reader cross-checks ret addrs against the disassembly. */
-   uint32_t ebp = base + 0x6c;
-   for (int i = 0; i < 8; i++) {
-      uint32_t saved = 0, r = 0;
-      if (!cxx_diag_read32(ebp, &saved) || !cxx_diag_read32(ebp + 4, &r)) break;
-      fprintf(stderr, "  frame[%d] ebp=%#x ret=%#x args:", i, ebp, r);
-      for (int k = 0; k < 8; k++) {
-         uint32_t w = 0;
-         cxx_diag_read32(ebp + 8 + 4*(uint32_t)k, &w);
-         fprintf(stderr, " %08x", w);
-      }
-      fprintf(stderr, "\n");
-      if (saved <= ebp || saved - ebp > 0x100000) break;
-      ebp = saved;
-   }
-   fflush(stderr);
-}
-
 static uint32_t cxx_alloc(uint32_t size, int may_abort, const char *which) {
-   if (size > 0x40000000u && getenv("ABICONV_CXX_ALLOC_DIAG"))
-      cxx_alloc_dump(g_cxx_alloc_args, size, which);
-   /* HYPOTHESIS EXPERIMENT (env ABICONV_CXX_ALLOC_MASK16, diagnostic only): the
-    * Civ texture-alloc garbage-size crash presents as low16 stable + high16
-    * random garbage (a u16 dimension mis-widened without zero-extension). Mask
-    * a pathological >1GB size to its low 16 bits to survive the abort and test
-    * whether the game then renders. If YES -> confirms the garbage-high-half
-    * root and the real fix is to zero-extend the descriptor field at its source.
-    * NOT a real fix (masks EVERY huge alloc; a genuine >64KB alloc would be
-    * wrongly truncated) — purely to validate the hypothesis end-to-end. */
-   if (size > 0x40000000u && getenv("ABICONV_CXX_ALLOC_MASK16")) {
-      uint32_t masked = size & 0xffff;
-      fprintf(stderr, "[cxx-mask] %s %#x -> low16 %#x (experiment)\n",
-              which, size, masked);
-      fflush(stderr);
-      size = masked ? masked : 1;
-   }
    void *p = malloc(size ? size : 1);     /* shim malloc -> low-4GB heap */
    if (!p && cxx_new_handler32) {
       /* libstdc++ contract: give the installed new-handler one chance to
@@ -252,8 +164,8 @@ static uint32_t cxx_alloc(uint32_t size, int may_abort, const char *which) {
    return (uint32_t)(uintptr_t)p;
 }
 
-uint32_t shim_Znwm(uint32_t *a)  { g_cxx_alloc_args = a; return cxx_alloc(a[0], 1, "operator new"); }
-uint32_t shim_Znam(uint32_t *a)  { g_cxx_alloc_args = a; return cxx_alloc(a[0], 1, "operator new[]"); }
+uint32_t shim_Znwm(uint32_t *a)  { return cxx_alloc(a[0], 1, "operator new"); }
+uint32_t shim_Znam(uint32_t *a)  { return cxx_alloc(a[0], 1, "operator new[]"); }
 uint32_t shim_Znwm_nothrow(uint32_t *a) { return cxx_alloc(a[0], 0, "new(nothrow)"); }
 uint32_t shim_Znam_nothrow(uint32_t *a) { return cxx_alloc(a[0], 0, "new[](nothrow)"); }
 

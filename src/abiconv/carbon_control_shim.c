@@ -38,20 +38,12 @@
 extern uint64_t x64_objc_unwrap(uint32_t h);
 extern uint32_t x64_objc_wrap(uint64_t real);
 
-// Opt-in diagnostic (ABICONV_CTRL_TRACE): the settings-window port/IP edit fields
-// are self-drawn HIViews serviced only when the ControlRef the app passes to
-// SetControlData/GetControlData resolves (via UNWRAP -> sd_find) to a registered
-// field. If a freshly-translated app delivers a different ControlRef arena handle
-// than GetControlByID returned, the self-drawn gate misses, the value goes to
-// storage-less native, and the field renders EMPTY. This trace prints the raw i386
-// handle, the unwrapped 64-bit pointer, and whether it matched a self-drawn field,
-// so the empty-port regression can be pinned on-target in one run (does NOT change
-// behavior). eventNotHandledErr-style tags are printed as FourCC where sensible.
-static int ctrl_trace(void) {
-	static int t = -1;
-	if (t < 0) t = getenv("ABICONV_CTRL_TRACE") != NULL;
-	return t;
-}
+// The settings-window port/IP edit fields are self-drawn HIViews serviced only
+// when the ControlRef the app passes to SetControlData/GetControlData resolves
+// (via UNWRAP -> sd_find) to a registered field. If a freshly-translated app
+// delivers a different ControlRef arena handle than GetControlByID returned, the
+// self-drawn gate misses, the value goes to storage-less native, and the field
+// renders EMPTY.
 
 // self-drawn Control Manager registry (carbon_nib_shim.c): service edit-text /
 // popup value + text + enable requests before falling through to native.
@@ -205,21 +197,6 @@ uint32_t shim_SetControlData(uint32_t *a) {
     uint32_t size = a[3];
     void *data = (void *)(uintptr_t)a[4];
     int is_ours = sd_ctrl_get_text(c, NULL, 0) >= 0;
-    if (ctrl_trace()) {
-        uint32_t h = (data && ctrl_tag_is_objptr(tag)) ? *(uint32_t *)data : 0;
-        // Also echo the raw 'text' bytes the app is pushing (the port default
-        // "2302"/"2303"): on-target this shows whether the value reaches the field
-        // (ours=1) and what it is, vs falling through to native (ours=0 -> empty).
-        char txt[24] = "";
-        if (tag == 'text' && data) {
-            uint32_t n = size < sizeof txt - 1 ? size : sizeof txt - 1;
-            memcpy(txt, data, n); txt[n] = 0;
-        }
-        fprintf(stderr, "[ctrl] SetControlData ctrl_h=0x%08x -> ptr=%p ours=%d "
-                        "tag=%c%c%c%c size=%u cfstr_h=0x%08x text='%s'\n",
-                a[0], c, is_ours,
-                (char)(tag>>24),(char)(tag>>16),(char)(tag>>8),(char)tag, size, h, txt);
-    }
     if (is_ours) {   // c is one of our edit fields
         if (ctrl_tag_is_cfstring(tag) && data) {
             // the buffer holds an i386 CFStringRef (arena handle) -> unwrap to real
@@ -254,10 +231,6 @@ uint32_t shim_GetControlData(uint32_t *a) {
     void *data = (void *)(uintptr_t)a[4];
     uint32_t *actual = (uint32_t *)(uintptr_t)a[5];
     int is_ours = sd_ctrl_get_text(c, NULL, 0) >= 0;
-    if (ctrl_trace())
-        fprintf(stderr, "[ctrl] GetControlData ctrl_h=0x%08x -> ptr=%p ours=%d "
-                        "tag=%c%c%c%c\n", a[0], c, is_ours,
-                (char)(tag>>24),(char)(tag>>16),(char)(tag>>8),(char)tag);
     if (is_ours) {   // our edit field
         if (ctrl_tag_is_cfstring(tag) && data) {
             const void *cf = NULL;

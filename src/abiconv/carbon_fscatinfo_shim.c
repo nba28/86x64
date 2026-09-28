@@ -77,7 +77,6 @@
  *                 `*actualObjects` = 0, `paramErr` returned. NOT "call through",
  *                 because calling through is the smashing path this exists to
  *                 remove.
- *   trace       : ABICONV_FSCATINFO_TRACE=1
  *
  * Wired through carbon_fscatinfo_tramp.asm (MTSHIM): rdi -> &i386 args[0],
  * return in eax. i386 arg slots are 4 bytes; a translated pointer is a 32-bit
@@ -125,18 +124,12 @@ _Static_assert(FSCI_SZ64 == FSCI_SZ32 + 4, "FSCatalogInfo delta must be exactly 
 _Static_assert(sizeof(FSRef) == 80 && sizeof(HFSUniStr255) == 512,
                "FSRef/HFSUniStr255 must be layout-identical (no conversion emitted for them)");
 
-/* ── kill switch / trace ──────────────────────────────────────────────────── */
+/* ── kill switch ─────────────────────────────────────────────────────────── */
 
 static int fscatinfo_enabled(void)
 {
    static int c = -1;
    if (c < 0) { const char *e = getenv("M64_NO_FSCATINFO"); c = !(e && *e && *e != '0'); }
-   return c;
-}
-static int fscatinfo_trace(void)
-{
-   static int c = -1;
-   if (c < 0) { const char *e = getenv("ABICONV_FSCATINFO_TRACE"); c = (e && *e && *e != '0'); }
    return c;
 }
 
@@ -246,11 +239,6 @@ static int32_t bulk_run(const struct bulk_args *b,
    if (b->actual32)  *(uint32_t *)i386_ptr(b->actual32) = (uint32_t)actual;
    if (b->changed32) *(uint8_t *)i386_ptr(b->changed32) = changed;
 
-   if (fscatinfo_trace())
-      fprintf(stderr, "[fscatinfo] %s max=%u actual=%llu err=%d ci=%s\n",
-              what, b->max, (unsigned long long)actual, (int)err,
-              b->ci32 ? "yes" : "no");
-
    free(ci64);
    return (int32_t)err;
 }
@@ -346,8 +334,6 @@ uint32_t shim_FSGetCatalogInfo(uint32_t *a)
                                 a[4] ? (FSSpec *)i386_ptr(a[4]) : NULL,
                                 a[5] ? (FSRef *)i386_ptr(a[5]) : NULL);
    if (ci32) fsci_out(i386_ptr(ci32), &ci);
-   if (fscatinfo_trace())
-      fprintf(stderr, "[fscatinfo] FSGetCatalogInfo which=0x%x err=%d\n", a[1], (int)err);
    return (uint32_t)(int32_t)err;
 }
 
@@ -359,8 +345,6 @@ uint32_t shim_FSSetCatalogInfo(uint32_t *a)
    fsci_in(&ci, i386_ptr(a[2]));
    OSErr err = FSSetCatalogInfo((const FSRef *)i386_ptr(a[0]),
                                 (FSCatalogInfoBitmap)a[1], &ci);
-   if (fscatinfo_trace())
-      fprintf(stderr, "[fscatinfo] FSSetCatalogInfo which=0x%x err=%d\n", a[1], (int)err);
    return (uint32_t)(int32_t)err;
 }
 
@@ -381,8 +365,6 @@ uint32_t shim_FSCreateFileUnicode(uint32_t *a)
                                    a[4] ? &ci : NULL,
                                    a[5] ? (FSRef *)i386_ptr(a[5]) : NULL,
                                    a[6] ? (FSSpec *)i386_ptr(a[6]) : NULL);
-   if (fscatinfo_trace())
-      fprintf(stderr, "[fscatinfo] FSCreateFileUnicode err=%d\n", (int)err);
    return (uint32_t)(int32_t)err;
 }
 
@@ -407,9 +389,6 @@ uint32_t shim_FSCreateDirectoryUnicode(uint32_t *a)
                                         a[6] ? (FSSpec *)i386_ptr(a[6]) : NULL,
                                         a[7] ? &newDirID : NULL);
    if (a[7]) *(uint32_t *)i386_ptr(a[7]) = (uint32_t)newDirID;
-   if (fscatinfo_trace())
-      fprintf(stderr, "[fscatinfo] FSCreateDirectoryUnicode err=%d dirID=%u\n",
-              (int)err, (unsigned)newDirID);
    return (uint32_t)(int32_t)err;
 }
 
@@ -433,7 +412,5 @@ uint32_t shim_FSCreateFileAndOpenForkUnicode(uint32_t *a)
                        (SInt8)a[7], a[8] ? &fork : NULL,
                        a[9] ? (FSRef *)i386_ptr(a[9]) : NULL);
    if (a[8]) *(int16_t *)i386_ptr(a[8]) = (int16_t)fork;
-   if (fscatinfo_trace())
-      fprintf(stderr, "[fscatinfo] FSCreateFileAndOpenForkUnicode err=%d\n", (int)err);
    return (uint32_t)(int32_t)err;
 }

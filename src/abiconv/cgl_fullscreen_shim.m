@@ -33,7 +33,7 @@
  * the app's window is not what a fullscreen game expects to be in.
  *
  * KILL SWITCH: M64_NO_CGL_FULLSCREEN_BRIDGE=1 forwards to native CGL (the
- * pre-fix 10012). ABICONV_CGLFS_TRACE=1 logs placement and mapping.
+ * pre-fix 10012).
  * ABI: MTSHIM (rdi -> &i386 args[0]); symbols in custom.syms.
  */
 #import <AppKit/AppKit.h>
@@ -64,13 +64,6 @@ static int bridge_off(void)
    return v;
 }
 
-static int trace(void)   /* 1: placement + forwarded events, 2: + every mapping */
-{
-   static int v = -1;
-   if (v < 0) { const char *e = getenv("ABICONV_CGLFS_TRACE"); v = e ? atoi(e) ? atoi(e) : 1 : 0; }
-   return v;
-}
-
 /* A captured display took the keyboard: the surface window takes key/main
  * status and hands input to the app as Carbon events. */
 @interface CGLFSWindow : NSWindow
@@ -97,12 +90,7 @@ static void forward_to_app(NSEvent *ev)
          SetEventParameter(ce, kEventParamMouseLocation, typeHIPoint, sizeof p, &p);
       }
    }
-   const OSStatus st = SendEventToEventTarget(ce, GetApplicationEventTarget());
-   if (trace()) {
-      fprintf(stderr, "[cglfs] forward NSEvent type %ld -> carbon %.4s/%u -> %d\n",
-              (long)ev.type, (const char *)&(UInt32){ CFSwapInt32HostToBig(GetEventClass(ce)) },
-              (unsigned)GetEventKind(ce), (int)st);
-   }
+   (void)SendEventToEventTarget(ce, GetApplicationEventTarget());
    ReleaseEvent(ce);
 }
 
@@ -162,9 +150,6 @@ static void relayout(void)
    g_gy = top - NSMaxY(sr);
    g_scale = k;
    [g_ns update];
-   if (trace()) {
-      fprintf(stderr, "[cglfs] layout scale %.3f view@%.0f,%.0f\n", k, g_gx, g_gy);
-   }
 }
 
 /* THE CAPTURE SHIELD. A captured display covered every other window, so a
@@ -190,7 +175,6 @@ static void shield_others(void)
       const int wid = (int)HIWindowGetCGWindowID(w);
       if (!wid || wid == (int)g_win.windowNumber || !IsWindowVisible(w)) { continue; }
       CGSOrderWindow(CGSMainConnectionID(), wid, 0 /* out */, 0);
-      if (trace() > 1) { fprintf(stderr, "[cglfs] shield: ordered out window %d\n", wid); }
    }
 }
 
@@ -267,10 +251,6 @@ int cglfs_map_global(double *x, double *y)
     * so GlobalToLocal(mapped) is the virtual point whatever window that is. */
    int16_t ox = 0, oy = 0;
    ci_content_origin(&ox, &oy);
-   if (trace() > 1) {
-      fprintf(stderr, "[cglfs] map %.0f,%.0f -> virtual %.0f,%.0f + origin %d,%d\n",
-              *x, *y, vx, vy, ox, oy);
-   }
    *x = ox + vx; *y = oy + vy;
    return 1;
 }

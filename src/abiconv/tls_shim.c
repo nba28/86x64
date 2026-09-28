@@ -42,20 +42,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 
-static int tls_trace(void) {
-   static int v = -1;
-   if (v < 0) { v = getenv("ABICONV_TLS_TRACE") ? 1 : 0; }
-   return v;
-}
-
 /* void *pthread_getspecific(pthread_key_t key):  a[0] = key. */
 int32_t shim_pthread_getspecific(uint32_t *a) {
    uint32_t key = a[0];
    if (key == 0) {                       /* unconstructed thread-local */
-      if (tls_trace()) {
-         fprintf(stderr, "[tls] getspecific(key=0) -> NULL (uninitialized)\n");
-         fflush(stderr);
-      }
       return 0;
    }
    void *v = pthread_getspecific((pthread_key_t)key);
@@ -69,10 +59,6 @@ int32_t shim_pthread_getspecific(uint32_t *a) {
 int32_t shim_pthread_setspecific(uint32_t *a) {
    uint32_t key = a[0];
    if (key == 0) {                       /* never clobber reserved TSD slot 0 */
-      if (tls_trace()) {
-         fprintf(stderr, "[tls] setspecific(key=0) -> no-op\n");
-         fflush(stderr);
-      }
       return 0;                          /* report success */
    }
    int r = pthread_setspecific((pthread_key_t)key, (void *)(uintptr_t)a[1]);

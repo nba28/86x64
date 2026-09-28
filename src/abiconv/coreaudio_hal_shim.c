@@ -12,7 +12,7 @@
  * Structural rule: a 4-byte request refused with '!siz' is retried with 8
  * bytes; if the value really is 8 bytes it is a pointer, handed back as a
  * 32-bit handle (x64_objc_wrap, which passes a low pointer through). Every
- * other request is forwarded untouched. Kill switch M64_NO_HAL_PTR_PROPS=1.
+ * other request is forwarded untouched.
  *
  * Same job, one value type: 'slay' (kAudioDevicePropertyStreamConfiguration)
  * is an AudioBufferList, whose AudioBuffer is 12 bytes on i386 and 16 natively
@@ -31,19 +31,12 @@ extern uint32_t x64_objc_wrap(uint64_t real);   /* objc_shim.c */
 
 #define P(x) ((void *)(uintptr_t)(x))
 
-static int off(void)
-{
-   static int v = -1;
-   if (v < 0) { v = getenv("M64_NO_HAL_PTR_PROPS") != NULL; }
-   return v;
-}
-
 /* A refused 4-byte request that the native side holds as 8 bytes: wrap it. */
 /* `asked` is the caller's size BEFORE the call: CoreAudio zeroes *sz on failure. */
 static OSStatus widen(OSStatus r, UInt32 asked, UInt32 *sz, void *data,
                       OSStatus (^get8)(UInt32 *sz8, uint64_t *v))
 {
-   if (r != kAudioHardwareBadPropertySizeError || off() || !sz || asked != 4 || !data) { return r; }
+   if (r != kAudioHardwareBadPropertySizeError || !sz || asked != 4 || !data) { return r; }
    UInt32 sz8 = 8;
    uint64_t v = 0;
    const OSStatus r8 = get8(&sz8, &v);
@@ -97,7 +90,7 @@ static OSStatus get_stream_config(uint32_t dev, uint32_t ch, Boolean in, UInt32 
 uint32_t shim_AudioDeviceGetPropertyInfo(uint32_t *a)
 {
    UInt32 *sz = P(a[4]);
-   if (!off() && a[3] == kAudioDevicePropertyStreamConfiguration && sz) {
+   if (a[3] == kAudioDevicePropertyStreamConfiguration && sz) {
       if (a[5]) { *(Boolean *)P(a[5]) = false; }
       return (uint32_t)get_stream_config(a[0], a[1], (Boolean)a[2], sz, NULL);
    }
@@ -111,7 +104,7 @@ uint32_t shim_AudioDeviceGetProperty(uint32_t *a)
    UInt32 *sz = P(a[4]);
    const UInt32 asked = sz ? *sz : 0;
    const Boolean in = (Boolean)a[2];
-   if (!off() && a[3] == kAudioDevicePropertyStreamConfiguration && sz) {
+   if (a[3] == kAudioDevicePropertyStreamConfiguration && sz) {
       return (uint32_t)get_stream_config(a[0], a[1], in, sz, P(a[5]));
    }
    const OSStatus r = AudioDeviceGetProperty(a[0], a[1], in, a[3], sz, P(a[5]));

@@ -54,7 +54,6 @@
  * KILL SWITCH: M64_NO_AGL_WINDOWREF=1 disarms the whole substrate — GetWindowPort
  * returns NULL again and every call here forwards raw to native AGL, i.e. the
  * exact pre-fix behaviour.  Used by the A/B guard (tests-i386, agl-drawable).
- * ABICONV_AGL_TRACE=1 logs the routing decisions.
  */
 
 #include <stdint.h>
@@ -90,14 +89,6 @@ extern int   qd_agl_windowref_enabled(void);
 
 typedef unsigned char GLboolean;
 
-static int agl_trace(void)
-{
-   static int t = -1;
-   if (t < 0) t = getenv("ABICONV_AGL_TRACE") ? 1 : 0;
-   return t;
-}
-#define AGLLOG(...) do { if (agl_trace()) fprintf(stderr, "[agl] " __VA_ARGS__); } while (0)
-
 /* ---- make libabiconv's AGL bridges self-sufficient ------------------------
  * libabiconv exports ~52 ___agl* ABI bridges whose bodies do a flat-namespace
  * `call _aglXxx`, and this file dlsym's aglSetWindowRef.  Both need AGL to be
@@ -113,8 +104,7 @@ static int agl_trace(void)
 __attribute__((constructor))
 static void agl_load_framework(void)
 {
-   if (!dlopen("/System/Library/Frameworks/AGL.framework/AGL", RTLD_LAZY | RTLD_GLOBAL))
-      AGLLOG("AGL.framework dlopen failed: %s\n", dlerror());
+   (void)dlopen("/System/Library/Frameworks/AGL.framework/AGL", RTLD_LAZY | RTLD_GLOBAL);
 }
 
 #define AGL_NATIVE(var, ty, name) \
@@ -229,14 +219,10 @@ uint32_t shim_aglSetDrawable(uint32_t *a)
       AGL_NATIVE(setwin, agl_set_win, "aglSetWindowRef");
       if (setwin) {
          GLboolean ok = setwin(ctx, win);
-         AGLLOG("SetDrawable ctx=%p port=%08x -> aglSetWindowRef(win=%p) = %d\n",
-                ctx, draw_h, win, (int)ok);
          if (ok) { bind_set(ctx, draw_h); return 1; }
          bind_set(ctx, 0);
          return 0;
       }
-      AGLLOG("SetDrawable ctx=%p port=%08x: aglSetWindowRef MISSING, falling back\n",
-             ctx, draw_h);
    }
 
    if (!draw_h && was_ours) {
@@ -244,7 +230,6 @@ uint32_t shim_aglSetDrawable(uint32_t *a)
       AGL_NATIVE(setwin, agl_set_win, "aglSetWindowRef");
       if (setwin) {
          GLboolean ok = setwin(ctx, NULL);
-         AGLLOG("SetDrawable ctx=%p detach -> aglSetWindowRef(NULL) = %d\n", ctx, (int)ok);
          bind_set(ctx, 0);
          return ok ? 1 : 0;
       }
@@ -256,8 +241,6 @@ uint32_t shim_aglSetDrawable(uint32_t *a)
     * rule as the PAGEZERO C-string gate: never hand a framework a pointer that
     * is structurally incapable of being what it expects. */
    if (qd_is_port(draw_h)) {
-      AGLLOG("SetDrawable ctx=%p port=%08x is an offscreen GWorld, not a window"
-             " -> refusing (a qd_port is not a GrafPort)\n", ctx, draw_h);
       bind_set(ctx, 0);
       return 0;
    }
@@ -269,8 +252,6 @@ uint32_t shim_aglSetDrawable(uint32_t *a)
    if (!setdraw) return 0;
    void *raw = (void *)(uintptr_t)x64_objc_unwrap(draw_h);
    GLboolean ok = setdraw(ctx, raw);
-   AGLLOG("SetDrawable ctx=%p raw=%p (not a window port) -> native = %d\n",
-          ctx, raw, (int)ok);
    return ok ? 1 : 0;
 }
 
@@ -282,7 +263,6 @@ uint32_t shim_aglGetDrawable(uint32_t *a)
 
    uint32_t ours = bind_get(ctx);
    if (ours) {
-      AGLLOG("GetDrawable ctx=%p -> %08x (window port)\n", ctx, ours);
       return ours;                       /* already an i386 port pointer */
    }
 

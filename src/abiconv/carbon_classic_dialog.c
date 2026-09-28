@@ -130,7 +130,6 @@ static CCWStatus body_draw(void *call, CCWEventRef ev, void *ud) {
     CGContextRef cg = ccw_draw_cg(ev);
     double W = 0, H = 0;
     if (!d || !cg || !ccw_view_size(d->body, &W, &H)) return ccwEventNotHandled;
-    if (!d->drew) CCW_LOG("dialog: body FIRST DRAW %.0fx%.0f\n", W, H);
     d->drew = 1;
     CGContextSaveGState(cg);
     CGContextSetRGBFillColor(cg, CCD_BG, CCD_BG, CCD_BG, 1.0);
@@ -166,8 +165,6 @@ static struct ccd_item_live *item_at(ccd_dialog *d, int item) {
 
 static void fire_item(ccd_dialog *d, int item) {
     struct ccd_item_live *it = item_at(d, item);
-    CCW_LOG("dialog: fire_item(%d) it=%p disabled=%d btn=%p\n", item, (void *)it,
-            it ? it->disabled : -1, it ? (void *)it->btn : NULL);
     if (!it || it->disabled) return;
     if (it->btn) { ccw_button_fire(it->btn); return; }
     d->result = item;
@@ -190,7 +187,6 @@ static CCWStatus key_handler(void *call, CCWEventRef ev, void *ud) {
     ccw_GetEventParameter(ev, 'kmod' /*kEventParamKeyModifiers*/, 'magn',
                           NULL, sizeof mods, NULL, &mods);
     const uint32_t cmdKeyMask = 0x0100, shiftKeyMask = 0x0200;
-    CCW_LOG("dialog: key %u mods 0x%x\n", (unsigned)ch, mods);
 
     if (ch == 13 || ch == 3) {                      /* Return / Enter */
         if (d->defaultItem) { fire_item(d, d->defaultItem); return 0; }
@@ -234,7 +230,6 @@ static CCWStatus close_handler(void *call, CCWEventRef ev, void *ud) {
     (void)call; (void)ev;
     ccd_dialog *d = (ccd_dialog *)ud;
     if (!d) return ccwEventNotHandled;
-    CCW_LOG("dialog: window-close event (cancel item %d)\n", d->cancelItem);
     if (!d->cancelItem) return 0;      /* never report OK for a close gesture */
     fire_item(d, d->cancelItem);
     if (!d->done) { d->result = d->cancelItem; d->done = 1; }
@@ -244,7 +239,7 @@ static CCWStatus close_handler(void *call, CCWEventRef ev, void *ud) {
 /* ------------------------------ construction ----------------------------- */
 ccd_dialog *ccd_create(const char *utf8Title, int contentW, int contentH,
                        const ccd_item *items, int nitems) {
-    if (!ccw_available()) { CCW_LOG("dialog: classic substrate unavailable\n"); return NULL; }
+    if (!ccw_available()) { return NULL; }
     if (getenv("M64_NO_CLASSIC_DIALOG")) return NULL;   /* A/B kill switch */
     if (contentW < 80)  contentW = 360;
     if (contentH < 40)  contentH = 160;
@@ -261,7 +256,7 @@ ccd_dialog *ccd_create(const char *utf8Title, int contentW, int contentH,
      * modal dBoxProc.  Both must be compositing on 64-bit. */
     uint32_t cls = (utf8Title && utf8Title[0]) ? kCCWMovableModalWindow : kCCWModalWindow;
     d->win = ccw_create_window(cls, 0, contentW, contentH, utf8Title);
-    if (!d->win) { CCW_LOG("dialog: CreateNewWindow failed\n"); free(d); return NULL; }
+    if (!d->win) { free(d); return NULL; }
 
     CCWViewRef root = ccw_HIViewGetRoot ? ccw_HIViewGetRoot(d->win) : NULL;
     CCWViewRef parent = ccw_content_view_of(d->win, root);
@@ -311,9 +306,6 @@ ccd_dialog *ccd_create(const char *utf8Title, int contentW, int contentH,
             ccw_edit_install(e, parent);
         }
         /* statText / icon / picture / userItem are painted by body_draw */
-        CCW_LOG("dialog:  item %d type=%d dis=%d rect=%.0f,%.0f,%.0fx%.0f '%s'\n",
-                i + 1, it->type, it->disabled, it->frame.origin.x, it->frame.origin.y,
-                it->frame.size.width, it->frame.size.height, it->text);
     }
 
     /* classic default: the FIRST push button is the default item until the app
@@ -353,8 +345,6 @@ ccd_dialog *ccd_create(const char *utf8Title, int contentW, int contentH,
                            ccw_edit_select_all(d->it[i].ed);
                            d->focus = d->it[i].ed; break; }
 
-    CCW_LOG("dialog: classic window %.0fx%.0f, %d items (%d controls, %d fields)\n",
-            d->contentW, d->contentH, d->nitems, d->nbtn, d->ned);
     return d;
 }
 
@@ -367,8 +357,6 @@ int ccd_run_modal(ccd_dialog *d) {
     if (ccw_SelectWindow) ccw_SelectWindow(d->win);
     carbon_ensure_foreground();
     if (ccw_BeginAppModalStateForWindow) ccw_BeginAppModalStateForWindow(d->win);
-    CCW_LOG("dialog: modal enter (default=%d cancel=%d ranOnce=%d)\n",
-            d->defaultItem, d->cancelItem, d->ranOnce);
     /* Only the FIRST round gets the liveness proof: once a round has completed
      * we know the pump works, and a later round legitimately sits idle for as
      * long as the user takes to type. */
@@ -376,10 +364,9 @@ int ccd_run_modal(ccd_dialog *d) {
                                   (ccw_edit *const *)&d->focus,
                                   d->ranOnce ? 0.0 : CCD_PROOF_SECS);
     if (ccw_EndAppModalStateForWindow) ccw_EndAppModalStateForWindow(d->win);
-    if (!live) { CCW_LOG("dialog: pump proved dead -> caller falls back\n"); return 0; }
+    if (!live) { return 0; }   /* pump proved dead -> caller falls back */
     d->ranOnce = 1;
     int item = d->result ? d->result : (d->defaultItem ? d->defaultItem : 1);
-    CCW_LOG("dialog: modal -> item %d\n", item);
     return item;
 }
 

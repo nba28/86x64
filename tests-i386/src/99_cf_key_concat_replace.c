@@ -3,7 +3,7 @@
  * chain (the "blank alert" root-cause probe).
  *
  * The blank CreateStandardAlert (icon + OK button, NO title/message text) traces
- * to Civ's localizer at translated 0x1000d1ac. ABICONV_ARGSTR_TRACE on the
+ * to Civ's localizer at translated 0x1000d1ac. An arg-string trace on the
  * deployed Civ showed it looking up the alert key "kErrInsufficientSystemVersion"
  * plus the suffixes "_err"/"_explain", and getting EMPTY CFStrings back — while a
  * native CFBundleCopyLocalizedString on Civ's own bundle returns the real text.

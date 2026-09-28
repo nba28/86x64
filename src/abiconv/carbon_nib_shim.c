@@ -92,14 +92,6 @@ static int g_sd_n;
 static void sd_register(void *ctrl, int kind, void *rec) {
     if (!ctrl || g_sd_n >= SD_MAX) return;
     g_sd[g_sd_n].ctrl = ctrl; g_sd[g_sd_n].kind = kind; g_sd[g_sd_n].rec = rec; g_sd_n++;
-    // Opt-in (ABICONV_CTRL_TRACE): log the real HIView pointer registered as a
-    // self-drawn control, so the settings-window empty-port regression can be
-    // cross-checked against the ControlRef pointer SetControlData resolves to
-    // (carbon_control_shim.c). If those pointers never coincide, the app's
-    // ControlRef arena-handle round-trip is broken (a core/retranslate concern),
-    // not the self-drawn control code.
-    if (getenv("ABICONV_CTRL_TRACE"))
-        fprintf(stderr, "[ctrl] sd_register #%d ptr=%p kind=%d\n", g_sd_n - 1, ctrl, kind);
 }
 static struct sd_entry *sd_find(void *ctrl) {
     for (int i = 0; i < g_sd_n; i++) if (g_sd[i].ctrl == ctrl) return &g_sd[i];
@@ -828,17 +820,6 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
             // resolves the field for the app's runtime value set.
             ControlRef ec = make_edit_field(x, il, ih, &r, parent, win);
             if (ec) wire_ids(x, il, ih, ec);
-            if (ec && getenv("ABICONV_CTRL_TRACE")) {
-                // Log the created field's ControlID signature so an on-target run can
-                // confirm the port fields ('Sprt'/'Cprt') were built + registered, and
-                // cross-check the ptr against the one SetControlData later resolves.
-                uint32_t sig = 0; int cid = 0;
-                int hs = nibx_ostype(x, il, ih, "controlSignature", &sig);
-                nibx_int(x, il, ih, "controlID", &cid);
-                fprintf(stderr, "[ctrl] make_edit_field ec=%p sig=%c%c%c%c id=%d\n", ec,
-                        hs ? (char)(sig>>24) : '?', hs ? (char)(sig>>16) : '?',
-                        hs ? (char)(sig>>8)  : '?', hs ? (char)sig : '?', cid);
-            }
             p = oe; continue;
         } else if (!strcmp(cls, "IBCarbonSeparator") ||
                    !strcmp(cls, "IBCarbonRelevanceBar") || !strcmp(cls, "IBCarbonLittleArrows")) {
@@ -1116,18 +1097,12 @@ uint32_t shim_CreateWindowFromNib(uint32_t *a) {
 
     WindowRef w = NULL;
     OSStatus st = n_CreateWindowFromNib ? n_CreateWindowFromNib(ref, wn, &w) : (OSStatus)-108;
-    int trace = getenv("ABICONV_NIB_TRACE") != NULL;
-    char wname[128] = "?";
-    if (trace && wn) CFStringGetCString(wn, wname, sizeof wname, kCFStringEncodingUTF8);
-    if (trace) fprintf(stderr, "[nib] CreateWindowFromNib('%s') native st=%d w=%p\n", wname, (int)st, w);
 
     if ((st != 0 || !w)) {                       // native gutted path failed (e.g. -5601)
         const char *xib = nib_lookup(ref);
-        if (trace) fprintf(stderr, "[nib]   -> falling back to build_window (xib=%s)\n", xib ? xib : "(none)");
         if (xib && wn) {
             WindowRef bw = build_window(xib, wn);
             if (bw) { w = bw; st = 0; }
-            if (trace) fprintf(stderr, "[nib]   -> build_window returned %p\n", (void *)bw);
         }
     }
     if (out) *out = w ? x64_objc_wrap((uint64_t)(uintptr_t)w) : 0;

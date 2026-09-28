@@ -53,12 +53,6 @@ static cb_binding     g_bind[8192];    /* MUST match cb_tramp.asm CB_SLOTS */
 static uint32_t       g_nbind;
 static os_unfair_lock g_bind_lock = OS_UNFAIR_LOCK_INIT;
 
-static int cb_trace(void) {
-   static int t = -1;
-   if (t < 0) { t = getenv("CB_BRIDGE_TRACE") != NULL; }
-   return t;
-}
-
 /* Bytes actually readable at `p`, capped at `want`: the header-derived pointee
  * size is NOT trustworthy against the runtime, so the bounce must never read
  * past the record's own VM region.
@@ -204,10 +198,6 @@ uint64_t x64_cb_wrap(uint32_t fn32, const x64_cb_sig *sig) {
    ++g_nbind;
    os_unfair_lock_unlock(&g_bind_lock);
 
-   if (cb_trace()) {
-      fprintf(stderr, "[cb] wrap fn=0x%x sig=%p nargs=%u ret=%u -> slot %u\n",
-              fn32, (const void *)sig, sig->nargs, sig->ret_kind, slot);
-   }
    return x64_cb_tramp_table[slot];
 }
 
@@ -291,24 +281,6 @@ uint64_t x64_cb_dispatch(uint64_t slot, const uint64_t *gp, const uint64_t *fp,
       }
    }
 
-   if (cb_trace()) {
-      fprintf(stderr, "[cb] t=%x slot %llu -> fn 0x%x (%u words)\n",
-              pthread_mach_thread_np(pthread_self()),
-              (unsigned long long)slot, b.fn32, w);
-      /* dump raw native args (gp/fp) + marshalled i386 words so a hang/crash in
-       * the translated callback can be traced to a mis-marshalled (e.g. >4GB ptr
-       * truncated) argument. */
-      fprintf(stderr, "[cb]   gp=%llx,%llx,%llx,%llx,%llx,%llx fp=%llx,%llx\n",
-              (unsigned long long)gp[0], (unsigned long long)gp[1],
-              (unsigned long long)gp[2], (unsigned long long)gp[3],
-              (unsigned long long)gp[4], (unsigned long long)gp[5],
-              (unsigned long long)fp[0], (unsigned long long)fp[1]);
-      fprintf(stderr, "[cb]   words=");
-      for (uint32_t k = 0; k < w; ++k) { fprintf(stderr, "%x ", words[k]); }
-      fprintf(stderr, "\n");
-      fflush(stderr);
-   }
-
    void *stkbuf = x64_lowstack_get(CB_LOWSTACK_SZ);   /* per-thread cached, low-4GB */
    if (!stkbuf) { return 0; }
    const uint64_t top =
@@ -340,12 +312,6 @@ uint64_t x64_cb_dispatch(uint64_t slot, const uint64_t *gp, const uint64_t *fp,
       free(bounce[k].lo);
    }
    x64_lowstack_put(stkbuf, CB_LOWSTACK_SZ);
-   if (cb_trace()) {
-      fprintf(stderr, "[cbret] t=%x slot %llu fn 0x%x eax=0x%x\n",
-              pthread_mach_thread_np(pthread_self()),
-              (unsigned long long)slot, b.fn32, eax);
-      fflush(stderr);
-   }
 
    switch (sig->ret_kind) {
    case CBR_VOID:  return 0;

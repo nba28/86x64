@@ -82,8 +82,6 @@ static void die(const char *what, const char *detail) {
 }
 
 uint64_t x64_lazy_bind_helper(const void *image_mark, uint64_t lazy_off) {
-   const int trace = getenv("LAZY_BIND_TRACE") != NULL;
-
    /* --- locate the image whose stub helper jumped here: the first qword the
     * helper head pushed is the address of that image's own __dyld_private,
     * i.e. an address inside one of its segments. --- */
@@ -226,14 +224,6 @@ uint64_t x64_lazy_bind_helper(const void *image_mark, uint64_t lazy_off) {
     * flat hit is unambiguous in practice). --- */
    const char *dlname = (symname[0] == '_') ? symname + 1 : symname;
    void *addr = NULL;
-   if (getenv("LB_PRE_TRACE")) {
-      fprintf(stderr, "[lb-pre] img=%s sym=%s ord=%d ndeps=%u dep[ord-1]=%p mh=%p\n",
-              image_path ? image_path : "?", symname ? symname : "?",
-              ordinal, ndeps,
-              (ordinal > 0 && (unsigned)ordinal <= ndeps) ? (void *)deps[ordinal - 1] : (void *)0,
-              (void *)mh);
-      fflush(stderr);
-   }
    if (ordinal > 0 && (unsigned)ordinal <= ndeps) {
       void *h = dlopen(deps[ordinal - 1], RTLD_LAZY | RTLD_NOLOAD);
       if (h) addr = dlsym(h, dlname);
@@ -245,11 +235,5 @@ uint64_t x64_lazy_bind_helper(const void *image_mark, uint64_t lazy_off) {
       ((uintptr_t)segs[seg_index].vmaddr + (uintptr_t)slide + seg_offset);
    *slot = (uint64_t)(uintptr_t)addr;
 
-   if (trace) {
-      fprintf(stderr, "[lb] %s: %s ord=%d -> %p (slot %p)\n",
-              image_path ? image_path : "?", symname, ordinal, addr,
-              (void *)slot);
-      fflush(stderr);
-   }
    return (uint64_t)(uintptr_t)addr;
 }

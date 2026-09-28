@@ -11,9 +11,8 @@
  * primitive itself robust: a 0 divisor returns 0 (quotient AND remainder) —
  * matching how well-behaved i386 code already guards its own division (Halo does
  * exactly `testl %edx,%edx; jne ..; xorl %eax,%eax` at its OWN guarded sites) —
- * instead of a SIGFPE the caller can't recover from. Under ABICONV_LIBGCC_TRACE
- * it also logs the i386 caller so a future zero-divisor is diagnosable without a
- * debugger. Signed AND unsigned, div AND mod are all covered.
+ * instead of a SIGFPE the caller can't recover from. Signed AND unsigned, div
+ * AND mod are all covered.
  *
  * Exit 97 = every zero-divisor form returned 0 without faulting, and the
  * non-zero control divide still computes correctly (the guard is transparent on
