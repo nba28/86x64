@@ -42,7 +42,6 @@ namespace MachO {
                                                       the SIB base. */
       Immediate<bits> *imm = nullptr;
       const SectionBlob<bits> *brdisp = nullptr;  /*!< branch displacement pointee */
-      std::size_t dbg_orig_md = 0;                /*!< DBG: original i386 abs disp32 */
 
       RelocBlob<bits> *reloc = nullptr; /*!< relocation pointee (owned) */
       
@@ -90,10 +89,25 @@ namespace MachO {
       Instruction(const Instruction<opposite<bits>>& other, TransformEnv<opposite<bits>>& env);
       template <Bits> friend class Instruction;
 
+      /* An i386 memory operand re-encoded for x86_64 (see lower_mem). */
+      struct LoweredMem {
+         typename SectionBlob<bits>::SectionBlobs pre; /*!< runs first (sets r11) */
+         opcode_t prefixes;   /*!< the source's legacy prefixes */
+         opcode_t opcode;     /*!< the source's opcode bytes */
+         uint8_t reg = 0;     /*!< the source's ModR/M reg field */
+         opcode_t operand;    /*!< ModR/M (reg=0) [SIB] [disp] */
+         opcode_t trailing;   /*!< the source's immediate bytes */
+         uint8_t rex = 0;     /*!< REX.X/REX.B the operand needs */
+         bool addr32 = false;
+         enum { NONE, RIP, ABS } bind = NONE;
+      };
+      bool lower_mem(TransformEnv<bits>& env, LoweredMem& out) const;
+      typename SectionBlob<bits>::SectionBlobs
+      emit_mem(TransformEnv<bits>& env, const LoweredMem& m, const opcode_t& opcode,
+               uint8_t reg, const opcode_t& trailing) const;
+
       void decode();
       static void decode(xed_decoded_inst_t& xedd, const opcode_t& instbuf);
-      // void patch_disp(ssize_t disp);
-      // void patch_relbr(xed_decoded_inst_t& xedd, opcode_t& instbuf, ssize_t disp) const;
 
       void parse_handle_relbr();
    };   

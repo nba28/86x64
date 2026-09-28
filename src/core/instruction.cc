@@ -191,115 +191,219 @@ namespace MachO {
          return out;
       }
 
+      bool is_legacy_prefix(uint8_t b) {
+         switch (b) {
+         case 0x66: case 0x67: case 0xF0: case 0xF2: case 0xF3:
+         case 0x2E: case 0x36: case 0x3E: case 0x26: case 0x64: case 0x65:
+            return true;
+         default:
+            return false;
+         }
+      }
+
+      /* Byte layout of an i386 instruction that carries a ModR/M memory
+       * operand: [prefixes][opcode][ModR/M [SIB] [disp]][trailing immediate]. */
+      struct ModrmLayout {
+         std::size_t opcode_idx = 0;   /*!< first byte after the legacy prefixes */
+         std::size_t modrm_idx = 0;
+         std::size_t operand_end = 0;  /*!< one past the last disp byte */
+      };
+
+      bool modrm_layout(const opcode_t& buf, ModrmLayout& out) {
+         std::size_t p = 0;
+         while (p < buf.size() && is_legacy_prefix(buf[p])) { ++p; }
+         out.opcode_idx = p;
+         if (p < buf.size() && buf[p] == 0x0F) {
+            p += (p + 1 < buf.size() && (buf[p + 1] == 0x38 || buf[p + 1] == 0x3A)) ? 3 : 2;
+         } else {
+            p += 1;
+         }
+         if (p >= buf.size()) { return false; }
+         out.modrm_idx = p;
+         const uint8_t mod = buf[p] >> 6, rm = buf[p] & 7;
+         if (mod == 3) { return false; }
+         std::size_t end = p + 1;
+         uint8_t sib_base = 0;
+         if (rm == 4) {
+            if (end >= buf.size()) { return false; }
+            sib_base = buf[end] & 7;
+            ++end;
+         }
+         if (mod == 1) { end += 1; }
+         else if (mod == 2 || (mod == 0 && (rm == 5 || (rm == 4 && sib_base == 5)))) { end += 4; }
+         if (end > buf.size()) { return false; }
+         out.operand_end = end;
+         return true;
+      }
+
+      /* i386 computes every effective address mod 2^32. A scaled index that
+       * relies on the wrap (a negative/sentinel index) needs the 0x67 prefix in
+       * x86_64. Never for a stack-pointer base or index (the widened rsp/rbp
+       * must not be truncated; rbp as a BASE is an ordinary register in
+       * -fomit-frame-pointer code, guard 99_sib_ebp_base_neg_wrap) nor for a
+       * base-only operand, which may hold a native >4GB pointer. */
+      bool wants_addr32(xed_reg_enum_t base, xed_reg_enum_t index) {
+         static const bool rbp_base_wide =
+            std::getenv("M64_SIB_RBP_BASE_WIDE") != nullptr;
+         auto stack = [](xed_reg_enum_t r) {
+            return r == XED_REG_ESP || r == XED_REG_RSP || r == XED_REG_EBP ||
+                   r == XED_REG_RBP || r == XED_REG_EIP || r == XED_REG_RIP;
+         };
+         auto frame = [](xed_reg_enum_t r) { return r == XED_REG_EBP || r == XED_REG_RBP; };
+         if (index == XED_REG_INVALID || stack(index)) { return false; }
+         if (stack(base) && (rbp_base_wide || !frame(base))) { return false; }
+         return true;
+      }
+
+   }
+
+   /* Re-encode this i386 instruction's memory operand for x86_64.
+    *
+    * Every rewrite that rebuilds an instruction around the SAME memory operand
+    * (call/jmp/push/pop [mem], `op [mem],$ptr`, the generic PIC and absolute-
+    * table forms) goes through here, so the operand's relocation is decided in
+    * one place:
+    *
+    *   PIC-anchored `disp(%anchor)`      -> [rip+target]
+    *   PIC-anchored `disp(%anchor,i,s)`  -> lea r11,[rip+target]; [r11+i*s]
+    *   absolute `[disp32]`               -> [rip+target]
+    *   absolute `disp32(%base)`          -> lea r11,[rip+target]; [base+r11]
+    *   absolute `disp32(,i,s)` / `disp32(%b,i,s)` -> kept absolute; the disp is
+    *     rebased at Emit and listed in __86x64_abs32 for the runtime slide
+    *   register-relative, no relocation -> bytes kept, 0x67 per wants_addr32
+    *
+    * The anchor register is dead in x86_64 (it holds the translated return
+    * address, not the i386 anchor), so a PIC operand must never keep it. */
+   template <Bits bits>
+   bool Instruction<bits>::lower_mem(TransformEnv<bits>& env, LoweredMem& out) const {
+      ModrmLayout L;
+      if (!modrm_layout(instbuf, L)) { return false; }
+      for (std::size_t i = 0; i < L.opcode_idx; ++i) {
+         if (instbuf[i] == 0x67) { return false; }   /* 16-bit addressing */
+      }
+      const uint8_t modrm = instbuf[L.modrm_idx];
+      const uint8_t rm = modrm & 7;
+      const bool has_sib = rm == 4;
+      const uint8_t sib = has_sib ? instbuf[L.modrm_idx + 1] : 0;
+      const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
+      const xed_reg_enum_t base = xed_decoded_inst_get_base_reg(ops, memidx);
+      const xed_reg_enum_t index = xed_decoded_inst_get_index_reg(ops, memidx);
+
+      auto lea_r11 = [&]() {
+         auto *lea = new Instruction<opposite<bits>>(opcode::lea_r11_mem_rip_disp32());
+         lea->memidx = 0;
+         env.resolve(memdisp, &lea->memdisp);
+         lea->memdisp_offset = memdisp_offset;
+         out.pre.push_back(lea);
+      };
+      auto rip_rel = [&]() {
+         out.operand = {0x05, 0, 0, 0, 0};
+         out.bind = LoweredMem::RIP;
+      };
+
+      static const bool no_pic_lowering =
+         std::getenv("M64_NO_PIC_OPERAND_LOWERING") != nullptr;   /* guard OFF arm */
+      if (memdisp && pic_anchored && !no_pic_lowering) {
+         uint8_t idx = (sib >> 3) & 7, scale = sib >> 6;
+         if (pic_anchor_in_index) { idx = sib & 7; scale = 0; }
+         if (!has_sib || idx == 4) {
+            rip_rel();
+         } else {
+            lea_r11();
+            out.operand = {0x04, (uint8_t)((scale << 6) | (idx << 3) | 0x03)};
+            out.rex = 0x01;                            /* REX.B: base r11 */
+            out.addr32 = idx != 5;
+         }
+      } else if (memdisp && base == XED_REG_INVALID && index == XED_REG_INVALID) {
+         rip_rel();
+      } else if (memdisp && index == XED_REG_INVALID) {
+         const uint8_t b = has_sib ? (sib & 7) : rm;
+         lea_r11();
+         if (b == 5) {   /* SIB base 101 at mod=00 means "no base": use disp8 0 */
+            out.operand = {0x44, (uint8_t)(0x18 | b), 0x00};
+         } else {
+            out.operand = {0x04, (uint8_t)(0x18 | b)};
+         }
+         out.rex = 0x02;                               /* REX.X: index r11 */
+      } else {
+         out.operand.assign(instbuf.begin() + L.modrm_idx,
+                            instbuf.begin() + L.operand_end);
+         out.operand[0] = (uint8_t)(modrm & 0xC7);
+         out.bind = memdisp ? LoweredMem::ABS : LoweredMem::NONE;
+         out.addr32 = wants_addr32(base, index);
+      }
+      out.prefixes.assign(instbuf.begin(), instbuf.begin() + L.opcode_idx);
+      out.opcode.assign(instbuf.begin() + L.opcode_idx, instbuf.begin() + L.modrm_idx);
+      out.reg = (modrm >> 3) & 7;
+      out.trailing.assign(instbuf.begin() + L.operand_end, instbuf.end());
+      return true;
+   }
+
+   /* Assemble `[0x67][prefixes][REX] opcode ModR/M(reg) operand trailing` from a
+    * lowered operand and bind its displacement. `reg` may name r8..r15. */
+   template <Bits bits>
+   typename SectionBlob<bits>::SectionBlobs
+   Instruction<bits>::emit_mem(TransformEnv<bits>& env, const LoweredMem& m,
+                               const opcode_t& opcode, uint8_t reg,
+                               const opcode_t& trailing) const {
+      opcode_t buf;
+      if (m.addr32) { buf.push_back(0x67); }
+      buf.insert(buf.end(), m.prefixes.begin(), m.prefixes.end());
+      const uint8_t rex = m.rex | (reg & 8 ? 0x04 : 0);
+      if (rex) { buf.push_back(0x40 | rex); }
+      buf.insert(buf.end(), opcode.begin(), opcode.end());
+      buf.push_back((uint8_t)(m.operand[0] | ((reg & 7) << 3)));
+      buf.insert(buf.end(), m.operand.begin() + 1, m.operand.end());
+      buf.insert(buf.end(), trailing.begin(), trailing.end());
+      auto *inst = new Instruction<opposite<bits>>(buf);
+      inst->memidx = 0;
+      if (m.bind != LoweredMem::NONE) {
+         env.resolve(memdisp, &inst->memdisp);
+         inst->memdisp_offset = memdisp_offset;
+         inst->memdisp_absolute = m.bind == LoweredMem::ABS;
+      }
+      typename SectionBlob<bits>::SectionBlobs insts = m.pre;
+      insts.push_back(inst);
+      return insts;
    }
 
    template <Bits bits>
    const xed_state_t& Instruction<bits>::dstate() { return dstate_<bits>; }
 
-   /* Shared constant-vs-pointer classifier for a 32-bit instruction IMMEDIATE
-    * whose value ALIASES a code (instructions-flagged) section. The
-    * classification must be a PURE FUNCTION of the value + image — never of
-    * parse ORDER or of which iform carries the immediate — or the two sides of
-    * a compare can classify DIFFERENTLY and a value test that held on i386
-    * silently fails after translation.
+   /* ---- Is a 32-bit literal an address? ------------------------------------
     *
-    * Ground truth (Civ IV Steam, locals-stripped): every GCC __GLOBAL__I_*
-    * static-init stub passes the default init priority in edx
-    * (`mov $0xffff,%edx; mov $1,%eax; jmp __static_initialization_and_
-    * destruction_0`) and every per-TU dispatcher tests it
-    * (`cmp $0xffff,%edx; jne skip`). 0xffff aliases __text. With
-    * code_alias_is_constant DISARMED (no local text syms) the MOV heuristic
-    * relocated all 1084 stub immediates to `lea edx,[rip+..]`; the relocated
-    * value then entered relocated_ptr_imms, so imm_bounds_relocated_table let
-    * 1095/1096 dispatcher CMPs relocate too — ACCIDENTALLY consistent (ctors
-    * still ran) — but the FIRST dispatcher in sweep order parsed before any
-    * relocated base existed and kept the literal 0xffff: its TU's static
-    * ctors were silently skipped -> a never-constructed std::list registry ->
-    * NULL-deref at game launch ("Launch in Window" EXC_BAD_ACCESS addr=0x8).
+    * An i386 image with no relocation for a site (every fixed-load executable)
+    * gives no record of which literals are addresses, so each operand shape
+    * below decides from the value and the image. Two rules hold throughout:
     *
-    * Rule: an imm32 aliasing an instructions-flagged section is an integer
-    * CONSTANT unless there is POSITIVE function-pointer evidence at its value:
-    *   - an nlist symbol AT the value (func_syms; global text symbols survive
-    *     `strip -x`, so this also serves locals-stripped binaries), or
-    *   - the standard i386 frame-setup prologue `55 89 e5` (push ebp;
-    *     mov ebp,esp) at the value — the same structural recovery the
-    *     stack-arg heuristic uses for stripped-binary callback ProcPtrs
-    *     (Halo CE Carbon event handlers).
-    * Symboled binaries additionally discriminate via code_alias_is_constant
-    * (mid-function = constant); stackarg_imm_is_code_constant supplies the
-    * locals-stripped arm. Data-section aliases are NOT gated here — the
-    * permissive probes keep them. */
+    *  - The verdict must be a PURE FUNCTION of value + image, never of parse
+    *    order or of which iform carries the literal. Otherwise the two sides of
+    *    a compare (`mov $X,%edx` ... `cmp $X,%edx`) classify differently and a
+    *    test that held on i386 silently fails (Civ IV's 0xffff static-init
+    *    priority skipped a TU's constructors).
+    *  - A value aliasing an INSTRUCTIONS section is an integer unless there is
+    *    positive function-ENTRY evidence at it (a symbol, or an entry shape).
+    *    Small integers alias a large __text constantly.
+    */
+
+   /* An imm32 that aliases code with no entry evidence is a constant. */
    template <Bits bits>
    static bool imm32_code_alias_is_constant(const Image& img, ParseEnv<bits>& env,
                                             uint32_t imm_val) {
       if (!env.code_alias_is_constant(imm_val) &&
           !env.stackarg_imm_is_code_constant(imm_val)) {
-         return false;   /* not a code-section alias (or already rescued) */
+         return false;
       }
-      /* POSITIVE evidence: an nlist at the value, or the `55 89 e5` frame-setup
-       * prologue there. Shared with the __DATA pointer-detection path so both
-       * use ONE definition of "this address is a function entry"
-       * (ParseEnv::code_target_has_entry_evidence). */
       return !env.code_target_has_entry_evidence(img, (std::size_t) imm_val);
    }
 
-   /* Same classifier, for a memory-operand DISPLACEMENT that carries a BASE
-    * REGISTER (`op disp32(%base)` / `op disp32(%base,%idx,s)` / `lea
-    * disp32(%base),%reg`). Those two arms of the absolute-table heuristic treat
-    * disp32 as a global table's vmaddr; but with a base register live, disp32 is
-    * FAR more often an ordinary integer — a struct-member offset, an array
-    * extent, a loop bound — and on a big i386 image __text spans a range
-    * (Civ IV: 0x23b0 .. 0xdd2176) that ordinary small integers alias constantly.
-    *
-    * Ground truth (Civ IV Steam, "launch in window" SIGBUS 2026-07-28): the
-    * GMemory free-list builder allocates 0x2800 bytes and computes the
-    * one-past-the-last-node terminator with `lea 0x27ec(%ecx),%edx`
-    * (0x27ec == 0x2800 - 0x14, the block size minus one 0x14-byte node).
-    * 0x27ec aliases __text, so this arm relocated it: the translated code became
-    * `lea r11,[rip+..]; lea (%rcx,%r11),%edx`, i.e. end = block + 0x599400d.
-    * The iterator never reached the terminator, the zeroing loop ran off the end
-    * of the mmap'd heap chunk and died on the first non-writable page
-    * (KERN_PROTECTION_FAILURE writing 0x10382008, 8 bytes past a 1540K rwx
-    * region whose neighbour is a read-only file mapping).
-    *
-    * Rule: identical to the immediate family — a code-section-aliasing value is
-    * an integer CONSTANT unless there is positive function-ENTRY evidence at it.
-    * The immediate classifier's own contract demands this: classification must
-    * be a PURE FUNCTION of value + image, "never of parse ORDER or of WHICH
-    * IFORM CARRIES the immediate". Before this, 0x27ec was a constant as
-    * `mov $0x27ec,%edx` but a pointer as `lea 0x27ec(%ecx),%edx`.
-    *
-    * Scope: BASE-REGISTER arms ONLY. The baseless arms (`[disp32]` and
-    * `[disp32+idx*scale]`) are untouched — there disp32 IS the whole effective
-    * address, and a switch/jump table legitimately lives in an instructions
-    * section with no symbol and no prologue at its base. Data-section aliases
-    * are likewise untouched (that is where every known true positive of this
-    * heuristic lives: photocd's `movl %edi,0x11260(%edx)`, Halo's
-    * `movb $0,0x453cc0(%edx)` zerofill store, Quinn's __TEXT,__const table).
-    *
-    * M64_NO_MEMDISP_CODE_ALIAS_GATE=1 disarms it (A/B guard
-    * `memdisp_code_alias_test.sh`). */
-   /* ★A MEMORY ACCESS (not `lea`) at disp(%base) never addresses data from a
-    * function's entry: entry evidence at disp says "function", which is exactly
-    * what a base-relative load/store is NOT indexing. So for accesses, any
-    * instructions-section alias is an integer. MEASURED, PvZ: `movl %edx,
-    * 0x558c(%eax)` (a member store) — 0x558c is a real function entry (after
-    * `retl`), so the entry rule rebased it and the store hit the GPU driver.
-    * `lea` keeps the entry rule (it can form a function pointer).
-    * Kill switch M64_MEMDISP_ACCESS_ENTRY_RULE=1. */
-   template <Bits bits>
-   static bool disp_in_instructions(ParseEnv<bits>& env, std::size_t disp) {
-      for (auto *seg : env.archive.segments()) {
-         for (auto *sect : seg->sections) {
-            if (sect->contains_vmaddr(disp)) {
-               return (sect->sect.flags & (S_ATTR_PURE_INSTRUCTIONS |
-                                           S_ATTR_SOME_INSTRUCTIONS)) != 0;
-            }
-         }
-      }
-      return false;
-   }
-
+   /* The same rule for the disp32 of a BASE-register operand, where disp is
+    * far more often a struct offset or extent than a table address (Civ IV
+    * `lea 0x27ec(%ecx),%edx`, a free-list terminator). A load/store at
+    * disp(%base) never indexes data from a function's entry, so for anything
+    * but `lea` (which can form a function pointer) any code alias is an
+    * integer (PvZ `movl %edx,0x558c(%eax)`). Guard memdisp_code_alias_test.sh;
+    * M64_MEMDISP_ACCESS_ENTRY_RULE=1 applies the entry rule to accesses too. */
    template <Bits bits>
    static bool memdisp_code_alias_is_constant(const Image& img, ParseEnv<bits>& env,
                                               std::size_t disp, bool is_lea) {
@@ -307,120 +411,30 @@ namespace MachO {
          std::getenv("M64_NO_MEMDISP_CODE_ALIAS_GATE") != nullptr;
       static const bool access_entry_rule =
          std::getenv("M64_MEMDISP_ACCESS_ENTRY_RULE") != nullptr;
-      if (disabled) { return false; }
-      if (bits != Bits::M32) { return false; }
+      if (disabled || bits != Bits::M32) { return false; }
       if (disp < 0x1000 || disp >= 0x80000000U) { return false; }
-      if (!is_lea && !access_entry_rule && disp_in_instructions(env, disp)) { return true; }
+      if (!is_lea && !access_entry_rule && env.vmaddr_in_instructions_sect(disp)) {
+         return true;
+      }
       return imm32_code_alias_is_constant(img, env, (uint32_t) disp);
    }
 
-   /* A code-target imm32 stored into a general-base FIELD (`movl $imm32,
-    * disp(%reg)`) or compared against one is a fn-ptr callback install
-    * (obj->cb = &handler). Two independent kinds of positive evidence:
-    *
-    *  1. a func_syms nlist AT the value — a real, symboled function ENTRY;
-    *  2. an entry SHAPE at the value (`55 89 e5` / adjustor thunk) AND
-    *     structural FUNCTION-START evidence (code_target_is_function_start:
-    *     nothing falls through into it).
-    *
-    * ★Why (2) exists. b4b2848 narrowed this to symbol-only after 31de727's
-    * prologue-only admit was bisected to a Civ IV regression, on the premise
-    * that "a genuine callback target is a defined function and thus symboled
-    * even in a locals-stripped image (globals survive `strip -x`)". MEASURED,
-    * that premise is FALSE, and symbol-only is not narrow but INERT:
-    *
-    *   Halo CE   : LC_DYSYMTAB nlocalsym=0, nextdefsym=236, of which 222 land
-    *               in __text and every one is a C++ COALESCED template
-    *               instantiation (__ZNSt5_Tree.., __ZN13IDirect3D_Mac6AddRefEv).
-    *               The game's own functions carry no nlist at all.
-    *   Civ IV    : 19205 defined symbols, yet of the 517 `movl $imm32,
-    *   (Steam)     disp(%reg)` sites whose imm32 lands in __text, the number
-    *               with an nlist AT the target is ZERO.
-    *
-    * So master admits NOTHING through this arm in EITHER image, and every
-    * `obj->fn = &static_handler` install ships a raw i386 code address. Halo
-    * dies on the first call through one: `movl $0x250ff8, 0x10(%ebx)` at
-    * i386 0x2532ca/0x256106 shipped verbatim into the translated dylib
-    * (0x1031e4ff/0x10321c82) -> `call *0x250FF8` -> SIGSEGV, rip=0x250FF8.
-    *
-    * ★Why (2) is safe where 31de727's prologue-only admit was not. The
-    * false-positive class b4b2848 protects against is, in its own words, an
-    * integer aliasing "an anonymous MID-FUNCTION `55 89 e5` run". Mid-function
-    * means fall-through reachable — precisely what code_target_is_function_start
-    * rejects. Census over the real images (otool linear sweep for true
-    * instruction boundaries + preceding instruction):
-    *
-    *   Halo : 207 in-__text field-store immediates; 2 carry a prologue; both
-    *          are preceded by `retl` and are the crash sites above.
-    *   Civ  : 648 in-__text field-store/field-cmp immediates across all
-    *          general-base shapes; 349 carry a prologue and ALL 349 are
-    *          preceded by ret/jmp/nop, i.e. every one is a genuine function
-    *          START. Spot-checked by disassembly: a one-shot guarded
-    *          initialiser (`cmpb $0,flag; jne; movb $1,flag`) installing 13
-    *          handlers into field +0x18 of 13 globals, targets being real
-    *          virtual stubs (`55 89 e5 31 c0 c9 c3`).
-    *          NOT ONE mid-function prologue alias exists in either image.
-    *   The adjustor-THUNK shape admits ZERO targets through this arm in both
-    *          images, so it cannot be a false-positive source here either.
-    *
-    * Net effect: Halo +2 relocations, Civ IV +349 — every one a verified
-    * function start. Guard 99_code_alias_imm_falsereloc stays RED-for-relocation
-    * because its `_marker` sits after `.space 0x40` of ZERO filler (measured:
-    * the 8 bytes before 0x1f90 are all 0x00), which is not a terminator.
-    * Guard 99_fnptr_field_call keeps its .globl handler on path (1).
-    *
-    * Kill switches: M64_NO_FIELD_FNPTR_SHAPE_EVIDENCE=1 drops arm (2) entirely
-    * (= master/b4b2848 behaviour); M64_NO_FUNCTION_START_EVIDENCE=1 makes the
-    * start test vacuous (= 31de727 prologue-only behaviour). The two give a
-    * three-way A/B over exactly the disputed axis. */
+   /* A code address stored into (or compared against) a struct field is a
+    * callback install `obj->cb = &f`. Evidence: a symbol at the value, or an
+    * entry shape that nothing falls through into (stripped images carry no
+    * symbols for their own functions: Halo 0 of 207, Civ IV 0 of 517). A
+    * page-multiple value is refused: `obj->cap = 0x100000` and a function that
+    * genuinely starts at 0x100000 look identical, and corrupting a live size
+    * costs more than missing an install (iPhoto). Guards 99_fnptr_field_call,
+    * 99_code_alias_imm_falsereloc. */
    template <Bits bits>
    static bool field_store_code_target_is_fnptr(const Image& img,
                                                 ParseEnv<bits>& env,
                                                 uint32_t value) {
       if (value < 0x1000 || value >= 0x80000000U) { return false; }
-      bool in_code = false;
-      for (Segment<bits> *seg : env.archive.segments()) {
-         if (!seg->contains_vmaddr(value)) continue;
-         for (Section<bits> *sect : seg->sections) {
-            if (!sect->contains_vmaddr(value)) continue;
-            in_code = (sect->sect.flags &
-                       (S_ATTR_PURE_INSTRUCTIONS |
-                        S_ATTR_SOME_INSTRUCTIONS)) != 0;
-            break;
-         }
-         break;
-      }
-      if (!in_code) { return false; }
-      if (env.func_syms.count(value) != 0) { return true; }   /* (1) symbol */
-      static const bool no_shape =
-         std::getenv("M64_NO_FIELD_FNPTR_SHAPE_EVIDENCE") != nullptr;
-      if (no_shape) { return false; }
-      /* PAGE-MULTIPLE REFUSAL. Without a symbol the only evidence is structural,
-       * and structure cannot separate `obj->cap = 0x100000` from
-       * `obj->fn = &f` when a real function genuinely begins at 0x100000.
-       * MEASURED, iPhoto contains exactly that collision:
-       *     003c49e7  movl  $0x20, (%esp)
-       *     003c49ee  calll _malloc                ; obj = malloc(32)
-       *     003c49ff  movl  $0x100000, 0xc(%ebx)   ; obj->capacity = 1 MiB
-       *     003c4a06  movl  $0x100000, (%esp)      ; SAME value as the malloc size
-       *     003c4a0d  calll _malloc
-       * (the sibling ctor 0x40 bytes earlier stores 0x800 into the SAME +0xc and
-       * mallocs 0x800), while iPhoto's 0x100000 is a properly padded, genuine
-       * function entry — `retl; nop; nopl (%eax,%eax); 55 89 e5 57 56 53`.
-       * The tie-break is ASYMMETRIC RISK, the same reasoning the 4-aligned and
-       * writable-data narrowings already use: refusing a genuine fn-ptr costs a
-       * missed relocation (the status quo, and the store is inert until called),
-       * whereas admitting an integer CORRUPTS a live constant — here a malloc
-       * size. So refuse the ambiguous case: a 4 KiB-multiple value is a size /
-       * capacity / mask far more often than it is a function entry.
-       * MEASURED cost: Halo 0 refusals of 4 admits, Civ IV 0 of 349, iPhoto 2 of
-       * 42 — and both iPhoto refusals (0x100000 and 0x4000) are verified
-       * integers (0x4000 is an enum written into an out-param by a dispatch
-       * table whose neighbouring arm stores __mh_execute_header). */
+      if (!env.vmaddr_in_instructions_sect(value)) { return false; }
+      if (env.func_syms.count(value) != 0) { return true; }
       if ((value & 0xfffU) == 0) { return false; }
-      /* (2) entry SHAPE + nothing falls through into it. Both halves required:
-       * the shape alone is 31de727 (regressed), the start test alone would
-       * admit any post-`ret` byte run. */
       return env.code_target_has_entry_evidence(img, (std::size_t) value) &&
              env.code_target_is_function_start(img, (std::size_t) value);
    }
@@ -434,947 +448,316 @@ namespace MachO {
                         img.size() - loc.offset) == XED_ERROR_NONE;
    }
 
+   /* True iff the word at `value` (in file-backed, non-code data) is itself an
+    * in-image address: the first slot of a vtable or fn-ptr table. An integer
+    * that merely aliases __DATA,__const points at scalar bytes instead. */
+   template <Bits bits>
+   static bool points_at_pointer(const Image& img, ParseEnv<bits>& env, uint32_t value) {
+      for (Segment<bits> *seg : env.archive.segments()) {
+         const auto& sc = seg->segment_command;
+         const std::string sn(sc.segname, strnlen(sc.segname, sizeof(sc.segname)));
+         if (sn == SEG_PAGEZERO || sn == SEG_LINKEDIT) { continue; }
+         if ((sc.initprot & VM_PROT_EXECUTE) != 0) { continue; }
+         if (!seg->contains_vmaddr(value)) { continue; }
+         const std::size_t toff = value - sc.vmaddr + sc.fileoff;
+         if (toff + 4 > sc.fileoff + sc.filesize || toff + 4 > img.size()) { return false; }
+         const uint32_t tword = img.template at<uint32_t>(toff);
+         return tword >= 0x1000 && tword < 0x80000000U && env.vmaddr_in_image(tword);
+      }
+      return false;
+   }
+
+   /* Offset of the rel32/disp32 a classic relocation may cover, or 0. */
+   static std::size_t reloc_field_offset(xed_iform_enum_t iform) {
+      switch (iform) {
+      case XED_IFORM_CALL_NEAR_RELBRz:
+      case XED_IFORM_JMP_RELBRz:
+         return 1;
+      case XED_IFORM_JZ_RELBRz:  case XED_IFORM_JNZ_RELBRz:
+      case XED_IFORM_JL_RELBRz:  case XED_IFORM_JLE_RELBRz:
+      case XED_IFORM_JNL_RELBRz: case XED_IFORM_JNLE_RELBRz:
+      case XED_IFORM_JNBE_RELBRz: case XED_IFORM_JBE_RELBRz:
+      case XED_IFORM_JB_RELBRz:  case XED_IFORM_JNB_RELBRz:
+      case XED_IFORM_JS_RELBRz:  case XED_IFORM_JNS_RELBRz:
+      case XED_IFORM_JP_RELBRz:  case XED_IFORM_JNP_RELBRz:
+      case XED_IFORM_JO_RELBRz:  case XED_IFORM_JNO_RELBRz:
+         return 2;
+      case XED_IFORM_LEA_GPRv_AGEN:
+         return 3;
+      default:
+         return 0;
+      }
+   }
+
    template <Bits bits>
    Instruction<bits>::Instruction(const Image& img, const Location& loc, ParseEnv<bits>& env,
                                   bool add_to_map):
       SectionBlob<bits>(loc, env, add_to_map), memdisp(nullptr), imm(nullptr), brdisp(nullptr)
    {
-      xed_error_enum_t err;
-
       xed_decoded_inst_zero_set_mode(&xedd, &dstate());
       xed_decoded_inst_set_input_chip(&xedd, XED_CHIP_INVALID);
-
-      if ((err = xed_decode(&xedd, &img.at<uint8_t>(loc.offset), img.size() - loc.offset)) !=
-          XED_ERROR_NONE) {
+      const xed_error_enum_t err =
+         xed_decode(&xedd, &img.at<uint8_t>(loc.offset), img.size() - loc.offset);
+      if (err != XED_ERROR_NONE) {
          throw error("%s: offset 0x%x: xed_decode: %s", __FUNCTION__, loc.offset,
                      xed_error_enum_t2str(err));
       }
-      
       instbuf = std::vector<uint8_t>(&img.at<uint8_t>(loc.offset),
                                      &img.at<uint8_t>(loc.offset + xed_decoded_inst_get_length(&xedd)));
 
-      /* special transformations */
-      // parse_handle_relbr();
-
       const std::size_t refaddr = loc.vmaddr + xed_decoded_inst_get_length(&xedd);
       xed_operand_values_t *operands = xed_decoded_inst_operands(&xedd);
+      const xed_iclass_enum_t iclass = xed_decoded_inst_get_iclass(&xedd);
+      const bool fixed_load = env.fixed_load_image();
 
-      /* Check for relocations */
-      std::unordered_map<xed_iform_enum_t, std::size_t> reloc_index_map =
-         {{XED_IFORM_CALL_NEAR_RELBRz, 1},
-          {XED_IFORM_JMP_RELBRz, 1},
-          {XED_IFORM_JZ_RELBRz, 2},
-          {XED_IFORM_JNZ_RELBRz, 2},
-          {XED_IFORM_JL_RELBRz, 2},
-          {XED_IFORM_JLE_RELBRz, 2},
-          {XED_IFORM_JNL_RELBRz, 2},
-          {XED_IFORM_JNLE_RELBRz, 2},
-          {XED_IFORM_JNBE_RELBRz, 2},
-          {XED_IFORM_JBE_RELBRz, 2},
-          {XED_IFORM_JB_RELBRz, 2},
-          {XED_IFORM_JNB_RELBRz, 2},
-          /* sign / parity / overflow conditionals — same 2-byte (0F 8x)
-           * opcode layout as the rest, so the rel32 starts at offset 2.
-           * Rare to carry a reloc in a fully-linked image, but completes
-           * the Jcc-RELBRz family so none is silently missed. */
-          {XED_IFORM_JS_RELBRz, 2},
-          {XED_IFORM_JNS_RELBRz, 2},
-          {XED_IFORM_JP_RELBRz, 2},
-          {XED_IFORM_JNP_RELBRz, 2},
-          {XED_IFORM_JO_RELBRz, 2},
-          {XED_IFORM_JNO_RELBRz, 2},
-          {XED_IFORM_LEA_GPRv_AGEN, 3},
-         };
+      /* A value that could name something in this image. */
+      auto image_addr = [&](std::size_t v) {
+         return v >= 0x1000 && v < 0x80000000U && env.vmaddr_in_image(v);
+      };
+      /* Bind this->memdisp to the table at `addr`; an address inside a blob
+       * (a zerofill extent, a packed const table) resolves to blob + offset. */
+      auto capture_table = [&](unsigned i, std::size_t addr) {
+         memidx = i;
+         memdisp_absolute = true;
+         env.vmaddr_resolver.resolve(addr, (const SectionBlob<bits> **) &this->memdisp);
+         if (env.vmaddr_in_indexed_table_target(addr)) {
+            env.vmaddr_resolver.resolve_containing(
+               addr, (const SectionBlob<bits> **) &this->memdisp, &this->memdisp_offset);
+         }
+      };
+      auto parse_imm = [&](std::size_t off, bool is_ptr) {
+         imm = Immediate<bits>::Parse(img, loc + off, env, is_ptr);
+         imm->heuristic = true;   /* a value-alias guess; see Immediate::heuristic */
+      };
 
-      auto reloc_index_map_it = reloc_index_map.find(xed_decoded_inst_get_iform_enum(&xedd));
-      if (reloc_index_map_it != reloc_index_map.end()) {
-         /* check if there is a relocation entry at this address */
-         auto relocs_it = env.relocs.find(loc.vmaddr + reloc_index_map_it->second);
+      if (const std::size_t roff = reloc_field_offset(xed_decoded_inst_get_iform_enum(&xedd))) {
+         auto relocs_it = env.relocs.find(loc.vmaddr + roff);
          if (relocs_it != env.relocs.end()) {
             reloc = relocs_it->second;
             env.relocs.erase(relocs_it);
             return;
          }
       }
-      
-      /* Memory Accesses */
+
+      /* ---- memory operands ---- */
       const unsigned int nops = xed_decoded_inst_noperands(&xedd);
       if (xed_operand_values_has_memory_displacement(operands)) {
          for (unsigned i = 0; i < nops; ++i) {
-            xed_reg_enum_t basereg  = xed_decoded_inst_get_base_reg(operands,  i);
-            xed_reg_enum_t indexreg = xed_decoded_inst_get_index_reg(operands, i);
+            const xed_reg_enum_t basereg  = xed_decoded_inst_get_base_reg(operands,  i);
+            const xed_reg_enum_t indexreg = xed_decoded_inst_get_index_reg(operands, i);
+            const bool disp32 =
+               xed_decoded_inst_get_memory_displacement_width(operands, i) == sizeof(uint32_t);
+            const ssize_t disp = xed_decoded_inst_get_memory_displacement(operands, i);
+
             if (basereg == select_value(bits, XED_REG_EIP, XED_REG_RIP) &&
-                indexreg == XED_REG_INVALID)
-               {
-                  if (memdisp) {
-                     /* Two rip/eip-relative memory operands on one
-                      * instruction — we only track a single memdisp. Throw
-                      * a located, catchable error instead of a raw abort()
-                      * so the driver can report which input tripped it. */
-                     throw error("%s: duplicate rip-relative memdisp at "
-                                 "offset 0x%jx, vmaddr 0x%jx",
-                                 __FUNCTION__, (uintmax_t) loc.offset,
-                                 (uintmax_t) loc.vmaddr);
-                  }
+                indexreg == XED_REG_INVALID) {
+               /* [rip+disp] (the M64 re-parse). */
+               if (memdisp) {
+                  throw error("%s: duplicate rip-relative memdisp at offset 0x%jx, "
+                              "vmaddr 0x%jx", __FUNCTION__, (uintmax_t) loc.offset,
+                              (uintmax_t) loc.vmaddr);
+               }
+               memidx = i;
+               const std::size_t targetaddr = refaddr + disp;
+               this->memdisp = env.add_placeholder(targetaddr);
+               /* An interior target of opaque data binds to blob + offset, so it
+                * survives re-layout; a mid-blob placeholder would drift to the
+                * next blob (Quinn `movswl _pieceSize1+2`). __OBJC and code stay
+                * exact: their interior offsets don't survive the rewrite. */
+               if (env.vmaddr_in_writable_data(targetaddr) ||
+                   env.vmaddr_in_readonly_opaque_data(targetaddr)) {
+                  env.vmaddr_resolver.resolve_containing(
+                     targetaddr, (const SectionBlob<bits> **) &this->memdisp,
+                     &this->memdisp_offset, /*override=*/true);
+               }
 
-                  memidx = i;
-
-                  /* get memory displacement & reference address */
-                  const ssize_t memdisp = xed_decoded_inst_get_memory_displacement(operands, i);
-                  const std::size_t targetaddr = refaddr + memdisp;
-
-                  /* resolve pointer */
-                  this->memdisp = env.add_placeholder(targetaddr);
-                  // env.vmaddr_resolver.resolve(targetaddr, &this->memdisp);
-                  /* mid-blob fallback for M64 [rip+disp] re-parse: if targetaddr
-                   * lands inside a multi-byte blob, prefer the containing blob +
-                   * offset over the stranded mid-section placeholder so the ref
-                   * survives the modify/convert layout shift. override=true.
-                   *
-                   * Admits writable __DATA AND read-only opaque const/literal
-                   * data (__TEXT,__const / __cstring / literals), mirroring the
-                   * M32-side Immediate/NonLazySymbolPointer gate (commit
-                   * 7a28d47): a `movswl [rip+disp]` reading the INTERIOR (2 mod
-                   * 4) of a {short,short} __TEXT,__const struct lands mid-blob,
-                   * so add_placeholder strands a placeholder at the interior
-                   * vmaddr; on re-Build that placeholder can't sit inside an
-                   * existing Immediate blob and gets bumped to the next blob
-                   * boundary -> the read misrelocates to the NEXT sibling datum
-                   * (Quinn Preferences: -[QuinnPieceStylePreviewCell
-                   * drawInteriorWithFrame:] `movswl _pieceSize1+2` read the HEIGHT
-                   * of the WRONG piece after the convert-stage re-parse ->
-                   * wrong preview geometry -> blank piece-style previews). The
-                   * containing-blob guess is only valid for opaque program data:
-                   * __OBJC stays excluded (structurally-parsed fragile metadata),
-                   * instruction sections stay excluded (mid-instruction offsets
-                   * don't survive the code rewrite) — both handled by
-                   * vmaddr_in_readonly_opaque_data / vmaddr_in_writable_data. */
-                  if (env.vmaddr_in_writable_data(targetaddr) ||
-                      env.vmaddr_in_readonly_opaque_data(targetaddr)) {
-                     env.vmaddr_resolver.resolve_containing(
-                        targetaddr,
-                        (const SectionBlob<bits> **) &this->memdisp,
-                        &this->memdisp_offset, /*override=*/true);
-                  }
-
-               } else if (basereg == XED_REG_INVALID && indexreg == XED_REG_INVALID &&
-                          xed_decoded_inst_get_memory_displacement_width(operands, i) ==
-                          sizeof(uint32_t)) {
-               /*
-                * Absolute `[disp32]` memory operand (i386 mod=00 r/m=101).
-                * `mov [abs32], imm32` (`c7 05 disp32 imm32`) has a trailing
-                * imm32, so the disp32 is NOT the last 4 instruction bytes:
-                * capture the disp32 destination in `memdisp` and the imm32
-                * in `imm`. Plain loads/stores have no trailing immediate
-                * and keep the disp32 in `imm` as before.
-                *
-                * Guard: only do the split when the destination lands in a
-                * section holding program-writable data. Linear-sweep
-                * disassembly occasionally misdecodes data/padding as
-                * `c7 05 ...`; such bogus instructions point their disp32
-                * at dyld-managed symbol-pointer/stub tables. Resolving
-                * those strands a placeholder mid-table and breaks a later
-                * re-parse, so fall back to plain simple-pointer handling.
-                */
-               const bool has_any_imm =
-                  xed_operand_values_has_immediate(operands);
+            } else if (basereg == XED_REG_INVALID && indexreg == XED_REG_INVALID && disp32) {
+               /* Absolute [disp32] (i386 mod=00 r/m=101, rip-relative in x86_64).
+                * With a trailing immediate the disp is NOT the last 4 bytes:
+                * capture it as memdisp and the immediate separately — but only
+                * when it names data; linear sweep sometimes decodes junk as
+                * `c7 05 ...` aimed at dyld's stub tables. Literal pools are data
+                * by section type (Halo's `cmpss xmm,[abs32]` float constants;
+                * guard literal_abs_disp_test.sh). */
+               const bool has_any_imm = xed_operand_values_has_immediate(operands);
                const unsigned imm_w = has_any_imm
                   ? xed_decoded_inst_get_immediate_width_bits(operands) : 0;
                const bool has_imm32 = has_any_imm && imm_w == 32;
-               /* `cmpb $imm8,[abs32]` / `movb $imm8,[abs32]` (and imm16 forms)
-                * place the disp32 BEFORE the trailing small immediate, so it is
-                * NOT the last 4 instruction bytes. The simple-pointer fallback
-                * below assumes disp32==last-4-bytes and would mis-read it,
-                * leaving the absolute address UNRELOCATED — emitted verbatim as
-                * a rip-relative disp it points outside the dylib (observed:
-                * `movb $1, 0xf6761d(%rip)` writing the raw i386 __DATA addr ->
-                * EXC_BAD_ACCESS). Treat ANY trailing immediate as "disp32 is the
-                * memory operand" so it gets relocated like the imm32 case. */
-               const bool has_small_imm =
-                  has_any_imm && (imm_w == 8 || imm_w == 16);
+               const bool has_small_imm = has_any_imm && (imm_w == 8 || imm_w == 16);
                bool dest_is_data = false;
-               ssize_t md = 0;
-               /* DBG_SMALLIMM extended: capture matched seg/sect/flags */
-               char dbg_segname[17] = {};
-               char dbg_sectname[17] = {};
-               uint32_t dbg_flags = 0;
-               bool dbg_matched = false;
                if (has_imm32 || has_small_imm) {
-                  md = xed_decoded_inst_get_memory_displacement(operands, i);
-                  dbg_orig_md = (std::size_t) md;
-                  /*
-                   * Does the disp32 name DATA (=> it is an address that must be
-                   * relocated)?  The type allowlist below used to be
-                   * S_REGULAR/S_ZEROFILL/S_GB_ZEROFILL only, which silently
-                   * excluded every LITERAL POOL: __literal4 is S_4BYTE_LITERALS,
-                   * __literal8 is S_8BYTE_LITERALS, __cstring is
-                   * S_CSTRING_LITERALS -- all of them DATA, none of them
-                   * S_REGULAR.  So a float compare against a pooled constant
-                   * (`cmpss xmm,[abs32],imm8`) kept its i386 ABSOLUTE
-                   * displacement; since ModR/M mod=00 r/m=101 means absolute in
-                   * 32-bit but RIP-RELATIVE in 64-bit, the emitted instruction
-                   * silently read whatever byte sat at that offset from rip.
-                   * Measured in Halo CE: four float compares reading __text,
-                   * __DATA,__data and our own __86x64_pcmap instead of 0.0f,
-                   * -0.05f and 0.0005f.
-                   *
-                   * A literal pool is data BY SECTION TYPE and can never hold
-                   * instructions, so admitting the pool types is safe as well as
-                   * correct -- and it keys on the section TYPE, not its name, so
-                   * it holds whatever a compiler calls its pools.  The
-                   * pre-existing types stay exactly as they were: this WIDENS the
-                   * gate, it does not redraw it.  Guard: tests-i386
-                   * literal_abs_disp_test.sh.
-                   */
                   static const bool literal_abs_off =
                      std::getenv("M64_NO_LITERAL_ABS_DISP") != nullptr;
-                  bool md_found = false;
-                  for (auto *seg : env.archive.segments()) {
-                     for (auto *sect : seg->sections) {
-                        if (!sect->contains_vmaddr((std::size_t) md)) continue;
-                        const uint32_t stype = sect->sect.flags & SECTION_TYPE;
-                        const bool pool =
-                           stype == S_CSTRING_LITERALS ||
-                           stype == S_4BYTE_LITERALS ||
-                           stype == S_8BYTE_LITERALS ||
-                           stype == S_16BYTE_LITERALS ||
-                           stype == S_LITERAL_POINTERS;
-                        dest_is_data = (stype == S_REGULAR || stype == S_ZEROFILL
-                                        || stype == S_GB_ZEROFILL
-                                        || (pool && !literal_abs_off));
-                        /* capture for DBG_SMALLIMM */
-                        std::strncpy(dbg_segname, seg->segment_command.segname,
-                                     sizeof(dbg_segname) - 1);
-                        std::strncpy(dbg_sectname, sect->sect.sectname,
-                                     sizeof(dbg_sectname) - 1);
-                        dbg_flags = sect->sect.flags;
-                        dbg_matched = true;
-                        md_found = true;
-                        break;
-                     }
-                     /* stop at the CONTAINING section: sections do not overlap,
-                        so a later segment cannot supersede this verdict. */
-                     if (md_found) break;
-                  }
-                  if (std::getenv("DBG_MDSECT")) {
-                     const char *want = std::getenv("DBG_MDSECT");
-                     if (want[0] == '*' ||
-                         (std::size_t) md == (std::size_t) strtoull(want, nullptr, 0)) {
-                        std::fprintf(stderr, "[mdsect] bits=%d vm=0x%zx md=0x%zx "
-                           "seg=%.16s sect=%.16s flags=0x%08x found=%d data=%d\n",
-                           bits == Bits::M32 ? 32 : 64, (std::size_t) loc.vmaddr,
-                           (std::size_t) md, dbg_segname, dbg_sectname, dbg_flags,
-                           md_found ? 1 : 0, dest_is_data ? 1 : 0);
-                     }
+                  if (const Section<bits> *sect = env.section_at((std::size_t) disp)) {
+                     const uint32_t stype = sect->sect.flags & SECTION_TYPE;
+                     const bool pool =
+                        stype == S_CSTRING_LITERALS || stype == S_4BYTE_LITERALS ||
+                        stype == S_8BYTE_LITERALS || stype == S_16BYTE_LITERALS ||
+                        stype == S_LITERAL_POINTERS;
+                     dest_is_data = stype == S_REGULAR || stype == S_ZEROFILL ||
+                                    stype == S_GB_ZEROFILL || (pool && !literal_abs_off);
                   }
                }
                if (has_imm32 && dest_is_data) {
                   memidx = i;
-                  /*
-                   * i386 `[disp32]` is ABSOLUTE addressing — the disp32
-                   * is the address itself. Mark memdisp_absolute so an
-                   * M32 re-emit (the `rebasify` pass) writes the address
-                   * back verbatim instead of a rip-relative delta. The
-                   * x86_64 transform re-derives this flag from the new
-                   * decode (mod=00 r/m=101 becomes rip-relative there).
-                   */
                   memdisp_absolute = true;
-                  dbg_orig_md = (std::size_t) md;
-                  env.vmaddr_resolver.resolve((std::size_t) md,
+                  env.vmaddr_resolver.resolve((std::size_t) disp,
                                               (const SectionBlob<bits> **) &this->memdisp);
-                  /* mid-blob fallback: if md lands inside a multi-byte blob
-                   * (exact-key resolve misses), attach to the containing blob
-                   * + offset so the store still relocates correctly. */
                   env.vmaddr_resolver.resolve_containing(
-                     (std::size_t) md,
-                     (const SectionBlob<bits> **) &this->memdisp,
+                     (std::size_t) disp, (const SectionBlob<bits> **) &this->memdisp,
                      &this->memdisp_offset);
-                  /* probe whether the trailing imm32 is itself a pointer */
                   const std::size_t imm_idx = instbuf.size() - sizeof(uint32_t);
-                  const uint32_t imm_val =
-                     img.template at<uint32_t>(loc.offset + imm_idx);
-                  bool imm_is_ptr = false;
-                  if (imm_val >= 0x1000 && imm_val < 0x80000000U) {
-                     for (auto *seg : env.archive.segments()) {
-                        std::string name(seg->segment_command.segname,
-                                         strnlen(seg->segment_command.segname,
-                                                 sizeof(seg->segment_command.segname)));
-                        if (name == SEG_PAGEZERO || name == SEG_LINKEDIT) continue;
-                        if (seg->contains_vmaddr(imm_val)) { imm_is_ptr = true; break; }
-                     }
-                  }
-                  /* CODE-target FUNCTION-ENTRY gate (shared with DataParser,
-                   * see ParseEnv::code_alias_is_constant): an imm32 that lands
-                   * MID-function inside an instructions section with no symbol
-                   * at its value is an integer constant, not a pointer.
-                   * imm32_code_alias_is_constant extends this to the LOCALS-
-                   * STRIPPED path (`movl $0xffff, _global` must store the
-                   * integer, not a relocated address), with func_syms/prologue
-                   * positive evidence keeping genuine fn-pointer installs
-                   * (`movl $_fn, _global`) relocated. */
+                  const uint32_t imm_val = img.template at<uint32_t>(loc.offset + imm_idx);
+                  bool imm_is_ptr = image_addr(imm_val);
                   if (imm_is_ptr && bits == Bits::M32 &&
                       imm32_code_alias_is_constant(img, env, imm_val)) {
                      imm_is_ptr = false;
                   }
-                  /* CMP/TEST COMPARISON-VALUE gate: in `cmp/test [abs32],imm32`
-                   * (81 /7, F7 /0-1) the immediate is usually a comparison
-                   * value / bit mask, and comparing a data word against an
-                   * integer that merely ALIASES a vmaddr is routine. The
-                   * code_alias_is_constant gate above is DISARMED for
-                   * locals-stripped binaries, which mis-relocated Civ IV
-                   * (Steam)'s OS-version check `cmpl $0x100308, _version`:
-                   * 0x100308 (packed 10.3.8) aliases __text, was rebased to a
-                   * `lea r11,[rip+..]; cmp r11d` -> the check compared against
-                   * ~0x101a690d -> "insufficient system version" exit. So for
-                   * CMP/TEST, keep the pointer classification on POSITIVE
-                   * evidence only:
-                   *  - an nlist symbol AT the immediate's value (func_syms —
-                   *    the `cmpl $_default_handler, _handler` idiom, test 87);
-                   *  - for CMP only, the EXACT 9510f29 store discriminator
-                   *    (fixed-load non-PIE MH_EXECUTE + 4-aligned + writable
-                   *    data): a pointer-IDENTITY test `cmpl $&sentinel, mem`
-                   *    against a field the 9510f29/07e7ef0 family relocates on
-                   *    the STORE side must classify IDENTICALLY to the store,
-                   *    or the identity test goes ALWAYS-FALSE in the
-                   *    translated binary (Civ IV shipped 22/22 __data-target +
-                   *    17/18 zerofill compare sites raw against relocated
-                   *    stores — silent COW/free-the-sentinel inversion, no
-                   *    crash). A __TEXT/__const-aliasing integer ($0x100308,
-                   *    $0x1000000) still stays literal: vmaddr_in_writable_data
-                   *    admits neither (guards 99_cmp_abs32_imm_notptr /
-                   *    99_cmp_mem_ptr_imm).
-                   * Otherwise the imm stays a literal. MOV (stored pointer
-                   * install) and the ADD/SUB pointer-arithmetic family keep
-                   * the permissive probe; TEST (a bit mask against a pointer
-                   * is meaningless) keeps func_syms-only. The register-compare
-                   * twin (CMP_GPRv_IMMz below) is instead gated by
-                   * imm_bounds_relocated_table: a loop-sentinel compare runs on
-                   * a REGISTER iterator; a memory-dest cmp bounds no loop. */
-                  if (imm_is_ptr && bits == Bits::M32) {
-                     const xed_iclass_enum_t iclass =
-                        xed_decoded_inst_get_iclass(&xedd);
-                     if (iclass == XED_ICLASS_CMP ||
-                         iclass == XED_ICLASS_TEST) {
-                        const bool cmp_data_identity =
-                           iclass == XED_ICLASS_CMP &&
-                           env.archive.header.filetype == MH_EXECUTE &&
-                           (env.archive.header.flags & MH_PIE) == 0 &&
-                           (imm_val & 3) == 0 &&
-                           env.vmaddr_in_writable_data(imm_val);
-                        if (env.func_syms.count(imm_val) == 0 &&
-                            !cmp_data_identity) {
-                           imm_is_ptr = false;
-                        }
+                  /* `cmp/test [abs32], $X`: X is a comparison value or mask far
+                   * more often than an address (Civ IV `cmpl $0x100308,_version`).
+                   * Keep a pointer only with a symbol at X, or — CMP only — the
+                   * exact store-side discriminator (aligned, writable data,
+                   * fixed-load image), so a pointer-identity test classifies
+                   * like the store it tests (guards 99_cmp_abs32_imm_notptr,
+                   * 99_cmp_mem_ptr_imm). */
+                  if (imm_is_ptr && bits == Bits::M32 &&
+                      (iclass == XED_ICLASS_CMP || iclass == XED_ICLASS_TEST)) {
+                     const bool cmp_data_identity =
+                        iclass == XED_ICLASS_CMP && fixed_load && (imm_val & 3) == 0 &&
+                        env.vmaddr_in_writable_data(imm_val);
+                     if (env.func_syms.count(imm_val) == 0 && !cmp_data_identity) {
+                        imm_is_ptr = false;
                      }
                   }
-                  imm = Immediate<bits>::Parse(img, loc + imm_idx, env, imm_is_ptr);
-                  imm->heuristic = true; /* value-alias probe (see Immediate) */
+                  parse_imm(imm_idx, imm_is_ptr);
                } else if (has_small_imm && dest_is_data) {
-                  /* Relocate the absolute disp32 (the memory operand). The
-                   * trailing imm8/imm16 is a scalar that stays verbatim in
-                   * instbuf; only the disp is patched (M32 absolute -> M64
-                   * rip-relative, re-derived per-instruction at Emit). */
                   memidx = i;
                   memdisp_absolute = true;
-                  dbg_orig_md = (std::size_t) md;
-                  env.vmaddr_resolver.resolve((std::size_t) md,
+                  env.vmaddr_resolver.resolve((std::size_t) disp,
                                               (const SectionBlob<bits> **) &this->memdisp);
-                  /* mid-blob fallback (see has_imm32 branch above): a
-                   * `movb/cmpb $imm8,[abs32]` whose abs32 is inside a multi-byte
-                   * __data blob misses exact-key resolve; attach to the
-                   * containing blob + offset. This is the iPhoto 8th-blocker. */
                   env.vmaddr_resolver.resolve_containing(
-                     (std::size_t) md,
-                     (const SectionBlob<bits> **) &this->memdisp,
+                     (std::size_t) disp, (const SectionBlob<bits> **) &this->memdisp,
                      &this->memdisp_offset);
-                  /* DBG_SMALLIMM: diagnostic for the movb $imm8,[abs32] mis-relocation bug.
-                   * Prints md (the i386 abs32 address), matched seg/sect/flags,
-                   * PURE_INSTRUCTIONS/SOME_INSTRUCTIONS attribute bits,
-                   * the resolved memdisp pointer, and (if resolved) which section
-                   * it landed in + its vmaddr. Also prints the trailing imm8/imm16
-                   * value and XED iform for identification. */
-                  if (std::getenv("DBG_SMALLIMM")) {
-                     /* trailing small immediate: last imm_w/8 bytes of instbuf */
-                     uint32_t trail_imm = 0;
-                     if (imm_w == 8 && !instbuf.empty())
-                        trail_imm = instbuf.back();
-                     else if (imm_w == 16 && instbuf.size() >= 2)
-                        trail_imm = (uint32_t)instbuf[instbuf.size()-2] |
-                                    ((uint32_t)instbuf[instbuf.size()-1] << 8);
-                     const xed_iform_enum_t iform_dbg =
-                        xed_decoded_inst_get_iform_enum(&xedd);
-                     std::fprintf(stderr,
-                        "[smallimm] instr_vmaddr=0x%zx md=0x%zx imm_w=%u trail_imm=0x%x"
-                        " iform=%s matched_seg=%.16s matched_sect=%.16s"
-                        " flags=0x%08x PURE_INST=%d SOME_INST=%d dest_is_data=%d"
-                        " memdisp=%p",
-                        (std::size_t)loc.vmaddr,
-                        (std::size_t)md,
-                        imm_w,
-                        trail_imm,
-                        xed_iform_enum_t2str(iform_dbg),
-                        dbg_matched ? dbg_segname : "(none)",
-                        dbg_matched ? dbg_sectname : "(none)",
-                        dbg_flags,
-                        (dbg_flags & S_ATTR_PURE_INSTRUCTIONS) ? 1 : 0,
-                        (dbg_flags & S_ATTR_SOME_INSTRUCTIONS) ? 1 : 0,
-                        dest_is_data ? 1 : 0,
-                        (const void *)this->memdisp);
-                     if (this->memdisp && this->memdisp->section) {
-                        std::fprintf(stderr,
-                           " resolved_sect=%.16s resolved_seg=%.16s resolved_vmaddr=0x%zx",
-                           this->memdisp->section->sect.sectname,
-                           (this->memdisp->section->segment
-                              ? this->memdisp->section->segment->segment_command.segname
-                              : "(null)"),
-                           (std::size_t)this->memdisp->loc.vmaddr);
-                     } else if (this->memdisp) {
-                        std::fprintf(stderr,
-                           " (memdisp non-null but section==nullptr) resolved_vmaddr=0x%zx",
-                           (std::size_t)this->memdisp->loc.vmaddr);
-                     } else {
-                        std::fprintf(stderr, " (deferred/unresolved)");
-                     }
-                     std::fprintf(stderr, " obj=%p &memdisp=%p\n",
-                                  (const void *)this, (const void *)&this->memdisp);
-                  }
                } else if (!has_small_imm) {
-                  /* simple pointer: disp32 is the last 4 bytes */
-                  const std::size_t idx = instbuf.size() - sizeof(uint32_t);
-                  dbg_orig_md = img.template at<uint32_t>(loc.offset + idx);
-                  imm = Immediate<bits>::Parse(img, loc + idx, env, true);
+                  /* plain load/store: the disp32 is the last 4 bytes */
+                  imm = Immediate<bits>::Parse(img, loc + (instbuf.size() - sizeof(uint32_t)),
+                                               env, true);
                }
-            } else if (basereg == XED_REG_INVALID && indexreg != XED_REG_INVALID &&
-                       xed_decoded_inst_get_memory_displacement_width(operands, i) ==
-                       sizeof(uint32_t)) {
-               /*
-                * `[disp32 + index*scale]` — jump-table or indexed-array
-                * addressing. The disp32 is an absolute pointer to a table
-                * base. In 64-bit mode the disp32 is sign-extended, so for
-                * the same code to work after transform we have to rewrite
-                * disp32 to the new vmaddr of the table.
-                *
-                * IMMEDIATE-group forms (`mov [disp32+idx*4], imm32` C7 /0,
-                * the ALU `81/83 /r`, `test` F6/F7 /0, byte `C6 /0`/`80 /r`)
-                * are captured EXACTLY like the plain load/store/rmw forms:
-                * the disp32 sits BEFORE the trailing immediate
-                * (prefixes|opcode|modrm|sib|disp32|imm per the ISA), Emit's
-                * xed_patch_disp patches it positionally from the decode
-                * (proven by the `[abs32]`+imm8 branch above, live since the
-                * iPhoto 12_static_byte_flag fix), and inject_abs32_section
-                * subtracts the immediate width when recording the field for
-                * the runtime slide. These forms USED to be skipped here
-                * (`has_trailing_imm32` gate) in deference to the runtime
-                * byte-pattern scan — which commit 2b7076a's exact
-                * __86x64_abs32 table SUPERSEDED (the scan corrupted real
-                * instructions at scale), so the skip shipped a RAW i386
-                * disp32 with no rebase and no table entry: Halo's renderer
-                * `movl $imm32, tab(,%esi,4)` (C7 04 B5) faulted at the
-                * i386-era address after the graphics-settings dialog
-                * (guard 98_abs32_imm_group).
-                */
-               /*
-                * ★ EXCEPTION: LEA DOES NOT DEREFERENCE ITS OPERAND, so for an
-                * AGEN operand the sentence above ("never an integer constant")
-                * is FALSE. `lea C(,%reg,4), %reg` is the compiler's ordinary
-                * idiom for the ARITHMETIC `C + 4*reg`, and C is then a plain
-                * integer that merely happens to alias a vmaddr.
-                *
-                * Gate it with the SAME doctrine the bare-immediate heuristic
-                * already uses (fixed_load_addr, below): only a FIXED-load-address
-                * image (non-PIE MH_EXECUTE) can name its own code/data with a
-                * literal absolute address. A dylib or a PIE executable is
-                * position-independent — it forms every real address through a PIC
-                * anchor (`lea tab(%ebx,%eax,4)`), which is a DIFFERENT operand
-                * shape (base register present) handled elsewhere — so a no-base
-                * literal disp32 there cannot be an address at all. A genuine
-                * absolute LEA that IS relocated never reaches here: the
-                * XED_IFORM_LEA_GPRv_AGEN reloc entry above returns first.
-                *
-                * MEASURED (Portal 2 wall 6): libtogl `CGLMBuffer::CGLMBuffer`
-                * picks the GL usage enum with
-                *     8d 04 85 e4 88 00 00   lea 0x88e4(,%eax,4), %eax
-                * = GL_STATIC_DRAW(0x88E4) + 4*(bool) = GL_DYNAMIC_DRAW(0x88E8).
-                * 0x88e4 aliases libtogl's own __text, so it was rewritten to the
-                * translated address and given a rebase; at run time the usage
-                * argument arrived as 0x4fec626 (= libtogl base + 0xc626),
-                * glBufferDataARB raised GL_INVALID_ENUM, the buffer kept a 0-byte
-                * store, glMapBufferARB returned NULL, and GenDebugFontTex stored
-                * through it (`movdqu %xmm3,(%ecx,%eax,2)`, ecx=0) -> SIGSEGV.
-                * Same class as the `mov $0x3400,%eax` integer-alias bug, one
-                * operand form further on.
-                *
-                * Kill switch M64_NO_LEA_INDEX_CONST=1 restores the old behaviour.
-                */
-               const bool agen_no_deref =
-                  xed_decoded_inst_get_iclass(&xedd) == XED_ICLASS_LEA;
-               const bool fixed_load_addr_img =
-                  env.archive.header.filetype == MH_EXECUTE &&
-                  (env.archive.header.flags & MH_PIE) == 0;
-               static const bool lea_index_const_disabled =
-                  std::getenv("M64_NO_LEA_INDEX_CONST") != nullptr;
-               const bool lea_const =
-                  agen_no_deref && !fixed_load_addr_img && !lea_index_const_disabled;
-               const ssize_t disp = xed_decoded_inst_get_memory_displacement(operands, i);
-               if (!lea_const && disp >= 0x1000 && (std::size_t)disp < 0x80000000U
-                   && !memdisp) {
-                  memidx = i;
-                  memdisp_absolute = true;
-                  env.vmaddr_resolver.resolve((std::size_t)disp,
-                                              (const SectionBlob<bits> **)&this->memdisp);
-                  /* mid-blob fallback: an absolute `[disp32+idx]` whose disp32
-                   * lands inside a multi-byte blob misses exact-key resolve and
-                   * ships a stale disp into read-only __TEXT (the 9th-blocker
-                   * null-memdisp class). Attach to the containing blob + offset.
-                   * Admits ANY non-__OBJC segment (writable __DATA AND read-only
-                   * const/literal tables): unlike the bare-immediate heuristics,
-                   * this operand's disp32 is a DEREFERENCED table base, never an
-                   * integer constant, so a mid-blob const-table offset is always
-                   * valid. The old writable-only gate stranded const tables:
-                   * Quinn's -[QuinnGame incrementScoreWithLastHeight:...]'s
-                   * `movswl 0xb2f42(,%eax,8)` into __TEXT,__const shipped the raw
-                   * i386 address -> SIGSEGV reading 0xb2f62 on a line-clear. */
-                  if (env.vmaddr_in_indexed_table_target((std::size_t)disp)) {
-                     env.vmaddr_resolver.resolve_containing(
-                        (std::size_t)disp,
-                        (const SectionBlob<bits> **)&this->memdisp,
-                        &this->memdisp_offset);
-                  }
+
+            } else if (basereg == XED_REG_INVALID && indexreg != XED_REG_INVALID && disp32) {
+               /* [disp32 + idx*scale]: a dereferenced table base, never an
+                * integer — except under `lea`, which computes `C + 4*idx`
+                * arithmetic. A PIC image never names an address with a literal,
+                * so there it is always the arithmetic (Portal 2 libtogl
+                * `lea 0x88e4(,%eax,4)` = GL_STATIC_DRAW + 4*bool). */
+               const bool lea_const = iclass == XED_ICLASS_LEA && !fixed_load;
+               if (!lea_const && disp >= 0x1000 && (std::size_t) disp < 0x80000000U && !memdisp) {
+                  capture_table(i, (std::size_t) disp);
                }
-            } else if (env.archive.header.filetype == MH_EXECUTE &&
-                       (env.archive.header.flags & MH_PIE) == 0 &&
+
+            } else if (fixed_load && disp32 &&
                        basereg != XED_REG_INVALID &&
                        basereg != select_value(bits, XED_REG_EIP, XED_REG_RIP) &&
                        basereg != select_value(bits, XED_REG_ESP, XED_REG_RSP) &&
-                       basereg != select_value(bits, XED_REG_EBP, XED_REG_RBP) &&
-                       indexreg == XED_REG_INVALID &&
-                       xed_decoded_inst_get_memory_displacement_width(operands, i) ==
-                       sizeof(uint32_t)) {
-               /*
-                * `[base + disp32]` absolute table addressing (i386
-                * mod=10, e.g. photocd's `movl %edi, 0x11260(%edx)`).
-                * The compiler indexes a fixed global table: `base`
-                * holds the element offset and disp32 is the table's
-                * absolute vmaddr. Our transform shifts that table, so
-                * the disp32 has to be relocated — capture it in
-                * `memdisp` so the transform can rewrite it.
-                *
-                * GATE: only a FIXED-load-address image (non-PIE
-                * MH_EXECUTE) references a global table this way. A PIC
-                * dylib / PIE exec ALWAYS reaches globals through its PIC
-                * anchor (ebx+disp) or rip-relative, so for those a
-                * `[base + disp32]` is ALWAYS an ordinary struct-field
-                * access where disp32 is a member offset — NOT an
-                * absolute address. (Observed: libtier0's
-                * `movl 0x7410(%edi),%eax` field load became
-                * `lea r11,[rip+sym]; mov (%rdi,%r11),%eax`, adding a
-                * relocated pointer to `this` → EXC_BAD_ACCESS in
-                * CLoggingSystem::RegisterLoggingListener.) Same gate as
-                * the bare-immediate heuristic below.
-                *
-                * Guard: only when disp32 lands inside a real
-                * (non-pagezero/linkedit) segment; otherwise this is an
-                * ordinary `[reg+offset]` struct-field access whose
-                * displacement must be emitted verbatim. esp/ebp bases
-                * are excluded outright — a global table is never
-                * indexed through the frame/stack pointer.
-                */
-               const ssize_t disp =
-                  xed_decoded_inst_get_memory_displacement(operands, i);
-               bool disp_in_seg = false;
-               if (disp >= 0x1000 && (std::size_t) disp < 0x80000000U) {
-                  for (auto *seg : env.archive.segments()) {
-                     std::string name(seg->segment_command.segname,
-                                      strnlen(seg->segment_command.segname,
-                                              sizeof(seg->segment_command.segname)));
-                     if (name == SEG_PAGEZERO || name == SEG_LINKEDIT) continue;
-                     if (seg->contains_vmaddr((std::size_t) disp)) {
-                        disp_in_seg = true;
-                        break;
-                     }
-                  }
-               }
-               /* CODE-ALIAS gate: with a base register live, a disp32 that
-                * merely aliases an instructions section and carries no
-                * function-ENTRY evidence is an integer (struct offset / extent /
-                * loop bound), not a table vmaddr. See
-                * memdisp_code_alias_is_constant — Civ IV's
-                * `lea 0x27ec(%ecx),%edx` free-list terminator. */
-               if (memdisp_code_alias_is_constant(img, env, (std::size_t) disp,
-                      xed_decoded_inst_get_iclass(&xedd) == XED_ICLASS_LEA)) {
-                  disp_in_seg = false;
-               }
-               if (disp_in_seg && !memdisp) {
-                  memidx = i;
-                  memdisp_absolute = true;
-                  env.vmaddr_resolver.resolve((std::size_t) disp,
-                                              (const SectionBlob<bits> **) &this->memdisp);
-                  /* mid-blob fallback (mirrors the `[disp32+idx*scale]`
-                   * branch above): a table base INSIDE a multi-byte blob —
-                   * notably EVERY zerofill (__bss/__common) variable, since
-                   * a zerofill section parses as ONE spanning ZeroBlob
-                   * extent — misses the exact-key resolve, leaving memdisp
-                   * null. The transform's slide-correct `lea r11,[rip+..];
-                   * op [base+r11]` rewrite gates on memdisp, so a null
-                   * silently degraded to the byte-identical copy shipping
-                   * the RAW i386 disp32 (Halo renderer: `movb $0,
-                   * 0x453cc0(%edx)` C6 82 into the __DATA zerofill tail ->
-                   * EXC_BAD_ACCESS write at the unmapped i386 address after
-                   * the graphics-settings dialog; guard 98_abs32_imm_group).
-                   * Same non-__OBJC admission as the indexed form: this
-                   * disp32 is a DEREFERENCED table base, never an integer
-                   * constant. */
-                  if (env.vmaddr_in_indexed_table_target((std::size_t) disp)) {
-                     env.vmaddr_resolver.resolve_containing(
-                        (std::size_t) disp,
-                        (const SectionBlob<bits> **) &this->memdisp,
-                        &this->memdisp_offset);
-                  }
-               }
-            } else if (env.archive.header.filetype == MH_EXECUTE &&
-                       (env.archive.header.flags & MH_PIE) == 0 &&
-                       basereg != XED_REG_INVALID &&
-                       basereg != select_value(bits, XED_REG_EIP, XED_REG_RIP) &&
-                       basereg != select_value(bits, XED_REG_ESP, XED_REG_RSP) &&
-                       basereg != select_value(bits, XED_REG_EBP, XED_REG_RBP) &&
-                       indexreg != XED_REG_INVALID &&
-                       xed_decoded_inst_get_memory_displacement_width(operands, i) ==
-                       sizeof(uint32_t)) {
-               /*
-                * `[base + idx*scale + disp32]` absolute table addressing
-                * (i386 mod=10 r/m=100 + SIB with BOTH base and index live) —
-                * a 2-D array / array-of-structs access against a fixed
-                * global: `movl _tab(%eax,%ecx,4), %edx` with the row offset
-                * in base, the element index in idx*scale and the table's
-                * absolute vmaddr as disp32. The [disp32+idx*scale] arm above
-                * requires base=INVALID and the [base+disp32] arm requires
-                * index=INVALID, so this shape matched NEITHER: the raw i386
-                * disp32 shipped verbatim — no rebase, no __86x64_abs32
-                * runtime-slide entry — and the translated access
-                * dereferenced the unmapped original address (guard
-                * 89_abs_base_index_disp).
-                *
-                * Same gates as the base-only arm: only a FIXED-load-address
-                * image (non-PIE MH_EXECUTE) bakes absolute table addresses
-                * into displacements (PIC code reaches globals anchor-
-                * relative, where disp32 is a struct offset); esp/ebp bases
-                * excluded (a global table is never indexed through the
-                * frame/stack pointer; note the SIB encoding already forbids
-                * esp as INDEX); disp32 must land inside a real segment.
-                *
-                * Translation needs no new rewrite: the byte-identical
-                * default rule keeps the SIB operand (identical in x86_64),
-                * re-derives memdisp_absolute=true (base != RIP), Emit
-                * patches the disp32 to the table's M64 vmaddr, and
-                * inject_abs32_section registers the field for the runtime
-                * ASLR slide — exactly the [disp32+idx*scale] mechanism. The
-                * copy ctor's 0x67 addr32 injection preserves the i386
-                * 32-bit EA wrap for the scaled index. Indirect control
-                * transfers through this shape (call/jmp *tab(%b,%i,s)) take
-                * the CALL_NEAR_MEMv/JMP_MEMv narrowing rewrites, which now
-                * propagate memdisp_absolute from the source instruction.
-                */
-               const ssize_t disp =
-                  xed_decoded_inst_get_memory_displacement(operands, i);
-               bool disp_in_seg = false;
-               if (disp >= 0x1000 && (std::size_t) disp < 0x80000000U) {
-                  for (auto *seg : env.archive.segments()) {
-                     std::string name(seg->segment_command.segname,
-                                      strnlen(seg->segment_command.segname,
-                                              sizeof(seg->segment_command.segname)));
-                     if (name == SEG_PAGEZERO || name == SEG_LINKEDIT) continue;
-                     if (seg->contains_vmaddr((std::size_t) disp)) {
-                        disp_in_seg = true;
-                        break;
-                     }
-                  }
-               }
-               /* CODE-ALIAS gate — identical to the base-only arm above; a
-                * 2-D-array access `tab(%base,%idx,s)` whose disp32 aliases
-                * mid-__text is an integer, not a table vmaddr. */
-               if (memdisp_code_alias_is_constant(img, env, (std::size_t) disp,
-                      xed_decoded_inst_get_iclass(&xedd) == XED_ICLASS_LEA)) {
-                  disp_in_seg = false;
-               }
-               if (disp_in_seg && !memdisp) {
-                  memidx = i;
-                  memdisp_absolute = true;
-                  env.vmaddr_resolver.resolve((std::size_t) disp,
-                                              (const SectionBlob<bits> **) &this->memdisp);
-                  /* mid-blob fallback — same non-__OBJC admission as the
-                   * sibling arms: this disp32 is a DEREFERENCED table base,
-                   * never an integer constant (zerofill spans and packed
-                   * const tables resolve to containing blob + offset). */
-                  if (env.vmaddr_in_indexed_table_target((std::size_t) disp)) {
-                     env.vmaddr_resolver.resolve_containing(
-                        (std::size_t) disp,
-                        (const SectionBlob<bits> **) &this->memdisp,
-                        &this->memdisp_offset);
-                  }
+                       basereg != select_value(bits, XED_REG_EBP, XED_REG_RBP)) {
+               /* disp32(%base[,%idx,s]) in a fixed-load image: the disp may be
+                * a global table's absolute address (photocd `movl %edi,
+                * 0x11260(%edx)`; guard 89_abs_base_index_disp). PIC code uses
+                * this shape only for struct fields, and a frame/stack base
+                * never indexes a global. DetectPicAnchoredDisps (2d) cancels it
+                * inside PIC-anchored functions. */
+               if (image_addr((std::size_t) disp) &&
+                   !memdisp_code_alias_is_constant(img, env, (std::size_t) disp,
+                                                   iclass == XED_ICLASS_LEA) &&
+                   !memdisp) {
+                  capture_table(i, (std::size_t) disp);
                }
             }
          }
       }
 
-      /* Relative Branches */
+      /* ---- relative branches ---- */
       if (xed_operand_values_has_branch_displacement(operands)) {
-         const ssize_t brdisp = xed_decoded_inst_get_branch_displacement(operands);
-         size_t targetaddr = refaddr + brdisp;
-
-         /* Classic i386 self-modifying CALL-stub redirect. A pre-10.4 image
-          * routes lazy calls through `__IMPORT,__jump_table` stubs that ship as
-          * `0xf4` (hlt) and were filled in place by an old dyld; modern dyld
-          * never fills them, so `call <stub>` would jump into hlt on a non-exec
-          * page. For stubs whose indirect symbol is DEFINED in this image,
-          * Dysymtab::lift_jump_table_targets recorded stub_vmaddr -> the defined
-          * function's vmaddr; retarget the branch straight to the function,
-          * bypassing the dead stub (the function blob resolves the placeholder
-          * to its translated address exactly like any intra-image call). */
-         {
-            auto jtt = env.jump_table_targets.find(targetaddr);
-            if (jtt != env.jump_table_targets.end()) {
-               targetaddr = jtt->second;
-            }
+         std::size_t targetaddr = refaddr + xed_decoded_inst_get_branch_displacement(operands);
+         /* A classic `__IMPORT,__jump_table` stub is dead on modern dyld: a
+          * branch to a DEFINED stub goes straight to its function, one to an
+          * UNDEFINED stub to its synthesized __jt_tramp trampoline (bound
+          * directly: the dead stub still owns its vmaddr, so a placeholder
+          * would land on it). See Dysymtab::lift_jump_table_targets. */
+         auto jtt = env.jump_table_targets.find(targetaddr);
+         if (jtt != env.jump_table_targets.end()) {
+            targetaddr = jtt->second;
          }
-
-         /* UNDEFINED half of the same redirect. An undefined stub has no
-          * in-image function to retarget to, so Dysymtab::synthesize_undef_jump_stubs
-          * built a `jmp *slot` trampoline (in __TEXT,__jt_tramp) reaching the real
-          * import at load. Point the branch's brdisp STRAIGHT at that trampoline
-          * blob. We must NOT route this through add_placeholder(): it positions a
-          * placeholder by vmaddr into whichever section owns the target address,
-          * and the dead __jump_table stub (its hlt bytes are still present) still
-          * owns the stub vmaddr — so the placeholder would land on the filler
-          * instead of the trampoline. A direct brdisp resolves through the
-          * trampoline blob's own (executable) Build vmaddr. */
          auto jtu = env.jump_table_undef_tramps.find(targetaddr);
          if (jtu != env.jump_table_undef_tramps.end()) {
             this->brdisp = jtu->second;
-         } else {
-            /*
-             * Only resolve the target if it lands inside a real segment.
-             * Linear-sweep disassembly misdecodes data interleaved in __text
-             * as branch instructions; their computed targets fall outside any
-             * segment and would strand an unplaceable placeholder, which is
-             * fatal in Archive::Build ("not all placeholders could be
-             * placed"). brdisp==nullptr is already a handled state — Emit
-             * (xed_patch_brdisp) and the i386->x86_64 copy ctor both guard on
-             * it — so leaving it null keeps the original displacement bytes.
-             */
-            bool target_in_seg = false;
-            for (auto *seg : env.archive.segments()) {
-               std::string name(seg->segment_command.segname,
-                                strnlen(seg->segment_command.segname,
-                                        sizeof(seg->segment_command.segname)));
-               if (name == SEG_PAGEZERO || name == SEG_LINKEDIT) { continue; }
-               if (seg->contains_vmaddr(targetaddr)) {
-                  target_in_seg = true;
-                  break;
-               }
-            }
-            if (target_in_seg) {
-               this->brdisp = env.add_placeholder(targetaddr);
-            }
+         } else if (env.vmaddr_in_image(targetaddr)) {
+            /* data misdecoded as a branch points nowhere; its bytes stay put */
+            this->brdisp = env.add_placeholder(targetaddr);
          }
       }
 
-      /* Check for other immediates */
+      /* ---- immediates ---- */
       switch (xed_decoded_inst_get_iform_enum(&xedd)) {
-      case XED_IFORM_PUSH_IMMz: /* push imm32 */
+      /* `push $X` / `mov $X,%reg` / `add $X,%reg`: a fixed-load image names its
+       * own globals and code by literal address (`mov $0xf4c500,%ebx`), with no
+       * relocation to mark it. Only full 32-bit immediates can be addresses. */
+      case XED_IFORM_PUSH_IMMz:
       case XED_IFORM_MOV_GPRv_IMMv:
-      /*
-       * `add reg, imm32` (general `81 /0 id` and the `05 id` eax short form)
-       * where imm32 is an absolute data address — the non-PIC pointer
-       * idiom `<reg>=index*stride; add $&table, <reg>`. Same fixed-load /
-       * in-segment probe as MOV/PUSH (the trailing imm32 is likewise the
-       * last 4 instruction bytes, so the shared body below applies). The
-       * Transform side expands these to `lea r11,[rip+disp]; add reg,r11d`
-       * (MOV becomes a plain lea since it fully defines the reg; add can't,
-       * the reg already carries the index). 16-bit forms are excluded by the
-       * 32-bit-immediate-width gate below, exactly as for MOV.
-       */
       case XED_IFORM_ADD_GPRv_IMMz:
       case XED_IFORM_ADD_OrAX_IMMz:
          {
             assert(imm == nullptr);
             const std::size_t imm_idx = instbuf.size() - sizeof(uint32_t);
-
-            /*
-             * `mov reg, imm32` / `push imm32` where imm32 is an ABSOLUTE
-             * data/code address. A fixed-load-address i386 image (no rebase
-             * info — `rebase_size==0`, common for non-PIE main executables)
-             * references its own globals by bare absolute immediate
-             * (`mov $0xf4c500, %ebx; ...; mov (%ebx)`) relying on its
-             * preferred base, with NO relocation to mark the site. Once
-             * translated into a dylib (which slides, and whose sections move
-             * as __cfstring/etc. expand), that raw immediate points at the
-             * stale i386 vmaddr -> EXC_BAD_ACCESS. Detect the case the same
-             * way the absolute-memory-operand paths above do — imm lands
-             * inside a real (non-pagezero/linkedit) segment's vmaddr range —
-             * and mark it a pointer so it gets a placeholder + relocation to
-             * the translated layout. (Integer constants that happen to fall
-             * in a segment's vmaddr range are the inherent false-positive
-             * risk of this heuristic, already accepted for memory operands.)
-             */
             bool imm_is_ptr = false;
-            /* GATE: only a FIXED-load-address image (non-PIE MH_EXECUTE) ever
-             * references its own globals/code by a bare absolute immediate. A
-             * dylib (MH_DYLIB) and a PIE executable are position-independent —
-             * they reach their data via PIC (get_pc_thunk / rip-relative), never
-             * a hardcoded absolute immediate. Applying this heuristic to them
-             * mis-relocates ordinary integer constants that merely alias a
-             * vmaddr: e.g. libtier0's `mov $0x3400,%eax` (a loop count) became
-             * `lea eax,[rip+disp]`, so the array-zeroing loop ran on a giant
-             * pointer and stomped past __DATA into __LINKEDIT (SIGBUS in
-             * GetGlobalLoggingSystem_Internal). Non-PIE execs (Portal 2's
-             * portal2_osx, the original use case) keep the heuristic. */
-            const bool fixed_load_addr =
-               env.archive.header.filetype == MH_EXECUTE &&
-               (env.archive.header.flags & MH_PIE) == 0;
-            /* Only a full 32-bit immediate can hold a pointer. `*_IMMv`/`IMMz`
-             * also cover the 16-bit-operand forms (`66`-prefixed, e.g.
-             * `mov di, imm16`); there imm_idx would mis-read into the opcode
-             * bytes and the M32->M64 transform (lea r32) would reject the
-             * 16-bit dest reg. Skip those — a 16-bit immediate is never a ptr. */
-            if (fixed_load_addr &&
-                xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
-               const uint32_t imm_val =
-                  img.template at<uint32_t>(loc.offset + imm_idx);
-               if (imm_val >= 0x1000 && imm_val < 0x80000000U) {
-                  for (auto *seg : env.archive.segments()) {
-                     std::string name(seg->segment_command.segname,
-                                      strnlen(seg->segment_command.segname,
-                                              sizeof(seg->segment_command.segname)));
-                     if (name == SEG_PAGEZERO || name == SEG_LINKEDIT) continue;
-                     if (seg->contains_vmaddr(imm_val)) { imm_is_ptr = true; break; }
-                  }
-               }
-               /* CODE-target FUNCTION-ENTRY gate (shared with DataParser, see
-                * ParseEnv::code_alias_is_constant): an imm32 that merely
-                * ALIASES a mid-function address inside an instructions section
-                * (no func_syms nlist at its value) is an integer constant.
-                * Civ IV: EVERY GCC static-init stub passes priority 0xffff in
-                * edx (`__GLOBAL__I_*: mov $0xffff,%edx; mov $1,%eax; jmp
-                * __static_initialization_and_destruction_0`); 0xffff aliases
-                * __text, so the old heuristic rewrote it to `lea edx,[rip+…]`
-                * -> the priority test `cmp $0xffff,%edx` failed -> ALL 1063
-                * C++ static ctors silently skipped -> first use of a
-                * never-constructed static std::set (MSG_Mac sCallbackList)
-                * crashed in _Rb_tree_decrement on the zeroed header (fault
-                * addr 0x4). A genuine code-pointer immediate (`push $_fn`
-                * callback, `mov $_fn,%reg`) targets a function ENTRY and
-                * carries a symbol (or prologue bytes) -> still relocated.
-                * imm32_code_alias_is_constant extends the gate to LOCALS-
-                * STRIPPED binaries (Civ IV STEAM: code_alias_is_constant is
-                * disarmed there, so the same 0xffff priority relocated again —
-                * `lea edx,[rip+..]` — and only parse-ORDER luck kept 1095/1096
-                * dispatchers consistent; the first-in-sweep dispatcher kept
-                * its literal cmp and its TU's ctors were skipped -> the
-                * "Launch in Window" NULL std::list registry crash). */
-               if (imm_is_ptr && bits == Bits::M32 &&
-                   imm32_code_alias_is_constant(img, env, imm_val)) {
-                  imm_is_ptr = false;
-               }
-               /* Record a relocated base so a later loop-bounding `cmp reg,
-                * $&table_end` can move with it (see the CMP_*_IMMz case). */
+            if (fixed_load && xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
+               const uint32_t imm_val = img.template at<uint32_t>(loc.offset + imm_idx);
+               imm_is_ptr = image_addr(imm_val) &&
+                  !(bits == Bits::M32 && imm32_code_alias_is_constant(img, env, imm_val));
+               /* a later loop-bounding `cmp $&table_end,%reg` moves with it */
                if (imm_is_ptr && bits == Bits::M32) {
                   env.relocated_ptr_imms.insert(imm_val);
                }
             }
-            imm = Immediate<bits>::Parse(img, loc + imm_idx, env, imm_is_ptr);
-            imm->heuristic = true; /* value-alias probe (see Immediate) */
+            parse_imm(imm_idx, imm_is_ptr);
          }
          break;
 
-      /*
-       * `cmp r32, imm32` (81 /7 id) / `cmp eax, imm32` (3d id) that bounds a
-       * pointer LOOP: the immediate is the one-past-the-end address of a table
-       * whose BASE was loaded by a relocated `mov reg, $&table` immediate. The
-       * base moves to the translated layout but a raw sentinel does not, so the
-       * loop iterator (a slid pointer) never equals the stale end value and runs
-       * off the end of the table -> a virtual call through a NULL/garbage slot
-       * (Halo static-init: `mov $tbl,%ebx; L: mov (%ebx),%edx; call *[edx+0x10];
-       * add $4,%ebx; cmp $tbl_end,%ebx; jne L` -> `jmp *0`). Relocate the
-       * sentinel by the same delta. Gated HARD (imm_bounds_relocated_table):
-       * only when a relocated base sits at/below this value in the SAME segment,
-       * so a bare loop-count constant that merely aliases a data vmaddr is left
-       * alone (cmp against integers is far more common than the ADD pointer
-       * idiom, hence the extra gate over the MOV/ADD/PUSH family above). The
-       * Transform emits `lea r11,[rip+disp]; cmp r32, r11d`. */
+      /* `cmp $X,%reg`: a pointer only as the end sentinel of a table whose base
+       * was relocated (Halo static-init table walk), or under the store-side
+       * discriminator so an identity compare classifies like the store
+       * regardless of parse order (guard 99_cmp_reg_ptr_imm_order). */
       case XED_IFORM_CMP_GPRv_IMMz:
       case XED_IFORM_CMP_OrAX_IMMz:
          {
             assert(imm == nullptr);
             const std::size_t imm_idx = instbuf.size() - sizeof(uint32_t);
             bool imm_is_ptr = false;
-            const bool fixed_load_addr =
-               env.archive.header.filetype == MH_EXECUTE &&
-               (env.archive.header.flags & MH_PIE) == 0;
-            if (fixed_load_addr && bits == Bits::M32 &&
+            if (fixed_load && bits == Bits::M32 &&
                 xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
-               const uint32_t imm_val =
-                  img.template at<uint32_t>(loc.offset + imm_idx);
-               /* imm32_code_alias_is_constant (not just code_alias_is_constant)
-                * so the compare side classifies a code-aliasing constant
-                * IDENTICALLY to the MOV/PUSH/ADD side above regardless of
-                * symbol coverage or parse order: on the locals-stripped path
-                * the mis-relocated stub MOVs used to enter relocated_ptr_imms,
-                * which made THIS gate relocate the matching dispatcher
-                * `cmp $0xffff,%edx` for every dispatcher parsed AFTER a stub —
-                * masking the MOV bug by accidental consistency — while the
-                * first-in-sweep dispatcher kept its literal and its TU's
-                * static ctors were skipped (Civ IV "Launch in Window").
-                *
-                * Second admit alongside imm_bounds_relocated_table: the
-                * 9510f29 store discriminator (4-aligned + writable data;
-                * fixed_load_addr already gates this arm) — the reg-dest
-                * IDENTITY compare `movl field(%reg),%eax; cmpl $&sentinel,
-                * %eax` must classify like the store/mem-cmp family AS A PURE
-                * FUNCTION OF VALUE+IMAGE, not of parse order. Relying on
-                * relocated_ptr_imms alone left the compare literal whenever
-                * it parsed BEFORE any relocated base in its segment (the
-                * exact accidental-consistency trap 695d60f closed on the
-                * code-alias side; guard 99_cmp_reg_ptr_imm_order). In real
-                * images the bounds table admits nearly every data-aliasing
-                * value anyway once one store relocated below it — this makes
-                * the behavior deterministic, not broader. */
-               if (imm_val >= 0x1000 && imm_val < 0x80000000U &&
-                   !imm32_code_alias_is_constant(img, env, imm_val) &&
-                   (env.imm_bounds_relocated_table(imm_val) ||
-                    ((imm_val & 3) == 0 &&
-                     env.vmaddr_in_writable_data(imm_val)))) {
-                  imm_is_ptr = true;
-               }
+               const uint32_t imm_val = img.template at<uint32_t>(loc.offset + imm_idx);
+               imm_is_ptr = imm_val >= 0x1000 && imm_val < 0x80000000U &&
+                  !imm32_code_alias_is_constant(img, env, imm_val) &&
+                  (env.imm_bounds_relocated_table(imm_val) ||
+                   ((imm_val & 3) == 0 && env.vmaddr_in_writable_data(imm_val)));
             }
-            imm = Immediate<bits>::Parse(img, loc + imm_idx, env, imm_is_ptr);
-            imm->heuristic = true; /* value-alias probe (see Immediate) */
+            parse_imm(imm_idx, imm_is_ptr);
          }
          break;
       default:
          break;
       }
 
-      /*
-       * `mov [esp/rsp + small_disp], imm32` (c7 04/44/84 24 imm32) and
-       * `mov [ebp + disp], imm32` (c7 45/85 imm32) — i386's canonical way
-       * to set up a stack-passed call arg (e.g. printf format string).
-       * If imm32 lands inside a real segment we treat it as a pointer
-       * so the transform rewrites it to lea+store against the new vmaddr.
-       *
-       * Validated by tests-i386/01_hello, 03_stack_imm_args.
-       * Caveat: value-range guessing has false positives — an integer
-       * constant that happens to alias a vmaddr will be mis-relocated.
-       * If we hit one, narrow the guard (e.g. require __cstring / __const
-       * / __text destination) rather than removing the heuristic, since
-       * 01_hello and every printf("format", ...) caller depends on it.
-       */
+      /* `movl $X, disp(%esp|%ebp)` — i386 stack-argument setup (printf format
+       * strings, callbacks). Any in-image value counts, except a code alias
+       * with no entry evidence (guards 01_hello, 03_stack_imm_args,
+       * 74_stripped_stackarg_const). */
       if (imm == nullptr && instbuf.size() >= 7 && instbuf.at(0) == 0xc7) {
          const uint8_t modrm = instbuf.at(1);
          const uint8_t mod = (modrm >> 6) & 0x3;
          const uint8_t rm  = modrm & 0x07;
          std::size_t imm_off = 0;
-         if ((modrm & 0x38) == 0 && rm == 0x04
-             && instbuf.size() >= 3 && instbuf.at(2) == 0x24) {
+         if ((modrm & 0x38) == 0 && rm == 0x04 && instbuf.at(2) == 0x24) {
             if (mod == 0 && instbuf.size() == 7)       imm_off = 3;
             else if (mod == 1 && instbuf.size() == 8)  imm_off = 4;
             else if (mod == 2 && instbuf.size() == 11) imm_off = 7;
@@ -1383,275 +766,92 @@ namespace MachO {
             else if (mod == 2 && instbuf.size() == 10) imm_off = 6;
          }
          if (imm_off > 0) {
-            const uint32_t value =
-               img.template at<uint32_t>(loc.offset + imm_off);
-            if (value >= 0x1000 && value < 0x80000000U) {
-               bool in_seg = false;
-               for (auto *seg : env.archive.segments()) {
-                  std::string name(
-                     seg->segment_command.segname,
-                     strnlen(seg->segment_command.segname,
-                             sizeof(seg->segment_command.segname)));
-                  if (name == SEG_PAGEZERO || name == SEG_LINKEDIT) continue;
-                  if (seg->contains_vmaddr(value)) { in_seg = true; break; }
-               }
-               /* CODE-target FUNCTION-ENTRY gate (imm32_code_alias_is_constant,
-                * the shared classifier): a stack-arg imm32 that lands
-                * MID-function inside an instructions section with no symbol at
-                * its value is an integer argument (e.g.
-                * `movl $0xffff, 4(%esp)`), not a pointer. A callback-pointer
-                * arg (`movl $_fn, (%esp)`) targets a function entry and
-                * carries a symbol OR the `55 89 e5` frame-setup prologue
-                * (the stripped-binary ProcPtr recovery: Halo CE registers its
-                * Carbon renderer-check event handlers via
-                * `movl $handler,(%esp)` with no symbols) -> still relocated.
-                * The prologue/func_syms positive-evidence logic lives in the
-                * helper so ALL imm32 heuristic arms classify identically. */
-               if (in_seg && bits == Bits::M32 &&
-                   imm32_code_alias_is_constant(img, env, value)) {
-                  in_seg = false;
-               }
-               if (in_seg) {
-                  imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);
-                  imm->heuristic = true; /* value-alias probe (see Immediate) */
-               }
+            const uint32_t value = img.template at<uint32_t>(loc.offset + imm_off);
+            if (image_addr(value) &&
+                !(bits == Bits::M32 && imm32_code_alias_is_constant(img, env, value))) {
+               parse_imm(imm_off, true);
             }
          }
       }
 
-      /* `mov [reg+disp], imm32` for a GENERAL register base (rax/rcx/rdx/rbx/
-       * rsi/rdi — not esp/ebp, handled above) where imm32 is an absolute data
-       * pointer the i386 image baked in, e.g. `movl $&__cfstring, 0x7c(%edi)`
-       * (c7 47 7c imm32) storing a constant NSString into an ivar. The
-       * esp/ebp heuristic above accepts ANY segment because stack-arg setup
-       * is overwhelmingly string/pointer args; a struct-field store through an
-       * arbitrary base, however, is just as often an integer ivar, so to avoid
-       * mis-relocating integer constants that merely alias a vmaddr we require
-       * the value to land in a CONSTANT/STRING section (cstring, cfstring,
-       * const, objc metadata, text) -- a high-confidence pointer target. The
-       * MOV_MEMv_IMMz transform rewrites this to a slide-correct lea+store. */
+      /* `movl $X, disp(%reg[,%idx,s])` through a general base: a field store,
+       * as often an integer as a pointer. X is a pointer if it names a string/
+       * ObjC object section, a pointer table (its first word is itself an
+       * in-image address: `movl $vtable,(%eax)`), writable data in a
+       * fixed-load image (4-aligned; guards 99_zerofill_target_imm_store,
+       * 99_sib_ptr_imm_store), or a function entry. The no-base
+       * `disp32(,%idx,s)` shape belongs to the absolute-table capture. */
       if (imm == nullptr && instbuf.size() >= 6 && instbuf.at(0) == 0xc7
-          && (instbuf.at(1) & 0x38) == 0          /* 0xc7 /0 = MOV r/m32, imm32 */
+          && (instbuf.at(1) & 0x38) == 0          /* c7 /0 = mov r/m32, imm32 */
           && (instbuf.at(1) >> 6) != 3) {         /* memory destination */
          const uint8_t mod = instbuf.at(1) >> 6;
          const uint8_t rm = instbuf.at(1) & 0x07;
-         /* rm==4 = SIB byte follows. A SIB with a REAL register base
-          * (`movl $&data, disp(%ebx,%esi,s)` — array-of-structs field
-          * install) is just as much a genbase store as the plain-ModR/M
-          * shapes and used to fall through BOTH arms (the stack arm keys
-          * the exact esp-no-index encodings, this arm excluded rm==4
-          * wholesale) -> the pointer imm shipped raw (guard
-          * 99_sib_ptr_imm_store). Admit it under the SAME policy gates;
-          * the no-base [disp32+idx*scale] shape (mod==0, SIB base==101)
-          * stays excluded — that displacement is owned by the
-          * absolute-table machinery. The MR rewrite prepends 0x67 for
-          * scaled-index dests to keep the i386 EA wrap. */
-         bool sib_reg_base = false;
-         if (rm == 0x04 && instbuf.size() >= 7) {   /* modrm+sib+imm32 min */
-            const uint8_t sib_base = instbuf.at(2) & 0x07;
-            sib_reg_base = !(mod == 0 && sib_base == 0x05);
+         bool genbase = rm != 0x04 && rm != 0x05;   /* esp/ebp: stack-arg arm */
+         if (rm == 0x04 && instbuf.size() >= 7) {
+            genbase = !(mod == 0 && (instbuf.at(2) & 0x07) == 0x05);
          }
-         if ((rm != 0x04 && rm != 0x05               /* esp/ebp handled above */
-              ? true : sib_reg_base)
-             && xed_operand_values_has_immediate(operands)
+         if (genbase && xed_operand_values_has_immediate(operands)
              && xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
             const std::size_t imm_off = instbuf.size() - sizeof(uint32_t);
             const uint32_t value = img.template at<uint32_t>(loc.offset + imm_off);
             bool ptr_target = false;
             if (value >= 0x1000 && value < 0x80000000U) {
                ptr_target = env.vmaddr_in_const_section(value);
-               /* Pointer-table (C++ vtable / fn-ptr dispatch array) install,
-                * e.g. `movl $vtable, (%eax)` (c7 00 imm32). The imm lands in
-                * __DATA,__const, which vmaddr_in_const_section deliberately
-                * EXCLUDES (integer constants frequently alias the __const
-                * range). Discriminate by DOUBLE-INDIRECTION: a vtable/table
-                * address points to a word that is ITSELF an in-image pointer
-                * (the first table entry), whereas an integer constant aliasing
-                * __const points at scalar bytes. This relocates the legitimate
-                * vtable store without the integer-constant false positives the
-                * __const exclusion guards against. (iPhoto's C++ frameworks
-                * install vtables via this exact `movl $vtable,(%reg)` form ->
-                * un-relocated stale i386 vtable ptr -> EXC_BAD_ACCESS.) */
                if (!ptr_target && (value & 3) == 0) {
-                  for (auto *seg : env.archive.segments()) {
-                     const auto &sc = seg->segment_command;
-                     std::string sn(sc.segname,
-                                    strnlen(sc.segname, sizeof(sc.segname)));
-                     if (sn == SEG_PAGEZERO || sn == SEG_LINKEDIT) continue;
-                     if ((sc.initprot & VM_PROT_EXECUTE) != 0) continue; /* code */
-                     if (!seg->contains_vmaddr(value)) continue;
-                     const std::size_t toff = value - sc.vmaddr + sc.fileoff;
-                     if (toff + 4 > sc.fileoff + sc.filesize) break; /* zerofill */
-                     if (toff + 4 > img.size()) break;
-                     const uint32_t tword = img.template at<uint32_t>(toff);
-                     if (tword < 0x1000 || tword >= 0x80000000U) break;
-                     for (auto *s2 : env.archive.segments()) {
-                        const auto &s2c = s2->segment_command;
-                        std::string s2n(s2c.segname,
-                                        strnlen(s2c.segname, sizeof(s2c.segname)));
-                        if (s2n == SEG_PAGEZERO || s2n == SEG_LINKEDIT) continue;
-                        if (s2->contains_vmaddr(tword)) { ptr_target = true; break; }
-                     }
-                     break;
-                  }
+                  ptr_target = points_at_pointer(img, env, value);
                }
-               /* FIXED-LOAD image, WRITABLE __DATA target (the Civ IV
-                * pointer-immediate wall): a non-PIE MH_EXECUTE baking
-                * `movl $&anon_static, field(%reg)` — Civ stores the interior
-                * pointer of an anonymous ZEROED static string block
-                * (0x145ea60, no symbol, no content for the vtable probe:
-                * `movzbl -2(%rax)` reads its zero length field) into ~97
-                * object fields; the raw i386 __data address shipped
-                * unrelocated -> EXC_BAD_ACCESS at first deref. The same
-                * fixed-load gate already justifies relocating data-aliasing
-                * immediates for the MOV/PUSH/ADD-to-REG family (a
-                * position-independent image NEVER bakes absolute data
-                * addresses; a fixed-load one genuinely does), so admit the
-                * store form under it too, narrowed against integer-ivar
-                * false positives by the value being 4-ALIGNED (the DataParser
-                * misaligned-data-range rule) and landing in writable data
-                * (vmaddr_in_writable_data also excludes fragile __OBJC).
-                *
-                * ZEROFILL targets included (the sibling gap 9510f29 deferred):
-                * a __bss/__common address is just as much a bakeable absolute
-                * pointer as a file-backed __data one, and the reg-dest twin of
-                * the SAME store — `movl $&__bss_global, %reg` (MOV_GPRv_IMMv
-                * above) — ALREADY relocates zerofill-valued immediates with no
-                * such exclusion, so refusing them here left a cross-form
-                * inconsistency: Civ shipped 5158 `movl $&zerofill, disp(%reg)`
-                * stores verbatim while their reg-load siblings relocated
-                * (guard 99_zerofill_target_imm_store). The reason 9510f29
-                * excluded zerofill — that __bss/__common spans megabytes so an
-                * OFFSET like `addl $0x124f80,%edx` (=&array[150000]) routinely
-                * ALIASES it and must NOT relocate — is a PIC-codegen artifact,
-                * and the structural back-stop for it already exists downstream:
-                * these heuristic immediates set heuristic=true and section.cc
-                * DetectPicAnchoredDisps pass (2c) CANCELS any zerofill-aliasing
-                * heuristic immediate inside a PIC-anchored region (where an
-                * absolute pointer can't legitimately appear). So the offset
-                * arithmetic is dropped by function-granularity context 2c has
-                * and the parse lacks, while genuine non-PIC absolute-pointer
-                * stores keep the relocation — exactly as for the reg-dest
-                * family. (Guards: 96_zerofill_common_interior /
-                * 99_bss_zerofill_not_filebacked stay green.) */
-               if (!ptr_target && (value & 3) == 0 &&
-                   env.archive.header.filetype == MH_EXECUTE &&
-                   (env.archive.header.flags & MH_PIE) == 0 &&
+               if (!ptr_target && (value & 3) == 0 && fixed_load &&
                    env.vmaddr_in_writable_data(value)) {
                   ptr_target = true;
                }
-               /* CODE-target FUNCTION-ENTRY admit — a callback installed
-                * into a struct field (`movl $_handler, disp(%reg)`,
-                * obj->cb = &handler) shipped its raw i386 code address
-                * verbatim (none of the probes above admit an
-                * instructions-section target) so the first indirect call
-                * through the field jumped to the stale i386 vmaddr (SIGSEGV;
-                * guard 99_fnptr_field_call). Admit ONLY on SYMBOL evidence
-                * (func_syms nlist at a real function entry) — NOT the
-                * prologue-byte heuristic, which mis-relocates an integer
-                * constant aliasing a coincidental `55 89 e5` run (the Civ
-                * boost-registry rc=139 deterministic crash; guard
-                * 99_code_alias_imm_falsereloc). See
-                * field_store_code_target_is_fnptr. */
                if (!ptr_target && bits == Bits::M32 &&
                    field_store_code_target_is_fnptr(img, env, value)) {
                   ptr_target = true;
                }
             }
             if (ptr_target) {
-               imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);
-               imm->heuristic = true; /* value-alias probe (see Immediate) */
+               parse_imm(imm_off, true);
             }
          }
       }
 
-      /* `cmp [reg+disp], imm32` (81 /7) — mem-dest pointer-IDENTITY COMPARE
-       * against a baked absolute data address: the COMPARE sibling of the
-       * 9510f29/07e7ef0 pointer-imm STORES above. A fixed-load i386 image
-       * that stores `movl $&sentinel, field(%reg)` tests it later with
-       * `cmpl $&sentinel, field(%reg)` (Civ IV live: `cmpl $0x145ea6c,
-       * -0x54(%rbp)` at 0x114cf20b, `cmpl $0x1460468,0xc(%rbx)` x13; census
-       * 22/22 __data-target + 17/18 zerofill compare sites shipped raw).
-       * Relocating the store but not the compare turns every such identity
-       * test ALWAYS-FALSE in the translated binary — a SILENT corruption
-       * class (copy-on-write / free-the-sentinel decisions invert), not a
-       * crash. Capture the imm under the EXACT 9510f29 discriminator so
-       * store and compare classify IDENTICALLY as a pure function of
-       * value+image: fixed-load non-PIE MH_EXECUTE + imm32 4-aligned +
-       * vmaddr_in_writable_data (zerofill included per 07e7ef0; __OBJC
-       * excluded by the predicate). Deliberately NOT the looser
-       * const-section/vtable probes the MOV arm also carries: live integer
-       * compares ($0x1000000, $0xff0000) alias __TEXT,__const and must stay
-       * literal (guard 99_cmp_abs32_imm_notptr covers the __text-aliasing
-       * side). CMP only — a TEST mask against a pointer is meaningless, and
-       * ADD/SUB/AND/OR mem-imm arithmetic on data-aliasing values is
-       * routinely plain integer math. The CMP_MEMv_IMMz transform
-       * (lea r11,[rip+disp]; cmp [mem], r11d — 39 /r, same operand order)
-       * already existed from the 87_alu_absdest family; this is purely the
-       * missing parse capture. heuristic=true keeps the section.cc
-       * DetectPicAnchoredDisps (2c) zerofill-alias back-stop. abs32 dests
-       * (mod=00 r/m=101, SIB no-base) are owned by the absolute-[disp32]
-       * arm above, whose CMP gate mirrors this discriminator.
-       * (Guard 99_cmp_mem_ptr_imm.)
-       *
-       * ADD (81 /0) and SUB (81 /5) mem-dest join CMP under the same
-       * strict discriminator (guard 99_alu_mem_ptr_imm): `addl $&base,
-       * field` / `subl $&base, field` are the in-place offset<->pointer
-       * conversions whose REG-dest twins (ADD_GPRv_IMMz — permissive
-       * any-segment probe) already relocate; leaving the mem form raw
-       * mixes a relocated pointer with a raw i386 base address and the
-       * arithmetic is off by the whole translation delta. AND/OR/XOR/TEST
-       * stay deliberately uncaptured: a mask/bit-op against a pointer
-       * VALUE is meaningless, so a data-aliasing imm there is always an
-       * integer. */
+      /* `cmp/add/sub $X, disp(%reg)` (81 /7, /0, /5): the compare and
+       * offset<->pointer siblings of the field store above, under its strict
+       * data discriminator so both sides of an identity test agree (guards
+       * 99_cmp_mem_ptr_imm, 99_alu_mem_ptr_imm). CMP also admits a function
+       * entry (`cmpl $_handler, field`). A mask or bit-op against a pointer is
+       * meaningless, so AND/OR/XOR/TEST never capture. */
       if (imm == nullptr && this->memdisp == nullptr && bits == Bits::M32
           && instbuf.size() >= 6 && instbuf.at(0) == 0x81
-          && ((instbuf.at(1) & 0x38) == 0x38      /* 81 /7 = CMP r/m32, imm32 */
-              || (instbuf.at(1) & 0x38) == 0x00   /* 81 /0 = ADD */
-              || (instbuf.at(1) & 0x38) == 0x28)  /* 81 /5 = SUB */
-          && (instbuf.at(1) >> 6) != 3) {         /* memory destination */
+          && ((instbuf.at(1) & 0x38) == 0x38      /* CMP */
+              || (instbuf.at(1) & 0x38) == 0x00   /* ADD */
+              || (instbuf.at(1) & 0x38) == 0x28)  /* SUB */
+          && (instbuf.at(1) >> 6) != 3) {
          const uint8_t mod = instbuf.at(1) >> 6;
          const uint8_t rm  = instbuf.at(1) & 0x07;
-         bool reg_base = !(mod == 0 && rm == 5);  /* not bare [disp32] */
-         if (mod == 0 && rm == 4 && instbuf.size() >= 3 &&
-             (instbuf.at(2) & 0x07) == 5) {
-            reg_base = false;                     /* SIB no-base [disp32+idx] */
+         bool reg_base = !(mod == 0 && rm == 5);
+         if (mod == 0 && rm == 4 && instbuf.size() >= 3 && (instbuf.at(2) & 0x07) == 5) {
+            reg_base = false;
          }
          if (reg_base
              && xed_operand_values_has_immediate(operands)
              && xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
             const std::size_t imm_off = instbuf.size() - sizeof(uint32_t);
-            const uint32_t value =
-               img.template at<uint32_t>(loc.offset + imm_off);
+            const uint32_t value = img.template at<uint32_t>(loc.offset + imm_off);
             bool cap = false;
             if (value >= 0x1000 && value < 0x80000000U) {
-               /* data-target: the strict 9510f29 store discriminator */
-               cap = (value & 3) == 0
-                  && env.archive.header.filetype == MH_EXECUTE
-                  && (env.archive.header.flags & MH_PIE) == 0
-                  && env.vmaddr_in_writable_data(value);
-               /* CODE-target identity compare, CMP only: `cmpl $_handler,
-                * field(%reg)` (obj->cb == &handler idiom) classifies like
-                * the genbase MOV field-store arm — SYMBOL-only evidence
-                * (field_store_code_target_is_fnptr, func_syms nlist), NOT
-                * the prologue heuristic, so an integer-constant compare
-                * aliasing a `55 89 e5` run stays literal (the same
-                * over-relocation as the store; guard
-                * 99_code_alias_imm_falsereloc). ADD/SUB on code addresses
-                * stay literal (fn-ptr arithmetic through fields is not a
-                * real idiom; a code-aliasing int summand is). */
+               cap = (value & 3) == 0 && fixed_load && env.vmaddr_in_writable_data(value);
                if (!cap && (instbuf.at(1) & 0x38) == 0x38) {
                   cap = field_store_code_target_is_fnptr(img, env, value);
                }
             }
             if (cap) {
-               imm = Immediate<bits>::Parse(img, loc + imm_off, env, true);
-               imm->heuristic = true; /* value-alias probe (see Immediate) */
+               parse_imm(imm_off, true);
             }
          }
       }
-
    }
+
    template <Bits bits>
    void Instruction<bits>::Emit(Image& img, std::size_t offset) const {
       /* patch instruction */
@@ -1659,32 +859,6 @@ namespace MachO {
       std::vector<uint8_t> instbuf = this->instbuf;
 
       if (memdisp) {
-         /* DBG_BADRELOC: catch the 8th-blocker bug at ground truth. A data
-          * store/ref whose resolved memdisp lands in a section flagged as
-          * containing instructions (__text) is the mis-relocation: writing
-          * an i386 __DATA/__bss flag address that resolved into code. Keyed on
-          * the resolved blob (NOT a code vmaddr), so it is immune to the
-          * Build cross-phase vmaddr remap that derailed prior diagnosis. */
-         if (std::getenv("DBG_BADRELOC")) {
-            char segn[17] = {0}, secn[17] = {0};
-            if (memdisp->section) {
-               std::memcpy(segn, memdisp->section->sect.segname, 16);
-               std::memcpy(secn, memdisp->section->sect.sectname, 16);
-            } else {
-               std::strcpy(segn, "(nosect)");
-            }
-            const bool in_text = memdisp->section &&
-               std::strncmp(memdisp->section->sect.segname, SEG_TEXT, 16) == 0;
-            if (in_text || !memdisp->section) {
-               std::fprintf(stderr,
-                  "[badreloc] iform=%s orig_md=0x%zx m64_vmaddr=0x%zx "
-                  "target=0x%zx -> %s,%s abs=%d pic=%d\n",
-                  xed_iform_enum_t2str(xed_decoded_inst_get_iform_enum(&xedd)),
-                  dbg_orig_md, (std::size_t)this->loc.vmaddr,
-                  (std::size_t)memdisp->loc.vmaddr, segn, secn,
-                  (int)memdisp_absolute, (int)pic_anchored);
-            }
-         }
          const unsigned width_bits =
             xed_decoded_inst_get_memory_displacement_width_bits(&xedd, memidx);
          /*
@@ -1698,7 +872,7 @@ namespace MachO {
             ? memdisp->loc.vmaddr + memdisp_offset
             : memdisp->loc.vmaddr + memdisp_offset
                  - (ssize_t) (this->loc.vmaddr + size());
-         xed_enc_displacement_t enc; // = {disp, width_bits};
+         xed_enc_displacement_t enc;
          enc.displacement = disp;
          enc.displacement_bits = width_bits;
          if (!xed_patch_disp(&xedd, &*instbuf.begin(), enc)) {
@@ -1710,12 +884,10 @@ namespace MachO {
       
       if (brdisp) {
          const ssize_t disp = brdisp->loc.vmaddr - (ssize_t) (this->loc.vmaddr + size());
-#if 1
          const unsigned width_bits = xed_decoded_inst_get_branch_displacement_width_bits(&xedd);
          xed_encoder_operand_t enc;
          enc.u.brdisp = disp;
          enc.width_bits = width_bits;
-         /* xed_patch_relbr was renamed to xed_patch_brdisp in newer xed. */
          if (!xed_patch_brdisp(&xedd, &*instbuf.begin(), enc)) {
             throw error("%s: xed_patch_brdisp: failed to patch instruction at offset 0x%zx, " \
                         "vmaddr 0x%zx, iform %s, width %u, disp %zd, target 0x%zx, orig 0x%zx\n",
@@ -1724,9 +896,6 @@ namespace MachO {
                         width_bits, disp, (std::size_t)brdisp->loc.vmaddr,
                         (std::size_t)this->orig_vmaddr);
          }
-#else
-         patch_relbr(xedd, instbuf, disp);
-#endif
       }
 
       /* emit instruction bytes */
@@ -1755,260 +924,107 @@ namespace MachO {
       assert(bits == Bits::M32);
 
       if (imm && imm->pointee) {
-         assert(bits == Bits::M32);
-
-         /* add dummy immediate */
+         /* The immediate names something in this image. i386 carried the
+          * address as a literal; x86_64 computes it rip-relative so it tracks
+          * both the new layout and the load slide. The translated image lives
+          * below 4GB, so the low 32 bits of a computed address are the whole
+          * pointer. */
          env.template add<Immediate>(imm, nullptr);
+
+         /* A new instruction whose rip-relative disp32 binds to the pointee. */
+         auto rip_to_pointee = [&](const opcode_t& bytes) {
+            auto *inst = new Instruction<opposite<bits>>(bytes);
+            inst->memidx = 0;
+            env.resolve(imm->pointee, &inst->memdisp);
+            inst->memdisp_offset = imm->pointee_offset;
+            return inst;
+         };
+         /* reg0 of a `op r32, $ptr` form; a 16-bit form cannot hold a pointer */
+         auto reg32 = [&](const char *what) {
+            const auto r32 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+            if (r32 < XED_REG_EAX || r32 > XED_REG_EDI) {
+               throw error("%s: %s at vmaddr 0x%zx: reg0=%s is not a 32-bit GPR",
+                           __FUNCTION__, what, this->loc.vmaddr, xed_reg_enum_t2str(r32));
+            }
+            return r32;
+         };
 
          switch (xed_decoded_inst_get_iform_enum(&xedd)) {
          case XED_IFORM_PUSH_IMMz:
             {
-               /* i386 | push abs32_pointer  (68 imm32, 5 bytes)
-                * -----|----------------------
-                * stub  | lea r11,[rip+disp32]  (compute new ptr)
-                *       | push r11              (8-byte push for dyld binder)
-                * other | lea r11,[rip+disp32]  (compute new ptr)
-                *       | push_r32(r11d)        (4-byte push of low 32)
-                *
-                * Stub sections (`__symbol_stub`/`__stub_helper`) push an
-                * 8-byte arg into the lazy-bind ABI. Other sections (the
-                * compiler emitting `push &global_func` for a 4-byte
-                * caller-pushed arg) need a 4-byte push instead, otherwise
-                * the callee sees its stack frame misaligned. The low 32
-                * bits of r11 carry the full pointer because the M64
-                * archive is placed at vmaddr < 4GB.
-                */
-               auto lea_inst = new Instruction<opposite<bits>>(opcode::lea_r11_mem_rip_disp32());
-               lea_inst->memidx = 0;
-               env.resolve(imm->pointee, &lea_inst->memdisp);
-               lea_inst->memdisp_offset = imm->pointee_offset;
-
+               /* lea r11,[rip+ptr]; push. A stub pushes the lazy-bind argument
+                * for native dyld_stub_binder (8 bytes); anything else is an
+                * i386 argument (4 bytes). */
+               auto lea_inst = rip_to_pointee(opcode::lea_r11_mem_rip_disp32());
                const std::string sect = this->section->name();
                if (sect == SECT_SYMBOL_STUB || sect == SECT_STUB_HELPER) {
-                  auto push_inst = new Instruction<opposite<bits>>(opcode::push_r11());
-                  return {lea_inst, push_inst};
+                  return {lea_inst, new Instruction<opposite<bits>>(opcode::push_r11())};
                }
-               /* Non-stub: 4-byte push via the push_r32 widening helper.
-                * Gated on bits==M32 because push_r32 returns M64-blob
-                * lists; the surrounding `if (imm && imm->pointee)` block
-                * has an assert(bits == M32) so this is unreachable for
-                * the M64 instantiation but still needs to type-check. */
                if constexpr (bits == Bits::M32) {
-                  auto push_insts = push_r32(XED_REG_R11D);
-                  push_insts.push_front(lea_inst);
-                  return push_insts;
+                  auto insts = push_r32(XED_REG_R11D);
+                  insts.push_front(lea_inst);
+                  return insts;
                } else {
-                  throw error("PUSH_IMMz non-stub in M64 transform unreachable");
+                  throw error("PUSH_IMMz in M64 transform unreachable");
                }
             }
 
-         case XED_IFORM_MOV_GPRv_IMMv:
-            {
-               /* i386 | mov r32, abs32
-                * -----|---------------
-                * X86  | lea r32, [rip+disp32]
-                *
-                * Only reached when the imm is a pointer (via the
-                * `imm->pointee` guard at the top of Transform). For 16-bit
-                * variants (`0x66 BX+r imm16`) the immediate is a 16-bit
-                * value that can't carry a 32-bit pointer, so this code
-                * path doesn't make sense — bail. lea_r32_mem_rip_disp32
-                * asserts r32 is in [EAX, EDI]; pre-guard so we throw a
-                * descriptive error instead of crashing on the assert.
-                */
-               const auto r32 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
-               if (r32 < XED_REG_EAX || r32 > XED_REG_EDI) {
-                  throw error("%s: MOV_GPRv_IMMv at vmaddr 0x%zx: reg0=%s "
-                              "out of [EAX,EDI] (likely 16-bit imm with "
-                              "pointer marking)",
-                              __FUNCTION__, this->loc.vmaddr,
-                              xed_reg_enum_t2str(r32));
-               }
-               auto lea_inst = new Instruction<opposite<bits>>(opcode::lea_r32_mem_rip_disp32(r32));
-               lea_inst->memidx = 0; // TODO: is this right
-               env.resolve(imm->pointee, &lea_inst->memdisp);
-               lea_inst->memdisp_offset = imm->pointee_offset;
-               return {lea_inst};
-            }
+         case XED_IFORM_MOV_GPRv_IMMv:   /* lea r32,[rip+ptr] */
+            return {rip_to_pointee(opcode::lea_r32_mem_rip_disp32(reg32("MOV imm-ptr")))};
 
-         case XED_IFORM_ADD_GPRv_IMMz:
+         case XED_IFORM_ADD_GPRv_IMMz:   /* lea r11,[rip+ptr]; add r32,r11d */
          case XED_IFORM_ADD_OrAX_IMMz:
             {
-               /* i386 | add r32, abs32_pointer
-                * -----|------------------------
-                * X86  | lea r11, [rip+disp32]   (r11 = slid &target)
-                *      | add r32, r11d           (r32 += low 32 of the ptr)
-                *
-                * Unlike MOV_GPRv_IMMv (which fully defines the dest and so
-                * becomes a bare lea), `add` must PRESERVE the index/base
-                * already live in r32, so the relocated address is computed
-                * in scratch r11 and added. r11d carries the whole pointer
-                * because the M64 archive is placed at vmaddr < 4GB. Same
-                * [EAX,EDI] guard as MOV (a 16-bit imm mis-marked as a ptr
-                * would yield an out-of-range reg). */
-               const auto r32 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
-               if (r32 < XED_REG_EAX || r32 > XED_REG_EDI) {
-                  throw error("%s: ADD imm-ptr at vmaddr 0x%zx: reg0=%s out of "
-                              "[EAX,EDI] (likely 16-bit imm mis-marked pointer)",
-                              __FUNCTION__, this->loc.vmaddr,
-                              xed_reg_enum_t2str(r32));
-               }
-               auto lea_inst =
-                  new Instruction<opposite<bits>>(opcode::lea_r11_mem_rip_disp32());
-               lea_inst->memidx = 0;
-               env.resolve(imm->pointee, &lea_inst->memdisp);
-               lea_inst->memdisp_offset = imm->pointee_offset;
-               auto add_inst =
-                  new Instruction<opposite<bits>>(opcode::add_r32_r11d(r32));
-               return {lea_inst, add_inst};
+               const auto r32 = reg32("ADD imm-ptr");
+               return {rip_to_pointee(opcode::lea_r11_mem_rip_disp32()),
+                       new Instruction<opposite<bits>>(opcode::add_r32_r11d(r32))};
             }
 
-         case XED_IFORM_CMP_GPRv_IMMz:
+         case XED_IFORM_CMP_GPRv_IMMz:   /* lea r11,[rip+ptr]; cmp r32,r11d */
          case XED_IFORM_CMP_OrAX_IMMz:
             {
-               /* i386 | cmp r32, abs32_pointer   (loop end sentinel)
-                * -----|---------------------------------------------
-                * X86  | lea r11, [rip+disp32]     (r11 = slid &table_end)
-                *      | cmp r32, r11d             (bound the slid iterator)
-                *
-                * Only reached when the imm was marked a pointer (the
-                * imm_bounds_relocated_table gate in Parse). Same [EAX,EDI]
-                * guard as ADD; CMP_OrAX is always EAX. */
-               const auto r32 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
-               if (r32 < XED_REG_EAX || r32 > XED_REG_EDI) {
-                  throw error("%s: CMP imm-ptr at vmaddr 0x%zx: reg0=%s out of "
-                              "[EAX,EDI] (likely 16-bit imm mis-marked pointer)",
-                              __FUNCTION__, this->loc.vmaddr,
-                              xed_reg_enum_t2str(r32));
-               }
-               auto lea_inst =
-                  new Instruction<opposite<bits>>(opcode::lea_r11_mem_rip_disp32());
-               lea_inst->memidx = 0;
-               env.resolve(imm->pointee, &lea_inst->memdisp);
-               lea_inst->memdisp_offset = imm->pointee_offset;
-               auto cmp_inst =
-                  new Instruction<opposite<bits>>(opcode::cmp_r32_r11d(r32));
-               return {lea_inst, cmp_inst};
+               const auto r32 = reg32("CMP imm-ptr");
+               return {rip_to_pointee(opcode::lea_r11_mem_rip_disp32()),
+                       new Instruction<opposite<bits>>(opcode::cmp_r32_r11d(r32))};
             }
 
-         /*
-          * `mov eax, [abs32]` short form (opcode 0xa1). The general form
-          * `MOV_GPRv_MEMv` with absolute addressing is the longer encoding
-          * — both get mapped to the same x86_64 sequence
-          * `mov r32, [rip+disp32]`.
-          *
-          * Note: at i386 decode time only the eax flavor (REG0=EAX) is
-          * possible for the OrAX variant, but we read the register out of
-          * xedd to keep the code symmetric with MOV_GPRv_MEMv if we add it.
-          */
+         /* mov between a register and [abs32]. The short moffs forms (A0-A3)
+          * take an 8-byte address in x86_64, so all of them become the ModR/M
+          * rip-relative form `66? 8A/8B/88/89 /r [rip+disp32]`. */
          case XED_IFORM_MOV_OrAX_MEMv:
          case XED_IFORM_MOV_GPRv_MEMv:
-            {
-               auto r32 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
-               /* 16-bit GPR form (`0x66 0xA1 disp32` for AX, or
-                * `0x66 0x8B /r [abs32]` for general r16): emit the
-                * x86_64 rip-relative long form with 0x66 prefix.
-                * Bytes: `66 8B 05+r<<3 disp32` (7 bytes). */
-               if (r32 >= XED_REG_AX && r32 <= XED_REG_DI) {
-                  const uint8_t r = (uint8_t)(r32 - XED_REG_AX);
-                  auto mov = new Instruction<opposite<bits>>(
-                     opcode_t({0x66, 0x8B,
-                               (uint8_t)(0x05 | (r << 3)),
-                               0x00, 0x00, 0x00, 0x00}));
-                  mov->memidx = 0;
-                  env.resolve(imm->pointee, &mov->memdisp);
-                  mov->memdisp_offset = imm->pointee_offset;
-                  return {mov};
-               }
-               if (r32 < XED_REG_EAX || r32 > XED_REG_EDI) {
-                  /* fall through to the generic error below for anything we
-                   * can't currently encode (r8d-r15d would only matter for
-                   * a x86_64 source we're transforming — not our case). */
-                  throw error("%s: MOV from abs32 with reg %s unsupported",
-                              __FUNCTION__, xed_reg_enum_t2str(r32));
-               }
-               auto mov = new Instruction<opposite<bits>>(opcode::mov_r32_mem_rip_disp32(r32));
-               mov->memidx = 0;
-               env.resolve(imm->pointee, &mov->memdisp);
-               mov->memdisp_offset = imm->pointee_offset;
-               return {mov};
-            }
-
-         /*
-          * 8-bit moffs short forms — `mov al, [abs32]` (0xA0) and
-          * `mov [abs32], al` (0xA2). Same problem as the 32-bit forms
-          * below: i386 uses a 4-byte abs address while x86_64's bare
-          * 0xA0/A2 expects an 8-byte moffs64, so the raw bytes don't
-          * survive a default copy-ctor decode (BUFFER_TOO_SHORT).
-          * Rewrite to the general `8A/88 /r mod=00 r/m=101` rip-relative
-          * form (reg=AL=000): `8A 05 disp32` / `88 05 disp32` — 6 bytes.
-          */
-         case XED_IFORM_MOV_AL_MEMb:
-            {
-               auto mov = new Instruction<opposite<bits>>(
-                  opcode_t({0x8A, 0x05, 0x00, 0x00, 0x00, 0x00}));
-               mov->memidx = 0;
-               env.resolve(imm->pointee, &mov->memdisp);
-               mov->memdisp_offset = imm->pointee_offset;
-               return {mov};
-            }
-
-         case XED_IFORM_MOV_MEMb_AL:
-            {
-               auto mov = new Instruction<opposite<bits>>(
-                  opcode_t({0x88, 0x05, 0x00, 0x00, 0x00, 0x00}));
-               mov->memidx = 0;
-               env.resolve(imm->pointee, &mov->memdisp);
-               mov->memdisp_offset = imm->pointee_offset;
-               return {mov};
-            }
-
-         /* Inverse: `mov [abs32], eax` short form (0xa3) / general form. */
          case XED_IFORM_MOV_MEMv_OrAX:
          case XED_IFORM_MOV_MEMv_GPRv:
             {
-               auto r32 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
-               /* 16-bit form: `66 89 05+r<<3 disp32` (7 bytes). */
-               if (r32 >= XED_REG_AX && r32 <= XED_REG_DI) {
-                  const uint8_t r = (uint8_t)(r32 - XED_REG_AX);
-                  auto mov = new Instruction<opposite<bits>>(
-                     opcode_t({0x66, 0x89,
-                               (uint8_t)(0x05 | (r << 3)),
-                               0x00, 0x00, 0x00, 0x00}));
-                  mov->memidx = 0;
-                  env.resolve(imm->pointee, &mov->memdisp);
-                  mov->memdisp_offset = imm->pointee_offset;
-                  return {mov};
+               const bool load = xed_decoded_inst_get_iform_enum(&xedd) == XED_IFORM_MOV_OrAX_MEMv ||
+                                 xed_decoded_inst_get_iform_enum(&xedd) == XED_IFORM_MOV_GPRv_MEMv;
+               const auto r = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+               opcode_t bytes;
+               if (r >= XED_REG_AX && r <= XED_REG_DI) {
+                  bytes = {0x66, (uint8_t)(load ? 0x8B : 0x89),
+                           (uint8_t)(0x05 | ((r - XED_REG_AX) << 3)), 0, 0, 0, 0};
+               } else if (r >= XED_REG_EAX && r <= XED_REG_EDI) {
+                  bytes = load ? opcode::mov_r32_mem_rip_disp32(r)
+                               : opcode::mov_mem_rip_disp32_r32(r);
+               } else {
+                  throw error("%s: MOV [abs32] with reg %s unsupported",
+                              __FUNCTION__, xed_reg_enum_t2str(r));
                }
-               if (r32 < XED_REG_EAX || r32 > XED_REG_EDI) {
-                  throw error("%s: MOV to abs32 from reg %s unsupported",
-                              __FUNCTION__, xed_reg_enum_t2str(r32));
-               }
-               auto mov = new Instruction<opposite<bits>>(opcode::mov_mem_rip_disp32_r32(r32));
-               mov->memidx = 0;
-               env.resolve(imm->pointee, &mov->memdisp);
-               mov->memdisp_offset = imm->pointee_offset;
-               return {mov};
+               return {rip_to_pointee(bytes)};
             }
+         case XED_IFORM_MOV_AL_MEMb:
+            return {rip_to_pointee(opcode_t{0x8A, 0x05, 0, 0, 0, 0})};
+         case XED_IFORM_MOV_MEMb_AL:
+            return {rip_to_pointee(opcode_t{0x88, 0x05, 0, 0, 0, 0})};
 
-         /* The whole `<op> r/m32, imm32` IMMEDIATE-group family (C7 /0 mov,
-          * 81 /0../7 add/or/adc/sbb/and/sub/xor/cmp, F7 /0 test) shares one
-          * translation when the imm32 is a pointer: compute the relocated
-          * pointer in r11 and re-encode the operation in its `/r` (reg-source)
-          * MR form against the SAME destination operand. Every one of these
-          * has a byte-identical MR sibling (verified against the ISA refs:
-          * 01/09/11/19/21/29/31/39/85/89), the ModR/M layout is common
-          * (opcode|modrm|sib?|disp?|imm32), and lea does not touch EFLAGS, so
-          * the rewrite is semantics-preserving for the flag-setting members
-          * too ([mem] OP r11d with the original operand order).
-          *
-          * Pre-fix only MOV was cased; the others fell to the default rule,
-          * whose flavor-1 assumption ("the imm IS the disp32") patched the
-          * DESTINATION displacement with the IMMEDIATE's pointee and left the
-          * raw i386 imm32 bytes unpatched — e.g. `cmpl $_fn, _handler`
-          * (81 3D disp32 imm32, comparing a global fn-ptr against a function
-          * address) read the FUNCTION BODY and compared it against the stale
-          * i386 address: both operands wrong (guard 87_alu_absdest_imm_ptr). */
+         /* `<op> r/m32, $ptr` for the whole immediate group (C7 /0 mov,
+          * 81 /0../7, F7 /0-1 test): compute the relocated pointer in a
+          * scratch register and re-encode the operation in its MR form
+          * (op [mem], r32) against the same destination. lea leaves EFLAGS
+          * alone, so the flag-setting members stay exact. No pointer
+          * immediate survives in __text, so every later M64 re-parse
+          * re-resolves both references (guards 86_selfref_imm_store,
+          * selfref_imm_stage_shift_test.sh, 87_alu_absdest_imm_ptr). */
          case XED_IFORM_ADD_MEMv_IMMz:
          case XED_IFORM_OR_MEMv_IMMz:
          case XED_IFORM_ADC_MEMv_IMMz:
@@ -2018,344 +1034,110 @@ namespace MachO {
          case XED_IFORM_XOR_MEMv_IMMz:
          case XED_IFORM_CMP_MEMv_IMMz:
          case XED_IFORM_TEST_MEMv_IMMz_F7r0:
-         case XED_IFORM_TEST_MEMv_IMMz_F7r1: /* F7 /1 alias, same semantics */
+         case XED_IFORM_TEST_MEMv_IMMz_F7r1:
          case XED_IFORM_MOV_MEMv_IMMz:
             {
-               /* `mov mem, imm32` where imm32 is a pointer. Two dest shapes:
-                *
-                * (a) REGISTER-BASE dest, e.g. `movl $&cfstring, 0x7c(%rdi)`
-                *     (c7 47 7c imm32) — no memdisp. A plain immediate store
-                *     can't hold the SLID runtime address (it's a 32-bit field
-                *     baked in __text; the dylib slides), so emit a slide-correct
-                *     sequence:
-                *        lea r11, [rip+disp32]      ; r11 = pointee's new vmaddr
-                *        mov  [reg+disp], r11d       ; store low 32 (dylib < 4GB)
-                *     r11 is the translator's scratch (no i386 reg maps to it).
-                *     This is PRECISE — only instructions the parser marked as
-                *     pointer-bearing are rewritten, unlike a blind __text scan.
-                *
-                * (b) ABS32 dest `mov [abs32], imm32` (c7 05 disp32 imm32) — the
-                *     parser put the dest in memdisp and the imm32 in imm. Emit
-                *     the SAME lea+store sequence; the destination's abs32
-                *     ModR/M (mod=00 r/m=101) re-reads as rip-relative in
-                *     64-bit mode, so the copied disp32 byte positions are
-                *     patched from `memdisp` at Emit exactly like any other
-                *     rip-relative store.
-                *
-                *     This arm used to clone the instruction, keeping the
-                *     pointer as a RAW imm32 patched by an M64 Immediate blob.
-                *     That imm32 is invisible to the M64 RE-PARSES of the later
-                *     pipeline stages (modify --insert / static-interpose /
-                *     convert): the rip-relative DESTINATION re-resolves against
-                *     each stage's fresh layout, but c7 05 in 64-bit mode is the
-                *     RIP-base parse path, which probes no trailing immediate —
-                *     so the imm kept the transform-stage address. When a later
-                *     stage shifted __DATA (+0x1000 on Civ IV Steam), every
-                *     same-object self-referential store went one page stale:
-                *     boost.python's registry std::set header ended up with
-                *     _M_left/_M_right == &_M_header - 0x1000, failing
-                *     _M_insert_unique's `__j == begin()` leftmost guard →
-                *     _Rb_tree_decrement(&header) on parent=0 → crash at 0x4
-                *     (std::list header next/prev inits went stale the same
-                *     way). lea+store leaves NO pointer immediate in __text, so
-                *     every re-parse re-resolves both references structurally.
-                *     (Guards: tests-i386/86_selfref_imm_store +
-                *     selfref_imm_stage_shift_test.sh.) */
-               {
-                  /* `/r` MR-form opcode for this member (ISA-verified):
-                   * op [mem], r32. */
-                  uint8_t mr_op;
-                  switch (xed_decoded_inst_get_iform_enum(&xedd)) {
-                  case XED_IFORM_ADD_MEMv_IMMz: mr_op = 0x01; break;
-                  case XED_IFORM_OR_MEMv_IMMz:  mr_op = 0x09; break;
-                  case XED_IFORM_ADC_MEMv_IMMz: mr_op = 0x11; break;
-                  case XED_IFORM_SBB_MEMv_IMMz: mr_op = 0x19; break;
-                  case XED_IFORM_AND_MEMv_IMMz: mr_op = 0x21; break;
-                  case XED_IFORM_SUB_MEMv_IMMz: mr_op = 0x29; break;
-                  case XED_IFORM_XOR_MEMv_IMMz: mr_op = 0x31; break;
-                  case XED_IFORM_CMP_MEMv_IMMz: mr_op = 0x39; break;
-                  case XED_IFORM_TEST_MEMv_IMMz_F7r0:
-                  case XED_IFORM_TEST_MEMv_IMMz_F7r1: mr_op = 0x85; break;
-                  default:                      mr_op = 0x89; break; /* MOV */
-                  }
-                  /* The ModR/M-reuse below assumes a bare 1-byte opcode at
-                   * instbuf[0] (C7/81/F7 — a 0x66 prefix can't reach here,
-                   * the imm-width gate routes imm16 forms elsewhere). A
-                   * legacy-prefixed encoding (segment override) would shift
-                   * the ModR/M; bail to the dual-resolve clone below rather
-                   * than corrupt the rewrite. */
-                  const uint8_t b0 = instbuf.at(0);
-                  if (b0 == 0xC7 || b0 == 0x81 || b0 == 0xF7) {
-                     auto *lea_inst = new Instruction<opposite<bits>>(
-                        opcode::lea_r11_mem_rip_disp32());
-                     lea_inst->memidx = 0;
-                     env.resolve(imm->pointee, &lea_inst->memdisp);
-                     lea_inst->memdisp_offset = imm->pointee_offset;
+               uint8_t mr_op;
+               switch (xed_decoded_inst_get_iform_enum(&xedd)) {
+               case XED_IFORM_ADD_MEMv_IMMz: mr_op = 0x01; break;
+               case XED_IFORM_OR_MEMv_IMMz:  mr_op = 0x09; break;
+               case XED_IFORM_ADC_MEMv_IMMz: mr_op = 0x11; break;
+               case XED_IFORM_SBB_MEMv_IMMz: mr_op = 0x19; break;
+               case XED_IFORM_AND_MEMv_IMMz: mr_op = 0x21; break;
+               case XED_IFORM_SUB_MEMv_IMMz: mr_op = 0x29; break;
+               case XED_IFORM_XOR_MEMv_IMMz: mr_op = 0x31; break;
+               case XED_IFORM_CMP_MEMv_IMMz: mr_op = 0x39; break;
+               case XED_IFORM_TEST_MEMv_IMMz_F7r0:
+               case XED_IFORM_TEST_MEMv_IMMz_F7r1: mr_op = 0x85; break;
+               default:                      mr_op = 0x89; break;   /* MOV */
+               }
+               LoweredMem m;
+               if (lower_mem(env, m)) {
+                  /* the value goes in r10 when the operand itself needs r11 */
+                  const bool r10 = !m.pre.empty();
+                  auto *lea = new Instruction<opposite<bits>>(
+                     r10 ? opcode_t{0x4C, 0x8D, 0x15, 0, 0, 0, 0}
+                         : opcode::lea_r11_mem_rip_disp32());
+                  lea->memidx = 0;
+                  env.resolve(imm->pointee, &lea->memdisp);
+                  lea->memdisp_offset = imm->pointee_offset;
+                  auto insts = emit_mem(env, m, opcode_t{mr_op}, r10 ? 10 : 11, {});
+                  insts.push_front(lea);
+                  return insts;
+               }
+               /* Unparseable operand: clone, resolving the destination and the
+                * pointer immediate separately (translate-time-correct only). */
+               auto *clone = new Instruction<opposite<bits>>(instbuf);
+               clone->memidx = 0;
+               if (this->memdisp) {
+                  env.resolve(this->memdisp, &clone->memdisp);
+                  clone->memdisp_offset = this->memdisp_offset;
+               }
+               clone->imm = imm->Transform_one(env);
+               return {clone};
+            }
 
-                     /* op [mem], r11d : REX.R + mr_op + modrm(reg=r11) + sib/disp.
-                      * Reuse the original /n ModR/M + any SIB/disp bytes
-                      * (everything after the ModR/M except the trailing imm32);
-                      * swap the reg field to r11 (low 3 = 011) and add REX.R.
-                      *
-                      * i386 EA-wrap fidelity for SCALED-INDEX dests: the copied
-                      * ModR/M widens the addressing regs to 64-bit, so a
-                      * `disp(base,index,scale)` operand loses the i386 mod-2^32
-                      * wrap a negative/sentinel index relies on (the
-                      * 55_sib_index_neg_wrap pathology, e.g. index=-4 at scale
-                      * 4 -> +0x3fffffff0 instead of -0x10 -> >4GB fault).
-                      * Mirror the M64 copy-ctor addr32 policy EXACTLY: prepend
-                      * 0x67 (legal before REX) iff the operand has a real
-                      * index and neither base nor index is the widened
-                      * esp/ebp (truncating the 64-bit stack pointer would
-                      * corrupt stack access; base-only operands stay
-                      * unprefixed for the same native->4GB-pointer reason
-                      * documented at the copy ctor). Read the regs from the
-                      * ORIGINAL i386 decode. */
-                     std::vector<uint8_t> mb;
-                     {
-                        const xed_operand_values_t *mrops =
-                           xed_decoded_inst_operands_const(&xedd);
-                        const xed_reg_enum_t mr_base =
-                           xed_decoded_inst_get_base_reg(mrops, 0);
-                        const xed_reg_enum_t mr_index =
-                           xed_decoded_inst_get_index_reg(mrops, 0);
-                        auto mr_wide = [](xed_reg_enum_t r) {
-                           return r == XED_REG_ESP || r == XED_REG_EBP ||
-                                  r == XED_REG_RSP || r == XED_REG_RBP;
-                        };
-                        if (mr_index != XED_REG_INVALID &&
-                            !mr_wide(mr_base) && !mr_wide(mr_index)) {
-                           mb.push_back(0x67);                    /* addr32 */
-                        }
-                     }
-                     mb.push_back(0x44);                                /* REX.R */
-                     mb.push_back(mr_op);                               /* op r/m32,r32 */
-                     mb.push_back((uint8_t)((instbuf.at(1) & 0xC7) | (0x3 << 3)));
-                     for (std::size_t bi = 2; bi + sizeof(uint32_t) < instbuf.size(); ++bi) {
-                        mb.push_back(instbuf.at(bi));
-                     }
-                     auto *mov_inst = new Instruction<opposite<bits>>(opcode_t(mb));
-                     if (this->memdisp) {
-                        /* abs32 destination: patch the copied disp32 rip-relatively
-                         * against the destination blob (carrying any mid-blob
-                         * offset), exactly as the old clone path did. */
-                        mov_inst->memidx = 0;
-                        env.resolve(this->memdisp, &mov_inst->memdisp);
-                        mov_inst->memdisp_offset = this->memdisp_offset;
-                     }
-                     return {lea_inst, mov_inst};
-                  }
-                  /* Prefixed encoding: dual-resolve clone — destination disp
-                   * from THIS->memdisp, pointer imm re-emitted via the
-                   * transformed Immediate (translate-time-correct; the baked
-                   * imm is the accepted fallback for this exotic shape). */
-                  auto *clone = new Instruction<opposite<bits>>(instbuf);
+         /* `jmp *[abs32]` / `call *[abs32]`: a promoted 8-byte dyld slot
+          * (lazy/non-lazy symbol pointers) keeps the byte-identical rip-relative
+          * form; the target is native and returns with an 8-byte ret. Any other
+          * slot is 4 bytes: load it (r11 for jmp, which clobbers no i386
+          * register; eax for call, as the call sequence needs r11). */
+         case XED_IFORM_JMP_MEMv:
+         case XED_IFORM_CALL_NEAR_MEMv:
+            if constexpr (bits == Bits::M32) {
+               const bool is_call =
+                  xed_decoded_inst_get_iform_enum(&xedd) == XED_IFORM_CALL_NEAR_MEMv;
+               bool slot_8byte = false;
+               if (imm->pointee->section) {
+                  const uint32_t stype = imm->pointee->section->sect.flags & SECTION_TYPE;
+                  slot_8byte = stype == S_LAZY_SYMBOL_POINTERS ||
+                               stype == S_NON_LAZY_SYMBOL_POINTERS;
+               }
+               if (slot_8byte) {
+                  auto *clone = new Instruction<Bits::M64>(instbuf);   /* width guard exempt */
                   clone->memidx = 0;
-                  if (this->memdisp) {
-                     env.resolve(this->memdisp, &clone->memdisp);
-                     clone->memdisp_offset = this->memdisp_offset;
-                  }
-                  clone->imm = imm->Transform_one(env);
+                  env.resolve(imm->pointee, &clone->memdisp);
+                  clone->memdisp_offset = imm->pointee_offset;
                   return {clone};
                }
+               const xed_reg_enum_t tgt = is_call ? XED_REG_RAX : XED_REG_R11;
+               auto mov_inst = new Instruction<Bits::M64>(
+                  opcode::mov_r32_mem_rip_disp32(is_call ? XED_REG_EAX : XED_REG_R11D));
+               mov_inst->memidx = 0;
+               env.resolve(imm->pointee, &mov_inst->memdisp);
+               mov_inst->memdisp_offset = imm->pointee_offset;
+               auto jmp_inst = new Instruction<Bits::M64>(opcode::jmp_r64(tgt));
+               if (!is_call) { return {mov_inst, jmp_inst}; }
+               auto insts = call_op(jmp_inst);
+               insts.insert(std::prev(insts.end(), 2), mov_inst);
+               return insts;
+            } else {
+               throw error("CALL/JMP_MEMv in M64 transform unreachable");
             }
 
-         case XED_IFORM_JMP_MEMv:
-            {
-               /* i386 | jmp [abs32]    (FF 25 disp32, 6 bytes)
-                * -----|-----------------
-                * X86  | jmp [rip+disp32]  (FF 25 disp32, 6 bytes)
-                *
-                * Same encoding in both modes; only the addressing-mode
-                * interpretation changes — BUT the x86_64 form reads an
-                * 8-byte slot where the i386 form read 4 bytes. Mirror
-                * CALL_NEAR_MEMv's slot-width split:
-                *
-                *  (a) 4-byte target slot (S_REGULAR function-pointer
-                *      table, S_LITERAL_POINTERS — e.g. a compiler-
-                *      emitted indirect jump through a global fnptr in
-                *      `__text`; iPhoto trips this from a non-stub
-                *      site): the byte-identical form would join two
-                *      adjacent 4-byte slots into one bogus address.
-                *      Split into:
-                *
-                *        mov eax, [rip+disp32]   ; 4-byte load, zero-ext
-                *        jmp rax
-                *
-                *  (b) 8-byte slot (S_LAZY_SYMBOL_POINTERS,
-                *      S_NON_LAZY_SYMBOL_POINTERS — dyld-managed and
-                *      promoted to ptr-sized by our transform; the
-                *      `__symbol_stub`/`__stub_helper` indirect jumps):
-                *      keep the byte-identical `jmp [rip+disp32]`.
-                */
-               if constexpr (bits == Bits::M32) {
-                  bool target_is_8byte = false;
-                  if (imm->pointee && imm->pointee->section) {
-                     const uint32_t stype =
-                        imm->pointee->section->sect.flags & SECTION_TYPE;
-                     if (stype == S_LAZY_SYMBOL_POINTERS ||
-                         stype == S_NON_LAZY_SYMBOL_POINTERS) {
-                        target_is_8byte = true;
-                     }
-                  }
-                  if (!target_is_8byte) {
-                     auto mov_inst = new Instruction<Bits::M64>(
-                        opcode::mov_r32_mem_rip_disp32(XED_REG_EAX));
-                     mov_inst->memidx = 0;
-                     env.resolve(imm->pointee, &mov_inst->memdisp);
-                     mov_inst->memdisp_offset = imm->pointee_offset;
-                     auto jmp_rax = new Instruction<Bits::M64>(
-                        opcode::jmp_r64(XED_REG_RAX));
-                     return {mov_inst, jmp_rax};
-                  }
-               }
-               auto jmp_inst = new Instruction<opposite<bits>>(opcode::jmp_mem_rip_disp32());
-               jmp_inst->memidx = 0;
-               env.resolve(imm->pointee, &jmp_inst->memdisp);
-               jmp_inst->memdisp_offset = imm->pointee_offset;
-               return {jmp_inst};
-            }
-
-         case XED_IFORM_CALL_NEAR_MEMv:
-            {
-               /* i386 `call [abs32]` (FF 15 disp32). i386 reads 4 bytes
-                * from [abs32] and calls that address.
-                *
-                * Two cases depending on the target slot in M64:
-                *
-                *  (a) 4-byte slot (S_REGULAR user-defined function-pointer
-                *      table, S_LITERAL_POINTERS): the byte-identical
-                *      x86_64 form would read 8 bytes, joining two
-                *      adjacent slots into one bogus address. We split:
-                *
-                *        mov eax, [rip+disp32]   ; 4-byte load, zero-ext
-                *        <call_op>(jmp rax)
-                *
-                *  (b) 8-byte slot (S_LAZY_SYMBOL_POINTERS,
-                *      S_NON_LAZY_SYMBOL_POINTERS — dyld-managed and
-                *      promoted to ptr-sized by our transform): the
-                *      byte-identical `call [rip+disp32]` works
-                *      correctly. Falls through to the default rule.
-                *
-                * Targets with S_REGULAR sections in __DATA that the
-                * compiler emitted with i386-stride 4 are also 4-byte;
-                * we detect via the pointee's section flags.
-                *
-                * Gated on bits==M32 because call_op returns M64-blob
-                * lists; the surrounding `if (imm && imm->pointee)` block
-                * asserts bits == M32 at entry. */
-               if constexpr (bits == Bits::M32) {
-                  /* Decide based on pointee's section: 8-byte slots in
-                   * M64 (S_LAZY_SYMBOL_POINTERS, S_NON_LAZY_SYMBOL_POINTERS)
-                   * fall through to default. */
-                  bool target_is_8byte = false;
-                  if (imm->pointee && imm->pointee->section) {
-                     const uint32_t stype =
-                        imm->pointee->section->sect.flags & SECTION_TYPE;
-                     if (stype == S_LAZY_SYMBOL_POINTERS ||
-                         stype == S_NON_LAZY_SYMBOL_POINTERS) {
-                        target_is_8byte = true;
-                     }
-                  }
-                  if (target_is_8byte) {
-                     /* Byte-identical `call [rip+disp32]` reading the
-                      * promoted 8-byte dyld slot. The target is a NATIVE
-                      * function (libabiconv shim / dyld_stub_binder
-                      * protocol) that returns with a native 8-byte ret,
-                      * so the 8-byte return-address push is intentional.
-                      * Constructed explicitly to stay EXEMPT from the
-                      * width guard in the default rules. */
-                     auto *clone = new Instruction<Bits::M64>(instbuf);
-                     clone->memidx = 0;
-                     env.resolve(imm->pointee, &clone->memdisp);
-                     clone->memdisp_offset = imm->pointee_offset;
-                     return {clone};
-                  }
-
-                  auto mov_inst = new Instruction<Bits::M64>(
-                     opcode::mov_r32_mem_rip_disp32(XED_REG_EAX));
-                  mov_inst->memidx = 0;
-                  env.resolve(imm->pointee, &mov_inst->memdisp);
-                  mov_inst->memdisp_offset = imm->pointee_offset;
-
-                  auto jmp_inst = new Instruction<Bits::M64>(
-                     opcode::jmp_r64(XED_REG_RAX));
-                  auto insts = call_op(jmp_inst);
-                  auto it = insts.end();
-                  --it; --it;
-                  insts.insert(it, mov_inst);
-                  return insts;
-               } else {
-                  throw error("CALL_NEAR_MEMv in M64 transform unreachable");
-               }
-            }
-
+         /* push/pop dword [abs32]: 4-byte slot, 4-byte stack step */
          case XED_IFORM_PUSH_MEMv:
-            {
-               /* i386 `push dword [abs32]` (FF 35 disp32). The
-                * byte-identical x86_64 form pushes a QWORD: it reads
-                * 8 bytes (joining the 4-byte slot with its neighbor)
-                * AND decrements rsp by 8, shifting every later cdecl
-                * argument (found via tests-i386/17: printf args after
-                * the push were off by one slot). Split into a 4-byte
-                * load + 4-byte push:
-                *
-                *   mov r11d, [rip+disp32]
-                *   <push_r32(r11d)>
-                *
-                * r11d as scratch: i386 code can't use r8-r15, and eax
-                * may be live across a push. */
-               if constexpr (bits == Bits::M32) {
-                  auto mov_inst = new Instruction<Bits::M64>(
-                     opcode::mov_r32_mem_rip_disp32(XED_REG_R11D));
-                  mov_inst->memidx = 0;
-                  env.resolve(imm->pointee, &mov_inst->memdisp);
-                  mov_inst->memdisp_offset = imm->pointee_offset;
-                  typename SectionBlob<Bits::M32>::SectionBlobs insts;
-                  insts.push_back(mov_inst);
-                  insts.splice(insts.end(), push_r32(XED_REG_R11D));
-                  return insts;
-               } else {
-                  throw error("PUSH_MEMv in M64 transform unreachable");
-               }
+            if constexpr (bits == Bits::M32) {
+               typename SectionBlob<Bits::M32>::SectionBlobs insts =
+                  {rip_to_pointee(opcode::mov_r32_mem_rip_disp32(XED_REG_R11D))};
+               insts.splice(insts.end(), push_r32(XED_REG_R11D));
+               return insts;
+            } else {
+               throw error("PUSH_MEMv in M64 transform unreachable");
             }
-
          case XED_IFORM_POP_MEMv:
-            {
-               /* i386 `pop dword [abs32]` (8F 05 disp32) pops 4 bytes
-                * into the slot; byte-identical M64 pops 8 (wrong rsp
-                * adjust + 8-byte store). Rewrite:
-                *
-                *   <pop_r32(r11d)>           ; mov r11d,[rsp]; lea rsp,[rsp+4]
-                *   mov [rip+disp32], r11d
-                */
-               if constexpr (bits == Bits::M32) {
-                  auto store_inst = new Instruction<Bits::M64>(
-                     opcode::mov_mem_rip_disp32_r32(XED_REG_R11D));
-                  store_inst->memidx = 0;
-                  env.resolve(imm->pointee, &store_inst->memdisp);
-                  store_inst->memdisp_offset = imm->pointee_offset;
-                  auto insts = pop_r32(XED_REG_R11D);
-                  insts.push_back(store_inst);
-                  return insts;
-               } else {
-                  throw error("POP_MEMv in M64 transform unreachable");
-               }
+            if constexpr (bits == Bits::M32) {
+               auto insts = pop_r32(XED_REG_R11D);
+               insts.push_back(rip_to_pointee(opcode::mov_mem_rip_disp32_r32(XED_REG_R11D)));
+               return insts;
+            } else {
+               throw error("POP_MEMv in M64 transform unreachable");
             }
 
          default:
             {
-               /*
-                * Pre-probe: does the i386 instbuf decode as x86_64? If
-                * not, this is an iform we don't have an explicit case
-                * for and the bytes won't survive `new Instruction(...)`.
-                * Almost always misdecoded data that happens to carry an
-                * imm that looked like a pointer at parse time — see the
-                * MOV_AL_MEMb / MOV_MEMb_AL cases above for the
-                * counterexample family (which now have real translations).
-                * For everything else, substitute NOPs of equal byte count;
-                * preserves section layout without crashing the translator.
-                */
+               /* Bytes that do not decode in x86_64 carrying a "pointer" are
+                * misdecoded data: keep the layout with NOPs. */
                xed_decoded_inst_t probe_xedd;
                xed_decoded_inst_zero_set_mode(
                   &probe_xedd, &Instruction<opposite<bits>>::dstate());
@@ -2382,52 +1164,21 @@ namespace MachO {
                   opcode_t nops(instbuf.size(), (uint8_t)0x90);
                   auto *clone = new Instruction<opposite<bits>>(nops);
                   clone->memidx = 0;
-                  /* Drop the imm — our NOPs already fill the buffer; we
-                   * also can't honor the pointee since the opcode form
-                   * is gone. */
                   return {clone};
                }
 
-               /* Byte-identical pass-through: require width equivalence
-                * between the two decodes (probe_xedd is the dest-mode
-                * decode computed above). */
                check_transform_width(xedd, probe_xedd, instbuf,
                                      this->loc.vmaddr);
 
                auto *clone = new Instruction<opposite<bits>>(instbuf);
                clone->memidx = 0;
 
-               /*
-                * Three flavors hit this default:
-                *
-                *  0. BOTH a captured destination (`this->memdisp`, the abs32
-                *     [disp32]-dest arm) AND a trailing imm32 the parser
-                *     marked as a pointer — an iform outside the explicit
-                *     IMMEDIATE-group family above (e.g. `imul r32, [abs32],
-                *     imm32`). The flavor-1 rule below would patch the
-                *     DESTINATION disp with the IMMEDIATE's pointee (both
-                *     operands wrong). Resolve each operand from its own
-                *     source instead: disp32 from this->memdisp, trailing
-                *     imm32 via the transformed Immediate.
-                *
-                *  1. `[abs32]`-form memory operand (i386 mod=00 r/m=101).
-                *     The ModR/M byte means rip-relative in x86_64, so the
-                *     bytes already encode the right opcode/operand
-                *     structure — we just need to recompute disp32 against
-                *     the new RIP via `memdisp` (here the parser's simple-
-                *     pointer path stored the disp32 AS the imm).
-                *
-                *  2. instruction with a literal imm32 that happens to be
-                *     a pointer (e.g. `mov [rsp+N], <cstring_addr>` from
-                *     a parser branch like the c7-prefix MOV_MEMv_IMMz
-                *     handler). Here the bytes don't encode a memdisp at
-                *     all — patching memdisp would corrupt the instruction.
-                *     Keep `imm` on the clone instead so Emit writes the
-                *     resolved pointee value over the trailing 4 bytes.
-                *
-                * Distinguish 1 vs 2 via XED's memory-displacement width on
-                * the decoded clone: nonzero ⇒ flavor 1, zero ⇒ flavor 2.
-                */
+               /* Byte-identical copy; the pointer lives in one of:
+                *  - a captured [abs32] destination AND a trailing imm32 (e.g.
+                *    `imul r32,[abs32],imm32`): bind each from its own source;
+                *  - the [abs32] operand itself (the parser kept the disp32 as
+                *    `imm`): rebind it as the rip-relative disp;
+                *  - a trailing imm32 with no memory disp: re-emit the value. */
                if (this->memdisp) {
                   clone->memidx = 0;
                   env.resolve(this->memdisp, &clone->memdisp);
@@ -2523,340 +1274,42 @@ namespace MachO {
                   return insts;
                }
 
+            /* `call/jmp dword [mem]` read a 4-byte slot; the byte-identical
+             * x86_64 forms read 8. Load the target with a 4-byte mov first.
+             * i386 evaluates the operand before `call` pushes, so the load
+             * precedes the return-address push (guard 99_call_mem_esp). jmp
+             * loads into r11, never an i386 register: the switch index stays
+             * live into the case bodies (guard 99_jmptbl_index_live). A bare
+             * `[disp32]` with nothing to relocate is a promoted 8-byte dyld
+             * slot and stays byte-identical. */
             case XED_IFORM_CALL_NEAR_MEMv:
-               {
-                  /*
-                   * `call dword [mem]` (i386 `FF /2`) reads 4 bytes from
-                   * memory and calls that address. The byte-identical
-                   * x86_64 encoding reads 8 bytes, joining two adjacent
-                   * 4-byte slots into one bogus 64-bit address. Split:
-                   *
-                   *     mov eax, [mem]        ; 4-byte load (zero-ext rax)
-                   *     <call_op>(jmp rax)    ; i386 4-byte ret-addr push
-                   *
-                   * `FF /2` -> `8B /0`: opcode 0xFF→0x8B, ModR/M reg field
-                   * 010→000 (eax). Keep mod+rm so the addressing form
-                   * (disp32, SIB, base+disp, …) survives untouched.
-                   *
-                   * The `[disp32]` form (no-base, no-index) goes through
-                   * the imm->pointee path in the first switch — the
-                   * parser tags it with a pointee imm. memdisp is set by
-                   * the `[disp32+idx*scale]` parser (line 266+) and must
-                   * be resolved to the translated pointee.
-                   *
-                   * REGISTER-RELATIVE forms — `[base+disp]` (e.g. a
-                   * function pointer in a stack slot `call [ebp-0x1c]` or
-                   * a struct field `call [eax+0x10]`) and
-                   * `[base+idx*scale+disp]` — have NO memdisp/pointee
-                   * (the address is computed at runtime from registers,
-                   * nothing to relocate) but STILL read a 4-byte i386
-                   * slot. They must be narrowed too, otherwise the
-                   * default rule emits a byte-identical `callq *qword
-                   * [mem]` that reads 8 bytes and joins the real 32-bit
-                   * pointer with adjacent garbage (observed: photocd
-                   * `call *-0x1c(%rbp)` -> rip=0x<garbage>_<realptr>).
-                   * For these the addressing bytes are byte-identical in
-                   * M64 (the i386 base reg maps to its 64-bit name), so
-                   * we copy the operand untouched and skip resolution.
-                   */
-                  const xed_operand_values_t *call_ops =
-                     xed_decoded_inst_operands_const(&xedd);
-                  const bool reg_relative =
-                     xed_decoded_inst_get_base_reg(call_ops, 0) != XED_REG_INVALID ||
-                     xed_decoded_inst_get_index_reg(call_ops, 0) != XED_REG_INVALID;
-                  if (!memdisp && !reg_relative) { break; }
-                  auto mov_buf = instbuf;
-                  std::size_t op_idx = 0;
-                  while (op_idx < mov_buf.size() &&
-                         (mov_buf[op_idx] == 0x66 || mov_buf[op_idx] == 0x67)) {
-                     ++op_idx;
-                  }
-                  const uint8_t modrm = mov_buf.at(op_idx + 1);
-                  if (((modrm >> 3) & 0x07) != 0x02) {
-                     throw error("CALL_NEAR_MEMv with unexpected ModR/M 0x%02x at vmaddr 0x%zx",
-                                 modrm, this->loc.vmaddr);
-                  }
-
-                  Instruction<Bits::M64> *mov_inst = nullptr;
-                  Instruction<Bits::M64> *pre_lea  = nullptr;
-                  if (pic_anchored && memdisp) {
-                     /* PIC-anchored `call *disp(%anchor[,idx,s])`: the parser
-                      * resolved memdisp to the target slot/table (anchor+disp).
-                      * The anchor register is a DEAD low-32 artifact in M64 (it
-                      * now holds the lea-r11 return address, not the i386 anchor
-                      * vmaddr), so the reg-relative narrowing below — which keeps
-                      * the anchor as the load base AND resolves memdisp into a
-                      * rip-relative disp — double-counts the base and lands on a
-                      * garbage address (crash calling the fn-ptr). Reach the
-                      * resolved blob DIRECTLY instead, mirroring the load/store
-                      * pic_anchored rewrite later in Transform:
-                      *   no live index : mov eax, [rip+slot]     (drop anchor)
-                      *   live index    : lea r11,[rip+base];
-                      *                   mov eax,[r11 + idx*s]   (keep index)
-                      * memdisp_offset carries any intra-blob byte offset from the
-                      * writable-__DATA containing fallback (section.cc). */
-                     const xed_reg_enum_t idxreg =
-                        xed_decoded_inst_get_index_reg(call_ops, 0);
-                     opcode_t rip_buf;
-                     for (std::size_t j = 0; j < op_idx; ++j) {
-                        rip_buf.push_back(mov_buf[j]); /* legacy prefixes (0x66) */
-                     }
-                     if (idxreg == XED_REG_INVALID) {
-                        rip_buf.push_back(0x8B);       /* mov r32, r/m32 */
-                        rip_buf.push_back(0x05);       /* mod=00 reg=eax rm=101 */
-                        rip_buf.insert(rip_buf.end(), 4, (uint8_t)0x00);
-                        mov_inst = new Instruction<Bits::M64>(rip_buf);
-                        mov_inst->memidx = 0;
-                        mov_inst->memdisp_absolute = false;
-                        env.resolve(memdisp, &mov_inst->memdisp);
-                        mov_inst->memdisp_offset = memdisp_offset;
-                     } else {
-                        const uint8_t sib = mov_buf.at(op_idx + 2);
-                        const uint8_t scale_f = (sib >> 6) & 0x03;
-                        const uint8_t idx_f   = (sib >> 3) & 0x07;
-                        pre_lea = new Instruction<Bits::M64>(
-                           opcode::lea_r11_mem_rip_disp32());
-                        pre_lea->memidx = 0;
-                        env.resolve(memdisp, &pre_lea->memdisp);
-                        pre_lea->memdisp_offset = memdisp_offset;
-                        rip_buf.push_back(0x41);       /* REX.B -> r11 base */
-                        rip_buf.push_back(0x8B);
-                        rip_buf.push_back(0x04);       /* mod=00 reg=eax rm=100 (SIB) */
-                        rip_buf.push_back((uint8_t)((scale_f << 6) |
-                                                    (idx_f << 3) | 0x03)); /* base=r11 */
-                        mov_inst = new Instruction<Bits::M64>(rip_buf);
-                        mov_inst->memidx = 0;
-                     }
-                  } else {
-                     mov_buf[op_idx] = 0x8B;
-                     mov_buf[op_idx + 1] = modrm & 0xC7;     /* reg -> eax */
-                     mov_inst = new Instruction<Bits::M64>(mov_buf);
-                     mov_inst->memidx = 0;
-                     /* mod=00 rm=101 in M32 = `[disp32]` (absolute); in M64
-                      * the same bytes decode as `[rip+disp32]`. We want the
-                      * disp resolved rip-relative so the load hits the
-                      * translated pointee at runtime. That's the default
-                      * (memdisp_absolute=false). For the SIB-no-base form
-                      * (rm=100, SIB base=101) it stays absolute — match what
-                      * JMP_MEMv does. */
-                     if ((modrm & 0xC7) == 0x04) {
-                        /* SIB present: check for no-base (SIB base=101 with
-                         * mod=00). */
-                        const uint8_t sib = mov_buf.at(op_idx + 2);
-                        if ((sib & 0x07) == 0x05) {
-                           mov_inst->memdisp_absolute = true;
-                        }
-                     }
-                     if (memdisp) {
-                        env.resolve(memdisp, &mov_inst->memdisp);
-                        mov_inst->memdisp_offset = memdisp_offset;
-                        /* A memdisp captured on a REGISTER-carrying operand
-                         * ([base+disp32] / [base+idx*scale+disp32] absolute
-                         * table calls) must stay ABSOLUTE on the narrowed
-                         * load: the operand keeps its base register, so a
-                         * rip-relative patch would mis-target. Propagate the
-                         * source's flag (true for those parser arms; the
-                         * bare-[disp32] shape never carries memdisp here —
-                         * it routes through the imm->pointee path). */
-                        if (memdisp_absolute) {
-                           mov_inst->memdisp_absolute = true;
-                        }
-                     }
-                     /* Preserve brdisp if any (rare for indirect call but the
-                      * parser may still have set it via the reloc table). */
-                     if (brdisp) {
-                        env.resolve(brdisp, &mov_inst->brdisp);
-                     }
-                  }
-
-                  auto jmp_inst =
-                     new Instruction<Bits::M64>(opcode::jmp_r64(XED_REG_RAX));
-                  auto insts = call_op(jmp_inst);
-                  /* call_op layout: lea, push_r32(r11d) (2 insts), jmp_inst,
-                   * ret_placeholder. The target load (preceded by pre_lea for
-                   * the indexed pic_anchored form) goes FIRST: i386 evaluates
-                   * the operand before `call` pushes, so an %esp-based slot
-                   * must be read before the return-address push moves %rsp.
-                   * (PvZ libbass `push x5; call *0x184(%esp)` read 4 bytes too
-                   * low -> jumped onto its own stack.) The push touches only
-                   * r11 and memory, never rax. Kill switch
-                   * M64_CALL_MEM_LOAD_AFTER_PUSH=1 restores the old order. */
-                  static const bool load_after_push =
-                     std::getenv("M64_CALL_MEM_LOAD_AFTER_PUSH") != nullptr;
-                  auto it = insts.end();
-                  --it; --it;
-                  auto mit = insts.insert(load_after_push ? it : insts.begin(), mov_inst);
-                  if (pre_lea) { insts.insert(mit, pre_lea); }
-                  /* trap a `call [mem]` through a NULL fn-ptr slot (env-gated):
-                   * after the 4-byte load into rax, before `jmp rax`. */
-                  auto trap = null_trap(XED_REG_RAX);
-                  if (!trap.empty()) { insts.splice(it, trap); }
-                  return insts;
-               }
-
             case XED_IFORM_JMP_MEMv:
                {
-                  /*
-                   * `jmp dword [disp32 + idx*4]` (i386) — used by switch
-                   * dispatch with a 4-byte function-pointer jump table.
-                   *
-                   * In 64-bit mode `jmp r/m64` reads 8 bytes, joining two
-                   * adjacent 4-byte table entries into one bogus 64-bit
-                   * address. We split this into:
-                   *
-                   *     mov  r11d, [disp32 + idx*4]  ; 32-bit load, zero-ext
-                   *     jmpq r11                     ; 64-bit indirect jmp
-                   *
-                   * ★The scratch MUST be r11d (codegen's standard scratch,
-                   * OUTSIDE the i386 register file), NOT eax. An i386
-                   * `jmp *mem` writes NO general register — every register
-                   * (crucially the switch INDEX register) is live-in at the
-                   * case handlers, and GCC's canonical switch KEEPS the
-                   * scrutinee in the index reg for the handlers to consume
-                   * (Civ IV HBITMAP_Mac: `movzwl %dx,%eax; jmp
-                   * *tbl(,%eax,4)` on biBitCount, then case-8's handler does
-                   * `movl %eax,-0x3c(%ebp)` storing %eax as bits-per-pixel).
-                   * Loading the target into eax clobbered the index with the
-                   * table entry's ASLR-slid ADDRESS -> case 8 stored a
-                   * ~3-4GB "bpp" -> operator new[]/memset abort (983 one-step
-                   * dispatches in Civ.dylib alone, 848 index==eax). r11 is
-                   * dead across the jump in BOTH ABIs (caller-saved, no i386
-                   * mapping), so it's a safe scratch and preserves every
-                   * i386 reg. Guard 99_jmptbl_index_live.
-                   *
-                   * Triggers for EVERY register-relative form: jump tables
-                   * `[disp32 + idx*scale]`, function pointers in struct
-                   * fields or stack slots `[base + disp]`, and
-                   * `[base + idx*scale + disp]` — all of them read a 4-byte
-                   * i386 slot that the byte-identical M64 form would read
-                   * as 8 bytes (same family as CALL_NEAR_MEMv above).
-                   * Bare `[disp32]` (no base, no index) still falls through:
-                   * those are dyld stub/non-lazy-pointer slots widened to
-                   * 8 bytes by the transform, handled via the imm->pointee
-                   * path in the first switch or the default rule.
-                   */
-                  const auto* operands = xed_decoded_inst_operands_const(&xedd);
-                  const xed_reg_enum_t basereg  =
-                     xed_decoded_inst_get_base_reg(operands, 0);
-                  const xed_reg_enum_t indexreg =
-                     xed_decoded_inst_get_index_reg(operands, 0);
-                  if (basereg == XED_REG_INVALID && indexreg == XED_REG_INVALID) {
+                  const xed_operand_values_t *mops = xed_decoded_inst_operands_const(&xedd);
+                  if (!memdisp &&
+                      xed_decoded_inst_get_base_reg(mops, 0) == XED_REG_INVALID &&
+                      xed_decoded_inst_get_index_reg(mops, 0) == XED_REG_INVALID) {
                      break;
                   }
-
-                  /* Build `mov eax, [SAME mem operand]` from the instbuf:
-                   * `FF /4` -> `8B /0`, keeping mod+rm so the addressing
-                   * form (SIB, base+disp, ...) survives untouched. */
-                  auto mov_buf = instbuf;
-                  /* Strip 0x66/0x67 prefix bytes if present so byte 0 is
-                   * the opcode. */
-                  size_t op_idx = 0;
-                  while (op_idx < mov_buf.size() && (mov_buf[op_idx] == 0x66
-                                                     || mov_buf[op_idx] == 0x67)) {
-                     ++op_idx;
+                  LoweredMem m;
+                  if (!lower_mem(env, m)) { break; }
+                  const bool is_call =
+                     xed_decoded_inst_get_iform_enum(&xedd) == XED_IFORM_CALL_NEAR_MEMv;
+                  const xed_reg_enum_t tgt = is_call ? XED_REG_RAX : XED_REG_R11;
+                  auto load = emit_mem(env, m, opcode_t{0x8B}, is_call ? 0 : 11, {});
+                  auto jmp_inst = new Instruction<Bits::M64>(opcode::jmp_r64(tgt));
+                  if (!is_call) {
+                     load.splice(load.end(), null_trap(tgt));
+                     load.push_back(jmp_inst);
+                     return load;
                   }
-                  const uint8_t modrm = mov_buf.at(op_idx + 1);
-                  if (((modrm >> 3) & 0x07) != 0x04) {
-                     throw error("JMP_MEMv with unexpected ModR/M 0x%02x at vmaddr 0x%zx",
-                                 modrm, this->loc.vmaddr);
-                  }
-                  Instruction<Bits::M64> *mov_inst = nullptr;
-                  Instruction<Bits::M64> *pre_lea  = nullptr;
-                  if (pic_anchored && memdisp) {
-                     /* PIC-anchored `jmp *disp(%anchor[,idx,s])` (tail-call
-                      * through an anchor-relative fn-ptr / jump-table). Same
-                      * root cause as the CALL_NEAR_MEMv case: the anchor base
-                      * is dead in M64, so reach the resolved blob rip-relative
-                      * instead of keeping the anchor + a rip-relative disp.
-                      *   no live index : mov r11d, [rip+slot]    (drop anchor)
-                      *   live index    : lea r11,[rip+base];
-                      *                   mov r11d,[r11 + idx*s]  (keep index) */
-                     const xed_reg_enum_t idxreg =
-                        xed_decoded_inst_get_index_reg(operands, 0);
-                     opcode_t rip_buf;
-                     for (std::size_t j = 0; j < op_idx; ++j) {
-                        rip_buf.push_back(mov_buf[j]); /* legacy prefixes (0x66) */
-                     }
-                     if (idxreg == XED_REG_INVALID) {
-                        rip_buf.push_back(0x44);       /* REX.R -> reg=r11d */
-                        rip_buf.push_back(0x8B);       /* mov r32, r/m32 */
-                        rip_buf.push_back(0x1D);       /* mod=00 reg=r11 rm=101 */
-                        rip_buf.insert(rip_buf.end(), 4, (uint8_t)0x00);
-                        mov_inst = new Instruction<Bits::M64>(rip_buf);
-                        mov_inst->memidx = 0;
-                        mov_inst->memdisp_absolute = false;
-                        env.resolve(memdisp, &mov_inst->memdisp);
-                        mov_inst->memdisp_offset = memdisp_offset;
-                     } else {
-                        const uint8_t sib = mov_buf.at(op_idx + 2);
-                        const uint8_t scale_f = (sib >> 6) & 0x03;
-                        const uint8_t idx_f   = (sib >> 3) & 0x07;
-                        pre_lea = new Instruction<Bits::M64>(
-                           opcode::lea_r11_mem_rip_disp32());
-                        pre_lea->memidx = 0;
-                        env.resolve(memdisp, &pre_lea->memdisp);
-                        pre_lea->memdisp_offset = memdisp_offset;
-                        /* REX.R (dest r11d) + REX.B (base r11): the load reads
-                         * [r11+idx*s] and writes r11d — the read completes
-                         * before the write within the single insn, so reusing
-                         * r11 as both base and dest is safe, and the i386
-                         * index reg is preserved (r11 is outside the i386
-                         * register file). */
-                        rip_buf.push_back(0x45);       /* REX.R|REX.B */
-                        rip_buf.push_back(0x8B);
-                        rip_buf.push_back(0x04);       /* mod=00 reg=r11 rm=100 (SIB) */
-                        rip_buf.push_back((uint8_t)((scale_f << 6) |
-                                                    (idx_f << 3) | 0x03)); /* base=r11 */
-                        mov_inst = new Instruction<Bits::M64>(rip_buf);
-                        mov_inst->memidx = 0;
-                     }
-                  } else {
-                     mov_buf[op_idx] = 0x8B;             /* mov r32, r/m32 */
-                     mov_buf[op_idx + 1] = modrm & 0xC7; /* reg -> r11 (011) */
-                     mov_buf[op_idx + 1] |= (0x3 << 3);  /* reg field = 011  */
-                     mov_buf.insert(mov_buf.begin() + op_idx, 0x44); /* REX.R */
-                     /* op_idx now points at REX.R; the opcode/ModR/M shifted
-                      * one byte right, so the SIB read below is at op_idx+3. */
-                     mov_inst = new Instruction<Bits::M64>(mov_buf);
-                     mov_inst->memidx = 0;
-                     /* SIB no-base form (mod=00 rm=100, SIB base=101) is an
-                      * absolute disp32 in M64 too — keep it absolute (the
-                      * wrapper's runtime __text patcher applies the slide),
-                      * matching CALL_NEAR_MEMv. Other forms keep their
-                      * register-relative disp untouched. */
-                     if ((modrm & 0xC7) == 0x04) {
-                        const uint8_t sib = mov_buf.at(op_idx + 3);
-                        if ((sib & 0x07) == 0x05) {
-                           mov_inst->memdisp_absolute = true;
-                        }
-                     }
-                     if (memdisp) {
-                        env.resolve(memdisp, &mov_inst->memdisp);
-                        mov_inst->memdisp_offset = memdisp_offset;
-                        /* Propagate ABSOLUTE for a register-carrying operand
-                         * ([base(+idx*scale)+disp32] table dispatch) — same
-                         * reasoning as CALL_NEAR_MEMv above. */
-                        if (memdisp_absolute) {
-                           mov_inst->memdisp_absolute = true;
-                        }
-                     }
-                  }
-
-                  auto jmp_inst = new Instruction<Bits::M64>(
-                     opcode::jmp_r64(XED_REG_R11));
-                  /* trap a `jmp [mem]` (switch dispatch / tail-call fn-ptr)
-                   * through a NULL slot (env-gated). r11 = the scratch the
-                   * mov above loaded the target into (see the head comment:
-                   * eax would clobber the live switch-index reg). */
-                  auto trap = null_trap(XED_REG_R11);
-                  if (trap.empty()) {
-                     if (pre_lea) { return {pre_lea, mov_inst, jmp_inst}; }
-                     return {mov_inst, jmp_inst};
-                  }
-                  trap.push_front(mov_inst);
-                  if (pre_lea) { trap.push_front(pre_lea); }
-                  trap.push_back(jmp_inst);
-                  return trap;
+                  auto insts = call_op(jmp_inst);   /* lea, push (2), jmp, ret */
+                  auto at_jmp = std::prev(insts.end(), 2);
+                  static const bool load_after_push =
+                     std::getenv("M64_CALL_MEM_LOAD_AFTER_PUSH") != nullptr;
+                  insts.splice(load_after_push ? at_jmp : insts.begin(), load);
+                  insts.splice(at_jmp, null_trap(tgt));
+                  return insts;
                }
 
             case XED_IFORM_JMP_GPRv: // jmp r32 — tail call / computed jump
@@ -3094,150 +1547,26 @@ namespace MachO {
                   return {new Instruction<opposite<bits>>(buf)};
                }
 
+            /* `push/pop dword [mem]` move 4 bytes; the x86_64 forms move 8.
+             * push: load into r11d, then the 4-byte push (the operand is
+             * evaluated before %esp moves). pop: the 4-byte pop, then the store
+             * (an %esp-relative destination is computed AFTER the increment).
+             * The popped value goes through r10d when the operand needs r11.
+             * The 16-bit forms move 2 bytes in both modes and copy verbatim. */
             case XED_IFORM_PUSH_MEMv:
+            case XED_IFORM_POP_MEMv:
                {
-                  /*
-                   * `push [r/m]` → split into `mov eax, [r/m]; push eax`.
-                   * Was: assert(mov_byte bits) — crashed on any PUSH_MEMv
-                   * with a legacy prefix (0x66/0x67/segment override),
-                   * which iPhoto's 13 MB __text definitely contains.
-                   * Detect prefixes, locate ModR/M, sanity-check that
-                   * reg=110 (/6 = PUSH); throw cleanly if anything is
-                   * outside what this rewrite supports — `error` is a
-                   * std::runtime_error subclass and is catchable up the
-                   * stack, unlike abort()/assert().
-                   */
-                  /* PIC-anchored `push disp(%anchor[,idx,s])`: this case
-                   * returns before the generic pic_anchored rewrite below, so
-                   * reach the resolved slot directly, exactly like the
-                   * CALL_NEAR_MEMv case: the anchor register is dead in M64.
-                   * (libbass `pushl key(%ebx)` -> pthread_getspecific read
-                   * code bytes as the key.) Guard pic-push-mem; OFF arm
-                   * M64_NO_PIC_PUSH_MEM=1. */
-                  static const bool no_pic_push =
-                     std::getenv("M64_NO_PIC_PUSH_MEM") != nullptr;
-                  if (pic_anchored && memdisp && !no_pic_push &&
-                      effective_width != 16) {
-                     const xed_operand_values_t *pops =
-                        xed_decoded_inst_operands_const(&xedd);
-                     const xed_reg_enum_t idxreg =
-                        xed_decoded_inst_get_index_reg(pops, 0);
-                     typename SectionBlob<Bits::M32>::SectionBlobs insts;
-                     if (idxreg == XED_REG_INVALID) {
-                        /* mov r11d, [rip+slot] */
-                        opcode_t b = {0x44, 0x8B, 0x1D, 0, 0, 0, 0};
-                        auto mov_inst = new Instruction<Bits::M64>(b);
-                        mov_inst->memidx = 0;
-                        mov_inst->memdisp_absolute = false;
-                        env.resolve(memdisp, &mov_inst->memdisp);
-                        mov_inst->memdisp_offset = memdisp_offset;
-                        insts.push_back(mov_inst);
-                     } else {
-                        /* lea r11,[rip+base]; addr32 mov r11d,[r11+idx*s] */
-                        std::size_t m = 0;
-                        while (m < instbuf.size() && instbuf[m] != 0xFF) { ++m; }
-                        const uint8_t sib = instbuf.at(m + 2);
-                        auto pre_lea = new Instruction<Bits::M64>(
-                           opcode::lea_r11_mem_rip_disp32());
-                        pre_lea->memidx = 0;
-                        env.resolve(memdisp, &pre_lea->memdisp);
-                        pre_lea->memdisp_offset = memdisp_offset;
-                        insts.push_back(pre_lea);
-                        opcode_t b = {0x67, 0x45, 0x8B, 0x1C,
-                                      (uint8_t)((sib & 0xF8) | 0x03)};
-                        insts.push_back(new Instruction<Bits::M64>(b));
-                     }
+                  if (effective_width == 16) { break; }
+                  LoweredMem m;
+                  if (!lower_mem(env, m)) { break; }
+                  if (xed_decoded_inst_get_iform_enum(&xedd) == XED_IFORM_PUSH_MEMv) {
+                     auto insts = emit_mem(env, m, opcode_t{0x8B}, 11, {});
                      insts.splice(insts.end(), push_r32(XED_REG_R11D));
                      return insts;
                   }
-                  opcode_t mov_buf = instbuf;
-                  std::size_t modrm_idx = 1;
-                  while (modrm_idx < mov_buf.size()) {
-                     const uint8_t b = mov_buf.at(modrm_idx - 1);
-                     if (b == 0x66 || b == 0x67 || b == 0x26 || b == 0x2E ||
-                         b == 0x36 || b == 0x3E || b == 0x64 || b == 0x65 ||
-                         b == 0xF0 || b == 0xF2 || b == 0xF3) {
-                        ++modrm_idx;
-                        continue;
-                     }
-                     break;
-                  }
-                  if (modrm_idx >= mov_buf.size()) {
-                     throw error("PUSH_MEMv: ModR/M past end at vmaddr 0x%zx",
-                                 this->loc.vmaddr);
-                  }
-                  uint8_t mov_byte = mov_buf.at(modrm_idx);
-                  /* Convert PUSH /6 (reg=110) → MOV /3 (reg=011) and prepend
-                   * REX.R (0x44), making the destination R11D — the register
-                   * push_r32(XED_REG_R11D) below actually pushes. (A previous
-                   * version encoded reg=100+REX.R = R12D, so the loaded value
-                   * was discarded and stale R11 got pushed instead.) The REX
-                   * byte must immediately precede the opcode, after any
-                   * legacy prefixes. */
-                  if (((mov_byte >> 3) & 0x07) != 0x06) {
-                     throw error("PUSH_MEMv with unexpected ModR/M 0x%02x at vmaddr 0x%zx",
-                                 mov_byte, this->loc.vmaddr);
-                  }
-                  mov_buf.at(modrm_idx - 1) = 0x8b;   /* opcode: mov r32, r/m32 */
-                  mov_byte = (mov_byte & ~(uint8_t)(0x07 << 3)) | (0x03 << 3);
-                  mov_buf.at(modrm_idx) = mov_byte;
-                  mov_buf.insert(mov_buf.begin() + (modrm_idx - 1), 0x44);
-                  typename SectionBlob<Bits::M32>::SectionBlobs insts;
-                  auto mov_inst = new Instruction<opposite<bits>>(mov_buf);
-                  insts.push_back(mov_inst);
-                  insts.splice(insts.end(), push_r32(XED_REG_R11D));
-                  return insts;
-               }
-
-            case XED_IFORM_POP_MEMv:
-               {
-                  /*
-                   * `pop dword [r/m]` (i386 8F /0) pops 4 bytes into the
-                   * memory slot. The byte-identical x86_64 form pops 8:
-                   * wrong rsp adjustment AND an 8-byte store smearing the
-                   * neighboring word. Rewrite:
-                   *
-                   *   mov r11d, [rsp]    ; 4-byte load of TOS
-                   *   lea rsp, [rsp+4]   ; i386-width pop
-                   *   mov [r/m], r11d    ; original addressing bytes
-                   *
-                   * The store runs AFTER the rsp increment, matching
-                   * Intel POP semantics for ESP-based destinations.
-                   * `8F /0` -> `89 /3 + REX.R` (mov r/m32, r11d), keeping
-                   * mod+rm so the addressing form survives untouched.
-                   * 16-bit form (66 8F /0) pops 2 bytes in both modes —
-                   * fall through to the byte-identical default rule.
-                   * The `[abs32]` pointee-tagged form is handled in the
-                   * first switch.
-                   */
-                  if (effective_width == 16) { break; }
-                  opcode_t store_buf = instbuf;
-                  std::size_t modrm_idx = 1;
-                  while (modrm_idx < store_buf.size()) {
-                     const uint8_t b = store_buf.at(modrm_idx - 1);
-                     if (b == 0x66 || b == 0x67 || b == 0x26 || b == 0x2E ||
-                         b == 0x36 || b == 0x3E || b == 0x64 || b == 0x65 ||
-                         b == 0xF0 || b == 0xF2 || b == 0xF3) {
-                        ++modrm_idx;
-                        continue;
-                     }
-                     break;
-                  }
-                  if (modrm_idx >= store_buf.size()) {
-                     throw error("POP_MEMv: ModR/M past end at vmaddr 0x%zx",
-                                 this->loc.vmaddr);
-                  }
-                  uint8_t store_byte = store_buf.at(modrm_idx);
-                  if (((store_byte >> 3) & 0x07) != 0x00) {
-                     throw error("POP_MEMv with unexpected ModR/M 0x%02x at vmaddr 0x%zx",
-                                 store_byte, this->loc.vmaddr);
-                  }
-                  store_buf.at(modrm_idx - 1) = 0x89;   /* mov r/m32, r32 */
-                  store_buf.at(modrm_idx) = (uint8_t)(store_byte | (0x03 << 3));
-                  store_buf.insert(store_buf.begin() + (modrm_idx - 1), 0x44);
-                  auto store_inst = new Instruction<opposite<bits>>(store_buf);
-                  auto insts = pop_r32(XED_REG_R11D);
-                  insts.push_back(store_inst);
+                  const bool r10 = !m.pre.empty();
+                  auto insts = pop_r32(r10 ? XED_REG_R10D : XED_REG_R11D);
+                  insts.splice(insts.end(), emit_mem(env, m, opcode_t{0x89}, r10 ? 10 : 11, {}));
                   return insts;
                }
 
@@ -3330,394 +1659,21 @@ namespace MachO {
             default: break;
             }
 
-            /*
-             * PIC-anchored [base + disp32] (Tessera root cause):
-             * Parser's DetectPicAnchoredDisps tagged this with
-             * memdisp = SectionBlob at (anchor_vmaddr + disp). Rewrite
-             * the load/store as rip-relative, dropping the base reg
-             * entirely. Works for any ModR/M shape `mod∈{01,10} r/m=base`
-             * with no SIB: keep prefixes + opcode + reg field, change
-             * mod=00 r/m=101 (rip-relative), replace disp with a 4-byte
-             * placeholder resolved at emit. The base register is no
-             * longer read by the rewritten instruction — it still gets
-             * loaded by the `pop` upstream (low 32 of anchor vmaddr) but
-             * is now dead w.r.t. memory addressing.
-             */
-            if (pic_anchored && memdisp) {
-               /* Locate ModR/M after legacy prefixes. Reject 0x67
-                * (addr-size override) and 0x0F-prefixed multi-byte
-                * opcodes — the rewrite assumes a 1-byte opcode and a
-                * normal ModR/M layout. */
-               std::size_t p = 0;
-               while (p < instbuf.size()) {
-                  const uint8_t b = instbuf.at(p);
-                  /* Legacy prefixes are copied verbatim below and the REX is
-                   * placed after them, so none needs to be tracked here. */
-                  if (b == 0x66) { ++p; continue; }
-                  if (b == 0x67) {
-                     throw error("%s: pic_anchored with 0x67 prefix at "
-                                 "vmaddr 0x%zx", __FUNCTION__,
-                                 this->loc.vmaddr);
-                  }
-                  if (b == 0xF0 || b == 0xF2 || b == 0xF3 ||
-                      b == 0x2E || b == 0x36 || b == 0x3E ||
-                      b == 0x26 || b == 0x64 || b == 0x65) {
-                     ++p; continue;
-                  }
-                  break;
-               }
-               if (p >= instbuf.size()) {
-                  goto pic_anchor_fallthrough;
-               }
-               /* Opcode may be multi-byte: 0x0F xx (SSE: movups/movss/
-                * movsd/...) or 0x0F 0x38/0x3A xx. clang's i386 codegen
-                * loads float struct literals through the PIC anchor with
-                * SSE (`movups 0x1057(%eax), %xmm0`), so these must take
-                * the rip-relative rewrite too — the fallthrough rewrite
-                * below ADDS the base reg (anchor) as an index and reads
-                * anchor+target garbage. */
-               std::size_t opcode_len = 1;
-               if (instbuf.at(p) == 0x0F) {
-                  opcode_len = (p + 1 < instbuf.size() &&
-                                (instbuf.at(p + 1) == 0x38 ||
-                                 instbuf.at(p + 1) == 0x3A)) ? 3 : 2;
-               }
-               if (p + opcode_len > instbuf.size()) {
-                  goto pic_anchor_fallthrough;
-               }
-               const std::size_t opcode_idx = p;
-               p += opcode_len; /* p -> ModR/M */
-               if (p >= instbuf.size()) {
-                  throw error("%s: pic_anchored: ModR/M past end at "
-                              "vmaddr 0x%zx", __FUNCTION__,
-                              this->loc.vmaddr);
-               }
-               const std::size_t modrm_idx = p;
-               const uint8_t modrm = instbuf.at(modrm_idx);
-               const uint8_t reg_field = modrm & 0x38;
-               const uint8_t rm        = modrm & 0x07;
-               const uint8_t mod       = modrm & 0xC0;
-               const bool has_sib = (rm == 0x04);
-               if (has_sib) {
-                  /* `[anchor + idx*scale + disp]` — the PIC anchor register
-                   * provides the table BASE, `idx*scale` is a live index.
-                   * Rewrite:
-                   *
-                   *   i386 | op [anchor + idx*scale + disp32]
-                   *   -----|---------------------------------------------------
-                   *   X86  | lea  r11, [rip + disp32]    ; r11 = table base
-                   *        | op   [r11 + idx*scale]      ; index into table
-                   *
-                   * r11 (register 11, low3=011, REX.B=1) replaces the anchor
-                   * base in the SIB byte.  The live index register is
-                   * unchanged.  REX.X is 0 since i386 index fields are always
-                   * within EAX..EDI (no extended indexing needed).
-                   *
-                   * Safety checks: we only enter here when section.cc's
-                   * DetectPicAnchoredDisps confirmed that the base is a
-                   * known anchor register and the index is a plain GP reg
-                   * (not itself an anchor).  An `idx_field == 4` (ESP =
-                   * "no index") can't appear since ESP cannot be an index
-                   * in i386 SIB; bail loudly rather than silently corrupt. */
-                  if (p + 1 >= instbuf.size()) {
-                     goto pic_anchor_fallthrough; /* no SIB byte? bail */
-                  }
-                  const uint8_t sib      = instbuf.at(modrm_idx + 1);
-                  uint8_t scale_f        = (sib >> 6) & 0x03;  /* bits 7:6 */
-                  uint8_t idx_f          = (sib >> 3) & 0x07;  /* bits 5:3 */
-                  if (pic_anchor_in_index) {
-                     /* ★The anchor was the INDEX, not the base (section.cc
-                      * proved scale == 1 and base != ESP). SIB is symmetric at
-                      * scale 1, so the fix is to SWAP the roles: the live
-                      * value moves into the index field and r11 — holding the
-                      * resolved `anchor + disp` — takes the base field, giving
-                      *
-                      *   i386 | lea edx, [live + anchor + disp32]
-                      *   X86  | lea  r11, [rip + disp32]
-                      *        | lea  edx, [r11 + live*1]
-                      *
-                      * Encoding the live BASE in the index field is why
-                      * section.cc rejects an ESP base: index field 100 means
-                      * "no index" and would silently drop the operand. */
-                     idx_f = (uint8_t)(sib & 0x07);   /* old base -> new index */
-                     scale_f = 0;                     /* scale 1 */
-                  }
-                  if (idx_f == 0x04) {
-                     /* ESP/no-index in SIB — not reachable from a real index
-                      * register; fall through to the generic rewrite. */
-                     goto pic_anchor_fallthrough;
-                  }
-                  /* Disp size: for SIB-based PIC accesses the parser always
-                   * captures a 4-byte disp (dwidth == 4 gate in section.cc);
-                   * mod must be 0x80 (disp32) or 0x40 (disp8, unusual here). */
-                  std::size_t sib_disp_bytes = 0;
-                  if (mod == 0x40) { sib_disp_bytes = 1; }
-                  else if (mod == 0x80) { sib_disp_bytes = 4; }
-                  const std::size_t sib_after =
-                     modrm_idx + 2 /* ModRM+SIB */ + sib_disp_bytes;
-                  const std::size_t sib_imm_bytes =
-                     instbuf.size() > sib_after ? instbuf.size() - sib_after : 0;
-
-                  /* lea r11, [rip+disp32] — resolves to the table base */
-                  auto* lea_sib = new Instruction<opposite<bits>>
-                     (opcode::lea_r11_mem_rip_disp32());
-                  lea_sib->memidx = 0;
-                  env.resolve(memdisp, &lea_sib->memdisp);
-                  /* Carry any intra-blob byte offset (set by section.cc's
-                   * DetectPicAnchoredDisps writable-__DATA containing fallback
-                   * for a mid-blob anchored access) onto the base-computing
-                   * lea, so `r11 = containing_blob + offset` is the exact
-                   * table base. Normally 0 (boundary-aligned target). */
-                  lea_sib->memdisp_offset = memdisp_offset;
-
-                  /* Rebuild main instruction:
-                   *   prefixes + opcode + new ModR/M(mod=00,rm=04) +
-                   *   new SIB(scale_f, idx_f, base=r11=3) + trailing imm */
-                  opcode_t sib_buf;
-                  for (std::size_t j = 0; j < opcode_idx + opcode_len; ++j) {
-                     sib_buf.push_back(instbuf.at(j));
-                  }
-                  /* ModRM: mod=00, reg preserved, rm=04 (SIB follows) */
-                  sib_buf.push_back((uint8_t)(0x04 | reg_field));
-                  /* SIB: scale unchanged, idx unchanged, base=r11 (low3=3) */
-                  sib_buf.push_back((uint8_t)((scale_f << 6) | (idx_f << 3) | 0x03));
-                  for (std::size_t j = instbuf.size() - sib_imm_bytes;
-                       j < instbuf.size(); ++j) {
-                     sib_buf.push_back(instbuf.at(j));
-                  }
-                  /* REX.B (0x41): extends r11 as the SIB base register.
-                   * REX.X is not needed since the index is within rax..rdi.
-                   *
-                   * ★REX MUST BE THE LAST PREFIX, immediately before the
-                   * opcode. sib_buf already holds this instruction's legacy
-                   * prefixes -- the copy loop above starts at index 0 -- so
-                   * inserting at begin() put the REX *ahead* of a mandatory
-                   * 0x66/0xF2/0xF3, and a REX followed by another prefix is
-                   * IGNORED by the CPU. REX.B was then lost and the SIB base
-                   * decoded from its low 3 bits alone: 011 = %rbx. Every
-                   * 16-bit (0x66: movw/cmpw/pinsrw) and SSE-scalar (0xF3/0xF2:
-                   * movss/movsd/mulss/...) access through a PIC anchor
-                   * therefore addressed a STALE %rbx instead of the table base
-                   * -- reading garbage, and writing to a wild 64-bit address
-                   * that silently corrupted whatever lived there. Measured on
-                   * Portal 2's engine.dylib: 292 such sites, one of which
-                   * scribbled 16-bit 0xFFFF into dyld's own allocations and
-                   * made dyld abort the process from an assert.
-                   *
-                   * Inserting at opcode_idx is a NO-OP for a prefix-less
-                   * instruction (opcode_idx == 0), so this changes only the
-                   * encodings that were provably wrong. The 0x66 is already
-                   * in the copied bytes, so re-adding it here would just
-                   * duplicate a prefix. */
-                  sib_buf.insert(sib_buf.begin() + opcode_idx, (uint8_t)0x41);
-                  /* i386 EA-wrap fidelity: `[anchor + idx*scale + disp]` is
-                   * computed mod 2^32 on i386, so a negative/sentinel index
-                   * (idx = -1 -> table[-1]) reads just BELOW the table. With
-                   * 64-bit addressing the zero-extended index lands +16GB away
-                   * (Portal 2 shaderapidx9 ImageFormatToD3DFormat(-1): fault
-                   * at table+0x3fffffffc). r11 holds a low-4GB image address,
-                   * so addr32 (0x67, legal before REX) restores the exact i386
-                   * EA. Same policy as the MR rewrite and the copy ctor: not
-                   * when the index is the widened ebp (a 64-bit frame
-                   * pointer must not be truncated). */
-                  if (idx_f != 0x05) {
-                     sib_buf.insert(sib_buf.begin() + opcode_idx, (uint8_t)0x67);
-                  }
-
-                  auto* main_sib = new Instruction<opposite<bits>>(sib_buf);
-                  return {lea_sib, main_sib};
-               }
-               /* Compute original disp size to find any trailing imm. */
-               std::size_t disp_bytes = 0;
-               if (mod == 0x40) { disp_bytes = 1; }
-               else if (mod == 0x80) { disp_bytes = 4; }
-               else if (mod == 0x00 && rm == 0x05) { disp_bytes = 4; }
-               /* else mod==0x00 with rm!=0x05: no disp (shouldn't happen
-                * because parser only attaches memdisp when disp width is
-                * 4; mod==0x00 rm!=0x05 means no displacement). */
-               const std::size_t after =
-                  modrm_idx + 1 + disp_bytes;
-               const std::size_t imm_bytes =
-                  instbuf.size() > after ? instbuf.size() - after : 0;
-
-               /* Build rewritten instbuf: prefixes + opcode + new ModR/M
-                * (mod=00 r/m=101, reg preserved) + disp32 placeholder +
-                * trailing imm verbatim. */
-               opcode_t buf;
-               for (std::size_t j = 0; j < opcode_idx + opcode_len; ++j) {
-                  buf.push_back(instbuf.at(j));
-               }
-               buf.push_back((uint8_t)(0x05 | reg_field));
-               buf.push_back(0x00);
-               buf.push_back(0x00);
-               buf.push_back(0x00);
-               buf.push_back(0x00);
-               for (std::size_t j = instbuf.size() - imm_bytes;
-                    j < instbuf.size(); ++j) {
-                  buf.push_back(instbuf.at(j));
-               }
-
-               auto *new_inst = new Instruction<opposite<bits>>(buf);
-               new_inst->memidx = 0;
-               new_inst->memdisp_absolute = false; /* rip-relative */
-               env.resolve(memdisp, &new_inst->memdisp);
-               /* Carry any intra-blob byte offset onto the synthesised
-                * rip-relative instruction. section.cc's DetectPicAnchoredDisps
-                * sets memdisp_offset when an anchored access reads an INTERIOR
-                * byte/short of a multi-byte __DATA blob (containing fallback);
-                * Emit adds it to the resolved blob vmaddr so the disp targets
-                * the exact byte instead of skewing to the next blob. Normally 0
-                * (boundary-aligned target) — a no-op for every other case. */
-               new_inst->memdisp_offset = memdisp_offset;
-               return {new_inst};
-            }
-         pic_anchor_fallthrough:
-
-            /*
-             * `[base + disp32]` absolute table access (e.g. i386
-             * `movl %edi, 0x11260(%edx)`). The parser captured the
-             * table's absolute address in `memdisp`. A bare disp32 is
-             * not slide-correct once the translated dylib moves, so
-             * rewrite:
-             *
-             *   i386 | <op> [base + disp32]
-             *   -----|------------------------------
-             *   X86  | lea  r11, [rip + disp32]   ; r11 = table base
-             *        | <op> [base + r11*1]        ; index addressing
-             *
-             * rip-relative `lea` tracks the ASLR slide automatically,
-             * so — unlike the `[disp32+idx*scale]` jump-table form —
-             * this needs no wrapper-side runtime __text patching.
-             */
-            if (memdisp
-                && xed_decoded_inst_get_iform_enum(&xedd) != XED_IFORM_JMP_MEMv) {
-               const xed_operand_values_t* mops =
-                  xed_decoded_inst_operands_const(&xedd);
-               const xed_reg_enum_t br =
-                  xed_decoded_inst_get_base_reg(mops, memidx);
-               const xed_reg_enum_t ir =
-                  xed_decoded_inst_get_index_reg(mops, memidx);
-               if (br != XED_REG_INVALID && ir == XED_REG_INVALID) {
-                  /*
-                   * Locate the ModR/M byte by skipping legacy prefixes.
-                   *
-                   * 0x66 (operand-size override): preserve verbatim on
-                   * the rewritten main instruction — it controls reg
-                   * width, not addressing, so the [base+r11*1] rewrite
-                   * still applies. The lea-r11 doesn't need 0x66.
-                   *
-                   * 0x67 (address-size override): in i386 this switches
-                   * addressing to addr16:disp16, but the parser only
-                   * captures memdisp when memory_displacement_width == 4,
-                   * so 0x67 should not reach here. Bail loudly if it
-                   * does — the rewrite math below assumes a 4-byte disp.
-                   */
-                  bool have_66 = false;
-                  std::size_t p = 0;
-                  while (p < instbuf.size()) {
-                     const uint8_t b = instbuf.at(p);
-                     if (b == 0x66) {
-                        have_66 = true;
-                        ++p;
-                        continue;
-                     }
-                     if (b == 0x67) {
-                        throw error("%s: [base+disp32] with addr-size "
-                                    "prefix at vmaddr 0x%zx", __FUNCTION__,
-                                    this->loc.vmaddr);
-                     }
-                     if (b == 0xF0 || b == 0xF2 || b == 0xF3 || b == 0x2E ||
-                         b == 0x36 || b == 0x3E || b == 0x26 || b == 0x64 ||
-                         b == 0x65) {
-                        ++p;
-                        continue;
-                     }
-                     break;
-                  }
-                  const std::size_t opcode_start = p;
-                  bool is_3byte_opcode = false;
-                  if (instbuf.at(p) == 0x0F) {
-                     ++p;
-                     if (instbuf.at(p) == 0x38 || instbuf.at(p) == 0x3A) {
-                        /*
-                         * 3-byte opcode (SSE3/SSSE3/SSE4). Skip the
-                         * explicit lea+r11 rewrite — it'd require
-                         * preserving 3-byte opcode in `buf` and the
-                         * existing math assumes 1-byte opcode after
-                         * prefixes. Fall through to the M32 default
-                         * rule (line ~1331): copy ctor reuses the
-                         * bytes (`[base+disp32]` decodes the same way
-                         * in x86_64 memory addressing) and resolves
-                         * memdisp absolute. Slide-correctness isn't
-                         * an issue since the wrapper disables ASLR.
-                         */
-                        is_3byte_opcode = true;
-                     }
-                  }
-                  if (is_3byte_opcode) {
-                     /* exit the [base+disp32] rewrite without returning
-                      * — control falls through to the default rule. */
-                     goto base_disp32_skip;
-                  }
-                  ++p;                                   /* p -> ModR/M */
-                  const std::size_t modrm_idx = p;
-                  const uint8_t modrm = instbuf.at(modrm_idx);
-                  const uint8_t reg = (modrm >> 3) & 0x7;
-                  const uint8_t rm  = modrm & 0x7;
-                  const bool has_sib = (rm == 0x4);
-                  const uint8_t base = has_sib
-                     ? (uint8_t)(instbuf.at(modrm_idx + 1) & 0x7)
-                     : rm;
-                  /* trailing immediate bytes, e.g. mov [base+disp32], imm32 */
-                  const std::size_t after =
-                     modrm_idx + 1 + (has_sib ? 1u : 0u) + 4;
-                  const std::size_t imm_bytes =
-                     instbuf.size() > after ? instbuf.size() - after : 0;
-
-                  /* lea r11, [rip+disp32] — table base, slide-correct */
-                  auto* lea_inst = new Instruction<opposite<bits>>
-                     (opcode::lea_r11_mem_rip_disp32());
-                  lea_inst->memidx = 0;
-                  env.resolve(memdisp, &lea_inst->memdisp);
-                  /* Carry any intra-blob byte offset from the parser's
-                   * containing fallback (a zerofill-interior or mid-blob
-                   * table base resolves as spanning-extent + offset) so
-                   * r11 = the exact table base, not the extent start —
-                   * mirrors the SIB-form rewrite above. Normally 0. */
-                  lea_inst->memdisp_offset = memdisp_offset;
-
-                  /* rebuild the operation with [base + r11*1] addressing */
-                  opcode_t buf;
-                  for (std::size_t j = opcode_start; j < modrm_idx; ++j) {
-                     buf.push_back(instbuf.at(j));
-                  }
-                  const uint8_t new_sib = 0x18 | base;   /* scale 1, idx r11 */
-                  if (base == 0x5) {
-                     /* SIB base=101 has no base meaning at mod=00 — use
-                      * mod=01 with an explicit zero disp8 instead. */
-                     buf.push_back((uint8_t)(0x40 | (reg << 3) | 0x04));
-                     buf.push_back(new_sib);
-                     buf.push_back(0x00);
-                  } else {
-                     buf.push_back((uint8_t)((reg << 3) | 0x04));
-                     buf.push_back(new_sib);
-                  }
-                  for (std::size_t j = instbuf.size() - imm_bytes;
-                       j < instbuf.size(); ++j) {
-                     buf.push_back(instbuf.at(j));
-                  }
-                  /* REX.X (0x42) — index field's high bit. Must come
-                   * AFTER any legacy prefix (0x66) per x86_64 ISA. */
-                  buf.insert(buf.begin(), 0x42);
-                  if (have_66) {
-                     buf.insert(buf.begin(), 0x66);
-                  }
-                  auto* main_inst = new Instruction<opposite<bits>>(buf);
-                  return {lea_inst, main_inst};
+            /* Any other iform keeps its operation; only a relocated memory
+             * operand (PIC-anchored, or an absolute `disp32(%base)` table)
+             * needs re-encoding. Absolute `disp32(,i,s)`/`disp32(%b,i,s)`
+             * stay byte-identical below with an absolute disp. */
+            if (memdisp) {
+               const xed_operand_values_t *mops = xed_decoded_inst_operands_const(&xedd);
+               const bool base_only =
+                  xed_decoded_inst_get_base_reg(mops, memidx) != XED_REG_INVALID &&
+                  xed_decoded_inst_get_index_reg(mops, memidx) == XED_REG_INVALID;
+               LoweredMem m;
+               if ((pic_anchored || base_only) && lower_mem(env, m)) {
+                  return emit_mem(env, m, m.opcode, m.reg, m.trailing);
                }
             }
 
-         base_disp32_skip:
             /* Stack-pointer widening: if the i386 instruction operates on
              * %esp or %ebp as a register operand with NO memory operand,
              * widen to 64-bit by prepending REX.W (0x48). Otherwise the
@@ -3788,42 +1744,6 @@ namespace MachO {
                                         this->loc.vmaddr);
                }
             }
-            /* DBG_SMALLIMM: post-do_resolve diagnostic for the movb $imm8,[abs32] bug.
-             * At Transform time do_resolve() has already run, so this->memdisp
-             * reflects the ACTUAL resolved value (vs. deferred-null at parse time).
-             * Also prints the trailing imm8 value and resolved NEW (x64 build) vmaddr
-             * when available (set during Build phase — may be 0 if Build not yet run). */
-            if (std::getenv("DBG_SMALLIMM") && memdisp_absolute && !imm) {
-               /* trailing imm8: last byte of instbuf (true for c6 05 movb form) */
-               const uint8_t trail_imm8 =
-                  instbuf.empty() ? 0 : instbuf.back();
-               std::fprintf(stderr,
-                  "[smallimm-transform] i386_vmaddr=0x%zx trail_imm8=0x%02x memdisp=%p",
-                  (std::size_t)this->loc.vmaddr,
-                  (unsigned)trail_imm8,
-                  (const void *)this->memdisp);
-               if (this->memdisp && this->memdisp->section) {
-                  /* loc.vmaddr at transform time = i386 (old) vmaddr of the blob.
-                   * The x64 (new) vmaddr is assigned during Build, which runs after
-                   * Transform, so it is typically still 0 here. We print both. */
-                  std::fprintf(stderr,
-                     " resolved_sect=%.16s resolved_seg=%.16s"
-                     " resolved_old_vmaddr=0x%zx resolved_new_vmaddr=0x%zx",
-                     this->memdisp->section->sect.sectname,
-                     (this->memdisp->section->segment
-                        ? this->memdisp->section->segment->segment_command.segname
-                        : "(null)"),
-                     (std::size_t)this->memdisp->loc.vmaddr,
-                     (std::size_t)this->memdisp->loc.vmaddr);
-               } else if (this->memdisp) {
-                  std::fprintf(stderr,
-                     " (section==nullptr) resolved_vmaddr=0x%zx",
-                     (std::size_t)this->memdisp->loc.vmaddr);
-               } else {
-                  std::fprintf(stderr, " (still null after do_resolve)");
-               }
-               std::fprintf(stderr, "\n");
-            }
             return {new Instruction<opposite<bits>>(*this, env)};
 
          } else {
@@ -3838,7 +1758,7 @@ namespace MachO {
       SectionBlob<bits>(other, env), instbuf(other.instbuf), memidx(other.memidx),
       memdisp(nullptr), memdisp_absolute(other.memdisp_absolute),
       memdisp_offset(other.memdisp_offset),
-      imm(nullptr), brdisp(nullptr), dbg_orig_md(other.dbg_orig_md)
+      imm(nullptr), brdisp(nullptr)
    {
       if (other.memdisp) {
          env.resolve(other.memdisp, &memdisp);
@@ -3970,100 +1890,28 @@ namespace MachO {
          env.resolve(other.brdisp, &brdisp);
       }
 
-      /*
-       * i386 effective-address wrap fidelity — emit a 0x67 address-size
-       * override on translated memory operands that keep an addressing
-       * register.
-       *
-       * An i386 memory operand `disp(base,index,scale)` computes its EA in a
-       * 32-bit address space: the sum WRAPS mod 2^32. A negative / sentinel
-       * index (e.g. pieceIndex = -1) relies on that wrap to land back
-       * in-bounds. Copied verbatim to x86_64 the base/index registers widen
-       * to 64-bit and the EA is computed in the FULL 64-bit address space —
-       * no wrap — so the SAME operand dereferences a >4 GB unmapped address
-       * and faults (Quinn -[QuinnGame setPieceIndex:…] `movl 0x..(,%rdx,8)`,
-       * -[KeyTypeCell isEntryAcceptable:] `movl 0x34(%rax,%rdx,4)`).
-       *
-       * Translated i386 operands only ever address the low 4 GB, so force a
-       * 32-bit EA with the 0x67 prefix. Per Intel SDM Vol.2 (LEA, Table 3-55:
-       * "32-bit effective address is calculated (using 67H prefix)"), in
-       * 64-bit mode 0x67 makes the CPU compute the EA with 32-bit registers,
-       * truncated mod 2^32 = exact i386 semantics.
-       *
-       * Trigger ONLY on a SCALED-INDEX operand — `[…+index*scale]`. The wrap
-       * pathology is `index*scale` overflowing 32 bits (a negative/sentinel
-       * index, e.g. -4 at scale 8 → +0x7ffffffe0) and needing to fold back
-       * mod 2^32; both Quinn instances carry such an index. A scaled index is
-       * an unmistakable i386 array/table access, so its address registers
-       * hold genuine i386 (zero-extended, <4 GB) values. Base-only operands
-       * (`[reg]`, `[reg+disp]`) are EXCLUDED: a bare base register can hold a
-       * native >4 GB pointer handed across the ABI (e.g. a C++ exception
-       * object from __cxa_allocate_exception / __cxa_begin_catch), and 0x67
-       * would truncate it — corrupting catch/cleanup paths.
-       *
-       * Also exclude RSP/RBP (the deliberately 64-bit-widened stack pointers
-       * — truncating them would corrupt stack-relative access) as base or
-       * index, and RIP (a RIP-relative operand reinterpreted under 0x67 would
-       * become an absolute disp32). PIC-anchored operands are rewritten to
-       * RIP-relative earlier and return their own encodings — they never
-       * reach this copy ctor.
-       */
+      /* i386 effective-address wrap: add 0x67 so a scaled-index operand
+       * computes its EA mod 2^32 as on i386 (see wants_addr32). */
       if (bits == Bits::M64) {
          const xed_operand_values_t *aops = xed_decoded_inst_operands(&xedd);
          const unsigned nmem =
             xed_decoded_inst_number_of_memory_operands(&xedd);
-         auto is_wide = [](xed_reg_enum_t r) {
-            return r == XED_REG_RSP || r == XED_REG_RBP || r == XED_REG_RIP ||
-                   r == XED_REG_ESP || r == XED_REG_EBP || r == XED_REG_EIP;
-         };
-         /* Exclude instructions that don't truly DEREFERENCE through the
-          * operand — modifying them only changes the encoding length, never
-          * corrects a fault:
-          *   - NOP / WIDENOP: the multi-byte alignment NOPs `0F 1F /0` carry a
-          *     SIB (base=index=rax, scale=1) that XED even reports with
-          *     mem_read=1, but the CPU never touches memory. Growing one by a
-          *     0x67 byte shifts code layout and corrupts exception
-          *     landing-pad / LSDA offsets (breaks C++ rethrow/cleanup).
-          *   - LEA: computes the address only; its 32-bit-operand result is
-          *     already truncated mod 2^32, so the wrap is a non-issue. */
+         /* NOP/WIDENOP never touch memory (growing an alignment nop would
+          * shift LSDA offsets) and LEA's 32-bit result already wraps. */
          const xed_category_enum_t cat = xed_decoded_inst_get_category(&xedd);
          const bool non_deref =
             cat == XED_CATEGORY_NOP || cat == XED_CATEGORY_WIDENOP ||
             xed_decoded_inst_get_iclass(&xedd) == XED_ICLASS_LEA;
-         /* RBP as the BASE of a scaled-index operand is an ordinary data
-          * register in -fomit-frame-pointer code (PvZ's libbass:
-          * `movss 0xc(%ebp,%esi,4)` with esi = -3). Even as a real frame
-          * pointer it addresses the low-4GB translated stack, so addr32 is
-          * exact there too. Guard 99_sib_ebp_base_neg_wrap; OFF arm
-          * M64_SIB_RBP_BASE_WIDE=1. */
-         static const bool rbp_base_wide =
-            std::getenv("M64_SIB_RBP_BASE_WIDE") != nullptr;
-         auto is_wide_base = [&](xed_reg_enum_t r) {
-            if (!rbp_base_wide && (r == XED_REG_RBP || r == XED_REG_EBP)) {
-               return false;
-            }
-            return is_wide(r);
-         };
          bool want_addr32 = false;
          for (unsigned i = 0; i < nmem && !want_addr32 && !non_deref; ++i) {
-            const xed_reg_enum_t base  =
-               xed_decoded_inst_get_base_reg(aops, i);
-            const xed_reg_enum_t index =
-               xed_decoded_inst_get_index_reg(aops, i);
-            const bool has_scaled_index = (index != XED_REG_INVALID);
-            if (has_scaled_index && !is_wide_base(base) && !is_wide(index)) {
-               want_addr32 = true;
-            }
+            want_addr32 = wants_addr32(xed_decoded_inst_get_base_reg(aops, i),
+                                       xed_decoded_inst_get_index_reg(aops, i));
          }
-         /* Skip if a 0x67 is already present (rare i386 addr-size override
-          * passing through verbatim) — scan the legacy-prefix run. */
+         /* ...unless the source already carries one */
          if (want_addr32) {
             for (uint8_t b : instbuf) {
+               if (!is_legacy_prefix(b)) { break; }
                if (b == 0x67) { want_addr32 = false; break; }
-               if (b == 0x66 || b == 0xF0 || b == 0xF2 || b == 0xF3 ||
-                   b == 0x2E || b == 0x36 || b == 0x3E || b == 0x26 ||
-                   b == 0x64 || b == 0x65) { continue; }  /* legacy prefix */
-               break;                                     /* opcode byte */
             }
          }
          if (want_addr32) {

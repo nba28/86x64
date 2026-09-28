@@ -89,6 +89,34 @@ namespace MachO {
    }
 
    template <Bits bits>
+   bool ParseEnv<bits>::vmaddr_in_image(std::size_t vmaddr) const {
+      for (Segment<bits> *seg : archive.segments()) {
+         const char *sn = seg->segment_command.segname;
+         const std::size_t snsz = sizeof(seg->segment_command.segname);
+         if (std::strncmp(sn, SEG_PAGEZERO, snsz) == 0) { continue; }
+         if (std::strncmp(sn, SEG_LINKEDIT, snsz) == 0) { continue; }
+         if (seg->contains_vmaddr(vmaddr)) { return true; }
+      }
+      return false;
+   }
+
+   template <Bits bits>
+   const Section<bits> *ParseEnv<bits>::section_at(std::size_t vmaddr) const {
+      for (Segment<bits> *seg : archive.segments()) {
+         for (Section<bits> *sec : seg->sections) {
+            if (sec->contains_vmaddr(vmaddr)) { return sec; }
+         }
+      }
+      return nullptr;
+   }
+
+   template <Bits bits>
+   bool ParseEnv<bits>::fixed_load_image() const {
+      return archive.header.filetype == MH_EXECUTE &&
+             (archive.header.flags & MH_PIE) == 0;
+   }
+
+   template <Bits bits>
    bool ParseEnv<bits>::vmaddr_in_writable_data(std::size_t vmaddr) const {
       for (Segment<bits> *seg : archive.segments()) {
          if ((seg->segment_command.initprot & VM_PROT_WRITE) == 0) { continue; }

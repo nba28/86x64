@@ -125,6 +125,11 @@ namespace MachO {
 
       static SectionBlob<bits> *TextParser(const Image& img, const Location& loc,
                                            ParseEnv<bits>& env);
+      /* DataParser's pointer-vs-constant verdict for one aligned data word. */
+      static bool data_word_is_pointer(const Image& img, const Location& loc,
+                                       ParseEnv<bits>& env, uint32_t value,
+                                       bool in_objc_symbols, bool is_text_const_sect,
+                                       bool in_objc_methods);
       static SectionBlob<bits> *DataParser(const Image& img, const Location& loc,
                                            ParseEnv<bits>& env);
       static SectionBlob<bits> *StubHelperParser(const Image& img, const Location& loc,

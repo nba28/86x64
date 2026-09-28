@@ -218,6 +218,14 @@ namespace MachO {
        * merely aliases a data vmaddr. */
       bool imm_bounds_relocated_table(std::size_t vmaddr) const;
 
+      /* True iff `vmaddr` lies in a real segment (not __PAGEZERO/__LINKEDIT). */
+      bool vmaddr_in_image(std::size_t vmaddr) const;
+      /* The section containing `vmaddr`, or nullptr. */
+      const Section<bits> *section_at(std::size_t vmaddr) const;
+      /* A non-PIE MH_EXECUTE: the only image kind that names its own code and
+       * data with literal absolute addresses. PIC code (dylibs, PIE) reaches
+       * them anchor- or rip-relative, so a literal there is always an integer. */
+      bool fixed_load_image() const;
       Placeholder<bits> *add_placeholder(std::size_t vmaddr);
       void do_resolve();
 

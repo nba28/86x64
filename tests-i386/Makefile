@@ -515,10 +515,10 @@ sib-rbp-base-wrap: $(BUILD_DIR)/99_sib_ebp_base_neg_wrap.i386
 	done | tr '\n' ' ' | grep -q "on=42 off=139" && echo "sib-rbp-base-wrap: PASS" || { echo "sib-rbp-base-wrap: FAIL"; exit 1; }
 # pic-push-mem: A/B guard that a PIC-anchored `push disp(%ebx[,idx,s])` reads
 # the translated slot (libbass pthread key). ON exits 42; OFF
-# (M64_NO_PIC_PUSH_MEM=1 at translate time) does not.
+# (M64_NO_PIC_OPERAND_LOWERING=1 at translate time) does not.
 pic-push-mem: $(BUILD_DIR)/99_pic_push_mem.i386
 	@r=$$(for arm in on off; do \
-	  e=""; [ $$arm = off ] && e="M64_NO_PIC_PUSH_MEM=1"; \
+	  e=""; [ $$arm = off ] && e="M64_NO_PIC_OPERAND_LOWERING=1"; \
 	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
 	    -o $(BUILD_DIR)/99_pic_push_mem.$$arm $< >/dev/null 2>&1; \
 	  $(BUILD_DIR)/99_pic_push_mem.$$arm; echo "$$arm=$$?"; \
