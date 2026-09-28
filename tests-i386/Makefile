@@ -1558,10 +1558,14 @@ $(BUILD_DIR)/36_stripped_func_pad.i386: $(BUILD_DIR)/36_stripped_func_pad.o
 # __textcoal_nt). The name-based ParseEnv::pic_thunks seed then finds nothing;
 # only the structural executable-section byte-scan (archive.cc) establishes the
 # anchor. Without the strip, the named-thunk seed would catch it and the test
-# would pass for the wrong reason. Overrides the generic %.i386 pattern rule.
+# would pass for the wrong reason. The SL linker folds a __textcoal_nt input into
+# __text and drops a custom section's attributes, so link with the custom name
+# and then give it Halo's real header (__textcoal_nt, coalesced + instructions).
+# Overrides the generic %.i386 pattern rule.
 $(BUILD_DIR)/62_pic_xsection_thunk_stripped.i386: $(BUILD_DIR)/62_pic_xsection_thunk_stripped.o
 	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
 	strip -x $@
+	python3 set_section.py $@ __picthunk __textcoal_nt 0x8000040b
 
 # 99_cmp_abs32_imm_notptr: STRIP local symbols (the Civ IV Steam shape:
 # locals-stripped => have_local_text_syms false => the code_alias_is_constant

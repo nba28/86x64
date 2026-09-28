@@ -22,7 +22,8 @@
 ## This test reproduces the structure with modern tools: the thunk sits in a
 ## CUSTOM `__TEXT,__picthunk` section (unknown names survive ld's merging of
 ## the deprecated __textcoal_nt/__StaticInit into __text), the caller in
-## __text, and the Makefile rule runs `strip -x` so the thunk label is gone.
+## __text, and the Makefile rule runs `strip -x` so the thunk label is gone,
+## then renames the section to Halo's `__textcoal_nt` with its real flags.
 ## _main anchors via the unnamed cross-section thunk, STOREs 42 into _g
 ## through the anchor, then _verify reads _g back via its own inline
 ## `call $+0; pop` anchor (always detected). exit(_verify()) == 42 iff the
