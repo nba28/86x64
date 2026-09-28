@@ -57,6 +57,11 @@ LDFLAGS_I386_OBJC := $(LDFLAGS_I386) -lobjc -framework Foundation -framework Cor
 CXX_I386 := clang++ -arch i386 -isysroot $(HOST_SDK) -mmacosx-version-min=10.6
 LDFLAGS_I386_CPP := $(LDFLAGS_I386) -lstdc++ -dead_strip_dylibs
 
+# Every fixture run gets a deadline: a hang (e.g. a broken OFF arm spinning)
+# fails the fixture with exit_code 142 instead of blocking the suite.
+FIXTURE_DEADLINE ?= 30
+RUN_FIXTURE := perl -e 'alarm shift; exec @ARGV or exit 127' $(FIXTURE_DEADLINE)
+
 SRC_DIR      := src
 EXPECTED_DIR := expected
 BUILD_DIR    := build
@@ -76,8 +81,12 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn
+.PHONY: check seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn
 all: run-only
+
+# check: every suite + every guard target, each under a deadline; exit 1 on any failure.
+check:
+	@bash check.sh
 
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
 # (core instruction.cc MOV_MEMv_IMMz abs32-dest arm; Civ IV Steam boost.python
@@ -1270,7 +1279,7 @@ objc: $(BUILD_DIR) $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL)
 	  bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) -o $(BUILD_DIR)/$$t.x86_64 $(BUILD_DIR)/$$t.i386 >/dev/null 2>&1 || { echo "FAIL $$t (translate)"; fail=$$((fail+1)); continue; }; \
 	  chmod +x $(BUILD_DIR)/$$t.x86_64; \
 	  actual=$(BUILD_DIR)/$$t.actual; expected=$(EXPECTED_DIR)/$$t.txt; \
-	  $(BUILD_DIR)/$$t.x86_64 > $$actual 2>/dev/null; \
+	  $(RUN_FIXTURE) $(BUILD_DIR)/$$t.x86_64 > $$actual 2>/dev/null; \
 	  echo "exit_code: $$?" >> $$actual; \
 	  if [ -f $$expected ] && diff -q $$expected $$actual >/dev/null 2>&1; then \
 	    echo "PASS $$t"; pass=$$((pass+1)); \
@@ -1279,7 +1288,8 @@ objc: $(BUILD_DIR) $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL)
 	    fail=$$((fail+1)); \
 	  fi; \
 	done; \
-	echo ""; echo "===== objc: $$pass passed, $$fail failed ====="
+	echo ""; echo "===== objc: $$pass passed, $$fail failed ====="; \
+	[ $$fail = 0 ]
 
 # C++ test group (opt-in via 'make cpp'). Mirrors `objc`. Builds each
 # src/NN_*.cc i386 C++ binary with clang++, translates via the full pipeline,
@@ -1297,7 +1307,7 @@ cpp: $(BUILD_DIR) $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL)
 	  bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) -o $(BUILD_DIR)/$$t.x86_64 $(BUILD_DIR)/$$t.i386 >/dev/null 2>&1 || { echo "FAIL $$t (translate)"; fail=$$((fail+1)); continue; }; \
 	  chmod +x $(BUILD_DIR)/$$t.x86_64; \
 	  actual=$(BUILD_DIR)/$$t.actual; expected=$(EXPECTED_DIR)/$$t.txt; \
-	  $(BUILD_DIR)/$$t.x86_64 > $$actual 2>/dev/null; \
+	  $(RUN_FIXTURE) $(BUILD_DIR)/$$t.x86_64 > $$actual 2>/dev/null; \
 	  echo "exit_code: $$?" >> $$actual; \
 	  if [ -f $$expected ] && diff -q $$expected $$actual >/dev/null 2>&1; then \
 	    echo "PASS $$t"; pass=$$((pass+1)); \
@@ -1306,7 +1316,8 @@ cpp: $(BUILD_DIR) $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL)
 	    fail=$$((fail+1)); \
 	  fi; \
 	done; \
-	echo ""; echo "===== cpp: $$pass passed, $$fail failed ====="
+	echo ""; echo "===== cpp: $$pass passed, $$fail failed ====="; \
+	[ $$fail = 0 ]
 
 build-only: $(addprefix $(BUILD_DIR)/, $(addsuffix .x86_64, $(TESTS)))
 
@@ -1318,7 +1329,7 @@ run-only: build-only
 	  if [ ! -f $$expected ]; then \
 	    echo "SKIP $$t (no expected/$$t.txt)"; continue; \
 	  fi; \
-	  $(BUILD_DIR)/$$t.x86_64 > $$actual 2>&1; \
+	  $(RUN_FIXTURE) $(BUILD_DIR)/$$t.x86_64 > $$actual 2>&1; \
 	  ec=$$?; \
 	  echo "exit_code: $$ec" >> $$actual; \
 	  if diff -q $$expected $$actual >/dev/null 2>&1; then \
