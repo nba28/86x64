@@ -1,0 +1,9 @@
+ok swizzle_methods_found
+ok swizzle_i386_send
+ok swizzle_native_send
+ok swizzle_restore
+ok forward_legacy_int
+ok forward_legacy_obj
+ok forward_native
+ok nextlist_legacy
+exit_code: 0

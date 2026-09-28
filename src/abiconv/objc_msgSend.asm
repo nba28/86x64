@@ -53,6 +53,7 @@
 ;;           6 reg-return struct -> i386 buf (C) 7 fp float: xmm0 -> st0
 ;;           8 int64: remap NSNotFound sentinel   9 64-bit token -> wrap handle
 ;;             (NSTrackingRectTag/NSToolTipTag round-trip; plain x64_objc_wrap)
+;;          10 opaque void* -> wrap if >4GB   11 SEL -> low interned name ptr
 ;;
 ;; Trampoline stack frame after prologue:
 ;;   [rbp +  0]  saved rbp
@@ -76,6 +77,7 @@
    extern _x64_objc_wrap
    extern _x64_objc_wrap_ret
    extern _x64_objc_bounce_cstr
+   extern _x64_objc_sel_wrap
    extern __dyld_stub_binder_flag
 
 ;; ----------------------------------------------------------------------------
@@ -216,6 +218,8 @@
    je %%tokwrap
    cmp ecx, 10
    je %%opaquewrap
+   cmp ecx, 11
+   je %%selwrap
    ;; kinds 3/5/6: struct-return finisher. xmm0/xmm1 still hold the callee's
    ;; FP return payload and bind to the finisher's double params.
    mov rdi, rbx                    ; &plan
@@ -260,6 +264,13 @@
    jz %%ret                        ; <=4GB: rax's low half already aliases eax
    mov rdi, rax
    call _x64_objc_wrap             ; >4GB: mint low-4GB arena handle in eax
+   jmp %%ret
+%%selwrap:
+   ;; SEL return (-[NSInvocation selector], NSSelectorFromString, ...): a native
+   ;; SEL is a >4GB pointer the i386 caller would truncate; hand it the stable
+   ;; low-4GB interned name the forward bridge re-registers (x64_objc_sel_wrap).
+   mov rdi, rax
+   call _x64_objc_sel_wrap
    jmp %%ret
 %%wrap:
    mov rdi, rax                    ; object return -> 32-bit handle

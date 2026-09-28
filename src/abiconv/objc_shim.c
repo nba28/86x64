@@ -2891,15 +2891,42 @@ uint32_t shim_CFStringAppendFormatAndArguments(const uint32_t *a) {
  * every instance method, leaving m=NULL → args unmarshalled, ret untyped). */
 /* The return KIND for the asm trampoline (see the table in
  * fill_args_and_return). A function of the Method alone: kept in its plan. */
+static int8_t ret_kind_of_enc(const char *rt, int rconv, uint8_t *sret_conv);
 static int8_t ret_kind_of(Method m, uint8_t *sret_conv) {
-   int8_t k = 0;
    char *rt = m ? method_copyReturnType(m) : NULL;
-   const int rconv = method_is_legacy(m) ? CONV_I386 : CONV_NATIVE;
+   const int8_t k = ret_kind_of_enc(rt, method_is_legacy(m) ? CONV_I386 : CONV_NATIVE,
+                                    sret_conv);
+   free(rt);
+   return k;
+}
+
+/* A message the receiver has no method for goes to the runtime's forwarding
+ * (methodSignatureForSelector: + forwardInvocation:), so there is no Method
+ * to classify the return by. Ask the receiver for the same signature the
+ * runtime will use. The result is native (the forwarding machinery returns
+ * through native objc_msgSend). Interned; NULL if the receiver has none. */
+static const char *forward_ret_type(id rcv, SEL sel) {
+   static SEL msfs;
+   if (!msfs) { msfs = sel_registerName("methodSignatureForSelector:"); }
+   if (!rcv || !sel || !class_respondsToSelector(object_getClass(rcv), msfs)) {
+      return NULL;
+   }
+   id sig = ((id (*)(id, SEL, SEL))objc_msgSend)(rcv, msfs, sel);
+   if (!sig) { return NULL; }
+   const char *rt = ((const char *(*)(id, SEL))objc_msgSend)(
+      sig, sel_registerName("methodReturnType"));
+   return rt ? enc_intern(rt) : NULL;
+}
+
+static int8_t ret_kind_of_enc(const char *rt, int rconv, uint8_t *sret_conv) {
+   int8_t k = 0;
    char rb = rt ? *enc_skip_quals(rt) : 0;
    if (rt && (rb == '@' || rb == '#')) {
       k = 1;
    } else if (rt && rb == '*') {
       k = 2;
+   } else if (rt && rb == ':' && rconv == CONV_NATIVE) {
+      k = 11;         /* native SEL -> low interned name (a legacy IMP's SEL is already one) */
    } else if (enc_is_objptr_struct(rt) || enc_is_cfptr(rt)) {
       k = 1;          /* ^{Class=#...} obj / ^{CF=} ref -> wrap */
    } else if (enc_is_opaque_voidptr(rt) || enc_is_handle_structptr(rt)) {
@@ -2943,7 +2970,6 @@ static int8_t ret_kind_of(Method m, uint8_t *sret_conv) {
    } else {
       k = 0;
    }
-   free(rt);
    return k;
 }
 
@@ -2995,6 +3021,11 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
    unsigned ai = arg_base_idx;
    struct fma_plan slow;
    const struct fma_plan *fp = fma_get(m, sel, &slow);
+   if (!m && reg_base == 2 && fp == &slow) {
+      /* forwarded message: classify the return by the receiver's signature */
+      const char *rt = forward_ret_type((id)(uintptr_t)plan->reg[0], sel);
+      if (rt) { slow.ret_kind = ret_kind_of_enc(rt, CONV_NATIVE, &slow.sret_conv); }
+   }
    unsigned nargs = fill_method_args(plan, args32, &ai, fp, m, &cur);
 
    /* Varargs continuation. Foundation methods like initWithObjects: take
@@ -7506,23 +7537,17 @@ static void rmeth_insert(Class c, SEL s, uint64_t imp, const char *types) {
       i = (i + 1) & (RMETH_CAP - 1);
    }
 }
+/* A removed entry keeps its slot (open addressing) with this imp; lookups
+ * treat it as absent and rmeth_insert reuses it for the same key. */
+#define RMETH_GONE 1u
 static struct rmeth_ent *rmeth_lookup(Class c, SEL s) {
    uint32_t i = rmeth_hash(c, s);
    for (uint32_t n = 0; n < RMETH_CAP; ++n) {
       if (g_rmeth[i].imp == 0) { return NULL; }
-      if (g_rmeth[i].cls == c && g_rmeth[i].sel == s) { return &g_rmeth[i]; }
+      if (g_rmeth[i].cls == c && g_rmeth[i].sel == s) {
+         return g_rmeth[i].imp == RMETH_GONE ? NULL : &g_rmeth[i];
+      }
       i = (i + 1) & (RMETH_CAP - 1);
-   }
-   return NULL;
-}
-
-/* The owning reverse-IMP entry for (start-class, sel): the dispatch path keys
- * g_rmeth on the class that actually registered the legacy method, which for an
- * inherited selector is an ancestor — so walk up exactly like reverse_prep. */
-static struct rmeth_ent *rmeth_find_owner(Class start, SEL s) {
-   for (Class c = start; c; c = class_getSuperclass(c)) {
-      struct rmeth_ent *e = rmeth_lookup(c, s);
-      if (e) { return e; }
    }
    return NULL;
 }
@@ -11028,13 +11053,72 @@ uint32_t shim_objc_exception_throw(uint32_t *a) {
 }
 
 /* struct objc_method_list *class_nextMethodList(Class, void **) — ObjC1
- * method-list iterator. No caller has surfaced yet; report an empty list and
- * trace so a real consumer is visible immediately. */
+ * method-list iterator (*iterator starts at 0). The modern runtime already
+ * holds the class's complete method set (own methods, reverse-registered
+ * legacy ones and applied categories), so the class is served as ONE i386
+ * list {obsolete, count, {name, types, imp}[count]}: the first call returns
+ * it, the next NULL. name is the low interned selector name (an i386 SEL);
+ * types a low copy; imp the real i386 IMP for a legacy method (callable) and
+ * a compare-only handle for a native one (as method_getImplementation).
+ * Rebuilt only when the class's method count changes. ponytail: a fixed
+ * per-class cache, grow it if an app enumerates more classes than this. */
+#define NML_CAP 256u
+static struct { Class cls; unsigned n; uint32_t *list; } g_nml[NML_CAP];
+static os_unfair_lock g_nml_lock = OS_UNFAIR_LOCK_INIT;
+
+static uint32_t method_copy_type_common(const char *t);
+static uint32_t *nml_build(Class cls, unsigned *count) {
+   unsigned n = 0;
+   Method *ms = class_copyMethodList(cls, &n);
+   *count = n;
+   uint32_t *l = (uint32_t *)calloc(2 + 3 * (size_t)(n ? n : 1), 4); /* low heap */
+   if (!l) { free(ms); return NULL; }
+   const int meta = class_isMetaClass(cls);
+   const char *cn = class_getName(cls);
+   l[1] = n;
+   for (unsigned i = 0; i < n; ++i) {
+      SEL sel = method_getName(ms[i]);
+      uint32_t *e = l + 2 + 3 * i;
+      e[0] = x64_objc_sel_wrap((uint64_t)(uintptr_t)sel);
+      e[1] = method_copy_type_common(method_getTypeEncoding(ms[i]));
+      uint64_t imp = 0;
+      if (method_is_legacy(ms[i]) && cn) {
+         imp = meta ? legacy_class_method_imp_byname(cn, sel_getName(sel))
+                    : legacy_instance_method_imp_byname(cn, sel_getName(sel));
+      }
+      e[2] = (imp && imp < 0x100000000ULL)
+         ? (uint32_t)imp
+         : x64_objc_wrap((uint64_t)(uintptr_t)method_getImplementation(ms[i]));
+   }
+   free(ms);
+   return l;
+}
+
 uint32_t shim_class_nextMethodList(uint32_t *a) {
-   fprintf(stderr, "[exc1] class_nextMethodList(cls32=0x%08x) unimplemented "
-           "-> NULL (no method lists)\n", a[0]);
-   fflush(stderr);
-   return 0;
+   Class cls = (Class)resolve_self(a[0]);
+   uint32_t *it = (uint32_t *)(uintptr_t)a[1];
+   if (!cls || !it) { return 0; }
+   if (*it) { return 0; }                 /* one list per class: exhausted */
+   unsigned n = 0;
+   Method *probe = class_copyMethodList(cls, &n);
+   free(probe);
+   uint32_t *list = NULL;
+   os_unfair_lock_lock(&g_nml_lock);
+   unsigned slot = (unsigned)(((uintptr_t)cls >> 4) % NML_CAP);
+   if (g_nml[slot].cls == cls && g_nml[slot].n == n) {
+      list = g_nml[slot].list;
+   } else {
+      unsigned built = 0;
+      list = nml_build(cls, &built);
+      if (list) {
+         /* an evicted list may still be held by an iterating caller: leak it */
+         g_nml[slot].cls = cls; g_nml[slot].n = built; g_nml[slot].list = list;
+      }
+   }
+   os_unfair_lock_unlock(&g_nml_lock);
+   if (!list || list[1] == 0) { return 0; }
+   *it = 1;
+   return (uint32_t)(uintptr_t)list;
 }
 
 /* id _objc_setNilReceiver(id) — nil-message hook, removed from the modern
@@ -11463,48 +11547,77 @@ uint32_t shim_method_setImplementation(uint32_t *a) {
    return 0;
 }
 
-/* method_exchangeImplementations(Method a, Method b) — atomically swap two
- * methods' implementations (the textbook swizzle primitive).
+/* The class whose own method list holds m (m may be inherited by `from`):
+ * g_rmeth keys a legacy method on the class that registered it. */
+static Class method_owner(Class from, SEL sel, Method m) {
+   Class owner = NULL;
+   for (Class c = from; c && class_getInstanceMethod(c, sel) == m;
+        c = class_getSuperclass(c)) {
+      owner = c;
+   }
+   return owner;
+}
+
+/* The exchange itself, run in the libabiconv copy whose trampolines and
+ * g_rmeth own the legacy side (see shim_method_exchangeImplementations).
+ * Invariant restored afterwards, for each method: if its IMP is now a reverse
+ * trampoline, g_rmeth(owner,sel) holds the i386 IMP it now carries; if its IMP
+ * is now native, g_rmeth(owner,sel) is absent. That covers legacy<->legacy (the
+ * entries swap), legacy<->native (the classic category swizzle: the native
+ * selector now dispatches to the i386 IMP, and the i386 IMP's call of its own
+ * selector reaches the original native IMP) and the restoring second exchange,
+ * which must also drop the stale entry or a later [super sel] walk would find
+ * it. Exported so another copy can find it with dlsym. */
+__attribute__((visibility("default")))
+void _86x64_exchange_impl(Method m1, Method m2, Class q1, Class q2) {
+   SEL s1 = method_getName(m1), s2 = method_getName(m2);
+   Class o1 = method_owner(q1, s1, m1), o2 = method_owner(q2, s2, m2);
+   struct rmeth_ent *e1 = (o1 && method_is_legacy(m1)) ? rmeth_lookup(o1, s1) : NULL;
+   struct rmeth_ent *e2 = (o2 && method_is_legacy(m2)) ? rmeth_lookup(o2, s2) : NULL;
+   const uint64_t i1 = e1 ? e1->imp : 0, i2 = e2 ? e2->imp : 0;
+   const char *t1 = e1 ? e1->types : NULL, *t2 = e2 ? e2->types : NULL;
+   method_exchangeImplementations(m1, m2);
+   if (o1) {
+      if (i2) { rmeth_insert(o1, s1, i2, t2); }
+      else if (e1) { e1->imp = RMETH_GONE; }
+   }
+   if (o2) {
+      if (i1) { rmeth_insert(o2, s2, i1, t1); }
+      else if (e2) { e2->imp = RMETH_GONE; }
+   }
+   if (BRIDGE_TRACE()) {
+      fprintf(stderr, "[rt] method_exchangeImplementations %s%s <-> %s%s\n",
+              sel_getName(s1), i1 ? "(i386)" : "", sel_getName(s2),
+              i2 ? "(i386)" : "");
+      fflush(stderr);
+   }
+}
+
+/* method_exchangeImplementations(Method a, Method b) — the textbook swizzle.
  *
- * For reverse-registered LEGACY methods the modern Method's IMP is the shared
- * _86x64_reverse_imp trampoline, which re-derives the i386 IMP from (class,sel)
- * at dispatch — so the bare runtime exchange is a NO-OP (both slots hold the
- * same trampoline) and, reached natively with our synthetic 12-byte
- * i386_method32 args reinterpreted as 64-bit objc_method structs, it reads/
- * writes the imp field at offset 16 PAST the struct and corrupts the heap — the
- * observed swizzle SIGSEGV. The fix swaps the authoritative (class,sel)->legacy-
- * IMP entries in g_rmeth so SEL-keyed dispatch honours the exchange, and ALSO
- * runs the real exchange so the trampoline KIND (plain vs _stret) and libobjc's
- * own Method/IMP identity follow. Native<->native exchanges fall straight
- * through to the real runtime. Involutive: a second exchange restores both. */
+ * A reverse-registered LEGACY method's modern IMP is the shared reverse
+ * trampoline, which re-derives the i386 IMP from g_rmeth(class,sel) at
+ * dispatch; exchanging the modern IMPs alone therefore mis-routes (and reached
+ * natively with our 12-byte i386_method32 handles it corrupted the heap). The
+ * g_rmeth map lives in the libabiconv copy that registered the class — the
+ * owner of the trampoline the legacy Method carries — which in a multi-copy
+ * deploy need not be the caller's copy, so the exchange runs THERE. */
 uint32_t shim_method_exchangeImplementations(uint32_t *a) {
    Method m1 = i386_method_unwrap(a[0]);
    Method m2 = i386_method_unwrap(a[1]);
    if (!m1 || !m2 || m1 == m2) { return 0; }
-   SEL s1 = method_getName(m1), s2 = method_getName(m2);
    Class q1 = i386_method_queried_class(a[0]);
    Class q2 = i386_method_queried_class(a[1]);
-   struct rmeth_ent *e1 = (q1 && s1) ? rmeth_find_owner(q1, s1) : NULL;
-   struct rmeth_ent *e2 = (q2 && s2) ? rmeth_find_owner(q2, s2) : NULL;
-   if (e1 && e2) {
-      uint64_t ti = e1->imp; const char *tt = e1->types;
-      e1->imp = e2->imp; e1->types = e2->types;
-      e2->imp = ti;       e2->types = tt;
-      if (BRIDGE_TRACE()) {
-         fprintf(stderr, "[rt] method_exchangeImplementations legacy %s <-> %s\n",
-                 s1 ? sel_getName(s1) : "?", s2 ? sel_getName(s2) : "?");
-         fflush(stderr);
-      }
-   } else if (e1 || e2) {
-      /* mixed legacy<->native: routing native dispatch to an i386 IMP (or vice
-       * versa) needs more than an imp swap; do the real exchange best-effort and
-       * flag it rather than silently mis-dispatch. */
-      fprintf(stderr, "[rt] method_exchangeImplementations mixed legacy/native "
-              "(%s <-> %s) — best effort\n",
-              s1 ? sel_getName(s1) : "?", s2 ? sel_getName(s2) : "?");
-      fflush(stderr);
+   void (*impl)(Method, Method, Class, Class) = _86x64_exchange_impl;
+   Method leg = method_is_legacy(m1) ? m1 : method_is_legacy(m2) ? m2 : NULL;
+   Dl_info di;
+   if (leg && dladdr((const void *)method_getImplementation(leg), &di) &&
+       di.dli_fname) {
+      void *h = dlopen(di.dli_fname, RTLD_NOLOAD | RTLD_LAZY);
+      void *f = h ? dlsym(h, "_86x64_exchange_impl") : NULL;
+      if (f) { impl = (void (*)(Method, Method, Class, Class))f; }
    }
-   method_exchangeImplementations(m1, m2);
+   impl(m1, m2, q1, q2);
    return 0;
 }
 
