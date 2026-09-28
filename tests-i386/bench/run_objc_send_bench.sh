@@ -16,5 +16,5 @@ bash "$ROOT/src/86x64/86x64.sh" -m "$ROOT/build/src/macho-tool/macho-tool" \
 cp "$ROOT/build/src/abiconv/libabiconv.dylib" "$ROOT/build/src/abiconv/libabiconv.nulljump" \
    "$ROOT/build/src/86x64/libinterpose.dylib" $O/
 clang -arch x86_64 -O2 -framework Foundation bench/objc_send_bench.m -o $O/bench.native 2>/dev/null
-echo "== translated";  $O/bench.x86_64 2>/dev/null | grep ns/send
-echo "== native";      $O/bench.native | grep ns/send
+echo "== translated";  $O/bench.x86_64 2>/dev/null | grep -E "ns\/(send|call)"
+echo "== native";      $O/bench.native | grep -E "ns\/(send|call)"

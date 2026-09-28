@@ -8010,23 +8010,40 @@ static void push_own_object_ivars(uint8_t *sh, id real, Class c) {
    }
 }
 
-/* ENTRY: refresh the shadow's inherited-ivar region from the real object and
- * push a dirty-tracking frame onto the thread-local snapshot stack. */
-static void sync_inherited_ivars(struct reverse_plan *plan, uint32_t shadow,
-                                 id real, Class cls) {
-   plan->wb_active = 0;
-   if (!shadow || !real || !cls) { return; }
-   uint8_t *sh = (uint8_t *)(uintptr_t)shadow;
-   uint32_t mark = g_snap_n;
-   /* The leaf legacy class + any LEGACY ancestor: mirror their nib-connected OWN
-    * object ivars (outlets) from the real object into the shadow, so the IMP's
-    * direct reads see the connected views/controllers, not the zeroed shadow. */
+/* Per-class sync plan: which LEGACY classes in the chain have nib-connected
+ * outlets to mirror, and every NATIVE ancestor ivar resolved to its offsets,
+ * sizes and kind. A class's ivar layout is fixed once it is realized, so this
+ * is derived once per class (per thread): walking the chain with
+ * native_ivar_map_lookup(class_getName) + class_getInstanceVariable per ivar
+ * on every reverse entry was ~30% of it. */
+struct sync_field { ptrdiff_t xoff; uint32_t i386_off, msz; uint8_t msign, i386_sz, kind; };
+struct sync_plan {
+   Class cls;
+   uint32_t nown, nf;
+   Class *own;                 /* legacy classes with outlets (own_lookup) */
+   struct sync_field *f;       /* native-ancestor ivars to mirror */
+};
+#define SYNC_PLAN_WAYS 64u
+static __thread struct sync_plan t_sync[SYNC_PLAN_WAYS];
+
+static void sync_plan_build(struct sync_plan *sp, Class cls) {
+   malloc_zone_t *z = malloc_default_zone();
+   malloc_zone_free(z, sp->own); malloc_zone_free(z, sp->f);
+   memset(sp, 0, sizeof *sp);
+   uint32_t cap_own = 0, cap_f = 0;
+   /* The leaf legacy class + any LEGACY ancestor: their nib-connected OWN
+    * object ivars (outlets). */
    for (Class c = cls; c; c = class_getSuperclass(c)) {
-      if (rcls_lookup(c)) { push_own_object_ivars(sh, real, c); }
+      if (!rcls_lookup(c) || !own_lookup(c)) { continue; }
+      if (sp->nown == cap_own) {
+         cap_own = cap_own ? cap_own * 2 : 4;
+         sp->own = malloc_zone_realloc(z, sp->own, cap_own * sizeof *sp->own);
+      }
+      sp->own[sp->nown++] = c;
    }
    /* Skip the leaf legacy class and any LEGACY ancestor (their ivars are the
-    * shadow's OWN region, written by the legacy IMPs directly); sync only the
-    * NATIVE ancestors, whose ivars live in the real object. */
+    * shadow's OWN region, written by the legacy IMPs directly); only the
+    * NATIVE ancestors' ivars live in the real object. */
    for (Class c = class_getSuperclass(cls); c; c = class_getSuperclass(c)) {
       if (rcls_lookup(c)) { continue; }
       const struct nivar_cls *m = native_ivar_map_lookup(class_getName(c));
@@ -8040,34 +8057,58 @@ static void sync_inherited_ivars(struct reverse_plan *plan, uint32_t shadow,
          int msign = 0;
          uint32_t msz = modern_enc_size(ivar_getTypeEncoding(iv), &msign);
          if (msz == 0 || e->i386_sz > 4 || e->i386_sz > msz) { continue; }
-         uint8_t *src = (uint8_t *)real + xoff;   /* real (modern) slot */
-         uint8_t *dst = sh + e->i386_off;         /* shadow (i386) slot */
-         if (!mem_readable((uintptr_t)src, msz)) { continue; }
-         uint32_t val = 0;                        /* i386-side value (<=4B) */
-         if (e->kind == 'P') {
-            uint64_t p; memcpy(&p, src, 8);
-            val = p ? x64_objc_wrap(p) : 0;
-            memcpy(dst, &val, 4);
-         } else if (e->kind == 'F') {
-            if (msz == 8) { double d; memcpy(&d, src, 8);
-                            float f = (float)d; memcpy(&val, &f, 4); }
-            else          { memcpy(&val, src, 4); }    /* genuine 4-byte float */
-            memcpy(dst, &val, e->i386_sz);
-         } else { /* 'I' */
-            memcpy(&val, src, e->i386_sz);              /* low i386_sz bytes */
-            memcpy(dst, &val, e->i386_sz);
+         if (sp->nf == cap_f) {
+            cap_f = cap_f ? cap_f * 2 : 8;
+            sp->f = malloc_zone_realloc(z, sp->f, cap_f * sizeof *sp->f);
          }
-         if (g_snap_n == g_snap_cap) {
-            uint32_t nc = g_snap_cap ? g_snap_cap * 2 : 64;
-            struct ivar_snap *ns = realloc(g_snap, (size_t)nc * sizeof *ns);
-            if (!ns) { continue; }                /* OOM: skip write-back tracking */
-            g_snap = ns; g_snap_cap = nc;
-         }
-         struct ivar_snap *s = &g_snap[g_snap_n++];
-         s->real_slot = src; s->shadow_slot = dst; s->snap = val;
-         s->kind = e->kind; s->i386_sz = e->i386_sz;
-         s->msz = (uint8_t)msz; s->msign = (uint8_t)msign;
+         sp->f[sp->nf++] = (struct sync_field){ xoff, e->i386_off, msz,
+                                                (uint8_t)msign, e->i386_sz, e->kind };
       }
+   }
+   sp->cls = cls;
+}
+
+/* ENTRY: refresh the shadow's inherited-ivar region from the real object and
+ * push a dirty-tracking frame onto the thread-local snapshot stack. */
+static void sync_inherited_ivars(struct reverse_plan *plan, uint32_t shadow,
+                                 id real, Class cls) {
+   plan->wb_active = 0;
+   if (!shadow || !real || !cls) { return; }
+   uint8_t *sh = (uint8_t *)(uintptr_t)shadow;
+   uint32_t mark = g_snap_n;
+   struct sync_plan *sp = &t_sync[((uintptr_t)cls >> 4) % SYNC_PLAN_WAYS];
+   if (sp->cls != cls) { sync_plan_build(sp, cls); }
+   for (uint32_t k = 0; k < sp->nown; ++k) { push_own_object_ivars(sh, real, sp->own[k]); }
+   for (uint32_t k = 0; k < sp->nf; ++k) {
+      const struct sync_field *e = &sp->f[k];
+      const uint32_t msz = e->msz;
+      uint8_t *src = (uint8_t *)real + e->xoff;  /* real (modern) slot */
+      uint8_t *dst = sh + e->i386_off;           /* shadow (i386) slot */
+      if (!mem_readable((uintptr_t)src, msz)) { continue; }
+      uint32_t val = 0;                          /* i386-side value (<=4B) */
+      if (e->kind == 'P') {
+         uint64_t p; memcpy(&p, src, 8);
+         val = p ? x64_objc_wrap(p) : 0;
+         memcpy(dst, &val, 4);
+      } else if (e->kind == 'F') {
+         if (msz == 8) { double d; memcpy(&d, src, 8);
+                         float f = (float)d; memcpy(&val, &f, 4); }
+         else          { memcpy(&val, src, 4); }    /* genuine 4-byte float */
+         memcpy(dst, &val, e->i386_sz);
+      } else { /* 'I' */
+         memcpy(&val, src, e->i386_sz);              /* low i386_sz bytes */
+         memcpy(dst, &val, e->i386_sz);
+      }
+      if (g_snap_n == g_snap_cap) {
+         uint32_t nc = g_snap_cap ? g_snap_cap * 2 : 64;
+         struct ivar_snap *ns = realloc(g_snap, (size_t)nc * sizeof *ns);
+         if (!ns) { continue; }                /* OOM: skip write-back tracking */
+         g_snap = ns; g_snap_cap = nc;
+      }
+      struct ivar_snap *s = &g_snap[g_snap_n++];
+      s->real_slot = src; s->shadow_slot = dst; s->snap = val;
+      s->kind = e->kind; s->i386_sz = e->i386_sz;
+      s->msz = (uint8_t)msz; s->msign = e->msign;
    }
    plan->wb_mark = mark;
    plan->wb_active = 1;
