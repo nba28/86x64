@@ -1,13 +1,16 @@
 /*
  * qsort_shim.c — ONE job: qsort with an i386 comparator.
  *
- * Native qsort compares against TEMPORARY copies of elements (a pivot on its
- * own, high, stack). The generic callback bridge bounces a high pointer into a
- * low buffer, but for `const void *` it cannot know the element width, so the
- * comparator read garbage (PvZ's sound-instance sort: **a deref -> SIGSEGV).
- * Here native qsort_r sorts an INDEX array and the i386 comparator only ever
- * sees pointers into the caller's own (low) array; the result is applied with
- * one permutation. Kill switch M64_NO_QSORT_SHIM=1 (generic bridge).
+ * libc's qsort is an introsort: on a bad pivot sequence it falls back to
+ * heapsort, which compares against TEMPORARY elements it mallocs itself —
+ * above 4 GB. The callback bridge hands comparator args to i386 code as 32-bit
+ * words, so those temporaries arrived truncated (0x6000_01aeb870 ->
+ * 0x01aeb870) and a comparator that dereferences its element read garbage
+ * (PvZ's sound-instance sort, **a -> SIGSEGV; only on inputs that trip the
+ * fallback). Here native qsort_r sorts an INDEX array and the i386 comparator
+ * only ever sees pointers into the caller's own (low) array; the result is
+ * applied with one permutation. Kill switch M64_NO_QSORT_SHIM=1 (plain
+ * native qsort through the callback bridge).
  * ABI: MTSHIM (rdi -> &i386 args[0]); symbol in custom.syms.
  */
 #include <stdint.h>

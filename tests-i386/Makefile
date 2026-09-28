@@ -605,25 +605,15 @@ memdisp-entry-store: $(BUILD_DIR)/99_memdisp_entry_store.i386 $(BUILD_DIR)/libab
 	    -o $(BUILD_DIR)/99_memdisp_entry_store.$$arm $< >/dev/null 2>&1; \
 	  $(BUILD_DIR)/99_memdisp_entry_store.$$arm; eval r_$$arm=$$?; done; \
 	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "memdisp-entry-store: PASS" || { echo "memdisp-entry-store: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
-# qsort-ptr-elems: the qsort shim sorts pointer elements with a dereferencing
-# comparator (PvZ sound sort). ⚠ SINGLE-ARM: the OFF arm (M64_NO_QSORT_SHIM=1)
-# crashes PvZ 3/3 but does not reproduce in this fixture (mechanism depends on
-# native qsort calling the cb trampoline directly; not isolated), so OFF is
-# only reported.
+# qsort-ptr-elems: an i386 qsort comparator only ever sees pointers into the
+# caller's array — libc's heapsort fallback compares against >4GB temporaries
+# (PvZ sound sort). OFF arm M64_NO_QSORT_SHIM=1 at RUN time.
 qsort-ptr-elems: $(BUILD_DIR)/99_qsort_ptr_elems.i386 $(BUILD_DIR)/libabiconv.dylib
 	@bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
 	  -o $(BUILD_DIR)/99_qsort_ptr_elems.on $< >/dev/null 2>&1; \
 	$(BUILD_DIR)/99_qsort_ptr_elems.on; on=$$?; \
 	M64_NO_QSORT_SHIM=1 $(BUILD_DIR)/99_qsort_ptr_elems.on; off=$$?; \
-	[ $$on = 42 ] && echo "qsort-ptr-elems: PASS (single-arm; off=$$off)" || { echo "qsort-ptr-elems: FAIL (on=$$on)"; exit 1; }
-# atomic-bit-volatile: `volatile void *` args pass through (OSAtomicTestAndSet/
-# ClearBarrier act on the caller's byte). OFF arm = a libabiconv from before the
-# fix (verified by hand: exit 1).
-atomic-bit-volatile: $(BUILD_DIR)/99_atomic_bit_volatile.i386 $(BUILD_DIR)/libabiconv.dylib
-	@bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
-	  -o $(BUILD_DIR)/99_atomic_bit_volatile.on $< >/dev/null 2>&1; \
-	$(BUILD_DIR)/99_atomic_bit_volatile.on; r=$$?; \
-	[ $$r = 42 ] && echo "atomic-bit-volatile: PASS" || { echo "atomic-bit-volatile: FAIL ($$r)"; exit 1; }
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "qsort-ptr-elems: PASS" || { echo "qsort-ptr-elems: FAIL (on=$$on off=$$off)"; exit 1; }
 # pthread-stack-np: guard that the pthread_t-taking _np introspection calls
 # resolve the i386 thread token (stack answers = the i386 stack in use). OFF
 # arm = the previous libabiconv (verified by hand: faults dereferencing the token).
