@@ -1314,7 +1314,7 @@ namespace MachO {
             }
          }
 
-         /* Anchor lifetime (DetectPicAnchoredDisps' rules). */
+         /* Anchor lifetime (DetectPicAnchoredDisps' rules, int3 transparent). */
          pending_targets.erase(pending_targets.begin(), pending_targets.upper_bound(vmaddr));
          if (cat == XED_CATEGORY_COND_BR || cat == XED_CATEGORY_UNCOND_BR) {
             const ssize_t bd = xed_decoded_inst_get_branch_displacement(&xedd);
@@ -1328,7 +1328,8 @@ namespace MachO {
             iform == XED_IFORM_CALL_NEAR_RELBRz &&
             xed_decoded_inst_get_branch_displacement(&xedd) == 0;
          if ((cat == XED_CATEGORY_RET && pending_targets.empty()) ||
-             cat == XED_CATEGORY_INTERRUPT ||
+             (cat == XED_CATEGORY_INTERRUPT &&
+              xed_decoded_inst_get_iclass(&xedd) != XED_ICLASS_INT3) ||
              cat == XED_CATEGORY_SYSCALL || cat == XED_CATEGORY_SYSRET) {
             anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
             stack_tbl.clear(); stack_anchor.clear();

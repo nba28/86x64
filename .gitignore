@@ -6,6 +6,8 @@ cmake_install.cmake
 *~
 *.o
 *.s
+# ...but tests-i386 fixtures are sources (NN_name.s)
+!tests-i386/src/[0-9]*.s
 *.dmp
 a.out
 macho
