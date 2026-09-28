@@ -316,6 +316,12 @@ namespace MachO {
          }
       } else if (memdisp && base == XED_REG_INVALID && index == XED_REG_INVALID) {
          rip_rel();
+      } else if (base == XED_REG_INVALID && index == XED_REG_INVALID && !has_sib) {
+         /* unbound i386 [disp32]: the same ModR/M is [rip+disp32] in x86_64;
+          * the SIB no-base/no-index form keeps it the absolute i386 address */
+         out.operand = {0x04, 0x25};
+         out.operand.insert(out.operand.end(), instbuf.begin() + L.modrm_idx + 1,
+                            instbuf.begin() + L.operand_end);
       } else if (memdisp && index == XED_REG_INVALID) {
          const uint8_t b = has_sib ? (sib & 7) : rm;
          lea_r11();
@@ -594,8 +600,12 @@ namespace MachO {
                         stype == S_CSTRING_LITERALS || stype == S_4BYTE_LITERALS ||
                         stype == S_8BYTE_LITERALS || stype == S_16BYTE_LITERALS ||
                         stype == S_LITERAL_POINTERS;
+                     /* dyld slots are data too (Halo `cmpl $func, nl_ptr`) */
+                     const bool slot = stype == S_NON_LAZY_SYMBOL_POINTERS ||
+                                       stype == S_LAZY_SYMBOL_POINTERS;
                      dest_is_data = stype == S_REGULAR || stype == S_ZEROFILL ||
-                                    stype == S_GB_ZEROFILL || (pool && !literal_abs_off);
+                                    stype == S_GB_ZEROFILL || slot ||
+                                    (pool && !literal_abs_off);
                   }
                }
                if (has_imm32 && dest_is_data) {
@@ -638,8 +648,9 @@ namespace MachO {
                   env.vmaddr_resolver.resolve_containing(
                      (std::size_t) disp, (const SectionBlob<bits> **) &this->memdisp,
                      &this->memdisp_offset);
-               } else if (!has_small_imm) {
-                  /* plain load/store: the disp32 is the last 4 bytes */
+               } else if (!has_any_imm) {
+                  /* plain load/store: the disp32 is the last 4 bytes (with an
+                   * immediate those are the immediate, not the address) */
                   imm = Immediate<bits>::Parse(img, loc + (instbuf.size() - sizeof(uint32_t)),
                                                env, true);
                }
@@ -1080,8 +1091,8 @@ namespace MachO {
          /* `jmp *[abs32]` / `call *[abs32]`: a promoted 8-byte dyld slot
           * (lazy/non-lazy symbol pointers) keeps the byte-identical rip-relative
           * form; the target is native and returns with an 8-byte ret. Any other
-          * slot is 4 bytes: load it (r11 for jmp, which clobbers no i386
-          * register; eax for call, as the call sequence needs r11). */
+          * slot is 4 bytes: load it into a register no i386 code owns (r11 for
+          * jmp; r10 for call, whose return-address push needs r11). */
          case XED_IFORM_JMP_MEMv:
          case XED_IFORM_CALL_NEAR_MEMv:
             if constexpr (bits == Bits::M32) {
@@ -1100,9 +1111,9 @@ namespace MachO {
                   clone->memdisp_offset = imm->pointee_offset;
                   return {clone};
                }
-               const xed_reg_enum_t tgt = is_call ? XED_REG_RAX : XED_REG_R11;
+               const xed_reg_enum_t tgt = is_call ? XED_REG_R10 : XED_REG_R11;
                auto mov_inst = new Instruction<Bits::M64>(
-                  opcode::mov_r32_mem_rip_disp32(is_call ? XED_REG_EAX : XED_REG_R11D));
+                  opcode::mov_r32_mem_rip_disp32(is_call ? XED_REG_R10D : XED_REG_R11D));
                mov_inst->memidx = 0;
                env.resolve(imm->pointee, &mov_inst->memdisp);
                mov_inst->memdisp_offset = imm->pointee_offset;
@@ -1277,9 +1288,11 @@ namespace MachO {
             /* `call/jmp dword [mem]` read a 4-byte slot; the byte-identical
              * x86_64 forms read 8. Load the target with a 4-byte mov first.
              * i386 evaluates the operand before `call` pushes, so the load
-             * precedes the return-address push (guard 99_call_mem_esp). jmp
-             * loads into r11, never an i386 register: the switch index stays
-             * live into the case bodies (guard 99_jmptbl_index_live). A bare
+             * precedes the return-address push (guard 99_call_mem_esp). The
+             * target goes in r11 (jmp) or r10 (call), never an i386 register:
+             * a switch index stays live into the case bodies (guard
+             * 99_jmptbl_index_live) and a register argument into the callee
+             * (guard 99_call_mem_eax_arg). A bare
              * `[disp32]` with nothing to relocate is a promoted 8-byte dyld
              * slot and stays byte-identical. */
             case XED_IFORM_CALL_NEAR_MEMv:
@@ -1295,8 +1308,8 @@ namespace MachO {
                   if (!lower_mem(env, m)) { break; }
                   const bool is_call =
                      xed_decoded_inst_get_iform_enum(&xedd) == XED_IFORM_CALL_NEAR_MEMv;
-                  const xed_reg_enum_t tgt = is_call ? XED_REG_RAX : XED_REG_R11;
-                  auto load = emit_mem(env, m, opcode_t{0x8B}, is_call ? 0 : 11, {});
+                  const xed_reg_enum_t tgt = is_call ? XED_REG_R10 : XED_REG_R11;
+                  auto load = emit_mem(env, m, opcode_t{0x8B}, is_call ? 10 : 11, {});
                   auto jmp_inst = new Instruction<Bits::M64>(opcode::jmp_r64(tgt));
                   if (!is_call) {
                      load.splice(load.end(), null_trap(tgt));
@@ -1902,7 +1915,11 @@ namespace MachO {
          const bool non_deref =
             cat == XED_CATEGORY_NOP || cat == XED_CATEGORY_WIDENOP ||
             xed_decoded_inst_get_iclass(&xedd) == XED_ICLASS_LEA;
-         bool want_addr32 = false;
+         /* LOOP/LOOPE/LOOPNE/JECXZ count in the address-size register: RCX
+          * in x86_64, ECX (wrapping at 2^32) only with 0x67. */
+         const xed_iclass_enum_t ic = xed_decoded_inst_get_iclass(&xedd);
+         bool want_addr32 = ic == XED_ICLASS_LOOP || ic == XED_ICLASS_LOOPE ||
+                            ic == XED_ICLASS_LOOPNE || ic == XED_ICLASS_JRCXZ;
          for (unsigned i = 0; i < nmem && !want_addr32 && !non_deref; ++i) {
             want_addr32 = wants_addr32(xed_decoded_inst_get_base_reg(aops, i),
                                        xed_decoded_inst_get_index_reg(aops, i));
