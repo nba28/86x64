@@ -1332,16 +1332,15 @@ namespace MachO {
           * a CFBundleGetFunctionPointerForName plugin-loader path reading a stale
           * __nl_symbol_ptr -> movl (%rdi),%eax with rdi = original vmaddr).
           *
-          * So: if a DyldInfo exists but its rebase table is EMPTY, run ONLY the
-          * rebase-synthesis pass and merge the synthesized REBASE opcodes into the
+          * So: if a DyldInfo exists, run ONLY the rebase-synthesis pass and
+          * merge the REBASE opcodes for slots it does not already slide into the
           * existing stream (its binds/exports are already correct). A modern PIE
-          * input has a populated rebase table and is left untouched. This is the
+          * input's table already covers every slot and gains nothing. This is the
           * modern-path analogue of the classic (LC_DYSYMTAB-only) synthesis below;
           * both derive the internal sliding-pointer set from the indirect symbol
           * table's INDIRECT_SYMBOL_LOCAL markers (nlocrel/nextrel are 0 here). */
          DyldInfo<b> *existing_dyld = this->template subcommand<DyldInfo>();
          const bool rebase_only = (existing_dyld != nullptr);
-         if (rebase_only && !existing_dyld->rebase->rebasees.empty()) { return; }
 
          auto *symtab   = this->template subcommand<Symtab>();
          auto *dysymtab = this->template subcommand<Dysymtab>();
@@ -1381,7 +1380,23 @@ namespace MachO {
          auto *lazy_bind = BindInfo<b, true>::Create();
          auto *export_info = ExportInfo<b>::Create();
 
+         /* rebase_only: the rule is per SLOT, not per table. "Existing table
+          * is empty" was the old proxy for a non-PIE input, but transform
+          * itself rebases the lazy pointers it re-points at the translated
+          * stub_helper, so such an input arrives with a few rebases and its
+          * widened __mod_init_func slots got none (their preferred addresses
+          * then survived the dylib's slide). Every 8-byte slot holding an
+          * internal pointer needs exactly one rebase: add the missing ones and
+          * never a second (dyld would slide it twice). A complete PIE table
+          * gains nothing. */
+         std::set<const SectionBlob<b> *> already_rebased;
+         if (rebase_only) {
+            for (const RebaseNode<b> *r : rebase->rebasees) {
+               if (r->blob != nullptr) { already_rebased.insert(r->blob); }
+            }
+         }
          auto add_rebase = [&] (const SectionBlob<b> *blob) {
+            if (!already_rebased.insert(blob).second) { return; }
             auto *rn = RebaseNode<b>::Create(REBASE_TYPE_POINTER);
             rn->blob = blob;
             rebase->rebasees.push_back(rn);

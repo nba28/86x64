@@ -36,7 +36,9 @@
 #       exactly ONE rebase (a second rebase would apply the slide twice);
 #   (b) ON: the fixture runs and its output matches expected/<t>.txt;
 #   (c) OFF (M64_NO_SELF_WEAK_REBASE=1): the self weak binds are BACK in the
-#       stream and the fixture fails again exactly as it did before the fix.
+#       stream. (The OFF fixture no longer crashes: synthesize_dyld_info now
+#       rebases every in-image slot itself, so this pass's remaining job is to
+#       keep the slot out of coalescing with a native definition.)
 #
 # The ON arm is (re)built LAST so the suite inherits the ON artifact.
 # Needs the C++ sysroot (`make sysroot-cpp`); SKIPs without.
@@ -51,8 +53,8 @@ HERE="$(cd "$(dirname "$0")" && pwd)"
 PIPELINE="$HERE/../src/86x64/86x64.sh"
 BUILD="$HERE/build"
 
-# The six fixtures that were failing on this defect.  Each must FAIL in the OFF
-# arm and PASS in the ON arm.
+# The six fixtures that were failing on this defect.  Each must carry self weak
+# binds in the OFF arm, none in the ON arm, and PASS in the ON arm.
 FIXTURES="28_weak_bind 32_member_func_ptr 52_eh_throw_object \
 96_rtti_const_vtable_bind 97_dynamic_cast_crosscast 98_dynamic_cast_corrupt_vtable"
 
@@ -181,10 +183,14 @@ EOF
       fail "$t: OFF arm has NO self weak binds -- the kill switch is inert, so the ON arm proves nothing"
    fi
 
+   # The OFF arm's bite is the stream check above. Since synthesize_dyld_info
+   # gives every in-image 8-byte slot its rebase per slot (not only when the
+   # input table was empty), an OFF-arm slot is slid anyway and these fixtures
+   # run; this pass's remaining job is keeping the slot out of weak coalescing,
+   # where a NATIVE image's definition of the same symbol would capture it.
    off_rc=$(run_deadlined "$off" "$BUILD/$t.swroff.out")
    if diff -q "$exp" "$BUILD/$t.swroff.out" >/dev/null 2>&1; then
       off_verdict="passes"
-      [ "$is_control" = "1" ] || fail "$t: OFF arm PASSED -- the fixture does not actually depend on the fix"
    else
       off_verdict="fails"
       [ "$is_control" = "0" ] || fail "$t: control fixture FAILED in the OFF arm (exit $off_rc) -- it should be unaffected by this fix"
