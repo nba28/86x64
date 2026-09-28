@@ -34,6 +34,7 @@
 #include <stdlib.h>
 #include <errno.h>
 #include <os/lock.h>
+#include <malloc/malloc.h>
 #include <mach/mach.h>
 #include <mach/mach_vm.h>
 #include <dlfcn.h>
@@ -149,6 +150,14 @@ static os_unfair_lock g_init_lock = OS_UNFAIR_LOCK_INIT;
 static int heap_trace(void) {
    static int t = -1;
    if (__builtin_expect(t < 0, 0)) { t = getenv("ABICONV_HEAP_TRACE") != NULL; }
+   return t;
+}
+
+/* M64_NO_NATIVE_FREE: the old behaviour (native pointers ignored by free,
+ * contents dropped by realloc). Guard OFF arm only. */
+static int native_free_off(void) {
+   static int t = -1;
+   if (__builtin_expect(t < 0, 0)) { t = getenv("M64_NO_NATIVE_FREE") != NULL; }
    return t;
 }
 
@@ -529,10 +538,19 @@ void free(void *p) {
    heap_init();
    if (!g_hc) { return; }
    os_unfair_lock_lock(&g_hc->lock);
-   /* Ignore pointers that aren't ours: a stray or double free from the
-    * translated program must not be allowed to corrupt the free list. */
+   /* Not ours: never touch the free list. A LIVE allocation of some native
+    * malloc zone goes back to that zone. Inside libabiconv free() IS this
+    * shim, so every internal free of native memory (method_copyArgumentType,
+    * objc_copyClassList, ...) used to be dropped, as was every native buffer a
+    * translated app frees (APIs that hand out malloc'd memory): a steady leak.
+    * malloc_zone_from_ptr is NULL for a stray or already-freed pointer, which
+    * stays ignored exactly as before. */
    if (!owned(p)) {
       os_unfair_lock_unlock(&g_hc->lock);
+      if (!native_free_off()) {
+         malloc_zone_t *z = malloc_zone_from_ptr(p);
+         if (z) { malloc_zone_free(z, p); }
+      }
       return;
    }
    struct block *b = (struct block *)((char *)p - sizeof(struct block));
@@ -581,9 +599,10 @@ void *realloc(void *p, size_t n) {
       free(p);
       return malloc(0);
    }
-   /* If it isn't ours, we can't safely inspect its header; allocate fresh.
-    * (We can't know the old size to copy, so this only preserves data for
-    * our own pointers — which is all the translated program should pass.) */
+   /* Not ours: a live native-zone allocation reports its size (malloc_size),
+    * so its bytes move into the new block and it is freed back to its zone;
+    * anything else has no knowable size and starts fresh. (This used to drop
+    * the contents of every native buffer realloc'd through the shim.) */
    heap_init();
    if (!g_hc) { return malloc(n); }
    os_unfair_lock_lock(&g_hc->lock);
@@ -591,12 +610,13 @@ void *realloc(void *p, size_t n) {
    uint64_t oldcap = 0;
    if (mine) oldcap = BLK_CAP((struct block *)((char *)p - sizeof(struct block)));
    os_unfair_lock_unlock(&g_hc->lock);
+   if (!mine && !native_free_off()) { oldcap = malloc_size(p); }
 
    if (mine && oldcap >= round_up(n, 16)) {
       return p;   /* current block already big enough */
    }
    void *np = malloc(n);
-   if (np != NULL && mine) {
+   if (np != NULL && oldcap) {
       memcpy(np, p, oldcap < n ? oldcap : n);
       free(p);
    }
@@ -645,18 +665,23 @@ void *valloc(size_t n) {
 }
 
 /* malloc_size / malloc_good_size: Foundation and CF occasionally query the
- * usable size of a block. Report the payload capacity for our pointers, 0
- * for anything we didn't allocate. */
+ * usable size of a block. Report the payload capacity for our pointers, the
+ * owning zone's answer for a live native allocation (see free), 0 otherwise. */
 size_t malloc_size(const void *p) {
    if (p == NULL) return 0;
    heap_init();
    if (!g_hc) { return 0; }
    os_unfair_lock_lock(&g_hc->lock);
    size_t sz = 0;
-   if (owned(p)) {
+   const int mine = owned(p);
+   if (mine) {
       sz = (size_t)((struct block *)((char *)p - sizeof(struct block)))->size;
    }
    os_unfair_lock_unlock(&g_hc->lock);
+   if (!mine && !native_free_off()) {
+      malloc_zone_t *z = malloc_zone_from_ptr(p);
+      if (z) { sz = z->size(z, p); }
+   }
    return sz;
 }
 
