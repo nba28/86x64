@@ -3270,63 +3270,6 @@ static void compat_getCMYKA(id self, SEL _cmd, double *c, double *m,
    color_narrow_outs(outs, buf, 5);
 }
 
-/* ProKit also swizzles the SINGLE-component NSColor getters (-redComponent,
- * -greenComponent, -blueComponent, -whiteComponent, -hueComponent,
- * -saturationComponent, -brightnessComponent) with its own *ComponentImp
- * functions, each of which raises the SAME color-space exception for an
- * extended/HDR system color ("whiteComponent is not implemented for Generic
- * Gray Gamma 2.2 Profile (extended) colorspace ..."). Modern AppKit calls these
- * while drawing text (NSHighContrastForegroundColorModifier asks a dynamic
- * color for its whiteComponent), so the s14 getRGBAImp patch alone isn't enough.
- * Compute each component straight from the CGColor — never raises. which:
- * 0=red 1=green 2=blue 3=white(luminance) 4=hue 5=saturation 6=brightness. */
-static double color_component_via_cgcolor(id self, int which) {
-   double r = 0, g = 0, b = 0;
-   double rgba[4];
-   int have = color_rgba_via_cgcolor(self, rgba);   /* RGB-model CGColor */
-   if (have) {
-      r = rgba[0]; g = rgba[1]; b = rgba[2];
-   } else if (self) {                               /* gray / monochrome */
-      CGColorRef cg = ((CGColorRef (*)(id, SEL))objc_msgSend)(
-         self, sel_registerName("CGColor"));
-      if (cg) {
-         size_t nc = CGColorGetNumberOfComponents(cg);
-         const CGFloat *comp = CGColorGetComponents(cg);
-         if (comp && nc >= 1) { r = g = b = comp[0]; have = 1; }
-      }
-   }
-   if (!have) { return 0.0; }
-   switch (which) {
-   case 0: return r;
-   case 1: return g;
-   case 2: return b;
-   case 3: return 0.299 * r + 0.587 * g + 0.114 * b;   /* luminance */
-   default: break;
-   }
-   double mx = r > g ? (r > b ? r : b) : (g > b ? g : b);
-   double mn = r < g ? (r < b ? r : b) : (g < b ? g : b);
-   double d = mx - mn, h = 0;
-   if (d > 0) {
-      if (mx == r)      { h = (g - b) / d + (g < b ? 6 : 0); }
-      else if (mx == g) { h = (b - r) / d + 2; }
-      else              { h = (r - g) / d + 4; }
-      h /= 6;
-   }
-   switch (which) {
-   case 4: return h;                          /* hue */
-   case 5: return mx <= 0 ? 0 : d / mx;        /* saturation */
-   case 6: return mx;                          /* brightness */
-   default: return 0.0;
-   }
-}
-static double compat_redComponent(id s, SEL c)        { (void)c; return color_component_via_cgcolor(s, 0); }
-static double compat_greenComponent(id s, SEL c)      { (void)c; return color_component_via_cgcolor(s, 1); }
-static double compat_blueComponent(id s, SEL c)       { (void)c; return color_component_via_cgcolor(s, 2); }
-static double compat_whiteComponent(id s, SEL c)      { (void)c; return color_component_via_cgcolor(s, 3); }
-static double compat_hueComponent(id s, SEL c)        { (void)c; return color_component_via_cgcolor(s, 4); }
-static double compat_saturationComponent(id s, SEL c) { (void)c; return color_component_via_cgcolor(s, 5); }
-static double compat_brightnessComponent(id s, SEL c) { (void)c; return color_component_via_cgcolor(s, 6); }
-
 static const struct { const char *sel; IMP imp; } g_color_swz[COLOR_SWZ_SELS] = {
    { "getRed:green:blue:alpha:",            (IMP)compat_getRGBA  },
    { "getHue:saturation:brightness:alpha:", (IMP)compat_getHSBA  },
@@ -3335,163 +3278,15 @@ static const struct { const char *sel; IMP imp; } g_color_swz[COLOR_SWZ_SELS] = 
 };
 static int g_color_installed;
 
-/* Locate symbol `sym` (mangled, i.e. with the leading '_') in the FIRST loaded
- * image whose path contains `image_substr`, returning its runtime address or
- * NULL. Walks LC_SYMTAB including LOCAL symbols — getRGBAImp is a non-exported
- * ProKit function, so dlsym can't see it. */
-static void *find_image_symbol(const char *image_substr, const char *sym) {
-   uint32_t nimg = x64_img_count();
-   for (uint32_t i = 0; i < nimg; ++i) {
-      const char *path = x64_img_path(i);
-      if (!path || !strstr(path, image_substr)) { continue; }
-      const struct mach_header_64 *mh =
-         (const struct mach_header_64 *)x64_img_header(i);
-      if (!mh || mh->magic != MH_MAGIC_64) { return NULL; }
-      intptr_t slide = x64_img_slide((const struct mach_header *)mh);
-      const struct load_command *lc =
-         (const struct load_command *)((const uint8_t *)mh + sizeof *mh);
-      const struct symtab_command *st = NULL;
-      uintptr_t linkedit_base = 0;
-      for (uint32_t c = 0; c < mh->ncmds; ++c) {
-         if (lc->cmd == LC_SYMTAB) {
-            st = (const struct symtab_command *)lc;
-         } else if (lc->cmd == LC_SEGMENT_64) {
-            const struct segment_command_64 *sg =
-               (const struct segment_command_64 *)lc;
-            if (strcmp(sg->segname, "__LINKEDIT") == 0) {
-               linkedit_base = (uintptr_t)(sg->vmaddr + slide - sg->fileoff);
-            }
-         }
-         lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
-      }
-      if (!st || !linkedit_base) { return NULL; }
-      const struct nlist_64 *syms =
-         (const struct nlist_64 *)(linkedit_base + st->symoff);
-      const char *strs = (const char *)(linkedit_base + st->stroff);
-      for (uint32_t s = 0; s < st->nsyms; ++s) {
-         uint32_t strx = syms[s].n_un.n_strx;
-         if (!strx || !syms[s].n_value) { continue; }
-         if (strcmp(strs + strx, sym) == 0) {
-            return (void *)(uintptr_t)(syms[s].n_value + slide);
-         }
-      }
-      return NULL;
-   }
-   return NULL;
-}
 
-/* Overwrite the first 12 bytes of native function `fn` with an absolute
- * tail-jump to `dest` (movabs rax,dest ; jmp rax). vm_protect with VM_PROT_COPY
- * forces a private COW copy so the code-signed page is writable. */
-static int patch_tailjmp(void *fn, void *dest) {
-   if (!fn || !dest) { return 0; }
-   uint8_t code[12];
-   code[0] = 0x48; code[1] = 0xB8;            /* movabs rax, imm64 */
-   memcpy(code + 2, &dest, 8);
-   code[10] = 0xFF; code[11] = 0xE0;          /* jmp rax */
-   uintptr_t pg = (uintptr_t)fn & ~(uintptr_t)0xFFF;
-   size_t len = (((uintptr_t)fn + sizeof code) - pg + 0xFFF) & ~(size_t)0xFFF;
-   if (mach_vm_protect(mach_task_self(), (mach_vm_address_t)pg, len, FALSE,
-                       VM_PROT_READ | VM_PROT_WRITE | VM_PROT_COPY)
-       != KERN_SUCCESS &&
-       mprotect((void *)pg, len, PROT_READ | PROT_WRITE | PROT_EXEC) != 0) {
-      return 0;
-   }
-   memcpy(fn, code, sizeof code);
-   mach_vm_protect(mach_task_self(), (mach_vm_address_t)pg, len, FALSE,
-                   VM_PROT_READ | VM_PROT_EXECUTE);
-   __builtin___clear_cache((char *)fn, (char *)fn + sizeof code);
-   return 1;
-}
-
-/* ProKit (bundled 2010 pro-apps framework, runs NATIVE) replaces the NSColor
- * -getRed:green:blue:alpha: IMP with its own getRGBAImp during native window
- * theme init, whose __raiseColorSpaceException throws an UNCAUGHT
- * NSInvalidArgumentException for any post-2010 (extended-sRGB / HDR) colorspace
- * -> +[NSApplication _crashOnException:]. That steal happens MID -becomeActive:,
- * after our last reassert and with no reverse-bridge re-entry before the raising
- * getter runs (deep in a native NSView Auto Layout constraint pass), so neither
- * the per-class reassert nor an own-entry sweep can win the race. Instead
- * neutralize getRGBAImp at the SOURCE: patch the function (resolvable in ProKit's
- * symbol table as soon as ProKit loads, BEFORE it is ever installed as an IMP)
- * to tail-jump into our compat_getRGBA, which returns RGBA via CGColor and never
- * raises. Once-per-process; retries until ProKit is loaded. getRGBAImp is the
- * getRed: IMP, so it shares compat_getRGBA's (self,_cmd,r,g,b,a) signature. */
-static int g_prokit_loaded;   /* ProKit (the only known NSColor-slot thief) is in */
-
-static void prokit_color_neutralize(void) {
-   static int done;
-   if (done) { return; }
-   /* ProKit can only arrive with an image load: look again only then (the
-    * symtab walk on every reverse entry was ~70 us per call). */
-   static uint32_t s_tried_imgcount;
-   uint32_t ic = x64_img_count();
-   if (ic == s_tried_imgcount) { return; }
-   s_tried_imgcount = ic;
-   /* Process-wide guard: the patch edits shared ProKit code, so once ANY copy
-    * has done it the others must not re-walk the symtab. */
-   if (getenv("ABICONV_GETRGBA_PATCHED")) { done = 1; g_prokit_loaded = 1; return; }
-   /* getRGBAImp + each single-component getter ProKit overrides; all raise the
-    * same color-space exception for extended/HDR colors. Patch every one whose
-    * symbol resolves; require at least getRGBAImp before declaring success. */
-   static const struct { const char *sym; void *dest; } patches[] = {
-      { "_getRGBAImp",             (void *)compat_getRGBA            },
-      { "_redComponentImp",        (void *)compat_redComponent       },
-      { "_greenComponentImp",      (void *)compat_greenComponent     },
-      { "_blueComponentImp",       (void *)compat_blueComponent      },
-      { "_whiteComponentImp",      (void *)compat_whiteComponent     },
-      { "_hueComponentImp",        (void *)compat_hueComponent       },
-      { "_saturationComponentImp", (void *)compat_saturationComponent},
-      { "_brightnessComponentImp", (void *)compat_brightnessComponent},
-   };
-   void *fn = find_image_symbol("/ProKit", patches[0].sym);
-   if (!fn) {
-      static int traced;
-      if (!traced && BRIDGE_TRACE()) {
-         int pk = 0;
-         for (uint32_t i = 0, n = x64_img_count(); i < n; ++i) {
-            const char *p = x64_img_path(i);
-            if (p && strstr(p, "/ProKit")) { pk = 1; break; }
-         }
-         if (pk) {       /* ProKit IS loaded but symbol not found: trace once */
-            traced = 1;
-            fprintf(stderr, "[compat] getRGBAImp NOT found though ProKit loaded\n");
-            fflush(stderr);
-         }
-      }
-      return;                              /* ProKit not loaded yet: retry */
-   }
-   g_prokit_loaded = 1;
-   int rgba_ok = 0;
-   for (unsigned i = 0; i < sizeof patches / sizeof patches[0]; ++i) {
-      void *p = (i == 0) ? fn : find_image_symbol("/ProKit", patches[i].sym);
-      int ok = p ? patch_tailjmp(p, patches[i].dest) : 0;
-      if (i == 0) { rgba_ok = ok; }
-      if (BRIDGE_TRACE()) {
-         fprintf(stderr, "[compat] %s @%p patch %s -> compat\n",
-                 patches[i].sym, p, ok ? "OK" : (p ? "FAILED" : "absent"));
-         fflush(stderr);
-      }
-   }
-   if (rgba_ok) { setenv("ABICONV_GETRGBA_PATCHED", "1", 1); done = 1; }
-}
-
-/* ProKit (bundled 2010 pro-apps framework, runs NATIVE) installs its OWN
- * NSColor getter replacement (getRGBAImp) during theme init — AFTER our
- * install — whose __raiseColorSpaceException fires for every post-2010
- * colorspace, killing modern AppKit/SwiftUI menu rendering on the extended-
- * sRGB accent color. Re-take any slot somebody replaced; the first-captured
- * AppKit originals stay our fallback. Called from the reverse-bridge prep
- * (every UI event passes through the legacy sendEvent: override, so a
- * re-swizzle never survives to the next draw). */
+/* Keep the compat getters installed on every NSColor-family class, including
+ * ones registered or realized after install. Foreign REPLACEMENTS of these
+ * slots are refused at install time by libinterpose (NSColor component-getter
+ * contract), so this only has to follow new classes. Called from the
+ * reverse-bridge prep. */
 static void color_sweep(void);
 
 static void appkit_color_compat_reassert(void) {
-   /* BEFORE the g_color_installed gate: that flag is per-copy (set only in the
-    * copy that ran install), but the reverse bridge — and thus this reassert —
-    * runs in whatever copy handles the call, and the getRGBAImp patch is a
-    * process-global code edit any copy can perform. */
-   prokit_color_neutralize();   /* patch getRGBAImp once ProKit has loaded */
    if (!g_color_installed) { return; }
    /* New images can register NSColor subclasses that inherit a stealable slot
     * (ProKit). AppKit also realizes some concrete color classes lazily — the
@@ -3501,8 +3296,7 @@ static void appkit_color_compat_reassert(void) {
     * class count moves. objc_getClassList(NULL,0) is NOT a cheap count: it
     * walks every realized class (~0.5 ms in an AppKit process, paid by every
     * native->app method call). So: the image count is checked on every entry,
-    * everything else on a poll at most every 50 ms — except the slot re-take,
-    * which runs on EVERY entry once ProKit (the thief) is loaded. */
+    * everything else on a poll at most every 50 ms. */
    static uint32_t s_last_imgcount, s_calls;
    static int      s_last_clscount;
    static uint64_t s_next_poll_ns;
@@ -3512,7 +3306,7 @@ static void appkit_color_compat_reassert(void) {
       uint64_t now = clock_gettime_nsec_np(CLOCK_UPTIME_RAW);
       if (now >= s_next_poll_ns) { s_next_poll_ns = now + 50000000ull; poll = 1; }
    }
-   if (!poll && !g_prokit_loaded) { return; }
+   if (!poll) { return; }
    static SEL s_sels[COLOR_SWZ_SELS];
    for (unsigned si = 0; si < COLOR_SWZ_SELS; ++si) {
       if (!s_sels[si]) { s_sels[si] = sel_registerName(g_color_swz[si].sel); }
@@ -10433,8 +10227,7 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
    id self_ = (id)regs[is_stret ? 1u : 0u];
    SEL sel  = (SEL)regs[gp0];
 
-   /* ProKit re-swizzles the NSColor getters behind our back (see
-    * appkit_color_compat_reassert) — re-take them on every reverse entry. */
+   /* follow NSColor classes registered since install (cheap unless polling) */
    appkit_color_compat_reassert();
 
    plan->ret_kind = 2;          /* default void */

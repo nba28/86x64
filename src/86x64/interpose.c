@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <dlfcn.h>
+#include <string.h>
 #include <sys/mman.h>
 #include <os/lock.h>
 #include <pthread.h>
@@ -365,6 +366,81 @@ __CFPreferencesGetAppIntegerValue(CFStringRef_ip key, CFStringRef_ip appID, Bool
 	return real(key, appID, valid);
 }
 
+/*
+ * NSColor component-getter contract. Pre-2010 native frameworks (ProKit's theme
+ * init was the measured case) replace NSColor's -getRed:green:blue:alpha: and
+ * single-component getters with implementations that raise an uncaught
+ * NSInvalidArgumentException for any colorspace newer than they are (extended
+ * sRGB / HDR), and modern AppKit asks every system accent colour for its
+ * components mid-layout. The system getters handle every colorspace, so a
+ * replacement of a SYSTEM (or 86x64-runtime) implementation by FOREIGN code is
+ * refused; overrides a class declares for itself are left alone. The trigger is
+ * the replacement itself, whoever does it, so no image is ever named.
+ */
+typedef struct objc_method_ip *Method_ip;
+typedef void (*IMP_ip)(void);
+typedef struct objc_selector_ip *SEL_ip;
+typedef struct objc_class_ip *Class_ip;
+
+extern IMP_ip method_setImplementation(Method_ip, IMP_ip) __attribute__((weak_import));
+extern void method_exchangeImplementations(Method_ip, Method_ip) __attribute__((weak_import));
+extern IMP_ip method_getImplementation(Method_ip) __attribute__((weak_import));
+extern SEL_ip method_getName(Method_ip) __attribute__((weak_import));
+extern const char *sel_getName(SEL_ip) __attribute__((weak_import));
+
+static int
+color_getter_sel(Method_ip m)
+{
+	static const char *const sels[] = {
+		"getRed:green:blue:alpha:", "getHue:saturation:brightness:alpha:",
+		"getWhite:alpha:", "getCyan:magenta:yellow:black:alpha:",
+		"redComponent", "greenComponent", "blueComponent", "whiteComponent",
+		"hueComponent", "saturationComponent", "brightnessComponent",
+	};
+	const char *n = m ? sel_getName(method_getName(m)) : NULL;
+	if (!n) { return 0; }
+	for (size_t i = 0; i < sizeof sels / sizeof sels[0]; ++i) {
+		if (strcmp(n, sels[i]) == 0) { return 1; }
+	}
+	return 0;
+}
+
+/* 1 = the system or the 86x64 runtime owns this code; unknown counts as owned
+ * (never refuse on a guess). */
+static int
+imp_is_owned(IMP_ip imp)
+{
+	Dl_info di;
+	if (!imp || !dladdr((const void *)imp, &di) || !di.dli_fname) { return 1; }
+	return strncmp(di.dli_fname, "/System/", 8) == 0 ||
+	       strncmp(di.dli_fname, "/usr/lib/", 9) == 0 ||
+	       strstr(di.dli_fname, "libabiconv") != NULL;
+}
+
+static int
+refuse_color_getter_steal(Method_ip m, IMP_ip incoming)
+{
+	return color_getter_sel(m) && imp_is_owned(method_getImplementation(m)) &&
+	       !imp_is_owned(incoming);
+}
+
+static IMP_ip
+__method_setImplementation(Method_ip m, IMP_ip imp)
+{
+	if (refuse_color_getter_steal(m, imp)) { return method_getImplementation(m); }
+	return method_setImplementation(m, imp);
+}
+
+static void
+__method_exchangeImplementations(Method_ip a, Method_ip b)
+{
+	if (a && b && (refuse_color_getter_steal(a, method_getImplementation(b)) ||
+	               refuse_color_getter_steal(b, method_getImplementation(a)))) {
+		return;
+	}
+	method_exchangeImplementations(a, b);
+}
+
 typedef struct { const void* replacement; const void* replacee; } interpose_t;
 
 __attribute__((used)) static const interpose_t __interposers[]
@@ -378,4 +454,6 @@ __attribute__ ((section("__DATA, __interpose"))) = {
 	{ (void *)__pthread_get_stacksize_np, (void *)pthread_get_stacksize_np },
 	{ (void *)__CFPreferencesGetAppBooleanValue, (void *)CFPreferencesGetAppBooleanValue },
 	{ (void *)__CFPreferencesGetAppIntegerValue, (void *)CFPreferencesGetAppIntegerValue },
+	{ (void *)__method_setImplementation, (void *)method_setImplementation },
+	{ (void *)__method_exchangeImplementations, (void *)method_exchangeImplementations },
 };

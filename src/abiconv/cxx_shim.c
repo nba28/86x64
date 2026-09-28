@@ -870,82 +870,6 @@ static const char *ti_name_of(uint32_t ti) {
    return (const char *)(uintptr_t)np;
 }
 
-/* ★SetStreamSource ARGUMENT CAPTURE (env ABICONV_D3D_STREAM_DIAG).
- *
- * The vertex stride Halo hands to glVertexPointer is garbage and differs on
- * every run (1481, 796, 1365, 1299 measured). It is read from
- * `this->strides[stream]` at +0xa0, written ONLY by the SetStreamSource
- * equivalent at i386 0x2b693e — and that write is now known to EXECUTE, since
- * the dynamic_cast it sits behind never fails. Two possibilities remain:
- *   (A) the caller passes a garbage stride, or
- *   (B) SetStreamSource is never called for the stream THIS draw uses, so the
- *       array still holds uninitialised heap — which fits four distinct values.
- *
- * SetStreamSource casts its buffer through US, so its frame is reachable from
- * here. Its prologue is
- *     push ebp ; mov esp,ebp ; push esi ; push ebx ; sub $0x10,esp
- * so at the call esp = ebp-0x18, and the arg block we are handed (`a`) IS that
- * address — the pushed return address is at a[-1], exactly as documented above.
- * Hence caller_ebp = a + 0x18, and the D3D arguments are:
- *     +0x8 this   +0xc StreamNumber   +0x10 pStreamData   +0x14 Offset
- *     +0x18 Stride
- *
- * ⚠The frame layout is an ASSUMPTION, so it is CHECKED, not trusted: only
- * streams 0 and 1 exist (0x2b68d0 `cmpl $0x1,%ebx; ja`), so a StreamNumber
- * outside that range means the interpretation is wrong and we say so instead of
- * printing convincing nonsense. */
-static void d3d_stream_diag(const uint32_t *a, uint32_t dst_ti) {
-   static int on = -1, n;
-   if (on < 0) on = getenv("ABICONV_D3D_STREAM_DIAG") != NULL;
-   if (!on || n >= 24) return;
-   const char *dn = ti_name_of(dst_ti);
-   if (!dn || !strstr(dn, "IDirect3DVertexBuffer9_Mac")) return;
-
-   uint32_t ebp = (uint32_t)(uintptr_t)a + 0x18;
-   uint32_t self = 0, stream = 0, buf = 0, off = 0, stride = 0;
-   if (!cxx_diag_read32(ebp + 0x08, &self)  ||
-       !cxx_diag_read32(ebp + 0x0c, &stream) ||
-       !cxx_diag_read32(ebp + 0x10, &buf)   ||
-       !cxx_diag_read32(ebp + 0x14, &off)   ||
-       !cxx_diag_read32(ebp + 0x18, &stride)) return;
-   n++;
-   if (stream > 1) {
-      fprintf(stderr, "[d3d] SetStreamSource frame UNRECOGNISED "
-              "(StreamNumber=%u, only 0/1 exist) — ignore these numbers\n", stream);
-      fflush(stderr);
-      return;
-   }
-   /* Read back what the array actually holds for BOTH streams, which is the
-    * whole question: a stream nobody sets keeps uninitialised heap. */
-   uint32_t s0 = 0, s1 = 0;
-   cxx_diag_read32(self + 0xa0, &s0);
-   cxx_diag_read32(self + 0xa4, &s1);
-   /* ★WHO CALLS SetStreamSource. The stride turns out to be transmitted
-    * FAITHFULLY — Halo really does ask for 768 while the array pointers
-    * describe a 32-byte vertex (pos@0, normal@12, uv@24). 768 = 24*32, i.e. the
-    * shape of a BUFFER SIZE standing where a stride belongs. So the defect is
-    * one level up, and its caller is what we need.
-    *
-    * Standard frame: saved ebp at [ebp], return address at [ebp+4]. Reported as
-    * a raw i386-space value AND, when it resolves, as Halo.dylib+offset. */
-   uint32_t ret = 0;
-   cxx_diag_read32(ebp + 4, &ret);
-   char site[128];
-   site[0] = 0;
-   Dl_info di;
-   if (ret && dladdr((void *)(uintptr_t)ret, &di) && di.dli_fname) {
-      const char *b = strrchr(di.dli_fname, '/');
-      snprintf(site, sizeof site, " caller=%s+0x%lx", b ? b + 1 : di.dli_fname,
-               (unsigned long)((uintptr_t)ret - (uintptr_t)di.dli_fbase));
-   } else if (ret) {
-      snprintf(site, sizeof site, " caller=%#x(raw)", ret);
-   }
-   fprintf(stderr, "[d3d] SetStreamSource this=%#x stream=%u buf=%#x off=%u "
-           "STRIDE=%u  | strides[0]=%u strides[1]=%u%s\n",
-           self, stream, buf, off, stride, s0, s1, site);
-   fflush(stderr);
-}
-
 static uint32_t dyncast_fail(int reason, uint32_t src_ti, uint32_t dst_ti) {
    static uint8_t said[16];
    if (reason >= 0 && reason < 16 && !said[reason]) {
@@ -976,7 +900,6 @@ uint32_t shim_dynamic_cast(uint32_t *a) {
    uint32_t src_type = a[1];
    uint32_t dst_type = a[2];
    int32_t  src2dst  = (int32_t)a[3];
-   d3d_stream_diag(a, dst_type);
    if (!src_ptr) return 0;
 
    /* ★FAULT-SAFE ENTRY READS. These three loads are the boundary between us and

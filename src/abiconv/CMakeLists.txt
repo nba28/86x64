@@ -688,9 +688,6 @@ add_library(abiconv SHARED
   # snd_convert.c = the pure (framework-free) SoundHeader/'snd '-resource decoder
   # (unit-tested headless by snd_convert_test.c). Needs -framework AudioToolbox.
   sndmgr_shim.c
-  # ⚠DIAGNOSTIC ONLY (task #46) — ships inert (needs ABICONV_VORBIS_SELFTEST).
-  # DELETE together with the sndmgr_shim.c probes when #46 closes.
-  vorbis_selftest.c
   snd_convert.c
   fontmgr_shim.c
   mlte_shim.c
