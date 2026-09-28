@@ -107,7 +107,7 @@
 // (cm_new_handle), NOT malloc: DisposeHandle / GetHandleSize / SetHandleSize all work on
 // it, and the 4-byte i386 Handle representation is preserved.
 //
-// The FSSpec <-> POSIX mapping is taken from carbon_fsspec_shim.c through carbon_fsspec.h
+// The FSSpec <-> POSIX mapping is taken from shimdb/impl/fsspec.c through fsspec.h
 // rather than copied, so there is exactly one implementation of the volfs / dirID-table /
 // HFS-name-swap rules.
 //
@@ -123,7 +123,7 @@
 // Wired through carbon_alias_tramp.asm (MTSHIM: rdi -> &i386 args[0], result in eax).
 
 #include "carbon_shim.h"
-#include "carbon_fsspec.h"
+#include "fsspec.h"
 
 #include <string.h>
 #include <stdio.h>

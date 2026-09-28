@@ -1,22 +1,23 @@
 /*
- * carbon_fsspec.h — the FSSpec <-> POSIX resolver owned by carbon_fsspec_shim.c,
- * exposed deliberately to the other classic-File-Manager-adjacent shims.
+ * fsspec.h — the FSSpec <-> POSIX resolver owned by shimdb/impl/fsspec.c,
+ * exposed deliberately to the other classic-File-Manager-adjacent code (the
+ * Alias Manager, and libabiconv's i386 glue).
  *
- * WHY A HEADER AND NOT A COPY. carbon_fsspec_shim.c is the ONE place that knows
+ * WHY A HEADER AND NOT A COPY. fsspec.c is the ONE place that knows
  * how a classic {vRefNum, dirID, HFS name} triple maps onto a modern path:
  * FSGetVolumeInfo for the volume root, the /.vol/<st_dev>/<CNID> volfs namespace
  * for the directory ID, the '/'<->':' HFS/POSIX leaf swap, and the dirID table
- * that shim_FindFolder mints into because modern CarbonCore's FindFolder hands
+ * that cfs_find_folder mints into because modern CarbonCore's FindFolder hands
  * back tokens rather than catalog node ids. Every one of those is a hard-won
  * behaviour with a comment explaining it; a second copy in another shim would
  * drift. carbon_alias_shim.c needs exactly this mapping (an AliasHandle is
  * created from, and resolved to, an FSSpec), so it takes it from here.
  *
- * Names are `cfs_`-prefixed because these become real exported symbols in a very
- * large dylib; the prefix says which module owns them.
+ * Names are `cfs_`-prefixed: they are exported from every shimgen shim that
+ * links fsspec.c, and the prefix says which module owns them.
  */
-#ifndef ABICONV_CARBON_FSSPEC_H
-#define ABICONV_CARBON_FSSPEC_H
+#ifndef SHIMDB_FSSPEC_H
+#define SHIMDB_FSSPEC_H
 
 #include <stdint.h>
 #include <stddef.h>
@@ -53,5 +54,10 @@ int cfs_path_to_fsspec(const char *path, uint8_t *spec);
 /* Remember that (vRefNum, dirID) names `path`, so the consumer half can resolve
  * a dirID we minted rather than one the file system assigned. */
 void cfs_dirtab_remember(int16_t vref, int32_t id, const char *path);
+
+/* FindFolder with a dirID the rest of this module can resolve (modern CarbonCore's
+ * own FindFolder returns internal tokens). Out-params are defined first. OSErr. */
+int32_t cfs_find_folder(int16_t vRefNum, uint32_t folderType, uint8_t createFolder,
+                        int16_t *foundVRefNum, int32_t *foundDirID);
 
 #endif /* ABICONV_CARBON_FSSPEC_H */

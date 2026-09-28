@@ -520,7 +520,7 @@ add_library(abiconv SHARED
   # x86_64 — so this BRIDGES onto Apple's own surviving engine (genuine alias records in,
   # Apple's own parser out) rather than reimplementing the format, and adds a CFURL
   # bookmark appendix for the one thing that engine no longer does: follow a moved file.
-  # Shares carbon_fsspec_shim.c's FSSpec<->POSIX resolver through carbon_fsspec.h.
+  # Shares the FSSpec<->POSIX resolver in shimdb/impl/fsspec.c through fsspec.h.
   carbon_alias_shim.c
   # FSOpenResFile with the flattened-resource-file fallback: codesign forbids HFS
   # resource forks in a bundle, so `m64 forks --flatten` moves them to the data
@@ -791,7 +791,10 @@ target_link_options(abiconv PRIVATE -Wl,-undefined,dynamic_lookup)
 add_library(shimdb_impl STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl/memory.c
   ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl/veclib.c
-  ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl/datetime.c)
+  ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl/datetime.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl/fsspec.c)
+target_include_directories(shimdb_impl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl)
+target_include_directories(abiconv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl)
 add_dependencies(abiconv shimdb_impl)
 target_link_options(abiconv PRIVATE "-Wl,-load_hidden,$<TARGET_FILE:shimdb_impl>")
 # objc_shim.c bridges into the live ObjC runtime; Foundation must be loaded
