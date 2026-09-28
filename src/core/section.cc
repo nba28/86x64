@@ -134,6 +134,7 @@ namespace MachO {
       static const std::pair<const char *, Parser> synthetic[] = {
          {"__86x64_xrel",   XrelBlob<bits>::Parse},
          {"__86x64_abs32",  Abs32Blob<bits>::Parse},
+         {"__86x64_dptr",   Abs32Blob<bits>::Parse},
          {"__86x64_cpin",   ConstPinBlob<bits>::Parse},
          {"__86x64_pcmap",  PcmapBlob<bits>::Parse},
          {"__86x64_ehlsda", EhlsdaBlob<bits>::Parse},

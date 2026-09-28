@@ -432,7 +432,12 @@ namespace MachO {
    template <Bits bits>
    class Abs32Blob: public SectionBlob<bits> {
    public:
-      static constexpr uint32_t MAGIC = 0x32336261u; /* "ab32" */
+      static constexpr uint32_t MAGIC = 0x32336261u;      /* "ab32" */
+      /* Same format, `__DATA,__86x64_dptr`: the 4-byte DATA slots (outside
+       * __TEXT/__OBJC) holding pre-slide intra-image pointers — the exact set
+       * objc_slide.c slide_data_fnptrs otherwise guesses by value. */
+      static constexpr uint32_t DPTR_MAGIC = 0x72747064u; /* "dptr" */
+      uint32_t magic = MAGIC;
       struct Ent {
          const SectionBlob<bits> *blob = nullptr; /*!< blob containing the field */
          std::size_t off = 0;                     /*!< field = blob->loc.vmaddr+off */
@@ -442,7 +447,11 @@ namespace MachO {
       virtual std::size_t size() const override { return 8 + ents.size() * 4; }
       virtual void Emit(Image& img, std::size_t offset) const override;
 
-      static Abs32Blob<bits> *Create() { return new Abs32Blob(); }
+      static Abs32Blob<bits> *Create(uint32_t magic = MAGIC) {
+         auto *b = new Abs32Blob();
+         b->magic = magic;
+         return b;
+      }
       /* Re-parse an already-emitted __86x64_abs32 section (a modify/convert
        * reparse): read each field vmaddr back and RE-RESOLVE it to the blob
        * currently containing it, so Emit re-emits the field's NEW vmaddr after

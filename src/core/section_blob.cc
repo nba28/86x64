@@ -404,7 +404,7 @@ namespace MachO {
          rows.push_back(static_cast<uint32_t>(e.blob->loc.vmaddr + e.off));
       }
       std::sort(rows.begin(), rows.end());
-      img.at<uint32_t>(offset + 0) = MAGIC;
+      img.at<uint32_t>(offset + 0) = magic;
       img.at<uint32_t>(offset + 4) = static_cast<uint32_t>(rows.size());
       std::size_t p = offset + 8;
       for (const uint32_t r : rows) {
@@ -427,9 +427,10 @@ namespace MachO {
        * vmaddrs and go stale when a later pass shifts the layout). */
       auto *blob = new Abs32Blob<bits>(loc, env);
       const uint32_t magic = img.at<uint32_t>(loc.offset + 0);
-      if (magic != MAGIC) {
-         throw error("__86x64_abs32: bad magic 0x%08x on reparse", magic);
+      if (magic != MAGIC && magic != DPTR_MAGIC) {
+         throw error("__86x64_abs32/dptr: bad magic 0x%08x on reparse", magic);
       }
+      blob->magic = magic;
       const uint32_t count = img.at<uint32_t>(loc.offset + 4);
       blob->ents.reserve(count); /* keep &ents.back() stable for deferred resolve */
       for (uint32_t i = 0; i < count; ++i) {

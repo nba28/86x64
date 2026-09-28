@@ -90,6 +90,61 @@ static void allocate_shim_files(void);
 static void redirect_stdio_symbol_ptrs(const struct mach_header_64 *mh,
                                        intptr_t slide);
 
+/* Apply an exact site table (__86x64_abs32 / __86x64_dptr: u32 magic, u32
+ * count, sorted pre-slide field vmaddrs) if it is present and carries `magic`;
+ * returns 1 if it was. objc_slide.c's add-image pass normally ran first and
+ * this is a no-op (values already outside the pre-slide window); it stays as
+ * the backstop for non-RUN_INITS and post-main loads. mprotect per site
+ * CLUSTER (gap > 16 pages starts a new one), NOT one [first,last] span: the
+ * pages between __text and __TEXT,__const can refuse PROT_WRITE under Rosetta
+ * and a whole-span mprotect fails ENOMEM. `restore` 0 = leave RW. */
+static int slide_site_table(uintptr_t addr, uintptr_t size, uint32_t magic,
+                            intptr_t slide, uint64_t lo, uint64_t hi,
+                            int restore, const char *base) {
+   if (addr == 0 || size < 8) return 0;
+   const uint32_t *hdr = (const uint32_t *)addr;
+   if (hdr[0] != magic) return 0;
+   uint32_t cnt = hdr[1];
+   if ((uintptr_t)cnt * 4 + 8 > size) cnt = (uint32_t)((size - 8) / 4);
+   const uint32_t *sites = hdr + 2;
+   size_t patched = 0;
+   for (uint32_t e = 0; e < cnt; ) {
+      uint32_t e2 = e + 1;
+      uintptr_t clo = (uintptr_t)sites[e] + slide;
+      uintptr_t chi = clo + 4;
+      while (e2 < cnt) {
+         uintptr_t a = (uintptr_t)sites[e2] + slide;
+         if (a > chi + 16 * 0x1000) break;
+         if (a + 4 > chi) chi = a + 4;
+         ++e2;
+      }
+      uintptr_t pg = clo & ~(uintptr_t)0xFFF;
+      size_t pglen = ((chi + 0xFFF) & ~(uintptr_t)0xFFF) - pg;
+      if (mprotect((void *)pg, pglen, PROT_READ | PROT_WRITE) != 0) {
+         perror("wrapper: mprotect rw site-table cluster");
+         e = e2;
+         continue;
+      }
+      for (uint32_t k = e; k < e2; ++k) {
+         uint32_t *f = (uint32_t *)((uintptr_t)sites[k] + slide);
+         uint32_t v;
+         memcpy(&v, f, sizeof v);
+         if (v >= lo && v < hi) {
+            v = (uint32_t)((uintptr_t)v + slide);
+            memcpy(f, &v, sizeof v);
+            ++patched;
+         }
+      }
+      if (restore) mprotect((void *)pg, pglen, restore);
+      e = e2;
+   }
+   if (getenv("WRAPPER_DEBUG")) {
+      fprintf(stderr, "wrapper: %.4s table slid %zu/%u site(s) in %s\n",
+              (const char *)&magic, patched, (unsigned)cnt, base);
+   }
+   return 1;
+}
+
 static void fixup_translated_dylib_slots(void) {
    /* NOTE 2026-05-29: this runs from build_i386_main_frame, which fires
     * AFTER all dyld static initializers. For images whose initializers
@@ -125,6 +180,8 @@ static void fixup_translated_dylib_slots(void) {
       int is_translated = 0;
       uintptr_t abs32_runtime_addr = 0;
       uintptr_t abs32_size = 0;
+      uintptr_t dptr_runtime_addr = 0;
+      uintptr_t dptr_size = 0;
       /*
        * Collect the actual pre-slide vmaddr span of this dylib by
        * walking its LC_SEGMENT_64 list. The old code keyed every imm32
@@ -166,6 +223,11 @@ static void fixup_translated_dylib_slots(void) {
                      abs32_runtime_addr = sects[s].addr + slide;
                      abs32_size = sects[s].size;
                   }
+                  if (strncmp(sects[s].sectname, "__86x64_dptr",
+                                     sizeof(sects[s].sectname)) == 0) {
+                     dptr_runtime_addr = sects[s].addr + slide;
+                     dptr_size = sects[s].size;
+                  }
                }
             }
          }
@@ -188,58 +250,16 @@ static void fixup_translated_dylib_slots(void) {
        * constants slid). objc_slide.c's add-image pass normally runs first
        * and this is a no-op (values already outside the pre-slide window);
        * it stays as the backstop for non-RUN_INITS and post-main loads. */
-      int have_abs32_table = 0;
-      if (abs32_runtime_addr != 0 && abs32_size >= 8) {
-         const uint32_t *hdr = (const uint32_t *)abs32_runtime_addr;
-         if (hdr[0] == 0x32336261u /* "ab32" */) {
-            uint32_t cnt = hdr[1];
-            if ((uintptr_t)cnt * 4 + 8 > abs32_size) {
-               cnt = (uint32_t)((abs32_size - 8) / 4);
-            }
-            const uint32_t *sites = hdr + 2;
-            have_abs32_table = 1;
-            /* Entries are sorted. mprotect per site CLUSTER (gap > 16 pages
-             * starts a new cluster), NOT one [first,last] span: the pages
-             * between __text and __TEXT,__const can refuse PROT_WRITE under
-             * Rosetta and a whole-span mprotect fails ENOMEM (mirrors
-             * objc_slide.c's table pass). */
-            size_t patched = 0;
-            for (uint32_t e = 0; e < cnt; ) {
-               uint32_t e2 = e + 1;
-               uintptr_t clo = (uintptr_t)sites[e] + slide;
-               uintptr_t chi = clo + 4;
-               while (e2 < cnt) {
-                  uintptr_t a = (uintptr_t)sites[e2] + slide;
-                  if (a > chi + 16 * 0x1000) break;
-                  if (a + 4 > chi) chi = a + 4;
-                  ++e2;
-               }
-               uintptr_t pg = clo & ~(uintptr_t)0xFFF;
-               size_t pglen = ((chi + 0xFFF) & ~(uintptr_t)0xFFF) - pg;
-               if (mprotect((void *)pg, pglen, PROT_READ | PROT_WRITE) != 0) {
-                  perror("wrapper: mprotect rw __86x64_abs32 cluster");
-                  e = e2;
-                  continue;
-               }
-               for (uint32_t k = e; k < e2; ++k) {
-                  uint32_t *f = (uint32_t *)((uintptr_t)sites[k] + slide);
-                  uint32_t v;
-                  memcpy(&v, f, sizeof v);
-                  if (v >= dylib_vmaddr_lo && v < dylib_vmaddr_hi) {
-                     v = (uint32_t)((uintptr_t)v + slide);
-                     memcpy(f, &v, sizeof v);
-                     ++patched;
-                  }
-               }
-               mprotect((void *)pg, pglen, PROT_READ | PROT_EXEC);
-               e = e2;
-            }
-            if (getenv("WRAPPER_DEBUG")) {
-               fprintf(stderr, "wrapper: abs32 table slid %zu/%u "
-                       "site(s) in %s\n", patched, (unsigned)cnt, base);
-            }
-         }
-      }
+      const int have_abs32_table =
+         slide_site_table(abs32_runtime_addr, abs32_size, 0x32336261u /* "ab32" */,
+                          slide, dylib_vmaddr_lo, dylib_vmaddr_hi,
+                          PROT_READ | PROT_EXEC, base);
+      /* The DATA twin (Archive::inject_dptr_section): exact 4-byte DATA
+       * pointer slots; the value scan of __DATA below slides integer
+       * constants that alias the window and misses unaligned-data pointers. */
+      const int have_dptr_table =
+         slide_site_table(dptr_runtime_addr, dptr_size, 0x72747064u /* "dptr" */,
+                          slide, dylib_vmaddr_lo, dylib_vmaddr_hi, 0, base);
 
       /* Walk relevant sections 4 bytes at a time; rewrite any slot whose
        * value points into the dylib's expected (pre-slide) vmaddr range.
@@ -317,6 +337,9 @@ static void fixup_translated_dylib_slots(void) {
             /* The exact table above already covered every __TEXT site; the
              * byte-scan would only re-introduce its phantom matches. */
             if (have_abs32_table && strcmp(seg->segname, "__TEXT") == 0) {
+               continue;
+            }
+            if (have_dptr_table && strcmp(seg->segname, "__DATA") == 0) {
                continue;
             }
 

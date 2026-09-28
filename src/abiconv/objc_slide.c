@@ -1046,6 +1046,59 @@ static int repair_method_lists_from_file(const char *imgname,
  * span [vmaddr_lo,vmaddr_hi); an already-slid value falls outside and is
  * skipped. __TEXT pages are toggled RW and restored to RX exactly like the
  * wrapper does. */
+/* Add the slide to each 4-byte field of an exact site table (__86x64_abs32 /
+ * __86x64_dptr: sorted pre-slide field vmaddrs). Entries are sorted. Do NOT
+ * mprotect one [first,last] span: the abs32 table covers __text AND
+ * __TEXT,__const, and the pages BETWEEN them (__unwind_info/__gcc_except_tab/
+ * ...) can refuse PROT_WRITE under Rosetta -> a single 27MB mprotect fails
+ * ENOMEM (observed on Civ IV) and nothing gets slid. Instead cluster
+ * consecutive sites (new cluster when the gap exceeds 16 pages) and RW exactly
+ * each cluster's page range; `restore` (0 = leave RW) is reapplied after.
+ * Idempotent across the N libabiconv copies and the wrapper's later pass: a
+ * slid value falls outside the pre-slide window and is skipped. */
+static void slide_site_table(const uint32_t *sites, uint32_t cnt, intptr_t slide,
+                             uint64_t vmaddr_lo, uint64_t vmaddr_hi, int restore,
+                             const char *imgname, const char *tag) {
+   size_t patched = 0;
+   for (uint32_t i = 0; i < cnt; ) {
+      uint32_t j = i + 1;
+      uintptr_t clo = (uintptr_t)sites[i] + (uintptr_t)slide;
+      uintptr_t chi = clo + 4;
+      while (j < cnt) {
+         uintptr_t a = (uintptr_t)sites[j] + (uintptr_t)slide;
+         if (a > chi + 16 * 0x1000) { break; }
+         if (a + 4 > chi) { chi = a + 4; }
+         ++j;
+      }
+      uintptr_t pg = clo & ~(uintptr_t)0xFFF;
+      size_t pglen = ((chi + 0xFFF) & ~(uintptr_t)0xFFF) - pg;
+      if (mprotect((void *)pg, pglen, PROT_READ | PROT_WRITE) != 0) {
+         fprintf(stderr, "abiconv %s-table: mprotect RW failed for "
+                 "cluster %#lx+%#zx of %s: %s — %u site(s) left "
+                 "UNPATCHED\n", tag, (unsigned long)pg, pglen, imgname,
+                 strerror(errno), (unsigned)(j - i));
+         i = j;
+         continue;
+      }
+      for (uint32_t k = i; k < j; k++) {
+         uint32_t *f = (uint32_t *)((uintptr_t)sites[k] + (uintptr_t)slide);
+         uint32_t v;
+         memcpy(&v, f, sizeof v);
+         if (v >= vmaddr_lo && v < vmaddr_hi) { /* still pre-slide */
+            v = (uint32_t)((uint64_t)v + (uint64_t)slide);
+            memcpy(f, &v, sizeof v);
+            ++patched;
+         }
+      }
+      if (restore) { mprotect((void *)pg, pglen, restore); }
+      i = j;
+   }
+   if (g_verbose) {
+      fprintf(stderr, "abiconv %s table: slid %zu/%u site(s) in %s\n",
+              tag, patched, (unsigned)cnt, imgname);
+   }
+}
+
 static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
                              uint64_t vmaddr_lo, uint64_t vmaddr_hi,
                              const char *imgname) {
@@ -1075,53 +1128,8 @@ static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
          if ((unsigned long)cnt * 4 + 8 > absz) {
             cnt = (uint32_t)((absz - 8) / 4);
          }
-         const uint32_t *sites = (const uint32_t *)(ab + 8);
-         size_t patched = 0;
-         /* Entries are sorted. Do NOT mprotect one [first,last] span: the
-          * table covers __text AND __TEXT,__const, and the pages BETWEEN them
-          * (__unwind_info/__gcc_except_tab/...) can refuse PROT_WRITE under
-          * Rosetta -> a single 27MB mprotect fails ENOMEM (observed on Civ IV)
-          * and nothing gets slid. Instead cluster consecutive sites (new
-          * cluster when the gap exceeds 16 pages) and RW exactly each
-          * cluster's page range — mirroring the per-section mprotects the
-          * legacy scan always did. */
-         for (uint32_t i = 0; i < cnt; ) {
-            uint32_t j = i + 1;
-            uintptr_t clo = (uintptr_t)sites[i] + (uintptr_t)slide;
-            uintptr_t chi = clo + 4;
-            while (j < cnt) {
-               uintptr_t a = (uintptr_t)sites[j] + (uintptr_t)slide;
-               if (a > chi + 16 * 0x1000) { break; }
-               if (a + 4 > chi) { chi = a + 4; }
-               ++j;
-            }
-            uintptr_t pg = clo & ~(uintptr_t)0xFFF;
-            size_t pglen = ((chi + 0xFFF) & ~(uintptr_t)0xFFF) - pg;
-            if (mprotect((void *)pg, pglen, PROT_READ | PROT_WRITE) != 0) {
-               fprintf(stderr, "abiconv abs32-table: mprotect RW failed for "
-                       "cluster %#lx+%#zx of %s: %s — %u site(s) left "
-                       "UNPATCHED\n", (unsigned long)pg, pglen, imgname,
-                       strerror(errno), (unsigned)(j - i));
-               i = j;
-               continue;
-            }
-            for (uint32_t k = i; k < j; k++) {
-               uint32_t *f = (uint32_t *)((uintptr_t)sites[k] + (uintptr_t)slide);
-               uint32_t v;
-               memcpy(&v, f, sizeof v);
-               if (v >= vmaddr_lo && v < vmaddr_hi) { /* still pre-slide */
-                  v = (uint32_t)((uint64_t)v + (uint64_t)slide);
-                  memcpy(f, &v, sizeof v);
-                  ++patched;
-               }
-            }
-            mprotect((void *)pg, pglen, PROT_READ | PROT_EXEC);
-            i = j;
-         }
-         if (g_verbose) {
-            fprintf(stderr, "abiconv abs32 table: slid %zu/%u site(s) in %s\n",
-                    patched, (unsigned)cnt, imgname);
-         }
+         slide_site_table((const uint32_t *)(ab + 8), cnt, slide, vmaddr_lo,
+                          vmaddr_hi, PROT_READ | PROT_EXEC, imgname, "abs32");
          return;
       }
    }
@@ -1416,6 +1424,39 @@ static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
                               uint64_t vmaddr_lo, uint64_t vmaddr_hi,
                               const char *imgname) {
    if (slide == 0 || vmaddr_lo >= vmaddr_hi) { return; }
+   /* EXACT-TABLE PATH. A current-pipeline translation carries
+    * __DATA,__86x64_dptr (Archive::inject_dptr_section): the translator's own
+    * list of every 4-byte DATA slot it resolved as an intra-image pointer.
+    * Measured over the audit corpus (315k slots), the value scan below slid
+    * 137 integer constants aliasing the image window (0x10000000, 0x10101008,
+    * __gcc_except_tab words; Civ IV 30, PvZ 80) and missed 76 real pointers to
+    * unaligned data (Halo's char* into __data). The scan stays ONLY as the
+    * fallback for translations that predate the table. Found through the load
+    * commands (not getsectiondata) so the test hook's synthetic header works. */
+   {
+      const uint8_t *q = (const uint8_t *)(mh64 + 1);
+      for (uint32_t i = 0; i < mh64->ncmds; i++) {
+         const struct load_command *lc = (const struct load_command *)q;
+         q += lc->cmdsize;
+         if (lc->cmd != LC_SEGMENT_64) { continue; }
+         const struct segment_command_64 *seg =
+            (const struct segment_command_64 *)lc;
+         const struct section_64 *sect = (const struct section_64 *)(seg + 1);
+         for (uint32_t s = 0; s < seg->nsects; s++, sect++) {
+            if (strncmp(sect->sectname, "__86x64_dptr", 16) != 0 ||
+                sect->size < 8) { continue; }
+            const uint32_t *t = (const uint32_t *)(uintptr_t)(sect->addr + slide);
+            if (t[0] != 0x72747064u /* "dptr" */) { continue; }
+            uint32_t cnt = t[1];
+            if ((uint64_t)cnt * 4 + 8 > sect->size) {
+               cnt = (uint32_t)((sect->size - 8) / 4);
+            }
+            slide_site_table(t + 2, cnt, slide, vmaddr_lo, vmaddr_hi,
+                             /*restore=*/0, imgname, "dptr");
+            return;
+         }
+      }
+   }
    /* This pass identifies pointers by VALUE -- any 4-byte word whose content
     * falls inside the image's pre-slide vmaddr span -- so an INTEGER that merely
     * aliases that window is indistinguishable from a pointer and gets slid. When

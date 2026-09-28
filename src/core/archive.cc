@@ -263,6 +263,10 @@ namespace MachO {
        * must run before the layout accounting below. */
       inject_cpin_section();
 
+      /* The exact 4-byte DATA pointer-slot table for the runtime slide (the
+       * DATA twin of __86x64_abs32). M64 only; fresh transforms only. */
+      inject_dptr_section();
+
       /* Manufacture a modern LC_DYLD_INFO_ONLY for a classic image (opt-in via
        * convert --synthesize-dyld-info). Runs AFTER inject_xrel_section so the
        * 4-byte external-reloc RTTI slots still get their runtime __86x64_xrel
@@ -1118,6 +1122,62 @@ namespace MachO {
          }
 
          auto *sect = Section<b>::Synthetic(SEG_DATA, "__86x64_abs32",
+                                            S_REGULAR, /*align=*/2);
+         sect->segment = data_seg;
+         sect->content.push_back(blob);
+         blob->section = sect;
+         blob->segment = data_seg;
+         insert_section_before_zerofill(data_seg, sect);
+         invalidate_segments_cache();
+      }
+   }
+
+   template <Bits b>
+   void Archive<b>::inject_dptr_section() {
+      if constexpr (b != Bits::M64) {
+         return;
+      } else {
+         /* Same provenance rule as inject_cpin_section: only the archive
+          * Transform just built holds the M32 pass's (gated) pointer verdicts;
+          * a re-parse carries the table as a live re-resolving Abs32Blob. */
+         if (!from_transform) { return; }
+         Segment<b> *data_seg = segment(SEG_DATA);
+         if (data_seg == nullptr) { return; }
+
+         /* Every 4-byte DATA slot the translator resolved as an intra-image
+          * pointer: Immediate::Emit writes pointee->loc.vmaddr (pre-slide) and
+          * dyld rejects 4-byte local rebases, so the runtime must slide it.
+          * Same slot set objc_slide.c slide_data_fnptrs scans for by value:
+          * writable segments except __OBJC (slid by the ObjC pass) and the
+          * dyld-/wrapper-owned symbol-pointer and init/term sections. */
+         auto *blob = Abs32Blob<b>::Create(Abs32Blob<b>::DPTR_MAGIC);
+         for (Segment<b> *seg : segments()) {
+            const std::string segname(
+               seg->segment_command.segname,
+               strnlen(seg->segment_command.segname,
+                       sizeof(seg->segment_command.segname)));
+            if ((seg->segment_command.initprot & VM_PROT_WRITE) == 0 ||
+                segname == SEG_TEXT || segname == SEG_OBJC) { continue; }
+            for (Section<b> *s : seg->sections) {
+               const uint32_t type = s->sect.flags & SECTION_TYPE;
+               if (type == S_NON_LAZY_SYMBOL_POINTERS ||
+                   type == S_LAZY_SYMBOL_POINTERS ||
+                   type == S_MOD_INIT_FUNC_POINTERS ||
+                   type == S_MOD_TERM_FUNC_POINTERS) { continue; }
+               for (SectionBlob<b> *sb : s->content) {
+                  auto *im = dynamic_cast<Immediate<b> *>(sb);
+                  if (im == nullptr || im->pointee == nullptr) { continue; }
+                  typename Abs32Blob<b>::Ent ent;
+                  ent.blob = im;
+                  ent.off = 0;
+                  blob->ents.push_back(ent);
+               }
+            }
+         }
+
+         /* Emitted EVEN WHEN EMPTY: "no data pointers" is ground truth that
+          * tells the runtime not to fall back to the value scan. */
+         auto *sect = Section<b>::Synthetic(SEG_DATA, "__86x64_dptr",
                                             S_REGULAR, /*align=*/2);
          sect->segment = data_seg;
          sect->content.push_back(blob);

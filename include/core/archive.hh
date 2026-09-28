@@ -224,6 +224,11 @@ namespace MachO {
        * that motivated it. */
       void inject_cpin_section();
 
+      /* Synthesize __DATA,__86x64_dptr: the exact 4-byte DATA pointer slots
+       * (the DATA twin of __86x64_abs32), replacing objc_slide.c
+       * slide_data_fnptrs's by-value scan. Same gating as inject_cpin_section. */
+      void inject_dptr_section();
+
       template <template <Bits> class Blob>
       Blob<b> *find_blob(std::size_t vmaddr) const {
          for (Segment<b> *segment : segments()) {
