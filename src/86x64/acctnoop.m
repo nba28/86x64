@@ -67,18 +67,12 @@ static int install_noops(void)
 		Method m = class_getInstanceMethod(c, sel_registerName(nil_sels[i]));
 		if (m) {
 			method_setImplementation(m, noop_nil);
-			if (getenv("ACCTNOOP_DEBUG"))
-				fprintf(stderr, "[acctnoop] no-op -[IPAccountConfigurationManager %s]\n",
-				        nil_sels[i]);
 		}
 	}
 	Method g = class_getInstanceMethod(c,
 	             sel_registerName("shouldFindUnknownAccountsWithDefaultsAccountConfigurations:"));
 	if (g) {
 		method_setImplementation(g, noop_gate);
-		if (getenv("ACCTNOOP_DEBUG"))
-			fprintf(stderr, "[acctnoop] gate -[IPAccountConfigurationManager "
-			        "shouldFindUnknownAccountsWithDefaultsAccountConfigurations:] -> NO\n");
 	}
 	return 1;
 }
@@ -96,8 +90,6 @@ static void *acct_poll(void *arg)
 __attribute__((constructor))
 static void acctnoop_init(void)
 {
-	if (getenv("ACCTNOOP_DEBUG"))
-		fprintf(stderr, "[acctnoop] loaded\n");
 	if (install_noops()) { g_done = 1; return; }   /* already registered? */
 	pthread_t t;
 	if (pthread_create(&t, NULL, acct_poll, NULL) == 0)

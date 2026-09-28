@@ -119,11 +119,6 @@ static void try_swizzle(void)
 		class_addMethod(wv, sel, (IMP)webnoop_initWithCoder, "@@:@");
 	}
 	g_done = 1;
-	if (getenv("WEBNOOP_DEBUG")) {
-		fprintf(stderr, "[webnoop] suppressed -[WebView initWithCoder:] (%s)\n",
-		        own ? "override" : "added");
-		fflush(stderr);
-	}
 }
 
 static void on_image(const struct mach_header *mh, intptr_t slide)
