@@ -662,6 +662,145 @@ def cmd_resync(args):
         cmd_sign(args)
 
 
+def runtime_home(app):
+    """The ONE directory a bundle keeps its runtime in (Contents/Frameworks for an
+    .app, else the bundle root)."""
+    app = Path(app)
+    return app / "Contents" / "Frameworks" if app.suffix == ".app" else app
+
+
+def _rpaths(macho):
+    """LC_RPATH entries of a Mach-O, in search order."""
+    o = subprocess.run(["otool", "-l", str(macho)], capture_output=True,
+                       text=True, errors="replace").stdout.splitlines()
+    return [o[k + 2].split()[1] for k, l in enumerate(o)
+            if l.strip() == "cmd LC_RPATH" and k + 2 < len(o)]
+
+
+def _resolve_dep(macho, dep, absent=frozenset()):
+    """The file an @loader_path/@rpath dependency of `macho` resolves to through
+    its OWN search paths, or None, treating files in `absent` as already gone.
+    (dyld also consults the loading chain's rpaths; an image's own are the part
+    that must be right.)"""
+    here = macho.resolve().parent
+    def expand(p):
+        return here / p[len("@loader_path/"):] if p.startswith("@loader_path/") else \
+               here if p == "@loader_path" else Path(p) if p.startswith("/") else None
+    if dep.startswith("@rpath/"):
+        for rp in _rpaths(macho):
+            d = expand(rp)
+            f = d / dep[len("@rpath/"):] if d is not None else None
+            if f is not None and f.is_file() and f.resolve() not in absent:
+                return f.resolve()
+        return None
+    f = expand(dep)
+    return f.resolve() if f is not None and f.is_file() and f.resolve() not in absent else None
+
+
+def cmd_consolidate_runtime(args):
+    """One runtime per bundle. dyld identifies an image by FILE, not by content:
+    every co-located copy of libabiconv/libinterpose loads as a separate image
+    with its own heap, handle tables and globals (iPhoto mapped 7 libabiconv
+    copies in one process). Keep one copy per library in runtime_home() and make
+    every image resolve to it: an @rpath dependency whose own search paths reach
+    the home copy once the local copy is gone is left alone; any other becomes an
+    @loader_path path computed from the image's REAL location (dyld resolves
+    @loader_path through symlinks and dedupes by file). A copy some image still
+    resolves to is kept, loudly."""
+    app = Path(args.app).resolve()
+    home = runtime_home(app)
+    plan = {}                                   # lib name -> copies
+    for lib in sorted(OUR_RUNTIME_LIBS):
+        copies = [c for c in app.rglob(lib) if c.is_file() and not c.is_symlink()]
+        if not copies:
+            continue
+        digests = {hashlib.sha256(c.read_bytes()).hexdigest() for c in copies}
+        if len(digests) > 1:
+            raise Die(f"{len(copies)} copies of {lib} in {app.name} differ -- "
+                      f"run `m64 resync` first so there is one runtime to keep")
+        plan[lib] = copies
+    if not plan:
+        info(f"{app.name}: no runtime copies, nothing to consolidate")
+        return
+    info(f"consolidate runtime in {app.name} -> {home.relative_to(app)}")
+    if not args.dry_run:
+        home.mkdir(parents=True, exist_ok=True)
+        for lib, copies in plan.items():
+            if not (home / lib).exists():
+                shutil.copy2(copies[0], home / lib)
+    homes = {(home / lib).resolve() for lib in plan}
+    doomed = frozenset(c.resolve() for cs in plan.values() for c in cs) - homes
+    images = list(iter_machos(app))
+    changed, forced = [], []
+    for m in images:
+        changes = []
+        for dep in _dylib_deps(m):
+            lib = dep.rsplit("/", 1)[-1]
+            if lib not in plan or not dep.startswith("@"):
+                continue
+            if _resolve_dep(m, dep, doomed) in homes:
+                continue                     # already reaches the home copy
+            new = "@loader_path/" + os.path.relpath(home / lib, m.resolve().parent)
+            if dep != new:
+                changes.append((dep, new))
+        if not changes:
+            continue
+        changed.append(m)
+        if args.dry_run:
+            print("  dry-run: repoint", m.relative_to(app), *[n for _, n in changes])
+            continue
+        # install_name_tool edits only the load command; it needs the signature
+        # gone. macho-tool change-deps (re-emits the whole image) is last resort.
+        subprocess.run(["codesign", "--remove-signature", str(m)], capture_output=True)
+        r = subprocess.run(["install_name_tool", *[x for o, n in changes for x in ("-change", o, n)],
+                            str(m)], capture_output=True, text=True, errors="replace")
+        if r.returncode != 0 and "EXECUTE" in subprocess.run(
+                ["otool", "-hv", str(m)], capture_output=True, text=True).stdout:
+            # change-deps re-emit of a wrapper EXECUTABLE crashed iPhoto at
+            # launch (todo_gaps). An executable is its own process, so it keeps
+            # its local copy instead: still one runtime per process.
+            subprocess.run(["codesign", "-f", "-s", "-", str(m)], capture_output=True)
+            changed.remove(m)
+            warn(f"{m.relative_to(app)}: executable not repointable in place; keeps its local runtime")
+            continue
+        if r.returncode != 0:
+            tmp = m.with_name(m.name + ".cd")
+            r = subprocess.run([str(MACHO_TOOL), "change-deps", "-q",
+                                *[x for o, n in changes for x in ("--change", f"{o}={n}")],
+                                str(m), str(tmp)], capture_output=True, text=True, errors="replace")
+            if r.returncode != 0 or not tmp.exists():
+                tmp.unlink(missing_ok=True)
+                raise Die(f"cannot repoint {m.relative_to(app)}: {r.stderr.strip()[-300:]}")
+            shutil.copymode(m, tmp)
+            os.replace(tmp, m)
+            forced.append(m)
+        subprocess.run(["codesign", "-f", "-s", "-", str(m)], capture_output=True)
+    for m in forced:
+        warn(f"{m.relative_to(app)}: repointed via change-deps (install_name_tool refused)")
+    removed, kept = 0, []
+    for lib, copies in plan.items():
+        for c in copies:
+            if c.resolve() in homes:
+                continue
+            users = [m for m in images for dep in _dylib_deps(m)
+                     if dep.endswith("/" + lib) and _resolve_dep(m, dep) == c.resolve()
+                     and _resolve_dep(m, dep, doomed) not in homes]
+            if users:
+                kept.append((c, users[0]))
+                continue
+            if args.dry_run:
+                print("  dry-run: remove", c.relative_to(app))
+                continue
+            c.unlink()
+            removed += 1
+    for c, u in kept:
+        warn(f"kept {c.relative_to(app)}: {u.relative_to(app)} still resolves to it")
+    if not args.dry_run:
+        good(f"{len(changed)} images repointed, {removed} copies removed, {len(kept)} kept")
+        if app.suffix == ".app" and getattr(args, "sign", True):
+            cmd_sign(args)
+
+
 def _dylib_deps(macho):
     """Set of LC_LOAD_DYLIB install names of a Mach-O (via `otool -L`). The first
     `otool` line is the file path itself; for an executable every remaining line
@@ -1554,6 +1693,12 @@ def build_parser():
     r.add_argument("-k", "--keep", action="store_true")
     r.set_defaults(output=None)
     common(r); r.set_defaults(func=cmd_retranslate)
+
+    # consolidate-runtime
+    cr = sub.add_parser("consolidate-runtime",
+                        help="keep ONE libabiconv/libinterpose per bundle and repoint every image at it")
+    cr.add_argument("app")
+    common(cr); cr.set_defaults(func=cmd_consolidate_runtime)
 
     # resync
     s = sub.add_parser("resync",
