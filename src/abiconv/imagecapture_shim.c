@@ -18,7 +18,7 @@
 //
 // Every ICA host entry point has the same shape:
 //      ICAError f(SomePB *pb, ICACompletion completion);   // 2 pointer args, 4-byte OSStatus
-// We ignore both args and return a benign "no device" error. The caller records the error and
+// We return a benign "no device" error (also stored in pb->header.err). The caller records the error and
 // proceeds down its graceful device-enumeration-failed path (no devices shown), exactly as it
 // would on a Mac with no camera attached.
 //
@@ -32,15 +32,23 @@
 // canonical device-not-found code so a trace reads sensibly.
 #define ICA_DEVICE_NOT_FOUND (-9920)
 
-static inline int ica_no_device(void) { return ICA_DEVICE_NOT_FOUND; }
+// Every PB starts with ICAHeader { ICAError err; unsigned long refcon; } and err
+// is an OUTPUT ("Error returned by an API"): a caller may read pb->header.err
+// instead of the return value, so write it too rather than leave it as the
+// caller's uninitialized stack.
+static inline int ica_no_device(uint32_t *args) {
+    int32_t *pb = (int32_t *)(uintptr_t)args[0];
+    if (pb) { pb[0] = ICA_DEVICE_NOT_FOUND; }
+    return ICA_DEVICE_NOT_FOUND;
+}
 
-int shim_ICAGetDeviceList(uint32_t *args)                 { (void)args; return ica_no_device(); }
-int shim_ICAGetChildCount(uint32_t *args)                 { (void)args; return ica_no_device(); }
-int shim_ICAGetNthChild(uint32_t *args)                   { (void)args; return ica_no_device(); }
-int shim_ICAGetPropertyByType(uint32_t *args)             { (void)args; return ica_no_device(); }
-int shim_ICAGetPropertyData(uint32_t *args)               { (void)args; return ica_no_device(); }
-int shim_ICACopyObjectPropertyDictionary(uint32_t *args)  { (void)args; return ica_no_device(); }
-int shim_ICACopyObjectThumbnail(uint32_t *args)           { (void)args; return ica_no_device(); }
-int shim_ICADownloadFile(uint32_t *args)                  { (void)args; return ica_no_device(); }
-int shim_ICAObjectSendMessage(uint32_t *args)             { (void)args; return ica_no_device(); }
-int shim_ICARegisterEventNotification(uint32_t *args)     { (void)args; return ica_no_device(); }
+int shim_ICAGetDeviceList(uint32_t *args)                 { return ica_no_device(args); }
+int shim_ICAGetChildCount(uint32_t *args)                 { return ica_no_device(args); }
+int shim_ICAGetNthChild(uint32_t *args)                   { return ica_no_device(args); }
+int shim_ICAGetPropertyByType(uint32_t *args)             { return ica_no_device(args); }
+int shim_ICAGetPropertyData(uint32_t *args)               { return ica_no_device(args); }
+int shim_ICACopyObjectPropertyDictionary(uint32_t *args)  { return ica_no_device(args); }
+int shim_ICACopyObjectThumbnail(uint32_t *args)           { return ica_no_device(args); }
+int shim_ICADownloadFile(uint32_t *args)                  { return ica_no_device(args); }
+int shim_ICAObjectSendMessage(uint32_t *args)             { return ica_no_device(args); }
+int shim_ICARegisterEventNotification(uint32_t *args)     { return ica_no_device(args); }
