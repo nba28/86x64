@@ -61,6 +61,8 @@
 #include <sys/ucontext.h>
 #include <unistd.h>
 #include <errno.h>
+#include <sys/mman.h>
+#include <pthread/introspection.h>
 #include "dyld_image_list.h"
 
 /* objc_shim.c: 1 + description when the address is a proxy-arena handle. */
@@ -800,6 +802,33 @@ chain:
    raise(sig);
 }
 
+/* Every OTHER thread needs its own alternate stack too: sigaltstack is
+ * per-thread, so a stack overflow on a worker thread (Portal 2's engine threads)
+ * died unreported. The introspection hook runs ON the new thread before its
+ * start routine and again as it exits, for native and translated threads alike.
+ * Threads that already existed at arm time are not covered. */
+#define FR_THREAD_ALTSTACK (256 * 1024)
+static pthread_introspection_hook_t g_prev_thread_hook;
+static __thread void *t_altstack;
+
+static void fr_thread_hook(unsigned int event, pthread_t thread, void *addr, size_t size) {
+   if (event == PTHREAD_INTROSPECTION_THREAD_START && !t_altstack) {
+      void *p = mmap(NULL, FR_THREAD_ALTSTACK, PROT_READ | PROT_WRITE,
+                     MAP_ANON | MAP_PRIVATE, -1, 0);
+      if (p != MAP_FAILED) {
+         stack_t ss = { .ss_sp = p, .ss_size = FR_THREAD_ALTSTACK, .ss_flags = 0 };
+         if (sigaltstack(&ss, NULL) == 0) { t_altstack = p; }
+         else { munmap(p, FR_THREAD_ALTSTACK); }
+      }
+   } else if (event == PTHREAD_INTROSPECTION_THREAD_TERMINATE && t_altstack) {
+      stack_t ss = { .ss_sp = NULL, .ss_size = 0, .ss_flags = SS_DISABLE };
+      sigaltstack(&ss, NULL);
+      munmap(t_altstack, FR_THREAD_ALTSTACK);
+      t_altstack = NULL;
+   }
+   if (g_prev_thread_hook) { g_prev_thread_hook(event, thread, addr, size); }
+}
+
 __attribute__((constructor))
 static void fr_install(void) {
    if (!getenv("M64_FAULT_REPORT")) return;
@@ -871,6 +900,10 @@ static void fr_install(void) {
    if (sigaltstack(&ss, NULL) != 0) {
       fprintf(stderr, "[fault] sigaltstack failed: %s — a fault on a broken "
                       "stack will not be reportable\n", strerror(errno));
+   }
+
+   if (!getenv("M64_NO_FAULT_THREAD_ALTSTACK")) {     /* guard OFF arm */
+      g_prev_thread_hook = pthread_introspection_hook_install(fr_thread_hook);
    }
 
    struct sigaction sa;
