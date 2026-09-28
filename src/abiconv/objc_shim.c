@@ -74,33 +74,7 @@ static int obj_trace_flag(const char *name, int *cache) {
                          __atomic_store_n(&_ki, 1, __ATOMIC_RELEASE); }      \
                       _kv; })
 static int g_bridge_trace_cache = -1;
-static int g_wrap_trace_cache   = -1;
-static int g_argstr_trace_cache = -1;
 #define BRIDGE_TRACE() obj_trace_flag("OBJC_BRIDGE_TRACE", &g_bridge_trace_cache)
-#define WRAP_TRACE()   obj_trace_flag("OBJC_WRAP_TRACE",   &g_wrap_trace_cache)
-/* Narrow, low-noise diagnostic (NOT the OBJC_BRIDGE_TRACE firehose): dump the
- * RESOLVED content of every object arg unwrapped for a native call, with the
- * caller's return address. Used to answer "what string does Civ's
- * CreateStandardAlert actually pass, and does it round-trip non-empty" without
- * drowning in Halo/Civ's millions of non-CFString unwrap probes. */
-#define ARGSTR_TRACE() obj_trace_flag("ABICONV_ARGSTR_TRACE", &g_argstr_trace_cache)
-/* Name the TRANSLATED CALL SITE behind an object/CF arg that a native framework
- * will certainly fault on. Neither of the obvious channels can do this: the
- * crashlog unwinder keeps only the frames ABOVE our shim (it cannot walk the
- * i386 frame below it), and ARGSTR_TRACE's caller= is _86x64_unwrap_obj_arg's
- * own return address — the same value on every line. See the recovery trick at
- * _86x64_unwrap_obj_arg. CALLSITE reports a non-nil SUB-PAGE result, which is
- * never legitimate; CALLSITE_NIL additionally reports nil, which IS legitimate
- * for e.g. a NULL CFAllocatorRef and is therefore opt-in and noisy. */
-static int g_callsite_trace_cache = -1;
-static int g_callsite_nil_cache   = -1;
-static int g_callsite_all_cache   = -1;
-#define CALLSITE_TRACE()     obj_trace_flag("ABICONV_CALLSITE_TRACE", &g_callsite_trace_cache)
-#define CALLSITE_NIL_TRACE() obj_trace_flag("ABICONV_CALLSITE_NIL",   &g_callsite_nil_cache)
-/* Firehose: EVERY bridged object/CF arg with its call site. Use when the bad
- * value never reaches the selective traces above — then the LAST line before the
- * crash names the call that died, regardless of what the value looked like. */
-#define CALLSITE_ALL_TRACE() obj_trace_flag("ABICONV_CALLSITE_ALL", &g_callsite_all_cache)
 
 /*
  * Proxy arena: a flat low-4GB array of 64-bit reals. A "handle" is the
@@ -599,21 +573,6 @@ uint32_t x64_objc_wrap(uint64_t real) {
    g_map[i].real   = real;
    g_map[i].handle = handle;
    os_unfair_lock_unlock(&g_ctrl->map_lock);
-   /* Diagnostic: a "real" that is neither a tagged pointer (high bit / low
-    * bit per platform) nor a plausible mapped address (0x6000…/0x7ff8…/low)
-    * is almost certainly a clobbered register being wrapped — the source of
-    * garbage-backed handles that later crash as msgSend receivers. */
-   if (WRAP_TRACE()) {
-      /* Log EVERY fresh mint: a garbage real can look tagged (odd low byte),
-       * so a validity heuristic can't catch it — instead we grep the log for
-       * the crashing handle afterwards. ra discriminates the libabiconv call
-       * site (which bridge path minted it), symbolizable via copy slide. */
-      fprintf(stderr, "[wrap] slot=%u handle=0x%x real=0x%llx t=%x ra=%p\n",
-              slot, handle, (unsigned long long)real,
-              pthread_mach_thread_np(pthread_self()),
-              __builtin_return_address(0));
-      fflush(stderr);
-   }
    return handle;
 }
 
@@ -1025,16 +984,10 @@ static int legacy_cstr_ok(uint32_t p32) {
  * same chain libobjc will walk, and decline if any step is unmapped. We do NOT
  * reinterpret the flags ourselves (their bit meanings are runtime-internal and
  * have changed across releases) — we only prove the dereferences are safe, then
- * let libobjc answer the actual question.
- *
- * Kill switch M64_NO_METACLASS_PROBE_GUARD=1 restores the unguarded call, which
- * reproduces the crash. */
+ * let libobjc answer the actual question. */
 #define OBJC_CLASS_BITS_OFF   0x20
 #define OBJC_FAST_DATA_MASK   0x00007ffffffffff8ULL
 static int metaclass_probe_safe(uint64_t cls) {
-   static int disabled = -1;
-   if (disabled < 0) { disabled = KNOB("M64_NO_METACLASS_PROBE_GUARD") != NULL; }
-   if (disabled) { return 1; }                 /* A/B arm: call through unguarded */
    /* through `bits` inclusive */
    if (!mem_readable(cls, OBJC_CLASS_BITS_OFF + 8)) { return 0; }
    uint64_t bits = *(const uint64_t *)(uintptr_t)(cls + OBJC_CLASS_BITS_OFF);
@@ -3999,8 +3952,7 @@ static void legacy_invocation_widen_install(void) {
  * (the __thread flag set in objc_bridge_prep for exactly this send) + layer!=nil.
  * Native AppKit displayRect: (flag 0) and non-layer-backed views are untouched.
  * Env ABICONV_QUINN_DISPLAYRECT_COMARK (default OFF pending the live pixel A/B;
- * flip default-on once the tester confirms the trail is gone). Trace under
- * ABICONV_QUINN_DISPLAYRECT_TRACE. */
+ * flip default-on once the tester confirms the trail is gone). */
 static __thread int g_displayrect_legacy;         /* set by objc_bridge_prep */
 void _86x64_test_set_displayrect_legacy(int v) { g_displayrect_legacy = v; }
 static IMP g_view_displayRect;
@@ -4010,11 +3962,6 @@ static int displayrect_comark_on(void) {
    if (v < 0) { v = KNOB("ABICONV_QUINN_DISPLAYRECT_COMARK") ? 1 : 0; }
    return v;
 }
-static int displayrect_trace_on(void) {
-   static int v = -1;
-   if (v < 0) { v = KNOB("ABICONV_QUINN_DISPLAYRECT_TRACE") ? 1 : 0; }
-   return v;
-}
 /* shared body: run the original IMP, then (legacy + layer-backed) co-mark. */
 static void displayrect_comark_common(id self, SEL _cmd, CGRect rect, IMP orig) {
    int legacy = g_displayrect_legacy; g_displayrect_legacy = 0;
@@ -4022,13 +3969,6 @@ static void displayrect_comark_common(id self, SEL _cmd, CGRect rect, IMP orig) 
    if (!legacy) { return; }
    id lyr = ((id(*)(id, SEL))objc_msgSend)(self, sel_registerName("layer"));
    int layered = lyr != nil;
-   if (displayrect_trace_on()) {
-      fprintf(stderr, "[disprect] %s<%s> rect=[%.1f %.1f %.1f %.1f] layerBacked=%d comark=%d\n",
-              sel_getName(_cmd), object_getClassName(self),
-              rect.origin.x, rect.origin.y, rect.size.width, rect.size.height,
-              layered, displayrect_comark_on() && layered);
-      fflush(stderr);
-   }
    if (displayrect_comark_on() && layered) {
       ((void(*)(id, SEL, CGRect))objc_msgSend)(
          self, sel_registerName("setNeedsDisplayInRect:"), rect);
@@ -4054,9 +3994,6 @@ static void legacy_displayrect_comark_install(void) {
    method_setImplementation(mR, (IMP)view_displayRect);
    method_setImplementation(mI, (IMP)view_displayRectIgnoringOpacity);
    done = 1;
-   if (KNOB("ABICONV_QUINN_DISPLAYRECT_TRACE")) {
-      fprintf(stderr, "[disprect] comark swizzle INSTALLED on NSView\n"); fflush(stderr);
-   }
 }
 
 /* ---- legacy -[NSView gState] + NSCopyBits view-capture -----------------------
@@ -4156,16 +4093,7 @@ static void legacy_gstate_capture_install(void) {
  *
  * The install is triggered by swizzling `-[NSThemeFrame drawRect:]` (fires on
  * every window display, gives us the frame view directly); the overlay itself
- * is a runtime-built NSView subclass. Env kill-switch ABICONV_WINCHROME_COMPAT
- * (set => skip). */
-
-/* low-noise env-gated trace for the window-chrome compat (independent of the
- * OBJC_BRIDGE_TRACE firehose, which slows app startup to a crawl). */
-static int wchrome_trace(void) {
-   static int v = -1;
-   if (v < 0) { v = KNOB("ABICONV_WINCHROME_TRACE") ? 1 : 0; }
-   return v;
-}
+ * is a runtime-built NSView subclass. */
 
 /* forward decls used by the overlay IMP */
 static Class g_chrome_overlay_cls;          /* our runtime NSView subclass     */
@@ -4322,49 +4250,10 @@ static void chrome_overlay_drawRect(id self, SEL _cmd, CGRect dirty) {
    }
 
    if (cg) { CGContextRestoreGState(cg); }
-   if (BRIDGE_TRACE() || wchrome_trace()) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[compat] wchrome overlay draw: band=%.0fx%.0f frameH=%.0f cg=%p (%s)\n",
               ob.size.width, bandH, frameH, (void*)cg, object_getClassName(win));
       fflush(stderr);
-   }
-
-   /* ABICONV_WINCHROME_PROBE: verify (headlessly — screencapture is wedged in
-    * agent sessions) WHAT the re-invoked app chrome actually painted. Once,
-    * offscreen-render THIS overlay via cacheDisplayInRect: (re-runs our drawRect:
-    * into a fresh bitmap, NOT the on-screen surface) and vertical-scan the band.
-    * This is how we established Quinn's -drawWindowBorderInRect: yields a uniformly
-    * BLACK band (=> PAINT off by default). Re-entry-guarded; inert unless set. */
-   static __thread int probe_depth;
-   if (KNOB("ABICONV_WINCHROME_PROBE") && probe_depth == 0) {
-      static int probed;
-      if (!probed) {
-         probed = 1;
-         ++probe_depth;
-         id rep = ((id(*)(id, SEL, CGRect))objc_msgSend)(
-            self, sel_registerName("bitmapImageRepForCachingDisplayInRect:"), ob);
-         if (rep) {
-            ((void(*)(id, SEL, CGRect, id))objc_msgSend)(
-               self, sel_registerName("cacheDisplayInRect:toBitmapImageRep:"), ob, rep);
-            long W = ((long(*)(id, SEL))objc_msgSend)(rep, sel_registerName("pixelsWide"));
-            long H = ((long(*)(id, SEL))objc_msgSend)(rep, sel_registerName("pixelsHigh"));
-            fprintf(stderr, "[wchrome-probe] overlay rep %ldx%ld; vertical scan at x=W/2:\n", W, H);
-            long xc = W/2;
-            for (long y = 0; y < H; y += (H > 20 ? H/20 : 1)) {
-               id col = ((id(*)(id, SEL, long, long))objc_msgSend)(
-                  rep, sel_registerName("colorAtX:y:"), xc, y);
-               if (!col) { continue; }
-               double r = ((double(*)(id, SEL))objc_msgSend)(col, sel_registerName("redComponent"));
-               double g = ((double(*)(id, SEL))objc_msgSend)(col, sel_registerName("greenComponent"));
-               double b = ((double(*)(id, SEL))objc_msgSend)(col, sel_registerName("blueComponent"));
-               const char *tag = (r>0.35&&r<0.85&&g>0.35&&g<0.85&&b>0.35&&b<0.85) ? "METAL?"
-                               : (r<0.15&&g<0.15&&b<0.15) ? "black"
-                               : (r>0.85&&g>0.85&&b>0.85) ? "white" : "other";
-               fprintf(stderr, "[wchrome-probe]   y=%ld rgb=%.2f,%.2f,%.2f %s\n", y, r, g, b, tag);
-            }
-            fflush(stderr);
-         }
-         --probe_depth;
-      }
    }
 }
 static signed char chrome_overlay_isFlipped(id self, SEL _cmd) {
@@ -4415,13 +4304,6 @@ static void chrome_install_overlay(id win) {
     * the overlay installs + repaints the band from the app's own chrome draw).
     * The native window-chrome guard drives this path via a working synthetic draw. */
    if (!KNOB("ABICONV_WINCHROME_PAINT") && !g_chrome_test_accept_responds) {
-      if (wchrome_trace()) {
-         fprintf(stderr, "[compat] wchrome: legacy-chrome window detected (%s); "
-                 "PAINT off by default (stock titled chrome kept) — set "
-                 "ABICONV_WINCHROME_PAINT to re-invoke the app chrome draw\n",
-                 object_getClassName(win));
-         fflush(stderr);
-      }
       return;
    }
    id contentView = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("contentView"));
@@ -4466,7 +4348,7 @@ static void chrome_install_overlay(id win) {
          ov, (long)-1 /*NSWindowBelow*/, first);
    }
    ((void(*)(id, SEL, signed char))objc_msgSend)(ov, sel_registerName("setNeedsDisplay:"), 1);
-   if (BRIDGE_TRACE() || wchrome_trace()) {
+   if (BRIDGE_TRACE()) {
       fprintf(stderr, "[compat] wchrome overlay INSTALLED on %s (band %.0fx%.0f)\n",
               object_getClassName(win), tb.size.width, tb.size.height);
       fflush(stderr);
@@ -4479,93 +4361,6 @@ static void chrome_install_overlay(id win) {
  * drawRect: swizzle never fires; orderWindow: does, and by then the window's
  * NSTitlebarView subtree is built (verified). Idempotent + self-gated, so it is
  * a no-op on every native window and only paints an orphaned-chrome legacy one. */
-/* ABICONV_TITLEBAR_PROBE (diagnostic, inert unless set): after a legacy window is
- * shown, offscreen-render its NSTitlebarView and report whether the STOCK chrome
- * actually composited the title text + the traffic-light widgets, and the band's
- * dominant colour. Answers "does the stock NSThemeFrame chrome show title+lights
- * under translation, or is the band blank?" without a display/screencapture. */
-static void titlebar_probe(id win) {
-   if (!KNOB("ABICONV_TITLEBAR_PROBE")) { return; }
-   static int done; if (done) { return; } done = 1;
-   id contentView = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("contentView"));
-   id frameView = contentView
-      ? ((id(*)(id, SEL))objc_msgSend)(contentView, sel_registerName("superview")) : nil;
-   id tbv = frameView ? chrome_find_subview(frameView, "NSTitlebarView") : nil;
-   if (!tbv) { fprintf(stderr, "[tbprobe] no NSTitlebarView\n"); fflush(stderr); return; }
-   /* enumerate the titlebar subtree: note widgets + the title field */
-   id subs = ((id(*)(id, SEL))objc_msgSend)(tbv, sel_registerName("subviews"));
-   long n = subs ? ((long(*)(id, SEL))objc_msgSend)(subs, sel_registerName("count")) : 0;
-   int lights = 0, titlefield = 0;
-   for (long i = 0; i < n; ++i) {
-      id s = ((id(*)(id, SEL, long))objc_msgSend)(subs, sel_registerName("objectAtIndex:"), i);
-      const char *cn = object_getClassName(s);
-      if (cn && strstr(cn, "Widget")) { lights++; }
-      if (cn && strstr(cn, "TextField")) { titlefield++; }
-   }
-   /* window title string */
-   id title = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("title"));
-   const char *tcstr = title
-      ? ((const char*(*)(id, SEL))objc_msgSend)(title, sel_registerName("UTF8String")) : "(nil)";
-   /* offscreen-render the titlebar band + sample its centre for a dominant colour */
-   CGRect tb = abiconv_view_bounds(tbv);
-   id rep = ((id(*)(id, SEL, CGRect))objc_msgSend)(
-      tbv, sel_registerName("bitmapImageRepForCachingDisplayInRect:"), tb);
-   double r = -1, g = -1, b = -1; long W = 0, H = 0;
-   if (rep) {
-      ((void(*)(id, SEL, CGRect, id))objc_msgSend)(
-         tbv, sel_registerName("cacheDisplayInRect:toBitmapImageRep:"), tb, rep);
-      W = ((long(*)(id, SEL))objc_msgSend)(rep, sel_registerName("pixelsWide"));
-      H = ((long(*)(id, SEL))objc_msgSend)(rep, sel_registerName("pixelsHigh"));
-      id col = ((id(*)(id, SEL, long, long))objc_msgSend)(
-         rep, sel_registerName("colorAtX:y:"), W/2, H/2);
-      if (col) {
-         r = ((double(*)(id, SEL))objc_msgSend)(col, sel_registerName("redComponent"));
-         g = ((double(*)(id, SEL))objc_msgSend)(col, sel_registerName("greenComponent"));
-         b = ((double(*)(id, SEL))objc_msgSend)(col, sel_registerName("blueComponent"));
-      }
-      /* rep row 0 = TOP of the band (title/traffic-light strip); bottom rows = the
-       * unified-toolbar strip. Sample both + the traffic-light x-columns. */
-      long ys[3] = { H/8, H/2, (H*7)/8 };
-      const char *yn[3] = { "top(title/lights)", "middle", "bottom(toolbar)" };
-      for (int k = 0; k < 3; ++k) {
-         id c2 = ((id(*)(id, SEL, long, long))objc_msgSend)(
-            rep, sel_registerName("colorAtX:y:"), W/2, ys[k]);
-         if (!c2) { continue; }
-         double rr = ((double(*)(id, SEL))objc_msgSend)(c2, sel_registerName("redComponent"));
-         double gg = ((double(*)(id, SEL))objc_msgSend)(c2, sel_registerName("greenComponent"));
-         double bb = ((double(*)(id, SEL))objc_msgSend)(c2, sel_registerName("blueComponent"));
-         fprintf(stderr, "[tbprobe]   y=%ld %-18s rgb=%.2f,%.2f,%.2f\n", ys[k], yn[k], rr, gg, bb);
-      }
-      /* traffic-light column at x~19pt*scale (close widget), y~top */
-      double scale = (double)W / (tb.size.width > 0 ? tb.size.width : 1);
-      long lx = (long)(19 * scale), ly = (long)(16 * scale);
-      id cl = ((id(*)(id, SEL, long, long))objc_msgSend)(
-         rep, sel_registerName("colorAtX:y:"), lx, ly);
-      if (cl) {
-         double rr = ((double(*)(id, SEL))objc_msgSend)(cl, sel_registerName("redComponent"));
-         double gg = ((double(*)(id, SEL))objc_msgSend)(cl, sel_registerName("greenComponent"));
-         double bb = ((double(*)(id, SEL))objc_msgSend)(cl, sel_registerName("blueComponent"));
-         fprintf(stderr, "[tbprobe]   close-light px(%ld,%ld) rgb=%.2f,%.2f,%.2f (red-ish if drawn)\n",
-                 lx, ly, rr, gg, bb);
-      }
-   }
-   fprintf(stderr, "[tbprobe] title='%s' widgets(lights)=%d titleField=%d "
-           "band=%ldx%ld centre_rgb=%.2f,%.2f,%.2f\n",
-           tcstr, lights, titlefield, W, H, r, g, b);
-   /* per-subview: class + opaque? + hidden? + wantsLayer? + layer bg colour, so we
-    * can pinpoint WHICH titlebar view is painting the band black under translation */
-   for (long i = 0; i < n; ++i) {
-      id s = ((id(*)(id, SEL, long))objc_msgSend)(subs, sel_registerName("objectAtIndex:"), i);
-      signed char opaque = ((signed char(*)(id, SEL))objc_msgSend)(s, sel_registerName("isOpaque"));
-      signed char hidden = ((signed char(*)(id, SEL))objc_msgSend)(s, sel_registerName("isHidden"));
-      signed char wl = ((signed char(*)(id, SEL))objc_msgSend)(s, sel_registerName("wantsLayer"));
-      CGRect sf = abiconv_msg_rect(s, sel_registerName("frame"));
-      fprintf(stderr, "[tbprobe]   [%ld] %-40s opaque=%d hidden=%d wantsLayer=%d frame=%.0f,%.0f %.0fx%.0f\n",
-              i, object_getClassName(s), opaque, hidden, wl,
-              sf.origin.x, sf.origin.y, sf.size.width, sf.size.height);
-   }
-   fflush(stderr);
-}
 
 /* ---- generic window-TITLE-on-show (Cocoa) --------------------------------
  * A pre-10.x Cocoa app that relied on the private-frame-view swap to draw its
@@ -4581,12 +4376,7 @@ static void titlebar_probe(id win) {
  * running app's localized name (NSRunningApplication) / NSBundle display name /
  * process name — and force titleVisibility=visible so the modern titlebar shows
  * (and auto-centers) it. Never overwrites a title the app DID set; never touches
- * a native window. Env kill-switch ABICONV_WINTITLE_COMPAT (set => skip). */
-static int wintitle_compat_off(void) {
-   static int v = -1;
-   if (v < 0) { v = KNOB("ABICONV_WINTITLE_COMPAT") ? 1 : 0; }
-   return v;
-}
+ * a native window. */
 /* returns 1 if `s` is nil or all-whitespace */
 static int nsstring_blank(id s) {
    if (!s) { return 1; }
@@ -4705,16 +4495,10 @@ static void install_titlebar_label(id win, id title) {
       ((void(*)(id, SEL, long))objc_msgSend)(avc, sel_registerName("setLayoutAttribute:"), 4);
    }
    ((void(*)(id, SEL, id))objc_msgSend)(win, sel_add, avc);
-   if (wchrome_trace()) {
-      const char *tc = ((const char*(*)(id, SEL))objc_msgSend)(title, sel_registerName("UTF8String"));
-      fprintf(stderr, "[compat] wintitle: installed titlebar-label accessory '%s'\n", tc ? tc : "?");
-      fflush(stderr);
-   }
 }
 
 /* Apply the generic title fix to a legacy window whose title is blank. */
 static void window_title_on_show(id win) {
-   if (wintitle_compat_off()) { return; }
    if (!(window_is_legacy(win) || window_has_legacy_chrome(win))) { return; }
 
    /* Ground truth (live Quinn diag): the title 'Quinn' is already SET and
@@ -4785,12 +4569,6 @@ static void window_title_on_show(id win) {
        * that the style is corrected (cheap). */
       ((void(*)(id, SEL, id))objc_msgSend)(win, sel_registerName("setTitle:"), name);
    }
-   if (wchrome_trace()) {
-      const char *nc = ((const char*(*)(id, SEL))objc_msgSend)(name, sel_registerName("UTF8String"));
-      fprintf(stderr, "[compat] wintitle: legacy window (%s) title '%s' set/visible; "
-              "installing titlebar label fallback\n", object_getClassName(win), nc ? nc : "?");
-      fflush(stderr);
-   }
    /* FALLBACK (the actual visible-title guarantee): on the LIVE Quinn diag the
     * title is correctly set + Visible + toolbarStyle=Expanded + unified bit
     * cleared, yet the legacy PolishedMetalWindow does NOT materialize a two-row
@@ -4833,12 +4611,7 @@ static void window_title_on_show(id win) {
  * + sizeMode=Regular, and set every non-space item borderless. Space items
  * (NSToolbar{Flexible,}SpaceItem — identifier starts with "NSToolbar") are left
  * alone so the app's grouping is preserved. Native toolbars on native windows are
- * never touched. Env kill-switch ABICONV_TOOLBAR_COMPAT. */
-static int toolbar_compat_off(void) {
-   static int v = -1;
-   if (v < 0) { v = KNOB("ABICONV_TOOLBAR_COMPAT") ? 1 : 0; }
-   return v;
-}
+ * never touched. */
 /* Flatten one STANDARD toolbar item (setBordered:NO) so it's a flat icon on the
  * metal toolbar. No-op on a space item (grouping preserved) and on an item that
  * doesn't respond to -setBordered: (older SDK). If the item DOES carry a custom
@@ -4873,14 +4646,9 @@ static void toolbar_style_item(id item) {
 }
 /* Apply classic display/size mode + item styling to a legacy window's toolbar. */
 static void toolbar_style_on_show(id win) {
-   if (toolbar_compat_off()) { return; }
    if (!(window_is_legacy(win) || window_has_legacy_chrome(win))) { return; }
    id tb = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("toolbar"));
    if (!tb) {
-      if (wchrome_trace()) {
-         fprintf(stderr, "[compat] toolbar: legacy window (%s) has NO toolbar\n",
-                 object_getClassName(win)); fflush(stderr);
-      }
       return;
    }
    /* NSToolbarDisplayModeIconAndLabel == 1 ; NSToolbarSizeModeRegular == 1 */
@@ -4900,15 +4668,6 @@ static void toolbar_style_on_show(id win) {
    for (long i = 0; i < n; ++i) {
       id it = ((id(*)(id, SEL, long))objc_msgSend)(items, sel_registerName("objectAtIndex:"), i);
       toolbar_style_item(it);
-   }
-   if (wchrome_trace()) {
-      fprintf(stderr, "[compat] toolbar: legacy window (%s) toolbar styled "
-              "(displayMode %ld->%ld sizeMode %ld->%ld, %ld items)\n",
-              object_getClassName(win), dm,
-              ((long(*)(id, SEL))objc_msgSend)(tb, sel_registerName("displayMode")),
-              sm,
-              ((long(*)(id, SEL))objc_msgSend)(tb, sel_registerName("sizeMode")), n);
-      fflush(stderr);
    }
 }
 
@@ -4931,92 +4690,6 @@ id _86x64_test_titlebar_label_text(id win) {
    return nil;
 }
 
-/* ---- ABICONV_WINCHROME_DIAG (env-gated, default OFF) ----------------------
- * A pixel-oracle diagnostic: when a window is shown, dump to stderr its class
- * chain, styleMask, title, titleVisibility, isVisible, and — for its toolbar —
- * displayMode/sizeMode + each item's identifier/label/view-class. Runs AFTER the
- * title + toolbar fixes so the log shows the POST-fix state (which is what the tester
- * sees). Called for legacy windows only; inert unless ABICONV_WINCHROME_DIAG. */
-static const char *nsstr_c(id s) {
-   if (!s) { return "(nil)"; }
-   const char *c = ((const char*(*)(id, SEL))objc_msgSend)(s, sel_registerName("UTF8String"));
-   return c ? c : "(nil)";
-}
-static void winchrome_diag(id win) {
-   if (!KNOB("ABICONV_WINCHROME_DIAG")) { return; }
-   if (!(window_is_legacy(win) || window_has_legacy_chrome(win))) { return; }
-   /* class chain (real, KVO-stripped) */
-   fprintf(stderr, "[wcdiag] === window %p ===\n", (void*)win);
-   fprintf(stderr, "[wcdiag] class chain:");
-   for (Class c = object_getClass(win); c; c = class_getSuperclass(c)) {
-      fprintf(stderr, " %s", class_getName(c));
-      if (c == objc_getClass("NSWindow")) { break; }
-   }
-   fprintf(stderr, "\n");
-   unsigned long mask = ((unsigned long(*)(id, SEL))objc_msgSend)(win, sel_registerName("styleMask"));
-   long tvis = ((long(*)(id, SEL))objc_msgSend)(win, sel_registerName("titleVisibility"));
-   signed char vis = ((signed char(*)(id, SEL))objc_msgSend)(win, sel_registerName("isVisible"));
-   signed char ttrans = 0;
-   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(win, sel_registerName("respondsToSelector:"),
-          sel_registerName("titlebarAppearsTransparent"))) {
-      ttrans = ((signed char(*)(id, SEL))objc_msgSend)(win, sel_registerName("titlebarAppearsTransparent"));
-   }
-   id title = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("title"));
-   long tbstyle = -1;
-   if (((signed char(*)(id, SEL, SEL))objc_msgSend)(win, sel_registerName("respondsToSelector:"),
-          sel_registerName("toolbarStyle"))) {
-      tbstyle = ((long(*)(id, SEL))objc_msgSend)(win, sel_registerName("toolbarStyle"));
-   }
-   fprintf(stderr, "[wcdiag] styleMask=0x%lx (Titled=%d Textured=%d UnifiedToolbar=%d FullSizeContent=%d) "
-           "title='%s' titleVisibility=%ld titlebarTransparent=%d toolbarStyle=%ld isVisible=%d\n",
-           mask, (int)(mask & 1), (int)((mask >> 8) & 1), (int)((mask >> 12) & 1),
-           (int)((mask >> 15) & 1), nsstr_c(title), tvis, ttrans, tbstyle, vis);
-   /* titlebar-label accessory (our fallback visible-title guarantee) */
-   {
-      id acc = _86x64_test_titlebar_label_text(win);
-      fprintf(stderr, "[wcdiag] titlebarLabelAccessory='%s'\n", nsstr_c(acc));
-   }
-   /* toolbar breakdown */
-   id tb = ((id(*)(id, SEL))objc_msgSend)(win, sel_registerName("toolbar"));
-   if (!tb) { fprintf(stderr, "[wcdiag] toolbar: (none)\n"); fflush(stderr); return; }
-   long dm = ((long(*)(id, SEL))objc_msgSend)(tb, sel_registerName("displayMode"));
-   long sm = ((long(*)(id, SEL))objc_msgSend)(tb, sel_registerName("sizeMode"));
-   signed char tbvis = ((signed char(*)(id, SEL))objc_msgSend)(tb, sel_registerName("isVisible"));
-   id ident = ((id(*)(id, SEL))objc_msgSend)(tb, sel_registerName("identifier"));
-   fprintf(stderr, "[wcdiag] toolbar '%s' displayMode=%ld sizeMode=%ld isVisible=%d\n",
-           nsstr_c(ident), dm, sm, tbvis);
-   id items = ((id(*)(id, SEL))objc_msgSend)(tb, sel_registerName("items"));
-   long n = items ? ((long(*)(id, SEL))objc_msgSend)(items, sel_registerName("count")) : 0;
-   for (long i = 0; i < n; ++i) {
-      id it = ((id(*)(id, SEL, long))objc_msgSend)(items, sel_registerName("objectAtIndex:"), i);
-      id iid = ((id(*)(id, SEL))objc_msgSend)(it, sel_registerName("itemIdentifier"));
-      id lbl = ((id(*)(id, SEL))objc_msgSend)(it, sel_registerName("label"));
-      id img = ((id(*)(id, SEL))objc_msgSend)(it, sel_registerName("image"));
-      id view = ((id(*)(id, SEL))objc_msgSend)(it, sel_registerName("view"));
-      const char *vcls = view ? object_getClassName(view) : "(nil)";
-      /* the STANDARD NSToolbarItem.isBordered (10.15+) — the property v3 flips */
-      int itembordered = -1;
-      if (((signed char(*)(id, SEL, SEL))objc_msgSend)(it, sel_registerName("respondsToSelector:"),
-             sel_registerName("isBordered"))) {
-         itembordered = (int)((signed char(*)(id, SEL))objc_msgSend)(it, sel_registerName("isBordered"));
-      }
-      const char *btitle = "";
-      int bordered = -1; long bezel = -1, imgpos = -1;
-      if (view && objc_getClass("NSButton") &&
-          ((signed char(*)(id, SEL, Class))objc_msgSend)(view, sel_registerName("isKindOfClass:"),
-             objc_getClass("NSButton"))) {
-         btitle = nsstr_c(((id(*)(id, SEL))objc_msgSend)(view, sel_registerName("title")));
-         bordered = (int)((signed char(*)(id, SEL))objc_msgSend)(view, sel_registerName("isBordered"));
-         bezel = ((long(*)(id, SEL))objc_msgSend)(view, sel_registerName("bezelStyle"));
-         imgpos = ((long(*)(id, SEL))objc_msgSend)(view, sel_registerName("imagePosition"));
-      }
-      fprintf(stderr, "[wcdiag]   item[%ld] id='%s' label='%s' hasImage=%d itemBordered=%d view=%s "
-              "btnTitle='%s' viewBordered=%d bezel=%ld imgPos=%ld\n",
-              i, nsstr_c(iid), nsstr_c(lbl), img ? 1 : 0, itembordered, vcls, btitle, bordered, bezel, imgpos);
-   }
-   fflush(stderr);
-}
-
 static IMP g_window_orig_orderWindow;
 static void window_orderWindow(id self, SEL _cmd, long place, long relativeTo) {
    if (g_window_orig_orderWindow) {
@@ -5027,11 +4700,9 @@ static void window_orderWindow(id self, SEL _cmd, long place, long relativeTo) {
       /* generic (every legacy Cocoa window): title-on-show + toolbar styling */
       window_title_on_show(self);
       toolbar_style_on_show(self);
-      winchrome_diag(self);   /* env-gated pixel-oracle dump (post-fix state) */
       /* archetype-only (frame-view chrome swap): the brushed-metal overlay */
       if (window_has_legacy_chrome(self)) {
          chrome_install_overlay(self);
-         titlebar_probe(self);
       }
    }
 }
@@ -5040,11 +4711,7 @@ static void legacy_window_chrome_install(void) {
    static int done = 0;
    if (done) { return; }
    /* This swizzle drives THREE generic on-show fixes (title, toolbar styling,
-    * chrome overlay), each with its OWN kill-switch. Only skip installing the
-    * swizzle entirely if ALL THREE are disabled. (ABICONV_WINCHROME_COMPAT kills
-    * just the chrome overlay; it must NOT also disable title/toolbar.) */
-   if (KNOB("ABICONV_WINCHROME_COMPAT") &&
-       wintitle_compat_off() && toolbar_compat_off()) { done = 1; return; }
+    * chrome overlay). */
    Class winc = objc_getClass("NSWindow");
    if (!winc) { return; }                       /* AppKit not loaded yet: retry */
    Method m = class_getInstanceMethod(winc, sel_registerName("orderWindow:relativeTo:"));
@@ -5308,11 +4975,6 @@ static int bp_track_tag(struct objc_call_plan *plan, const uint32_t *args32,
    if (method_is_legacy(class_getInstanceMethod(object_getClass(real_self), sel)))
       return 0;
    long tag = (long)x64_objc_unwrap(args32[2]);   /* 32-bit handle -> real 64-bit tag */
-   if (KNOB("ABICONV_TAG_TRACE")) {
-      fprintf(stderr, "[tag] remove sel=%s handle=0x%x -> tag=0x%lx self=%p\n",
-              sel_getName(sel), args32[2], (unsigned long)tag, (void *)real_self);
-      fflush(stderr);
-   }
    /* Old macOS (the i386 era) silently IGNORED removeTrackingRect:/removeToolTipRect:
     * with an invalid tag; tag 0 = "none", the uninitialized-ivar "remove the old
     * one before adding a new one" idiom legacy views use. Modern AppKit instead
@@ -5721,11 +5383,6 @@ static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
    if      (!strcmp(s, "bytes"))      { clsname = "NSData";           sizesel = "length"; }
    else if (!strcmp(s, "bitmapData")) { clsname = "NSBitmapImageRep"; sizesel = "bytesPerPlane"; }
    else { return 0; }
-   if (KNOB("ABICONV_GL_TEXLOG") && !strcmp(s, "bitmapData")) {
-      fprintf(stderr, "[bmp] HOOK REACHED self=%p<%s>\n", (void*)real_self,
-              real_self ? object_getClassName(real_self) : "(nil)");
-      fflush(stderr);
-   }
    Class cls = objc_getClass(clsname);
    if (!cls) { return 0; }
    typedef unsigned char (* msg_kind_t)(id, SEL, Class);
@@ -5763,29 +5420,6 @@ static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
       const void *nb = ((msg_ptr_t)objc_msgSend)(real_self, sel);
       unsigned long len = ((msg_len_t)objc_msgSend)(real_self,
                                                     sel_registerName(sizesel));
-      if (KNOB("ABICONV_GL_TEXLOG") && !strcmp(s, "bitmapData")) {
-         /* Diagnostic: native buffer, size accessor sanity, row distribution
-          * of non-zero content in the NATIVE buffer (before any copy). */
-         unsigned long bpr = ((msg_len_t)objc_msgSend)(real_self, sel_registerName("bytesPerRow"));
-         unsigned long pw  = ((msg_len_t)objc_msgSend)(real_self, sel_registerName("pixelsWide"));
-         unsigned long ph  = ((msg_len_t)objc_msgSend)(real_self, sel_registerName("pixelsHigh"));
-         unsigned long bpp = ((msg_len_t)objc_msgSend)(real_self, sel_registerName("bitsPerPixel"));
-         long r0=-1, r1=-1, nrows=0;
-         if (nb && bpr && ph && len >= bpr) {
-            const unsigned char *p = (const unsigned char*)nb;
-            unsigned long hh = len / bpr; if (hh > ph) hh = ph;
-            for (unsigned long y = 0; y < hh; y++) {
-               const unsigned char *row = p + y*bpr;
-               int rn = 0;
-               for (unsigned long x = 0; x < bpr; x++) if (row[x]) { rn = 1; break; }
-               if (rn) { if (r0 < 0) r0 = (long)y; r1 = (long)y; nrows++; }
-            }
-         }
-         fprintf(stderr, "[bmp] bitmapData self=%p<%s> nb=%p len(bytesPerPlane)=%lu bpr=%lu %lux%lu bpp=%lu nzrows=[%ld..%ld]n=%ld\n",
-                 (void*)real_self, object_getClassName(real_self), nb, len,
-                 bpr, pw, ph, bpp, r0, r1, (long)nrows);
-         fflush(stderr);
-      }
       if ((uintptr_t)nb < 0x100000000ULL || !nb) {
          low = nb;                           /* already low-4GB (or nil): pass through */
       } else {
@@ -6191,19 +5825,6 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
       g_gstate_legacy = 1;
    }
 
-   /* Quinn GL-upload diagnostic (env ABICONV_GL_TEXLOG): log the createTexture
-    * selector sends BEFORE any gating, with raw handle + resolution result. */
-   if (KNOB("ABICONV_GL_TEXLOG") && sel) {
-      const char *sn = sel_getName(sel);
-      if (!strcmp(sn, "bitmapData") || !strcmp(sn, "bytesPerRow") ||
-          !strcmp(sn, "bytesPerPlane") || !strcmp(sn, "bitsPerPixel")) {
-         fprintf(stderr, "[bmp] prep sel=%s self32=0x%08x real=%p<%s>\n",
-                 sn, args32[0], (void*)real_self,
-                 real_self ? object_getClassName(real_self) : "(nil)");
-         fflush(stderr);
-      }
-   }
-
    /* breadcrumb (zero-I/O): record the send + i386 caller RA + stack pointer */
    {
       uint64_t sp = (uint64_t)(uintptr_t)__builtin_frame_address(0);
@@ -6393,14 +6014,6 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
          add_tip   = sel_registerName("addToolTipRect:owner:userData:");
       }
       if (sel == add_track || sel == add_tip) {
-         if (KNOB("ABICONV_TAG_TRACE")) {
-            fprintf(stderr, "[tag] add sel=%s ret_kind=%d (m=%p) self=%p\n",
-                    sel_getName(sel), plan->ret_is_obj,
-                    (void *)hot_instance_method(
-                        real_self ? object_getClass(real_self) : NULL, sel),
-                    (void *)real_self);
-            fflush(stderr);
-         }
          if (plan->ret_is_obj == 8) plan->ret_is_obj = 9;
       }
    }
@@ -6950,10 +6563,6 @@ static uint64_t scan_one_list(uint32_t list, const char *sel_name) {
    for (int m = 0; m < ml->method_count; ++m) {
       if (!ptr_ok(methods[m].name, 1)) { continue; }
       const char *mname = (const char *)(uintptr_t)methods[m].name;
-      if (KNOB("OBJC_BRIDGE_TRACE_METH")) {
-         fprintf(stderr, "[bp]     meth \"%s\" imp=0x%x\n", mname, methods[m].imp);
-         fflush(stderr);
-      }
       if (strcmp(mname, sel_name) == 0) {
          return (uint64_t)(uintptr_t)methods[m].imp;
       }
@@ -7523,11 +7132,6 @@ void x64_refresh_data_shadows(void) {
       if (v == 0) { ++rem; continue; }           /* still nil */
       *shadow = (v >= 0x100000000ULL) ? x64_objc_wrap(v) : (uint32_t)v;
       g_ps_shadow[i] = NULL;                      /* mark done (benign race) */
-      if (KNOB("ABICONV_SHADOW_TRACE")) {
-         fprintf(stderr, "[shadow] late-resolved %s -> 0x%x\n",
-                 g_ps_name[i], (uint32_t)*shadow);
-         fflush(stderr);
-      }
    }
    g_ps_remaining = rem;
 }
@@ -8101,8 +7705,7 @@ static void ivar_snap_push(uint8_t *real_slot, uint8_t *shadow_slot, uint32_t va
  * actually connected (R non-nil) are mirrored, so ivars a legacy IMP manages
  * purely in the shadow are never disturbed (no regression to the shadow-only
  * ExtendedApplication/iPhoto path). The existing ivar_wb_flush 'P' write-back
- * carries an IMP's reassignment back to R. UNIVERSAL: any classic-ObjC1 outlet.
- * Gate ABICONV_NO_OUTLET_IVARS restores the old no-ivar behavior. */
+ * carries an IMP's reassignment back to R. UNIVERSAL: any classic-ObjC1 outlet. */
 struct own_ivar {
    const char *name;      /* legacy ivar name (app __OBJC cstring, persistent) */
    uint32_t    i386_off;  /* classic ivar offset (translated IMP reads here)   */
@@ -8142,9 +7745,6 @@ static struct own_ivars_ent *own_intern(Class c) {   /* find or create slot */
 /* Registration (before objc_registerClassPair): add each OWN object ivar to the
  * modern class so the nib outlet connector can find & write it. */
 static void reverse_add_ivars(Class target, const struct legacy_objc_class *cls) {
-   static int disabled = -1;
-   if (disabled < 0) { disabled = KNOB("ABICONV_NO_OUTLET_IVARS") ? 1 : 0; }
-   if (disabled) { return; }
    if (!cls->ivars ||
        !ptr_ok(cls->ivars, sizeof(struct legacy_objc_ivar_list))) { return; }
    const struct legacy_objc_ivar_list *ivl =
@@ -8320,38 +7920,7 @@ id _86x64_shadow_real(uint32_t s) { return shadow_real(s); }
  * shadows, paired/raw legacy objects, real x86 objects, else passthrough).
  * Used by C-API object bridges (e.g. NSMapTable/NSHashTable) so a legacy
  * object's SHADOW is never handed to native code as the object itself. */
-uint64_t _86x64_unwrap_obj_arg(uint32_t a) {
-   uint64_t r = unwrap_obj_arg(a);
-   /* Call-site recovery (see CALLSITE_TRACE). This is structural, not a guess
-    * about layout: an abigen `.l1` shim does `push rbp; mov rsp,rbp` and
-    * thereafter only scratches rsp, and THIS function builds a normal frame, so
-    * __builtin_frame_address(1) IS the shim's rbp. In that frame the i386
-    * caller's 4-byte return address sits at [rbp+8] (the i386 cdecl args start
-    * at [rbp+0xc]); dladdr then names the translated image and offset, which is
-    * directly disassemblable because the translated __TEXT mirrors the i386
-    * layout. */
-   if (__builtin_expect(r < 0x1000 || CALLSITE_ALL_TRACE(), 0)) {
-      const int want = (r >= 0x1000) ? 1
-                     : r            ? (CALLSITE_TRACE() || CALLSITE_ALL_TRACE())
-                                    : (CALLSITE_NIL_TRACE() || CALLSITE_ALL_TRACE());
-      if (want) {
-         void *fp = __builtin_frame_address(1);
-         uint32_t ret = fp ? *(const uint32_t *)((uintptr_t)fp + 8) : 0;
-         Dl_info di;
-         if (ret && dladdr((void *)(uintptr_t)ret, &di) && di.dli_fname) {
-            const char *b = strrchr(di.dli_fname, '/');
-            fprintf(stderr, "[callsite] arg=0x%08x -> 0x%llx  i386ret=0x%08x  %s+0x%lx\n",
-                    a, (unsigned long long)r, ret, b ? b + 1 : di.dli_fname,
-                    (unsigned long)((uintptr_t)ret - (uintptr_t)di.dli_fbase));
-         } else {
-            fprintf(stderr, "[callsite] arg=0x%08x -> 0x%llx  i386ret=0x%08x (unresolved)\n",
-                    a, (unsigned long long)r, ret);
-         }
-         fflush(stderr);
-      }
-   }
-   return r;
-}
+uint64_t _86x64_unwrap_obj_arg(uint32_t a) { return unwrap_obj_arg(a); }
 
 /* ---------------------------------------------------------------------------
  * objc_setProperty / objc_getProperty — the modern-runtime @synthesize'd
@@ -8617,10 +8186,6 @@ static Ivar x64_object_setInstanceVariable(id obj, const char *name, void *value
          if (riv) {
             ptrdiff_t moff = ivar_getOffset(riv);
             if (moff > 0) { *(void **)((char *)obj + moff) = value; }
-         }
-         if (KNOB("ABICONV_OUTLET_TRACE")) {
-            fprintf(stderr, "[outlet] -[%s set ivar %s @0x%x] = %p (slot=%p rivar=%p)\n",
-                    class_getName(cls), name, off, value, (void *)slot, (void *)riv);
          }
          return riv;
       }
@@ -9079,74 +8644,6 @@ static id i386_cfstr_to_real(uint32_t p) {
 /* Unwrap an i386 `@`/`#` argument to a real x86_64 id for a call into the
  * modern runtime. Handles arena proxy handles, R/S shadows, paired legacy
  * objects, raw legacy objects/classes, and otherwise passes through. */
-/* Render a resolved native id/CFStringRef into buf for the ARGSTR diagnostic.
- * Toll-free: CFStringGetCString works on both NSString and CFStringRef. Prints
- * "(nil)" for 0, "(-1 sentinel)" for the CF default-text sentinel, and
- * "(non-string CFTypeID=N)" for a non-CFString object; never dereferences a
- * raw non-object value. Diagnostic-only; guarded by the caller. */
-static void argstr_describe(uint64_t real, char *buf, size_t n) {
-   if (real == 0)      { snprintf(buf, n, "(nil)"); return; }
-   if (real == ~0ULL)  { snprintf(buf, n, "(-1 sentinel)"); return; }
-   /* Decide whether it's safe to hand `real` to CF. A TAGGED pointer (low bit
-    * set on x86_64, or an obfuscated NSString with the tag bit) is NOT
-    * dereferenceable but CFGetTypeID/CFStringGet* decode it fine — pass it
-    * through. An UNTAGGED pointer must be 8-aligned AND readable (its isa slot
-    * readable) to be a real object; otherwise it is a passthrough low i386
-    * value (unwrap's final fallthrough) — describe it verbatim rather than
-    * faulting CFGetTypeID inside a diagnostic. */
-   const int tagged = (real & 0x1) != 0;          /* x86_64 tagged-ptr low bit */
-   if (!tagged) {
-      /* An untagged object pointer must be 8-aligned and readable AND its isa
-       * must itself point to a readable, aligned class whose own isa
-       * (metaclass) is readable — the is_real_x86_object isa-chain probe. This
-       * is a DIAGNOSTIC (ABICONV_ARGSTR_TRACE): it must never itself fault the
-       * traced program. Handing CFGetTypeID/objc_msgSend a readable-but-
-       * non-object pointer (arbitrary data whose first word merely looks like
-       * an isa) derefs deep inside the runtime and SIGSEGVs — observed on a
-       * RunStandardAlert arg whose resolved value was not a real object
-       * (argstr_describe -> _CF_IS_OBJC/objc_msgSend_uncached -> KERN at 0x0).
-       * The earlier "CFGetTypeID robustly validates it IS a CF object" claim
-       * was WRONG: CFGetTypeID trusts the isa. Pre-validate the isa chain so
-       * only a provable object reaches CF. A tagged pointer (handled above by
-       * skipping this block) has no in-memory isa and is decoded safely by CF. */
-      if ((real & 0x7) || !mem_readable((uintptr_t)real, 8)) {
-         snprintf(buf, n, "(raw 0x%llx, not an object)",
-                  (unsigned long long)real);
-         return;
-      }
-      uint64_t isa = *(const uint64_t *)(uintptr_t)real;
-      /* strip the non-pointer-isa bits (x86_64 ISA_MASK 0x00007ffffffffff8) so
-       * a real object with a packed/tagged isa still validates. */
-      uint64_t isa_ptr = isa & 0x00007ffffffffff8ULL;
-      if (isa_ptr < 0x1000 || !mem_readable(isa_ptr, 8)) {
-         snprintf(buf, n, "(raw 0x%llx, isa 0x%llx not a class)",
-                  (unsigned long long)real, (unsigned long long)isa);
-         return;
-      }
-      uint64_t meta = *(const uint64_t *)(uintptr_t)isa_ptr;   /* class's isa */
-      uint64_t meta_ptr = meta & 0x00007ffffffffff8ULL;
-      if (meta_ptr < 0x1000 || !mem_readable(meta_ptr, 8)) {
-         snprintf(buf, n, "(raw 0x%llx, not an object)",
-                  (unsigned long long)real);
-         return;
-      }
-   }
-   CFTypeRef t = (CFTypeRef)(uintptr_t)real;
-   if (CFGetTypeID(t) == CFStringGetTypeID()) {
-      CFIndex len = CFStringGetLength((CFStringRef)t);
-      char tmp[256];
-      if (CFStringGetCString((CFStringRef)t, tmp, sizeof tmp,
-                             kCFStringEncodingUTF8)) {
-         snprintf(buf, n, "CFString len=%ld \"%s\"", (long)len, tmp);
-      } else {
-         snprintf(buf, n, "CFString len=%ld (uncopyable)", (long)len);
-      }
-   } else {
-      snprintf(buf, n, "(non-string CFTypeID=%lu)",
-               (unsigned long)CFGetTypeID(t));
-   }
-}
-
 static uint64_t unwrap_obj_arg_core(uint32_t a) {
    if (!a) { return 0; }
    if (a == 0xffffffffu) {
@@ -9252,21 +8749,9 @@ static uint64_t unwrap_obj_arg_core(uint32_t a) {
    return (uint64_t)a;                      /* nil-ish / already-low passthrough */
 }
 
-static uint64_t unwrap_obj_arg_inner(uint32_t a);
 static uint64_t unwrap_obj_arg(uint32_t a) {
-   uint64_t r = unwrap_obj_arg_inner(a);
-   if (g_mb_n && r) { mb_flush((id)(uintptr_t)r, 0); }   /* shadow -> real */
-   return r;
-}
-static uint64_t unwrap_obj_arg_inner(uint32_t a) {
    uint64_t r = unwrap_obj_arg_core(a);
-   if (__builtin_expect(ARGSTR_TRACE(), 0)) {
-      char desc[320];
-      argstr_describe(r, desc, sizeof desc);
-      fprintf(stderr, "[argstr] i386=0x%08x -> %s (caller=%p)\n",
-              a, desc, __builtin_return_address(0));
-      fflush(stderr);
-   }
+   if (g_mb_n && r) { mb_flush((id)(uintptr_t)r, 0); }   /* shadow -> real */
    return r;
 }
 
@@ -9650,7 +9135,7 @@ uint64_t x64_blk_invoke(uint64_t blockp, const uint64_t *gp, const uint64_t *fp,
  * ever reuses it as another reverse stack, LIFO, after the frame is dead. */
 static void *rev_stack_alloc(void) { return x64_lowstack_get(REV_STACK_SZ); }
 static void rev_stack_free(void *p) {
-   if (!p || KNOB("ABICONV_REVSTACK_LEAK")) { return; }   /* diagnostic: never reuse */
+   if (!p) { return; }
    x64_lowstack_put(p, REV_STACK_SZ);
 }
 
@@ -9759,474 +9244,6 @@ void x64_rev_dump_ring(void) {
    fflush(stderr);
 }
 
-/* ======================================================================
- * GL-drawable probe (env ABICONV_GL_PROBE) — Quinn black-splash diagnostic.
- * QuinnSplashView (a legacy NSOpenGLView subclass) receives drawRect:, issues
- * GL, and tail-calls [[self openGLContext] flushBuffer], yet nothing
- * composites (content area is black). Swizzle the native NSOpenGLContext
- * present/attach entry points and log the attached view + layer state so we
- * can see whether the context has a valid drawable. Installed lazily on the
- * first reverse-dispatch (AppKit is fully up by then). Inert unless the env
- * var is set. Pure native ObjC/C — no legacy bridge re-entry.
- * ==================================================================== */
-static IMP g_glp_flushBuffer, g_glp_setView, g_glp_makeCurrent, g_glp_clearDrawable;
-
-static void glp_dump_ctx(const char *tag, id ctx) {
-   if (!ctx) { fprintf(stderr, "[glp] %s ctx=nil\n", tag); return; }
-   id view = ((id(*)(id,SEL))objc_msgSend)(ctx, sel_registerName("view"));
-   const char *vc = view ? object_getClassName(view) : "(nil)";
-   long opaque = 0, wantsLayer = 0; void *layer = NULL, *win = NULL;
-   if (view) {
-      opaque     = ((long(*)(id,SEL))objc_msgSend)(view, sel_registerName("isOpaque"));
-      wantsLayer = ((long(*)(id,SEL))objc_msgSend)(view, sel_registerName("wantsLayer"));
-      layer      = (void*)((id(*)(id,SEL))objc_msgSend)(view, sel_registerName("layer"));
-      win        = (void*)((id(*)(id,SEL))objc_msgSend)(view, sel_registerName("window"));
-   }
-   /* view frame (NSRect via objc_msgSend_stret on x86_64 for >16B struct) */
-   struct { double x,y,w,h; } fr = {0,0,0,0};
-   if (view) {
-      ((void(*)(void*,id,SEL))objc_msgSend_stret)(&fr, view, sel_registerName("frame"));
-   }
-   void *cgl = (void*)((id(*)(id,SEL))objc_msgSend)(ctx, sel_registerName("CGLContextObj"));
-   const char *lc = layer ? object_getClassName((id)layer) : "(nil)";
-   fprintf(stderr,
-      "[glp] %s ctx=%p view=%p<%s> frame=%.0fx%.0f@(%.0f,%.0f) opaque=%ld "
-      "wantsLayer=%ld layer=%p<%s> window=%p cgl=%p\n",
-      tag, (void*)ctx, (void*)view, vc, fr.w, fr.h, fr.x, fr.y, opaque,
-      wantsLayer, layer, lc, win, cgl);
-   fflush(stderr);
-}
-
-/* Native GL entry points (libabiconv links OpenGL.framework — it hosts the
- * ___gl* abigen shims). Sample the back buffer to see if GL actually rendered
- * content before the swap. */
-extern unsigned glGetError(void);
-extern void glReadBuffer(unsigned);
-extern void glReadPixels(int,int,int,int,unsigned,unsigned,void*);
-extern void glFinish(void);
-extern void glClearColor(float,float,float,float);
-extern void glClear(unsigned);
-extern void glDrawBuffer(unsigned);
-extern void glDisable(unsigned);
-extern void glMatrixMode(unsigned);
-extern void glPushMatrix(void);
-extern void glPopMatrix(void);
-extern void glLoadIdentity(void);
-extern void glColor4f(float,float,float,float);
-extern void glBegin(unsigned);
-extern void glEnd(void);
-extern void glVertex3f(float,float,float);
-extern void glViewport(int,int,int,int);
-extern void glTexEnvi(unsigned,unsigned,int);
-extern void glEnable(unsigned);
-extern void glTexCoord2f(float,float);
-extern void glBindTexture(unsigned,unsigned);
-extern void glGetIntegerv(unsigned,int*);
-extern unsigned char glIsTexture(unsigned);
-extern void glGetTexLevelParameteriv(unsigned,int,unsigned,int*);
-extern void glGetTexParameteriv(unsigned,unsigned,int*);
-extern void glGetTexImage(unsigned,int,unsigned,unsigned,void*);
-#define GLP_GL_BACK 0x0405
-#define GLP_GL_RGBA 0x1908
-#define GLP_GL_UBYTE 0x1401
-#define GLP_GL_COLOR_BIT 0x4000
-/* (Removed dyld GL interposers: they never caught libabiconv's own stub calls,
- * and interposing glGenTextures recursed via dlsym(RTLD_NEXT) when APPKIT's
- * NSCGLSurface flush path called it -> stack overflow, crash 2026-07-02-210828.) */
-
-static void glp_flushBuffer(id self, SEL _cmd) {
-   static int n = 0;
-   if (KNOB("ABICONV_GL_TESTCLEAR")) {
-      /* Overwrite the back buffer with solid red just before the swap: if the
-       * window turns red, the present path works and Quinn's own GL rendering
-       * is the culprit; if still black, presentation itself is broken. */
-      glDrawBuffer(GLP_GL_BACK);
-      glClearColor(1.f, 0.f, 0.f, 1.f);
-      glClear(GLP_GL_COLOR_BIT);
-      glFinish();
-   }
-   if (KNOB("ABICONV_GL_TESTQUAD")) {
-      /* Overlay a solid green quad (no texture) over Quinn's render using
-       * native immediate mode + identity matrices. Green => geometry/raster
-       * work and Quinn's texture is empty; no green => a global GL-state issue
-       * suppresses all drawing. */
-      glDrawBuffer(GLP_GL_BACK);
-      glDisable(0x0DE1 /*TEXTURE_2D*/); glDisable(0x0BE2 /*BLEND*/);
-      glDisable(0x0B71 /*DEPTH_TEST*/); glDisable(0x0C11 /*SCISSOR_TEST*/);
-      glMatrixMode(0x1701 /*PROJECTION*/); glPushMatrix(); glLoadIdentity();
-      glMatrixMode(0x1700 /*MODELVIEW*/);  glPushMatrix(); glLoadIdentity();
-      glColor4f(0.f, 1.f, 0.f, 1.f);
-      glBegin(0x0007 /*QUADS*/);
-      glVertex3f(-0.8f,-0.8f,0.f); glVertex3f(0.8f,-0.8f,0.f);
-      glVertex3f(0.8f,0.8f,0.f);   glVertex3f(-0.8f,0.8f,0.f);
-      glEnd();
-      glPopMatrix(); glMatrixMode(0x1701); glPopMatrix();
-      glFinish();
-   }
-   if (KNOB("ABICONV_GL_TESTTEX")) {
-      /* Draw a full-viewport quad textured with each candidate texture id and
-       * log which ids are live textures. If the logo appears, the texture data
-       * is valid and the bug is Quinn's matrices/viewport; if black, the
-       * texture upload produced empty data. */
-      /* Quinn uses GL_TEXTURE_RECTANGLE_ARB (0x84F5), non-normalized coords. */
-      #define GLP_RECT 0x84F5
-      int wq=0, hq=0;
-      static int logged = 0;
-      if (!logged) { logged = 1;
-         char b[256]; int p = 0;
-         for (unsigned t = 1; t <= 16; t++)
-            if (glIsTexture(t)) p += snprintf(b+p, sizeof(b)-p, "%u ", t);
-         fprintf(stderr, "[glp] liveTex={ %s}\n", b);
-         for (unsigned t = 1; t <= 13; t++) {
-            if (!glIsTexture(t)) continue;
-            glBindTexture(GLP_RECT, t);
-            int w=0,h=0,ifmt=0,minf=0,magf=0;
-            glGetTexLevelParameteriv(GLP_RECT,0,0x1000,&w);
-            glGetTexLevelParameteriv(GLP_RECT,0,0x1001,&h);
-            glGetTexLevelParameteriv(GLP_RECT,0,0x1003,&ifmt);
-            glGetTexParameteriv(GLP_RECT,0x2801,&minf);
-            glGetTexParameteriv(GLP_RECT,0x2800,&magf);
-            /* read back the pixels: count non-zero + row/col distribution */
-            long nzc = -1, nza = -1;
-            int r0=-1, r1=-1, nrows=0, c0=-1, c1=-1;
-            if (w > 0 && h > 0 && (long)w*h*4 < 8*1024*1024) {
-               unsigned char *buf = (unsigned char*)calloc((size_t)w*h, 4);
-               if (buf) {
-                  glGetTexImage(GLP_RECT,0,0x1908/*RGBA*/,0x1401/*UBYTE*/,buf);
-                  nzc = nza = 0;
-                  for (int y = 0; y < h; y++) {
-                     int rownz = 0;
-                     for (int x = 0; x < w; x++) {
-                        long i = (long)y*w + x;
-                        int nz = buf[i*4]|buf[i*4+1]|buf[i*4+2]|buf[i*4+3];
-                        if (buf[i*4]|buf[i*4+1]|buf[i*4+2]) nzc++;
-                        if (buf[i*4+3]) nza++;
-                        if (nz) { rownz = 1;
-                           if (c0 < 0 || x < c0) c0 = x;
-                           if (x > c1) c1 = x; }
-                     }
-                     if (rownz) { if (r0 < 0) r0 = y; r1 = y; nrows++; }
-                  }
-                  free(buf);
-               }
-            }
-            fprintf(stderr,"[glp]  RECTtex%u L0=%dx%d ifmt=0x%x nzRGBpx=%ld nzApx=%ld rows=[%d..%d]n=%d cols=[%d..%d]\n",
-                    t,w,h,ifmt,nzc,nza,r0,r1,nrows,c0,c1);
-         }
-         fflush(stderr);
-      }
-      const char *tid = KNOB("ABICONV_GL_TEXID");
-      unsigned useid = tid ? (unsigned)atoi(tid) : 1u;
-      glBindTexture(GLP_RECT, useid);
-      glGetTexLevelParameteriv(GLP_RECT,0,0x1000,&wq);
-      glGetTexLevelParameteriv(GLP_RECT,0,0x1001,&hq);
-      glDrawBuffer(GLP_GL_BACK);
-      glViewport(0,0,1600,1400);          /* full drawable, bypass Quinn's 1x vp */
-      glDisable(0x0BE2 /*BLEND*/); glDisable(0x0B71 /*DEPTH*/);
-      glDisable(0x0C11 /*SCISSOR*/); glDisable(0x0DE1 /*TEXTURE_2D*/);
-      glEnable(GLP_RECT);
-      glTexEnvi(0x2300/*TEXTURE_ENV*/,0x2200/*ENV_MODE*/,0x1E01/*REPLACE*/);
-      glMatrixMode(0x1701); glPushMatrix(); glLoadIdentity();
-      glMatrixMode(0x1700); glPushMatrix(); glLoadIdentity();
-      glColor4f(1.f,1.f,1.f,1.f);
-      float fw = wq>0?(float)wq:1.f, fh = hq>0?(float)hq:1.f;
-      glBegin(0x0007);
-      glTexCoord2f(0,fh);   glVertex3f(-1.f,-1.f,0.f);
-      glTexCoord2f(fw,fh);  glVertex3f(1.f,-1.f,0.f);
-      glTexCoord2f(fw,0);   glVertex3f(1.f,1.f,0.f);
-      glTexCoord2f(0,0);    glVertex3f(-1.f,1.f,0.f);
-      glEnd();
-      glDisable(GLP_RECT);
-      glPopMatrix(); glMatrixMode(0x1701); glPopMatrix();
-      glFinish();
-   }
-   if (n < 8) {
-      glp_dump_ctx("flushBuffer", self);
-      /* Scan a grid of the back buffer for any non-black pixel. */
-      glFinish();
-      glReadBuffer(GLP_GL_BACK);
-      unsigned e0 = glGetError();
-      int W = 785, H = 702, nonblack = 0; unsigned char mx = 0;
-      for (int gy = 0; gy < 6; gy++) for (int gx = 0; gx < 6; gx++) {
-         unsigned char px[4] = {0,0,0,0};
-         glReadPixels((gx+1)*W/8, (gy+1)*H/8, 1, 1, GLP_GL_RGBA, GLP_GL_UBYTE, px);
-         if (px[0]|px[1]|px[2]) { nonblack++;
-            if (px[0]>mx) mx=px[0]; if (px[1]>mx) mx=px[1]; if (px[2]>mx) mx=px[2]; }
-      }
-      unsigned e1 = glGetError();
-      fprintf(stderr, "[glp] backbuffer scan: nonblack=%d/36 maxc=%u glErr(read)=0x%x/0x%x\n",
-              nonblack, mx, e0, e1); fflush(stderr);
-   }
-   n++;
-   ((void(*)(id,SEL))g_glp_flushBuffer)(self, _cmd);
-}
-static void glp_setView(id self, SEL _cmd, id v) {
-   fprintf(stderr, "[glp] setView: ctx=%p view=%p<%s>\n", (void*)self, (void*)v,
-           v ? object_getClassName(v) : "(nil)"); fflush(stderr);
-   ((void(*)(id,SEL,id))g_glp_setView)(self, _cmd, v);
-   glp_dump_ctx("post-setView", self);
-}
-static void glp_makeCurrent(id self, SEL _cmd) {
-   static int n = 0;
-   if (n++ < 4) { fprintf(stderr, "[glp] makeCurrentContext ctx=%p\n", (void*)self); fflush(stderr); }
-   ((void(*)(id,SEL))g_glp_makeCurrent)(self, _cmd);
-}
-static void glp_clearDrawable(id self, SEL _cmd) {
-   fprintf(stderr, "[glp] clearDrawable ctx=%p\n", (void*)self); fflush(stderr);
-   ((void(*)(id,SEL))g_glp_clearDrawable)(self, _cmd);
-}
-
-/* Pixel-format + context creation probes (hypothesis a: nil pf -> nil ctx). */
-static IMP g_glp_pfInit, g_glp_ctxInit, g_glp_openGLContext, g_glp_pixelFormat;
-static id glp_pfInit(id self, SEL _cmd, const uint32_t *attrs) {
-   char buf[512]; int p = 0;
-   buf[0] = 0;
-   if (attrs) {
-      for (int i = 0; i < 40 && attrs[i]; i++)
-         p += snprintf(buf+p, sizeof(buf)-p, "%u ", attrs[i]);
-   }
-   id r = ((id(*)(id,SEL,const uint32_t*))g_glp_pfInit)(self, _cmd, attrs);
-   fprintf(stderr, "[glp] NSOpenGLPixelFormat initWithAttributes:{ %s} -> %p\n",
-           buf, (void*)r); fflush(stderr);
-   return r;
-}
-static id glp_ctxInit(id self, SEL _cmd, id fmt, id share) {
-   id r = ((id(*)(id,SEL,id,id))g_glp_ctxInit)(self, _cmd, fmt, share);
-   fprintf(stderr, "[glp] NSOpenGLContext initWithFormat:%p shareContext:%p -> %p\n",
-           (void*)fmt, (void*)share, (void*)r); fflush(stderr);
-   return r;
-}
-static id glp_openGLContext(id self, SEL _cmd) {
-   id r = ((id(*)(id,SEL))g_glp_openGLContext)(self, _cmd);
-   static int n = 0;
-   if (n++ < 6)
-      fprintf(stderr, "[glp] -[%s openGLContext] -> ctx=%p\n",
-              object_getClassName(self), (void*)r), fflush(stderr);
-   return r;
-}
-static id glp_pixelFormat(id self, SEL _cmd) {
-   id r = ((id(*)(id,SEL))g_glp_pixelFormat)(self, _cmd);
-   static int n = 0;
-   if (n++ < 6)
-      fprintf(stderr, "[glp] -[%s pixelFormat] -> pf=%p\n",
-              object_getClassName(self), (void*)r), fflush(stderr);
-   return r;
-}
-
-static void glp_swz(Class C, const char *sel, IMP fn, IMP *slot) {
-   if (!C) return;
-   Method m = class_getInstanceMethod(C, sel_registerName(sel));
-   if (m) { *slot = method_getImplementation(m); method_setImplementation(m, fn); }
-   else fprintf(stderr, "[glp] no method %s on %s\n", sel, class_getName(C));
-}
-
-/* Force NSOpenGLView non-layer-backed (ABICONV_GL_NOLAYER test). setWantsLayer:
- * / wantsLayer live on NSView, so the swizzled Method is SHARED by every view —
- * coerce ONLY for NSOpenGLView instances (else the titlebar etc. break). */
-static IMP g_glp_setWantsLayer, g_glp_wantsLayer;
-static Class g_glp_nsoglview;
-static int glp_is_glview(id o) {
-   if (!g_glp_nsoglview) g_glp_nsoglview = objc_getClass("NSOpenGLView");
-   for (Class c = object_getClass(o); c; c = class_getSuperclass(c))
-      if (c == g_glp_nsoglview) return 1;
-   return 0;
-}
-static void glp_setWantsLayer(id self, SEL _cmd, BOOL want) {
-   if (glp_is_glview(self)) want = NO;
-   ((void(*)(id,SEL,BOOL))g_glp_setWantsLayer)(self, _cmd, want);
-}
-static BOOL glp_wantsLayer(id self, SEL _cmd) {
-   if (glp_is_glview(self)) return NO;
-   return ((BOOL(*)(id,SEL))g_glp_wantsLayer)(self, _cmd);
-}
-
-/* CI probe: log every CIContext drawImage (the actual splash render lane —
- * QuinnSplashView drawRect: composites the logo via CIColorMatrix ->
- * [CIContext drawImage:atPoint:fromRect:]) + sample the CIImage's CONTENT by
- * rendering it into a scratch bitmap through a separate software CIContext. */
-static IMP g_glp_ciDrawAt, g_glp_ciDrawIn;
-static void glp_ci_sample(id ciimg, const char *tag) {
-   /* extent (CGRect, stret) */
-   struct { double x,y,w,h; } ex = {0,0,0,0};
-   ((void(*)(void*,id,SEL))objc_msgSend_stret)(&ex, ciimg, sel_registerName("extent"));
-   long nz = -1; unsigned maxb = 0;
-   int w = (int)ex.w, h = (int)ex.h;
-   const char *why = "";
-   if (w > 0 && h > 0 && w < 4096 && h < 4096) {
-      static id swctx;
-      if (!swctx) {
-         swctx = ((id(*)(id,SEL,id))objc_msgSend)((id)objc_getClass("CIContext"),
-                    sel_registerName("contextWithOptions:"), (id)0);
-         if (swctx) ((id(*)(id,SEL))objc_msgSend)(swctx, sel_registerName("retain"));
-      }
-      if (!swctx) { why = " NOCTX"; }
-      else {
-         CGRect b = CGRectMake(ex.x, ex.y, w, h);
-         CGImageRef cg = ((CGImageRef(*)(id,SEL,id,CGRect))objc_msgSend)(
-            swctx, sel_registerName("createCGImage:fromRect:"), ciimg, b);
-         if (!cg) { why = " NOCGIMG"; }
-         else {
-            CGDataProviderRef dp = CGImageGetDataProvider(cg);
-            CFDataRef data = dp ? CGDataProviderCopyData(dp) : NULL;
-            if (!data) { why = " NODATA"; }
-            else {
-               const unsigned char *p = CFDataGetBytePtr(data);
-               long n = CFDataGetLength(data);
-               nz = 0;
-               for (long i = 0; i < n; i++)
-                  if (p[i]) { nz++; if (p[i] > maxb) maxb = p[i]; }
-               CFRelease(data);
-            }
-            CGImageRelease(cg);
-         }
-      }
-   }
-   fprintf(stderr, "[ci] %s img=%p extent=%.0fx%.0f@(%.0f,%.0f) nzbytes=%ld max=%u%s\n",
-           tag, (void*)ciimg, ex.w, ex.h, ex.x, ex.y, nz, maxb, why);
-   fflush(stderr);
-}
-
-/* Sampler CONTROL: a natively-built solid red 8x8 CIImage must read non-zero
- * through the same path, proving the sampler works. Runs once. */
-static void glp_ci_control(void) {
-   static int done; if (done) return; done = 1;
-   id c = ((id(*)(id,SEL,double,double,double,double))objc_msgSend)(
-      (id)objc_getClass("CIColor"), sel_registerName("colorWithRed:green:blue:alpha:"),
-      1.0, 0.0, 0.0, 1.0);
-   id img = ((id(*)(id,SEL,id))objc_msgSend)((id)objc_getClass("CIImage"),
-      sel_registerName("imageWithColor:"), c);
-   img = ((id(*)(id,SEL,CGRect))objc_msgSend)(img,
-      sel_registerName("imageByCroppingToRect:"), CGRectMake(0,0,8,8));
-   glp_ci_sample(img, "CONTROL(red8x8)");
-}
-static void glp_ciDrawAt(id self, SEL _cmd, id img, CGPoint p, CGRect from) {
-   static int n = 0;
-   if (n++ < 12) { glp_ci_control(); glp_ci_sample(img, "drawImage:atPoint:"); }
-   ((void(*)(id,SEL,id,CGPoint,CGRect))g_glp_ciDrawAt)(self, _cmd, img, p, from);
-}
-static void glp_ciDrawIn(id self, SEL _cmd, id img, CGRect in, CGRect from) {
-   static int n = 0;
-   if (n++ < 12) glp_ci_sample(img, "drawImage:inRect:");
-   ((void(*)(id,SEL,id,CGRect,CGRect))g_glp_ciDrawIn)(self, _cmd, img, in, from);
-}
-
-/* Value-level probes on the CI creators + the file loader. */
-static IMP g_glp_ciColor4, g_glp_ciColor3, g_glp_ciVec2, g_glp_ciVec4, g_glp_ciURL;
-static id glp_ciColor4(id self, SEL _cmd, double r, double g, double b, double a) {
-   id res = ((id(*)(id,SEL,double,double,double,double))g_glp_ciColor4)(self,_cmd,r,g,b,a);
-   fprintf(stderr, "[civ] colorWithRGBA(%g,%g,%g,%g) -> %p\n", r,g,b,a,(void*)res);
-   fflush(stderr); return res;
-}
-static id glp_ciColor3(id self, SEL _cmd, double r, double g, double b) {
-   id res = ((id(*)(id,SEL,double,double,double))g_glp_ciColor3)(self,_cmd,r,g,b);
-   fprintf(stderr, "[civ] colorWithRGB(%g,%g,%g) -> %p\n", r,g,b,(void*)res);
-   fflush(stderr); return res;
-}
-static id glp_ciVec2(id self, SEL _cmd, double x, double y) {
-   id res = ((id(*)(id,SEL,double,double))g_glp_ciVec2)(self,_cmd,x,y);
-   fprintf(stderr, "[civ] vectorXY(%g,%g) -> %p\n", x,y,(void*)res);
-   fflush(stderr); return res;
-}
-static id glp_ciVec4(id self, SEL _cmd, double x, double y, double z, double w2) {
-   id res = ((id(*)(id,SEL,double,double,double,double))g_glp_ciVec4)(self,_cmd,x,y,z,w2);
-   fprintf(stderr, "[civ] vectorXYZW(%g,%g,%g,%g) -> %p\n", x,y,z,w2,(void*)res);
-   fflush(stderr); return res;
-}
-/* Log every CIColorMatrix setValue:forKey: (key + value description). */
-static IMP g_glp_fltSVFK;
-static void glp_fltSVFK(id self, SEL _cmd, id val, id key) {
-   if (!strcmp(object_getClassName(self), "CIColorMatrix")) {
-      const char *ks = key ? ((const char*(*)(id,SEL))objc_msgSend)(key, sel_registerName("UTF8String")) : "?";
-      id d = val ? ((id(*)(id,SEL))objc_msgSend)(val, sel_registerName("description")) : 0;
-      const char *ds = d ? ((const char*(*)(id,SEL))objc_msgSend)(d, sel_registerName("UTF8String")) : "(nil)";
-      fprintf(stderr, "[cmx] set %s = %s\n", ks ? ks : "?", ds ? ds : "?");
-      fflush(stderr);
-   }
-   ((void(*)(id,SEL,id,id))g_glp_fltSVFK)(self, _cmd, val, key);
-}
-
-/* Sample every CIFilter outputImage fetch: pinpoints WHICH filter step drops
- * the content (first ~24 fetches). */
-static IMP g_glp_fltVFK;
-static id glp_fltVFK(id self, SEL _cmd, id key) {
-   id res = ((id(*)(id,SEL,id))g_glp_fltVFK)(self, _cmd, key);
-   static int n = 0;
-   if (n < 24 && res && key) {
-      const char *ks = ((const char*(*)(id,SEL))objc_msgSend)(key, sel_registerName("UTF8String"));
-      if (ks && !strcmp(ks, "outputImage")) {
-         Class cimg = objc_getClass("CIImage");
-         char tag[128];
-         snprintf(tag, sizeof(tag), "  %s.output", object_getClassName(self));
-         int iskind = 0;
-         for (Class c = object_getClass(res); c; c = class_getSuperclass(c))
-            if (c == cimg) { iskind = 1; break; }
-         if (iskind) { n++; glp_ci_sample(res, tag); }
-      }
-   }
-   return res;
-}
-
-static id glp_ciURL(id self, SEL _cmd, id url) {
-   id res = ((id(*)(id,SEL,id))g_glp_ciURL)(self, _cmd, url);
-   id us = url ? ((id(*)(id,SEL))objc_msgSend)(url, sel_registerName("absoluteString")) : 0;
-   const char *ustr = us ? ((const char*(*)(id,SEL))objc_msgSend)(us, sel_registerName("UTF8String")) : "(nil)";
-   fprintf(stderr, "[civ] imageWithContentsOfURL:%s -> %p\n", ustr ? ustr : "?", (void*)res);
-   fflush(stderr);
-   if (res) glp_ci_sample(res, "  fileImage");
-   return res;
-}
-
-static void glp_install_once(void) {
-   static int done; if (done) return; done = 1;
-   Class CI = objc_getClass("CIContext");
-   if (CI) {
-      glp_swz(CI, "drawImage:atPoint:fromRect:", (IMP)glp_ciDrawAt, &g_glp_ciDrawAt);
-      glp_swz(CI, "drawImage:inRect:fromRect:",  (IMP)glp_ciDrawIn, &g_glp_ciDrawIn);
-   }
-   Class CIC = objc_getClass("CIColor"), CIV = objc_getClass("CIVector"),
-         CII = objc_getClass("CIImage");
-   if (CIC) {
-      glp_swz(object_getClass((id)CIC), "colorWithRed:green:blue:alpha:",
-              (IMP)glp_ciColor4, &g_glp_ciColor4);
-      glp_swz(object_getClass((id)CIC), "colorWithRed:green:blue:",
-              (IMP)glp_ciColor3, &g_glp_ciColor3);
-   }
-   if (CIV) {
-      glp_swz(object_getClass((id)CIV), "vectorWithX:Y:", (IMP)glp_ciVec2, &g_glp_ciVec2);
-      glp_swz(object_getClass((id)CIV), "vectorWithX:Y:Z:W:", (IMP)glp_ciVec4, &g_glp_ciVec4);
-   }
-   if (CII)
-      glp_swz(object_getClass((id)CII), "imageWithContentsOfURL:", (IMP)glp_ciURL, &g_glp_ciURL);
-   Class CIF = objc_getClass("CIFilter");
-   if (CIF) {
-      glp_swz(CIF, "valueForKey:", (IMP)glp_fltVFK, &g_glp_fltVFK);
-      glp_swz(CIF, "setValue:forKey:", (IMP)glp_fltSVFK, &g_glp_fltSVFK);
-   }
-   Class C = objc_getClass("NSOpenGLContext");
-   if (!C) { fprintf(stderr, "[glp] NSOpenGLContext class not found\n"); return; }
-   glp_swz(C, "flushBuffer",         (IMP)glp_flushBuffer,  &g_glp_flushBuffer);
-   glp_swz(C, "setView:",            (IMP)glp_setView,      &g_glp_setView);
-   glp_swz(C, "makeCurrentContext",  (IMP)glp_makeCurrent,  &g_glp_makeCurrent);
-   glp_swz(C, "clearDrawable",       (IMP)glp_clearDrawable,&g_glp_clearDrawable);
-   glp_swz(C, "initWithFormat:shareContext:", (IMP)glp_ctxInit, &g_glp_ctxInit);
-   glp_swz(objc_getClass("NSOpenGLPixelFormat"), "initWithAttributes:",
-           (IMP)glp_pfInit, &g_glp_pfInit);
-   glp_swz(objc_getClass("NSOpenGLView"), "openGLContext",
-           (IMP)glp_openGLContext, &g_glp_openGLContext);
-   glp_swz(objc_getClass("NSOpenGLView"), "pixelFormat",
-           (IMP)glp_pixelFormat, &g_glp_pixelFormat);
-   if (KNOB("ABICONV_GL_NOLAYER")) {
-      glp_swz(objc_getClass("NSOpenGLView"), "setWantsLayer:",
-              (IMP)glp_setWantsLayer, &g_glp_setWantsLayer);
-      if (KNOB("ABICONV_GL_NOLAYER_GETTER"))
-         glp_swz(objc_getClass("NSOpenGLView"), "wantsLayer",
-                 (IMP)glp_wantsLayer, &g_glp_wantsLayer);
-      fprintf(stderr, "[glp] NSOpenGLView setWantsLayer: coerced to NO%s\n",
-              KNOB("ABICONV_GL_NOLAYER_GETTER") ? " (+getter)" : "");
-   }
-   fprintf(stderr, "[glp] NSOpenGLContext swizzles installed\n"); fflush(stderr);
-}
-
 /* -[NSView bounds] as a plain CGRect (32B on x86_64 -> struct-return ABI).
  * Casting objc_msgSend to a CGRect-returning fn ptr emits the STRET convention
  * (hidden retbuf ptr in rdi, self in rsi) while still calling plain objc_msgSend,
@@ -10280,27 +9297,6 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
     * +initialize-style recursion). Validate it against the authoritative map;
     * fall back to the derived class if it doesn't name a legacy method. */
    Class lookup = object_getClass(self_);
-
-   /* Env-gated reverse-DISPATCH trace: ABICONV_REV_DISPATCH_TRACE=<substr>
-    * logs every native->legacy method dispatch whose selector contains
-    * <substr> ("=" alone or "*" logs all). Diagnostic for display-cycle
-    * questions of the form "does AppKit ever send drawRect:/drawWithFrame:
-    * to the app's legacy views?" (Quinn black-board). Read once. */
-   {
-      static const char *dt_filter; static int dt_init;
-      if (!dt_init) { dt_filter = KNOB("ABICONV_REV_DISPATCH_TRACE"); dt_init = 1; }
-      if (dt_filter) {
-         const char *sn = sel_getName(sel);
-         if (dt_filter[0] == '\0' || dt_filter[0] == '*' || strstr(sn, dt_filter)) {
-            fprintf(stderr, "[rdis] %s[%s]\n", class_getName(lookup), sn);
-            fflush(stderr);
-         }
-      }
-   }
-
-   /* GL-drawable probe: install NSOpenGLContext swizzles once, lazily (AppKit
-    * fully up here). See glp_install_once above. */
-   if (KNOB("ABICONV_GL_PROBE")) glp_install_once();
 
    struct rmeth_ent *m = NULL;
    Class hint = reverse_take_super(self_, sel);
@@ -10619,48 +9615,6 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
 #undef REV_XMM
    plan->frame_words = w;
 
-   /* Env-gated reverse-ARG value trace: ABICONV_REV_ARG_TRACE=<substr>[,<substr>...]
-    * logs the marshalled i386 frame VALUES of every native->legacy dispatch
-    * whose selector contains one of the substrings ("*" = all). Complements
-    * ABICONV_REV_DISPATCH_TRACE (names only): prints each explicit arg word as
-    * hex + as a {short,short} pair so 16-bit cell geometry (Quinn IGRect /
-    * IGPoint) reads off directly. Diagnostic only; zero cost when unset. */
-   {
-      static const char *at_filter; static int at_init;
-      if (!at_init) { at_filter = KNOB("ABICONV_REV_ARG_TRACE"); at_init = 1; }
-      if (at_filter && sel) {
-         const char *sn = sel_getName(sel);
-         int hit = (at_filter[0] == '*');
-         if (!hit) {
-            const char *p = at_filter;
-            while (*p && !hit) {
-               const char *e = strchr(p, ',');
-               size_t n = e ? (size_t)(e - p) : strlen(p);
-               char tok[64];
-               if (n > 0 && n < sizeof tok) {
-                  memcpy(tok, p, n); tok[n] = '\0';
-                  if (strstr(sn, tok)) { hit = 1; }
-               }
-               p = e ? e + 1 : p + strlen(p);
-            }
-         }
-         if (hit) {
-            char buf[512]; int off = 0;
-            off += snprintf(buf + off, sizeof buf - off, "[rarg] %s[%s]",
-                            class_getName(lookup), sn);
-            unsigned a0 = head + 2;              /* first explicit arg word */
-            for (unsigned k = a0; k < w && k < a0 + 8 &&
-                                  off < (int)sizeof buf - 40; ++k) {
-               uint32_t fv = plan->frame[k];
-               off += snprintf(buf + off, sizeof buf - off, " %08x(%d,%d)",
-                               fv, (short)(fv & 0xffff), (short)(fv >> 16));
-            }
-            fprintf(stderr, "%s\n", buf);
-            fflush(stderr);
-         }
-      }
-   }
-
    /* ---- LEGACY DRAW-CLIP CONTRACT ------------------------------------------
     * Legacy apps were written against the pre-10.14 AppKit drawing contract:
     * the dirty rect handed to -drawRect: was INTERSECTED with the view's
@@ -10688,17 +9642,9 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
     *
     * Triggers on STRUCTURE (a reverse-dispatched legacy draw method with an
     * NSRect arg + a current bitmap/window context), never on an app/class name,
-    * so any translated legacy AppKit target benefits. ABICONV_DRAWCLIP overrides
-    * the mode for A/B bisection: 1=full (default), 0=off, 2=intersect-arg only
-    * (no clip), 3=clip only (don't rewrite the arg). ABICONV_DRAWCLIP_TRACE logs
-    * each decision. */
+    * so any translated legacy AppKit target benefits. */
    {
-      static int dcl_mode = -1;
-      if (dcl_mode < 0) {
-         const char *dm = KNOB("ABICONV_DRAWCLIP");
-         dcl_mode = dm ? atoi(dm) : 1;
-      }
-      if (dcl_mode && rect_w && !object_isClass(self_) &&
+      if (rect_w && !object_isClass(self_) &&
           sel && mem_readable((uintptr_t)sel, 1)) {
          const char *dsn = sel_getName(sel);
          int is_drawrect = dsn && !strcmp(dsn, "drawRect:");
@@ -10734,34 +9680,22 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
                      CGRect inter = CGRectIntersection(clipr, b);
                      if (CGRectIsNull(inter)) { inter = CGRectZero; }
                      clipr = inter;
-                     if (dcl_mode != 3) {
-                        float ox = (float)inter.origin.x, oy = (float)inter.origin.y;
-                        float ow = (float)inter.size.width, oh = (float)inter.size.height;
-                        memcpy(&plan->frame[rect_w + 0], &ox, 4);
-                        memcpy(&plan->frame[rect_w + 1], &oy, 4);
-                        memcpy(&plan->frame[rect_w + 2], &ow, 4);
-                        memcpy(&plan->frame[rect_w + 3], &oh, 4);
-                     }
+                     float ox = (float)inter.origin.x, oy = (float)inter.origin.y;
+                     float ow = (float)inter.size.width, oh = (float)inter.size.height;
+                     memcpy(&plan->frame[rect_w + 0], &ox, 4);
+                     memcpy(&plan->frame[rect_w + 1], &oy, 4);
+                     memcpy(&plan->frame[rect_w + 2], &ow, 4);
+                     memcpy(&plan->frame[rect_w + 3], &oh, 4);
                      do_clip = ((signed char (*)(id, SEL))objc_msgSend)(
                         self_, sel_registerName("wantsDefaultClipping")) != 0;
                   } else {
                      do_clip = 0;
                   }
                }
-               if (dcl_mode == 2) { do_clip = 0; }
                if (do_clip) {
                   CGContextSaveGState(dcc);
                   CGContextClipToRect(dcc, clipr);
                   plan->draw_clip_ctx = (uint64_t)(uintptr_t)dcc;
-               }
-               if (KNOB("ABICONV_DRAWCLIP_TRACE")) {
-                  fprintf(stderr, "[dcl] %s[%s] clip=[%.1f %.1f %.1f %.1f] "
-                          "applied=%d ctx=%p mode=%d\n",
-                          class_getName(lookup), dsn,
-                          clipr.origin.x, clipr.origin.y,
-                          clipr.size.width, clipr.size.height,
-                          do_clip, (void *)dcc, dcl_mode);
-                  fflush(stderr);
                }
             }
          }
@@ -11107,16 +10041,6 @@ static struct geo_res geo_call(unsigned idx, const uint32_t *a32) {
     * first 6 i386 arg slots as hex + float so a brief play reveals the actual CG
     * draw geometry/pointers reaching native (e.g. CGContextDrawImage ctx@slot0,
     * rect@slots1-4, image@slot5). Quinn invisible-blocks investigation. */
-   if (KNOB("GEO_PTR_TRACE")) {
-      float f1, f2, f3, f4;
-      memcpy(&f1, &a32[1], 4); memcpy(&f2, &a32[2], 4);
-      memcpy(&f3, &a32[3], 4); memcpy(&f4, &a32[4], 4);
-      fprintf(stderr, "[geoin] %s slots=[%08x %08x %08x %08x %08x %08x] "
-              "rectf=[%.2f %.2f %.2f %.2f]\n", e->name,
-              a32[0], a32[1], a32[2], a32[3], a32[4], a32[5],
-              (double)f1, (double)f2, (double)f3, (double)f4);
-      fflush(stderr);
-   }
    char rb = *enc_skip_quals(ret);
    size_t risz = 0, rnsz = 0; uint8_t rsse[8] = {0}; unsigned rnebs = 0;
    int kind = 0;   /* 0 scalar/void, 1 wrap obj, 3 stret narrow, 4 fp,
@@ -11141,12 +10065,6 @@ static struct geo_res geo_call(unsigned idx, const uint32_t *a32) {
       if (*tb == '^') {            /* opaque CF/CG ptr arg -> handle-bridge */
          uint32_t praw = a32[ai++];
          uint64_t preal = geo_cfptr_arg(praw);
-         if (KNOB("GEO_PTR_TRACE")) {
-            fprintf(stderr, "[geoptr] %s ^arg raw=0x%08x -> real=0x%llx%s\n",
-                    e->name, praw, (unsigned long long)preal,
-                    preal == 0 ? "  (NULL!)" : "");
-            fflush(stderr);
-         }
          mcur_put_gp(&plan, &cur, preal);
          continue;
       }
@@ -11410,23 +10328,6 @@ static void reverse_add_methods(Class target, uint32_t methodLists) {
          const char *types = legacy_cstr_ok(meth[k].types)
             ? (const char *)(uintptr_t)meth[k].types : "v8@0:4";
          SEL sel = sel_registerName(sname);
-         /* ABICONV_REV_REG_TRACE: log every reverse-registration, and loudly flag
-          * any entry with a 0/implausible legacy imp (should be caught by ptr_ok
-          * above, but trace defensively). */
-         if (KNOB("ABICONV_REV_REG_TRACE")) {
-            const char *cn = class_getName(target);
-            if (meth[k].imp == 0) {
-               fprintf(stderr, "[REV_REG] imp=0 ZERO-IMP class=%s sel=%s types=%s\n",
-                       cn ? cn : "?", sname, types);
-            } else if (meth[k].imp < 0x1000) {
-               fprintf(stderr, "[REV_REG] imp=0x%x JUNK-IMP class=%s sel=%s types=%s\n",
-                       meth[k].imp, cn ? cn : "?", sname, types);
-            } else {
-               fprintf(stderr, "[REV_REG] imp=0x%x class=%s sel=%s types=%s\n",
-                       meth[k].imp, cn ? cn : "?", sname, types);
-            }
-            fflush(stderr);
-         }
          /* A struct-by-value return (>16B, e.g. -adjustScroll: -> NSRect) is
           * dispatched by native callers through objc_msgSend_stret, whose ABI
           * puts a hidden return-buffer pointer in rdi. Register the stret-aware
@@ -11496,9 +10397,8 @@ static int reverse_register_one(const struct legacy_objc_class *cls) {
  * re-enters the forward bridge -> reverse bridge) and _cmd = 0 (+load bodies
  * effectively never read _cmd). Ordering: `reg[]` restricts this to classes we
  * actually registered (never a native/pre-existing class), `loaded[]` makes it
- * run-once, and a class's superclass +load is forced first by recursion. Guard
- * ABICONV_NO_LEGACY_LOAD disables the whole pass if a target's +load misbehaves
- * under the bridge (it runs app code inside the dyld add-image callback). */
+ * run-once, and a class's superclass +load is forced first by recursion. It runs
+ * app code inside the dyld add-image callback. */
 static void invoke_legacy_load(const struct legacy_objc_class **defs,
                                size_t ndefs, const char *reg, char *loaded,
                                size_t i) {
@@ -11562,7 +10462,6 @@ static int apply_legacy_category(const struct legacy_objc_category *cat) {
 }
 
 static void retry_pending_legacy(void) {
-   if (KNOB("M64_NO_PENDING_LEGACY")) { return; }
    const struct legacy_objc_class *late[PEND_CAP];
    size_t nlate = 0;
    for (int pass = 0; pass < 64; ++pass) {
@@ -11582,7 +10481,7 @@ static void retry_pending_legacy(void) {
       g_pend_cat[i] = g_pend_cat[--g_pend_ncat];
       ++cats;
    }
-   if (nlate && !KNOB("ABICONV_NO_LEGACY_LOAD")) {
+   if (nlate) {
       char reg[PEND_CAP], loaded[PEND_CAP];
       memset(reg, 1, nlate); memset(loaded, 0, nlate);
       for (size_t i = 0; i < nlate; ++i) {
@@ -11651,58 +10550,29 @@ static void reverse_register_image(const struct mach_header_64 *mh,
     * methods were merely indexed for class-method lookup and stayed invisible
     * to class_getInstanceMethod / direct messaging. */
    uint32_t cats_applied = 0;
-   int cat_trace = KNOB("ABICONV_CAT_TRACE") != NULL;
    for (size_t i = 0; i < nmodules; ++i) {
       const struct legacy_objc_module *mod = &modules[i];
       if (mod->version != 7 || mod->size != sizeof(*mod)) {
-         if (cat_trace) {
-            fprintf(stderr, "[cat] mod[%zu] BAD-HDR version=0x%x size=0x%x symtab=0x%x\n",
-                    i, mod->version, mod->size, mod->symtab); fflush(stderr);
-         }
          continue;
       }
       if (!ptr_ok(mod->symtab, sizeof(struct legacy_objc_symtab))) {
-         if (cat_trace) {
-            fprintf(stderr, "[cat] mod[%zu] BAD-SYMTAB symtab=0x%x\n", i, mod->symtab);
-            fflush(stderr);
-         }
          continue;
       }
       const struct legacy_objc_symtab *st =
          (const struct legacy_objc_symtab *)(uintptr_t)mod->symtab;
       const uint32_t *ddefs = (const uint32_t *)
          ((const char *)st + sizeof(struct legacy_objc_symtab));
-      if (cat_trace && st->cat_def_cnt) {
-         fprintf(stderr, "[cat] mod[%zu] symtab=0x%x cls_def_cnt=%u cat_def_cnt=%u\n",
-                 i, mod->symtab, st->cls_def_cnt, st->cat_def_cnt); fflush(stderr);
-      }
       for (uint16_t j = 0; j < st->cat_def_cnt; ++j) {
          uint32_t cref = ddefs[(uint32_t)st->cls_def_cnt + j];
          if (!ptr_ok(cref, sizeof(struct legacy_objc_category))) {
-            if (cat_trace) {
-               fprintf(stderr, "[cat]   j=%u BAD-CREF cref=0x%x\n", j, cref);
-               fflush(stderr);
-            }
             continue;
          }
          const struct legacy_objc_category *cat =
             (const struct legacy_objc_category *)(uintptr_t)cref;
          if (!legacy_cstr_ok(cat->class_name)) {
-            if (cat_trace) {
-               fprintf(stderr, "[cat]   j=%u BAD-CLSNAME cref=0x%x class_name=0x%x\n",
-                       j, cref, cat->class_name); fflush(stderr);
-            }
             continue;
          }
          Class tgt = objc_getClass((const char *)(uintptr_t)cat->class_name);
-         if (KNOB("ABICONV_CAT_TRACE")) {
-            fprintf(stderr, "[cat] %s (+%s) tgt=%p imeths=0x%x\n",
-                    (const char *)(uintptr_t)cat->class_name,
-                    legacy_cstr_ok(cat->category_name)
-                       ? (const char *)(uintptr_t)cat->category_name : "?",
-                    (void *)tgt, cat->instance_methods);
-            fflush(stderr);
-         }
          if (!tgt) {                /* target class not present yet: retry later */
             if (g_pend_ncat < PEND_CAP) { g_pend_cat[g_pend_ncat++] = cat; }
             continue;
@@ -11715,7 +10585,7 @@ static void reverse_register_image(const struct mach_header_64 *mh,
    /* +load pass: replay each registered legacy class's fragile-ObjC1 +load,
     * superclass-first, AFTER all classes and categories are attached (matching
     * the old call_load_methods timing). See invoke_legacy_load. */
-   if (registered && !KNOB("ABICONV_NO_LEGACY_LOAD")) {
+   if (registered) {
       char loaded[CAP]; memset(loaded, 0, ndefs);
       for (size_t i = 0; i < ndefs; ++i) {
          invoke_legacy_load(defs, ndefs, reg, loaded, i);
@@ -12079,12 +10949,6 @@ static void x64_init_objc1_compat(void) {
    for (unsigned i = 0; i < sizeof g_cgfloat_sels / sizeof g_cgfloat_sels[0]; ++i) {
       cgfloat_mask_insert(sel_registerName(g_cgfloat_sels[i].name),
                           g_cgfloat_sels[i].mask);
-   }
-   /* KILL SWITCH for the NSTableColumn width entries (mask 0 = the pre-fix
-    * fused-double read). Two-arm guard: tests-i386 tablecolumn-width. */
-   if (KNOB("M64_NO_CGFLOAT_COLUMN_WIDTH")) {
-      cgfloat_mask_insert(sel_registerName("setMinWidth:"), 0);
-      cgfloat_mask_insert(sel_registerName("setMaxWidth:"), 0);
    }
 }
 

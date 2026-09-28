@@ -37,13 +37,6 @@
 
 #define ENV_KEY "ABICONV_USER_INPUT_SRC"
 
-static int kb_trace(void) {
-    static int v = -1;
-    if (v < 0) v = getenv("KEYBOARD_INPUT_TRACE") != NULL;
-    return v;
-}
-#define KBLOG(...) do { if (kb_trace()) { fprintf(stderr, "[kbinput] " __VA_ARGS__); fflush(stderr); } } while (0)
-
 /* Re-select the recorded pre-launch input source. Runs at process exit. */
 static void restore_user_source(void) {
     const char *want = getenv(ENV_KEY);
@@ -69,10 +62,7 @@ static void restore_user_source(void) {
     CFArrayRef list = filter ? TISCreateInputSourceList(filter, false) : NULL;
     if (list && CFArrayGetCount(list) > 0) {
         TISInputSourceRef src = (TISInputSourceRef)CFArrayGetValueAtIndex(list, 0);
-        OSStatus st = TISSelectInputSource(src);
-        KBLOG("restored user input source '%s' at exit (st=%d)\n", want, (int)st);
-    } else {
-        KBLOG("could not find input source '%s' to restore\n", want);
+        (void)TISSelectInputSource(src);
     }
     if (list) CFRelease(list);
     if (filter) CFRelease(filter);
@@ -93,7 +83,6 @@ static void kbinput_init(void) {
         char buf[256];
         if (id && CFStringGetCString(id, buf, sizeof buf, kCFStringEncodingUTF8) && buf[0]) {
             setenv(ENV_KEY, buf, 1);
-            KBLOG("snapshot pre-launch input source = %s\n", buf);
         }
         CFRelease(s);
     }

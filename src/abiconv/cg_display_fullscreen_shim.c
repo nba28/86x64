@@ -75,7 +75,7 @@
  * KILL SWITCH: M64_NO_DISPLAY_FULLSCREEN_BRIDGE=1 disarms the whole file — every
  * entry point forwards to the native CoreGraphics function, i.e. exactly the
  * pre-fix abigen-bridge behaviour.  Used by the A/B guard (tests-i386,
- * display-fullscreen-bridge).  ABICONV_DISPLAY_TRACE=1 logs every decision.
+ * display-fullscreen-bridge).
  *
  * ABI: reached from translated i386 code through the ___CG* trampolines in
  * cg_display_tramp.asm (rdi -> &i386 args[0], result in eax; CGDisplayBounds
@@ -125,16 +125,7 @@ extern boolean_t CGDisplayIsCaptured(CGDirectDisplayID);
 typedef struct { int16_t top, left, bottom, right; } CarbonRect;
 typedef int32_t (*win_getbounds_fn)(void *, uint32_t, CarbonRect *);
 typedef int32_t (*win_setbounds_fn)(void *, uint32_t, const CarbonRect *);
-typedef unsigned char (*agl_update_fn)(void *);
 #define kWinContentRgn 33u
-
-static int disp_trace(void)
-{
-   static int t = -1;
-   if (t < 0) t = getenv("ABICONV_DISPLAY_TRACE") ? 1 : 0;
-   return t;
-}
-#define DLOG(...) do { if (disp_trace()) fprintf(stderr, "[cgdisp] " __VA_ARGS__); } while (0)
 
 /* THE kill switch. Read once; when set, every entry point below forwards. */
 static int bridge_off(void)
@@ -278,34 +269,22 @@ static void present_window(uint32_t id, int w, int h, double *ox, double *oy)
 
    void *win = NULL, *ctx = NULL;
    if (!agl_gl_render_target(&win, &ctx) || !win) {
-      DLOG("present: no GL render target; virtual origin = display origin %.0f,%.0f\n",
-           *ox, *oy);
       return;
    }
    static win_getbounds_fn getb; static win_setbounds_fn setb;
    if (!getb) getb = (win_getbounds_fn)dlsym(RTLD_DEFAULT, "GetWindowBounds");
    if (!setb) setb = (win_setbounds_fn)dlsym(RTLD_DEFAULT, "SetWindowBounds");
-   if (!getb) { DLOG("present: GetWindowBounds missing\n"); return; }
+   if (!getb) { return; }
 
    CarbonRect r = { 0, 0, 0, 0 };
-   if (getb(win, kWinContentRgn, &r) != 0) { DLOG("present: GetWindowBounds failed\n"); return; }
+   if (getb(win, kWinContentRgn, &r) != 0) { return; }
    const int cw = r.right - r.left, ch = r.bottom - r.top;
 
    if (cw == w && ch == h && setb) {
       CarbonRect t = { (int16_t)*oy, (int16_t)*ox,
                        (int16_t)(*oy + ch), (int16_t)(*ox + cw) };
-      int32_t st = setb(win, kWinContentRgn, &t);
-      DLOG("present: window %p content %dx%d moved %d,%d -> %.0f,%.0f st=%d\n",
-           win, cw, ch, r.left, r.top, *ox, *oy, (int)st);
-      if (ctx) {
-         static agl_update_fn upd;
-         if (!upd) upd = (agl_update_fn)dlsym(RTLD_DEFAULT, "aglUpdateContext");
-         if (upd) DLOG("present: aglUpdateContext = %d\n", (int)upd(ctx));
-      }
+      (void)setb(win, kWinContentRgn, &t);
       (void)getb(win, kWinContentRgn, &r);        /* believe the window, not us */
-   } else {
-      DLOG("present: window %p content %dx%d != requested %dx%d -> NOT moved"
-           " (a resize is the operation that panics)\n", win, cw, ch, w, h);
    }
    *ox = r.left;
    *oy = r.top;
@@ -323,7 +302,6 @@ uint32_t shim_CGDisplaySwitchToMode(uint32_t *a)
 
    CFDictionaryRef req = (CFDictionaryRef)(uintptr_t)_86x64_unwrap_obj_arg(a[1]);
    if (!req || CFGetTypeID(req) != CFDictionaryGetTypeID()) {
-      DLOG("SwitchToMode(display=%u): not a mode dictionary -> ignored\n", id);
       return 0;                                   /* never reconfigure a display */
    }
    const int w   = dict_int(req, K_W, 0);
@@ -331,7 +309,6 @@ uint32_t shim_CGDisplaySwitchToMode(uint32_t *a)
    const int bpp = dict_int(req, K_BPP, 32);
    const double rr = dict_dbl(req, K_RR, 0.0);
    if (w <= 0 || h <= 0) {
-      DLOG("SwitchToMode(display=%u): mode has no geometry -> ignored\n", id);
       return 0;
    }
 
@@ -356,8 +333,6 @@ uint32_t shim_CGDisplaySwitchToMode(uint32_t *a)
    os_unfair_lock_unlock(&g_lk);
 
    if (restore) {
-      DLOG("SwitchToMode(display=%u, %dx%d %dbpp): matches the PHYSICAL mode ->"
-           " virtual mode dropped\n", id, w, h, bpp);
       return 0;
    }
 
@@ -370,8 +345,6 @@ uint32_t shim_CGDisplaySwitchToMode(uint32_t *a)
    if (s >= 0) { g_disp[s].mode = m; g_disp[s].bx = ox; g_disp[s].by = oy; }
    os_unfair_lock_unlock(&g_lk);
 
-   DLOG("SwitchToMode(display=%u): NOT switching the physical display;"
-        " virtual mode = %dx%d %dbpp @%.0f,%.0f\n", id, w, h, bpp, ox, oy);
    return 0;                                      /* kCGErrorSuccess */
 }
 
@@ -386,7 +359,7 @@ uint32_t shim_CGDisplayCurrentMode(uint32_t *a)
          if (g_disp[i].used && g_disp[i].id == id && g_disp[i].installed)
             { m = g_disp[i].mode; break; }
       os_unfair_lock_unlock(&g_lk);
-      if (m) { DLOG("CurrentMode(display=%u) -> virtual\n", id); return ref_out(m); }
+      if (m) { return ref_out(m); }
    }
    return ref_out(CGDisplayCurrentMode(id));
 }
@@ -462,16 +435,11 @@ static uint32_t best_mode(uint32_t id, int bpp, int w, int h, double rr,
       CGRect nb = CGDisplayBounds(id);
       const int nw = (int)nb.size.width, nh = (int)nb.size.height;
       if (nw > 0 && nh > 0 && (nw != w || nh != h)) {
-         DLOG("BestModeForParameters: requested %dx%d -> answering with NATIVE "
-              "%dx%d so no window resize is ever needed\n", w, h, nw, nh);
          w = nw; h = nh;
       }
    }
    CFDictionaryRef m = synth_mode(id, w, h, bpp > 0 ? bpp : 32, rr);
    if (exact) *exact = 1;
-   DLOG("BestModeForParameters(display=%u, %dbpp %dx%d @%.0fHz) -> synthesised"
-        " exact match (native would answer with a real, DIFFERENT mode)\n",
-        id, bpp, w, h, rr);
    return ref_out(m);
 }
 
@@ -507,8 +475,6 @@ uint32_t shim_CGDisplayBounds(uint32_t *a)
       out[0] = (float)r.origin.x;   out[1] = (float)r.origin.y;
       out[2] = (float)r.size.width; out[3] = (float)r.size.height;
    }
-   DLOG("Bounds(display=%u) -> %.0f,%.0f %.0fx%.0f\n", id, r.origin.x, r.origin.y,
-        r.size.width, r.size.height);
    return a[0];
 }
 
@@ -533,14 +499,14 @@ static int virt_geom(uint32_t id, int *w, int *h, int *bpp)
 uint32_t shim_CGDisplayPixelsWide(uint32_t *a)
 {
    int w = 0;
-   if (virt_geom(a[0], &w, NULL, NULL)) { DLOG("PixelsWide(display=%u) -> %d (virtual)\n", a[0], w); return (uint32_t)w; }
+   if (virt_geom(a[0], &w, NULL, NULL)) { return (uint32_t)w; }
    return (uint32_t)CGDisplayPixelsWide(a[0]);
 }
 
 uint32_t shim_CGDisplayPixelsHigh(uint32_t *a)
 {
    int h = 0;
-   if (virt_geom(a[0], NULL, &h, NULL)) { DLOG("PixelsHigh(display=%u) -> %d (virtual)\n", a[0], h); return (uint32_t)h; }
+   if (virt_geom(a[0], NULL, &h, NULL)) { return (uint32_t)h; }
    return (uint32_t)CGDisplayPixelsHigh(a[0]);
 }
 
@@ -582,8 +548,6 @@ static uint32_t capture_all(void)
    g_all_captured = 1;
    for (int i = 0; i < MAX_DISP; i++) if (g_disp[i].used) g_disp[i].captured = 1;
    os_unfair_lock_unlock(&g_lk);
-   DLOG("CaptureAllDisplays: tracked, NOT performed (a real capture shields the"
-        " screen over the app's own window)\n");
    return 0;
 }
 
@@ -602,7 +566,6 @@ uint32_t shim_CGDisplayCapture(uint32_t *a)
    int s = slot_for(a[0]);
    if (s >= 0) g_disp[s].captured = 1;
    os_unfair_lock_unlock(&g_lk);
-   DLOG("DisplayCapture(display=%u): tracked, NOT performed\n", a[0]);
    return 0;
 }
 
@@ -624,7 +587,6 @@ uint32_t shim_CGReleaseAllDisplays(uint32_t *a)
       if (g_disp[i].used) { g_disp[i].captured = 0; g_disp[i].installed = 0;
                             g_disp[i].mode = NULL; }
    os_unfair_lock_unlock(&g_lk);
-   DLOG("ReleaseAllDisplays: capture state cleared, virtual modes dropped\n");
    return 0;
 }
 
@@ -635,7 +597,6 @@ uint32_t shim_CGDisplayRelease(uint32_t *a)
    int s = slot_for(a[0]);
    if (s >= 0) { g_disp[s].captured = 0; g_disp[s].installed = 0; g_disp[s].mode = NULL; }
    os_unfair_lock_unlock(&g_lk);
-   DLOG("DisplayRelease(display=%u): capture cleared, virtual mode dropped\n", a[0]);
    return 0;
 }
 

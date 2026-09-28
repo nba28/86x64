@@ -141,13 +141,6 @@ namespace {
          }
       }
 
-      if (getenv("ABICONV_PRINTF_DIAG")) {
-         fprintf(stderr, "[printf-diag] unrecognized conversion specifier "
-                 "0x%02x '%c' at format tail \"%.24s\"\n",
-                 (unsigned char)*format,
-                 (*format >= 0x20 && *format < 0x7f) ? *format : '?', format);
-         fflush(stderr);
-      }
       throw std::invalid_argument("invalid conversion specifier");
    }
 

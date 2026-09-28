@@ -19,8 +19,7 @@
  * GetPixBaseAddr.
  *
  * UNIVERSAL: any i386 app decoding images through the QuickTime GraphicsImporter
- * (the standard pre-ImageIO API — iLife, countless Carbon apps) is served. Set
- * ABICONV_QT_TRACE=1 to log the importer calls (ingestion path, sizes).
+ * (the standard pre-ImageIO API — iLife, countless Carbon apps) is served.
  *
  * Reached via the ___GraphicsImport* / ___NewGWorld* / ___GetPix* trampolines in
  * maptable_tramp.asm. The QuickTime originals are unshimmed by abigen (QuickTime
@@ -44,14 +43,6 @@ extern void  free(void *);
  * GraphicsImporter renders into a bound GWorld/port via this shared accessor
  * (port handle 0 => the current port). */
 extern int qd_port_pixels(uint32_t port_h, void **base, int *rowBytes, int *w, int *h);
-
-static int qt_trace(void)
-{
-   static int t = -1;
-   if (t < 0) t = getenv("ABICONV_QT_TRACE") ? 1 : 0;
-   return t;
-}
-#define QTLOG(...) do { if (qt_trace()) fprintf(stderr, "[qt] " __VA_ARGS__); } while (0)
 
 /* ---- classic types we expose to the i386 caller (byte-exact) ------------ */
 
@@ -101,7 +92,6 @@ static cm_result gi_open(cm_instance *inst)
    gi_state *gi = (gi_state *)calloc(1, sizeof(gi_state));
    if (!gi) return cmMemFullErr;
    cm_inst_set_storage(inst, gi);
-   QTLOG("open importer subtype=0x%08x storage=%p\n", cm_inst_subtype(inst), (void*)gi);
    return cmNoErr;
 }
 
@@ -162,7 +152,6 @@ static void gi_set_bytes(gi_state *gi, const void *bytes, uint32_t len)
    gi_reset_source(gi);
    if (bytes && len)
       gi->data = CFDataCreate(NULL, (const UInt8 *)bytes, len);
-   QTLOG("set data bytes=%p len=%u\n", bytes, len);
 }
 
 /* classic data-reference subtypes */
@@ -187,9 +176,6 @@ static void gi_set_dataref(gi_state *gi, uint32_t dataRef, uint32_t dataRefType)
             CFRelease(s);
          }
       }
-      QTLOG("set dataref url='%s'\n", u ? u : "(null)");
-   } else {
-      QTLOG("set dataref UNHANDLED type=0x%08x\n", dataRefType);
    }
 }
 
@@ -199,13 +185,13 @@ static cm_result gi_draw(gi_state *gi)
 {
    void *base = NULL; int rowBytes = 0, gw_w = 0, gw_h = 0;
    if (!qd_port_pixels(gi->gw, &base, &rowBytes, &gw_w, &gw_h) || !base) {
-      QTLOG("draw: no target GWorld\n"); return cmParamErr;
+      return cmParamErr;
    }
 
    CGImageSourceRef s = gi_source(gi);
-   if (!s) { QTLOG("draw: no image source\n"); return cmParamErr; }
+   if (!s) { return cmParamErr; }
    CGImageRef img = CGImageSourceCreateImageAtIndex(s, 0, NULL);
-   if (!img) { QTLOG("draw: decode failed\n"); return cmCantOpenErr; }
+   if (!img) { return cmCantOpenErr; }
 
    CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
    /* ARGB, 8bpc, big-endian 32-bit word == classic k32ARGBPixelFormat byte
@@ -216,7 +202,7 @@ static cm_result gi_draw(gi_state *gi)
       base, gw_w, gw_h, 8, rowBytes, cs,
       kCGImageAlphaPremultipliedFirst | kCGBitmapByteOrder32Big);
    CGColorSpaceRelease(cs);
-   if (!ctx) { CGImageRelease(img); QTLOG("draw: no bitmap ctx\n"); return cmMemFullErr; }
+   if (!ctx) { CGImageRelease(img); return cmMemFullErr; }
 
    /* Destination rect (default: whole GWorld). QuickDraw is top-left origin,
     * CoreGraphics bottom-left -> flip vertically. */
@@ -231,10 +217,6 @@ static cm_result gi_draw(gi_state *gi)
    CGContextScaleCTM(ctx, 1, -1);
    CGContextDrawImage(ctx, CGRectMake(dx, dy, dw, dh), img);
    CGContextFlush(ctx);
-
-   QTLOG("draw: %ldx%ld -> gworld %dx%d rb=%d at (%g,%g %gx%g)\n",
-         CGImageGetWidth(img), CGImageGetHeight(img),
-         gw_w, gw_h, rowBytes, dx, dy, dw, dh);
 
    CGContextRelease(ctx);
    CGImageRelease(img);
@@ -272,7 +254,6 @@ uint32_t shim_GraphicsImportSetDataFile(uint32_t *a)
    if (!gi) return cmBadComponentType;
    /* FSSpec -> path is handled by the file opener; here we record nothing
     * useful without a live File Manager. Logged so we can see if it is hit. */
-   QTLOG("SetDataFile(spec=%08x) — FSSpec path unsupported; prefer dataRef\n", a[1]);
    return cmParamErr;
 }
 
@@ -285,7 +266,6 @@ uint32_t shim_GraphicsImportGetNaturalBounds(uint32_t *a)
    if (!gi_dimensions(gi, &w, &h)) return cmCantOpenErr;
    QDRect *r = (QDRect *)i386_ptr(a[1]);
    if (r) { r->top = 0; r->left = 0; r->bottom = (int16_t)h; r->right = (int16_t)w; }
-   QTLOG("GetNaturalBounds -> %dx%d\n", w, h);
    return cmNoErr;
 }
 
@@ -315,7 +295,6 @@ uint32_t shim_GraphicsImportGetImageDescription(uint32_t *a)
    d->depth   = 32;
    d->clutID  = -1;
    put_u32(a[1], handle);
-   QTLOG("GetImageDescription -> %dx%d depth32 handle=%08x\n", w, h, handle);
    return cmNoErr;
 }
 
@@ -325,7 +304,6 @@ uint32_t shim_GraphicsImportSetGWorld(uint32_t *a)
    gi_state *gi = gi_from_i386(a[0]);
    if (!gi) return cmBadComponentType;
    gi->gw = a[1];
-   QTLOG("SetGWorld(port=%08x)\n", a[1]);
    return cmNoErr;
 }
 
@@ -432,7 +410,6 @@ uint32_t shim_GetGraphicsImporterForDataRef(uint32_t *a)
  *                                            ComponentInstance *gi); */
 uint32_t shim_GetGraphicsImporterForFile(uint32_t *a)
 {
-   QTLOG("GetGraphicsImporterForFile(spec=%08x) — FSSpec unsupported\n", a[0]);
    put_u32(a[1], 0);
    return cmParamErr;
 }

@@ -46,7 +46,6 @@
  * KILL SWITCH  M64_NO_AGL_RENDERERINFO=1 — forward everything raw to native
  *   AGL, i.e. the exact pre-fix behaviour (query returns NULL). Used by the
  *   tests-i386 A/B guard, which fails if the two arms do not differ.
- * TRACE        ABICONV_AGL_TRACE=1 (shared with agl_drawable_shim.c).
  *
  * ABI: MTSHIM convention — rdi -> &i386 args[0] (4-byte cdecl slots), result
  * in eax. Pointer args are i386 addresses in the shared low 4GB.
@@ -71,14 +70,6 @@ typedef int           GLint;
 typedef void         *AGLRendererInfo;
 
 #define AGL_MAX_DEVICES 32
-
-static int arg_trace(void)
-{
-   static int t = -1;
-   if (t < 0) t = getenv("ABICONV_AGL_TRACE") ? 1 : 0;
-   return t;
-}
-#define ARLOG(...) do { if (arg_trace()) fprintf(stderr, "[aglri] " __VA_ARGS__); } while (0)
 
 static int renderer_info_enabled(void)
 {
@@ -127,8 +118,6 @@ uint32_t shim_aglQueryRendererInfo(uint32_t *a)
    if (!renderer_info_enabled()) {
       AGL_NATIVE(qgd, agl_q_gd, "aglQueryRendererInfo");
       AGLRendererInfo r = qgd ? qgd((const void *)(uintptr_t)gdevs_p, ndev) : NULL;
-      ARLOG("QueryRendererInfo DISARMED -> native(gdevs=%08x,%d) = %p\n",
-            gdevs_p, ndev, (void *)r);
       return ri_wrap(r);
    }
 
@@ -139,8 +128,7 @@ uint32_t shim_aglQueryRendererInfo(uint32_t *a)
       const uint32_t *gd = (const uint32_t *)(uintptr_t)gdevs_p;
       for (int32_t i = 0; i < ndev && n < AGL_MAX_DEVICES; i++) {
          uint32_t id = qd_gdevice_display_id(gd[i]);
-         if (id) ids[n++] = (CGDirectDisplayID)id;
-         else ARLOG("QueryRendererInfo: GDHandle %08x is not one of ours, dropped\n", gd[i]);
+         if (id) ids[n++] = (CGDirectDisplayID)id;   /* a GDHandle not ours is dropped */
       }
    } else {
       /* NULL device list == "all devices" in the classic API. */
@@ -148,21 +136,15 @@ uint32_t shim_aglQueryRendererInfo(uint32_t *a)
    }
 
    if (!n) {
-      ARLOG("QueryRendererInfo(gdevs=%08x,%d): no resolvable display -> NULL\n",
-            gdevs_p, ndev);
       return 0;
    }
 
    AGL_NATIVE(qcg, agl_q_cg, "aglQueryRendererInfoForCGDirectDisplayIDs");
    if (!qcg) {
-      ARLOG("QueryRendererInfo: aglQueryRendererInfoForCGDirectDisplayIDs MISSING\n");
       return 0;
    }
    AGLRendererInfo r = qcg(ids, (GLint)n);
    uint32_t h = ri_wrap(r);
-   ARLOG("QueryRendererInfo(gdevs=%08x,%d) -> %u display(s), first=0x%x"
-         " -> aglQueryRendererInfoForCGDirectDisplayIDs = %p (handle %08x)\n",
-         gdevs_p, ndev, n, (unsigned)ids[0], (void *)r, h);
    return h;
 }
 
@@ -178,7 +160,6 @@ uint32_t shim_aglQueryRendererInfoForCGDirectDisplayIDs(uint32_t *a)
    AGL_NATIVE(qcg, agl_q_cg, "aglQueryRendererInfoForCGDirectDisplayIDs");
    if (!qcg) return 0;
    AGLRendererInfo r = qcg(ids, ndev);
-   ARLOG("QueryRendererInfoForCGDirectDisplayIDs(%p,%d) = %p\n", (void *)ids, ndev, (void *)r);
    return ri_wrap(r);
 }
 
@@ -208,8 +189,6 @@ uint32_t shim_aglDescribeRenderer(uint32_t *a)
    if (!desc) return 0;
    GLboolean ok = desc(r, prop, value);
    if (!ok) *value = 0;                 /* native leaves it untouched on failure */
-   ARLOG("DescribeRenderer(handle=%08x prop=%d) ok=%d value=%d\n",
-         a[0], prop, (int)ok, *value);
    return ok ? 1 : 0;
 }
 

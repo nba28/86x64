@@ -101,13 +101,6 @@ extern void eh_resume(uint32_t rip, uint32_t esp, uint32_t ebp,
 #define DW_EH_PE_aligned  0x50
 #define DW_EH_PE_indirect 0x80
 
-static int eh_trace_on(void) {
-   static int v = -1;
-   if (v < 0) { const char *e = getenv("ABICONV_EH_TRACE"); v = (e && *e) ? 1 : 0; }
-   return v;
-}
-#define EHLOG(...) do { if (eh_trace_on()) { fprintf(stderr, "[eh] " __VA_ARGS__); fflush(stderr); } } while (0)
-
 /* ===================================================================== */
 /* uleb/sleb readers (operate on low-4GB i386 data pointers)            */
 /* ===================================================================== */
@@ -472,9 +465,6 @@ static void eh_scan_images(void) {
       /* Parse __eh_frame CFI for callee-saved register restore at landing pads. */
       eh_parse_eh_frame(im, ehf, ehfsz);
       eh_assoc_fdes(im);
-      EHLOG("registered eh-image #%d text=[%#lx,+%#lx) gxt=%#lx pcmap=%u lsda=%u\n",
-            g_img_n, (unsigned long)im->text_base, (unsigned long)im->text_size,
-            (unsigned long)im->gxt_base, im->pcmap_n, im->lsda_n);
       g_img_n++;
    }
    g_img_scanned = 1;
@@ -605,9 +595,6 @@ static int eh_scan_lsda(uint32_t lsda_addr, uint32_t region, uint32_t orig_pc,
             }
             uint32_t adj = 0;
             if (type_caught_by(thrown_ti, catch_ti, &adj)) {
-               EHLOG("match: cs_start=%#x clen=%#x cs_lp=%#x region=%#x "
-                     "orig_pc=%#x -> lp_orig=%#x ti=%d\n", cs_start, cs_clen,
-                     cs_lp, region, orig_pc, lp, (int)ttype_index);
                *lp_orig = lp; *selector = (int32_t)ttype_index;
                if (adjusted) *adjusted = adj;
                return 1;
@@ -620,8 +607,6 @@ static int eh_scan_lsda(uint32_t lsda_addr, uint32_t region, uint32_t orig_pc,
          ap = after_idx + next_off;
       }
       if (have_cleanup && !want_handler) {         /* no catch matched: run cleanup */
-         EHLOG("cleanup: cs_lp=%#x region=%#x orig_pc=%#x -> lp_orig=%#x\n",
-               cs_lp, region, orig_pc, lp);
          *lp_orig = lp; *selector = 0; return 1;
       }
       return 0;                                    /* call site found, no match */
@@ -676,12 +661,10 @@ static int eh_has_handler(struct eh_exception *h, uint32_t start_ebp, uint32_t s
    uint32_t ebp = start_ebp, ret = start_ret; int hops = 0;
    while (ret && hops++ < 4096) {
       struct eh_image *im = eh_image_for_pc((uintptr_t)ret);
-      if (!im) { EHLOG("ph1 ret=%#x not in image\n", ret); break; }
+      if (!im) { break; }
       uint32_t orig_pc = 0;
       if (pc_trans_to_orig(im, (uintptr_t)ret, &orig_pc)) {
          const struct lsda_ent *rec = eh_lsda_for_pc(im, (uintptr_t)ret);
-         EHLOG("ph1 ret=%#x orig_pc=%#x rec_region=%#x lsda_off=%d\n",
-               ret, orig_pc, rec?rec->orig_func:0, rec?rec->lsda_off:0);
          if (rec && im->gxt_base) {
             uint32_t lp = 0; int32_t sel = 0; uint32_t adj = 0;
             if (eh_scan_lsda((uint32_t)(im->gxt_base + (intptr_t)rec->lsda_off),
@@ -689,7 +672,7 @@ static int eh_has_handler(struct eh_exception *h, uint32_t start_ebp, uint32_t s
                              /*want_handler=*/1, &lp, &sel, &adj))
                return 1;
          }
-      } else { EHLOG("ph1 no orig for ret=%#x\n", ret); }
+      }
       if (!ebp) break;
       uint32_t saved_ebp = *(const uint32_t *)(uintptr_t)ebp;
       uint32_t caller_ret = *(const uint32_t *)(uintptr_t)(ebp + 4);
@@ -728,10 +711,10 @@ static void eh_raise_from(struct eh_exception *h, uint32_t start_ebp,
    int hops = 0;
    while (ret && hops++ < 4096) {
       struct eh_image *im = eh_image_for_pc((uintptr_t)ret);
-      if (!im) { EHLOG("frame ret=%#x not in any eh-image; stop\n", ret); break; }
+      if (!im) { break; }
 
       uint32_t orig_pc = 0;
-      if (!pc_trans_to_orig(im, (uintptr_t)ret, &orig_pc)) { EHLOG("no orig for ret=%#x\n", ret); goto next; }
+      if (!pc_trans_to_orig(im, (uintptr_t)ret, &orig_pc)) { goto next; }
       /* The unwinder keys the LSDA on the instruction BEFORE the return point
        * (the call), per Itanium ("ip-1"). */
       const struct lsda_ent *rec = eh_lsda_for_pc(im, (uintptr_t)ret);
@@ -742,7 +725,6 @@ static void eh_raise_from(struct eh_exception *h, uint32_t start_ebp,
                           /*want_handler=*/0, &lp_orig, &sel, &adj)) {
             uintptr_t lp_trans = 0;
             if (!pc_orig_to_trans(im, lp_orig, &lp_trans)) {
-               EHLOG("LP orig=%#x has no trans mapping\n", lp_orig);
                goto next;
             }
             if (sel != 0) { h->selector = sel; if (adj) h->adjusted = adj; }
@@ -767,13 +749,7 @@ static void eh_raise_from(struct eh_exception *h, uint32_t start_ebp,
                if (rset[3]) r_ebx = *(const uint32_t *)(uintptr_t)(cfa + roff[3]);
                if (rset[6]) r_esi = *(const uint32_t *)(uintptr_t)(cfa + roff[6]);
                if (rset[7]) r_edi = *(const uint32_t *)(uintptr_t)(cfa + roff[7]);
-               EHLOG("cfi: cfa_reg=%d cfa_off=%d ebx@%d=%s esi@%d=%s edi@%d=%s\n",
-                     cfa_reg, cfa_off, roff[3], rset[3]?"y":"n", roff[6],
-                     rset[6]?"y":"n", roff[7], rset[7]?"y":"n");
             }
-            EHLOG("resume: frame ebp=%#x esp=%#x lp=%#lx sel=%d (%s) ebx=%#x esi=%#x edi=%#x\n",
-                  ebp, lp_esp, (unsigned long)lp_trans, sel, sel ? "catch" : "cleanup",
-                  r_ebx, r_esi, r_edi);
             eh_resume((uint32_t)lp_trans, lp_esp, ebp, (uint32_t)(uintptr_t)h,
                       (uint32_t)sel, r_ebx, r_esi, r_edi);
             /* noreturn */
@@ -830,7 +806,6 @@ uint32_t shim_cxa_throw(uint32_t *a) {
    h->destructor = dtor;
    h->handler_count = 0;
    eh_get()->uncaught_count++;
-   EHLOG("throw obj=%#x tinfo=%#x dtor=%#x\n", obj, tinfo, dtor);
 
    /* The throwing frame is our trampoline's i386 caller.  &a[0] is [rbp+12] in
     * the trampoline frame; the throwing frame's ebp is the dword the
@@ -852,7 +827,6 @@ uint32_t shim_cxa_rethrow(uint32_t *a) {
    struct eh_exception *h = hdr_from_handle(g->caught);
    if (!h) eh_terminate(NULL, "__cxa_rethrow: no current exception");
    g->uncaught_count++;
-   EHLOG("rethrow obj=%#x\n", h->obj);
    uint32_t thrower_ebp = a[-3];
    uint32_t thrower_ret = a[-1];
    eh_raise_from(h, thrower_ebp, thrower_ret, (uint32_t)(uintptr_t)a);
@@ -873,7 +847,6 @@ uint32_t shim_cxa_begin_catch(uint32_t *a) {
    }
    h->handler_count++;
    uint32_t r = h->adjusted ? h->adjusted : h->obj;
-   EHLOG("begin_catch handle=%#x -> obj=%#x (count=%d)\n", a[0], r, h->handler_count);
    return r;
 }
 
@@ -892,7 +865,6 @@ uint32_t shim_cxa_end_catch(uint32_t *a) {
        * crashes.  Cleanup destructors for LOCALS unwound past are run by the
        * translated cleanup landing pads themselves (via _Unwind_Resume), not
        * here. */
-      EHLOG("end_catch free obj=%#x (dtor=%#x deferred)\n", h->obj, h->destructor);
       free(h);
    }
    return 0;
@@ -923,7 +895,6 @@ uint32_t shim_Unwind_Resume(uint32_t *a) {
    struct eh_exception *h = hdr_from_handle(a[0]);
    if (!h) h = hdr_from_obj(a[0]);
    if (!h) eh_terminate(NULL, "_Unwind_Resume: unknown exception");
-   EHLOG("Unwind_Resume obj=%#x\n", h->obj);
    /* Resume from the frame that called us (the cleanup landing pad's frame): we
     * continue searching its CALLER outward. */
    uint32_t cur_ebp = a[-3];                        /* the resuming frame ebp  */

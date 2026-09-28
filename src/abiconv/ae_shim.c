@@ -130,12 +130,6 @@ const AEDesc *ae_shadow_lookup(uint32_t shadow32) {
 static struct { uint32_t fn32; uint32_t refcon32; int used; } g_bind[AE_MAX_BIND];
 static os_unfair_lock g_bind_lock = OS_UNFAIR_LOCK_INIT;
 
-static int ae_trace(void) {
-   static int t = -1;
-   if (t < 0) { t = getenv("AE_BRIDGE_TRACE") != NULL; }
-   return t;
-}
-
 typedef OSErr (*ae_handler_fn)(const AppleEvent *, AppleEvent *, SRefCon);
 
 /* Is `fn` a NATIVE-ABI address (i.e. a cb_bridge trampoline from
@@ -196,13 +190,6 @@ static OSErr ae_native_dispatch(const AppleEvent *ev, AppleEvent *reply,
    ae_shadow_register(rep32, reply);
 
    int native = ae_fn_is_native_tramp(fn32);
-   if (ae_trace()) {
-      fprintf(stderr, "[ae] dispatch idx=%ld fn=0x%x(%s) ev=%p(0x%x) "
-              "reply=%p(0x%x)%s\n", idx, fn32, native ? "tramp" : "i386",
-              (void *)ev, ev32, (void *)reply, rep32,
-              ((uintptr_t)ev >= 0x100000000ULL) ? " WARN:ev>4GB" : "");
-      fflush(stderr);
-   }
 
    OSErr err;
    if (native) {
@@ -266,11 +253,6 @@ uint32_t shim_AEInstallEventHandler(uint32_t *args) {
       g_bind[idx].used = 0;
       os_unfair_lock_unlock(&g_bind_lock);
    }
-   if (ae_trace()) {
-      fprintf(stderr, "[ae] install class=0x%x id=0x%x fn=0x%x idx=%ld -> %d\n",
-              theClass, theID, fn32, idx, (int)err);
-      fflush(stderr);
-   }
    return (uint32_t)(int32_t)err;
 }
 
@@ -310,12 +292,5 @@ uint32_t shim_AEGetParamPtr(uint32_t *args) {
    if (typeCode32) { *(uint32_t *)(uintptr_t)typeCode32 = (uint32_t)actualType; }
    if (actSize32) { *(uint32_t *)(uintptr_t)actSize32 = (uint32_t)actualSize; }
 
-   if (ae_trace()) {
-      fprintf(stderr, "[ae] AEGetParamPtr ev=0x%x%s key=0x%x -> err=%d "
-              "type=0x%x size=%u\n", ev32,
-              ae_shadow_lookup(ev32) ? "(shadow)" : "(direct)", key, (int)err,
-              (unsigned)actualType, (unsigned)actualSize);
-      fflush(stderr);
-   }
    return (uint32_t)(int32_t)err;
 }

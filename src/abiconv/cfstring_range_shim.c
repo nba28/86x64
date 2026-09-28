@@ -54,7 +54,6 @@
  *
  *   kill switch : M64_NO_CFSTRING_RANGE_CLAMP=1  (exact pre-fix behaviour:
  *                 hand the raw range straight to CF and let it throw)
- *   trace       : ABICONV_CFSTRING_RANGE_TRACE=1 (one line per ACTUAL clamp)
  *
  * Guard: tests-i386/src/98_cfstring_range_overrun.c runs both arms.
  */
@@ -73,16 +72,6 @@ static int clamp_enabled(void)
    if (v < 0) {
       const char *e = getenv("M64_NO_CFSTRING_RANGE_CLAMP");
       v = !(e && *e && *e != '0');
-   }
-   return v;
-}
-
-static int range_trace(void)
-{
-   static int v = -1;
-   if (v < 0) {
-      const char *e = getenv("ABICONV_CFSTRING_RANGE_TRACE");
-      v = (e && *e && *e != '0');
    }
    return v;
 }
@@ -128,12 +117,6 @@ uint32_t shim_CFStringGetCharacters(uint32_t *a)
 
    if (n < want) {                  /* the tail the app asked for but CF lacks */
       memset(buf + n, 0, (size_t)(want - n) * sizeof(UniChar));
-      if (range_trace())
-         fprintf(stderr,
-                 "[cfrange] CFStringGetCharacters clamped: len=%ld request={%ld,%ld}"
-                 " -> copied %ld, zero-filled %ld\n",
-                 (long)(s ? CFStringGetLength(s) : -1), (long)loc, (long)want,
-                 (long)n, (long)(want - n));
    }
    return 0;
 }

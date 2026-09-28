@@ -57,7 +57,7 @@
  * entries: dyld itself and, under Rosetta, /usr/libexec/rosetta/libRosettaRuntime.
  * Those are not part of the app's image graph, and handing them to callers that were
  * written against the Loader list is a REAL behaviour change, not a cosmetic one:
- * osatomic_shim's caller_image_base() brackets an address by its LOW 32 BITS on the
+ * a caller that brackets an address by its LOW 32 BITS on the
  * documented assumption that the image lives in the low 4 GB, and libRosettaRuntime
  * at 0x10000a000 has low32 0xa000, so it would match and return a base above 4 GB.
  * So both are filtered out. dyld is identified structurally, from

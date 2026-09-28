@@ -54,12 +54,6 @@
 #include <mach-o/getsect.h>
 #include <mach-o/loader.h>
 
-static int psx_trace(void) {
-   static int v = -1;
-   if (v < 0) v = getenv("ABICONV_PTHREAD_TRACE") ? 1 : 0;
-   return v;
-}
-
 /* In-struct header we impose on the (opaque-to-the-client) i386 sync object.
  * magic distinguishes "adopted" objects per type so a misuse is caught. */
 #define PSX_MAGIC_MUTEX  0x8642ABC0DE5A4D55ULL  /* ...'MU' */
@@ -158,8 +152,6 @@ int32_t shim_pthread_mutex_init(uint32_t *a) {
    if (old) { pthread_mutex_destroy((pthread_mutex_t *)old); free(old); }
    void *attr = a[1] ? (void *)(uintptr_t)a[1] : NULL;
    pthread_mutex_t *m = mtx_native(a[0], attr);
-   if (psx_trace()) fprintf(stderr, "[psx] mutex_init i386=%#x attr=%#x -> %p\n",
-                            a[0], a[1], (void *)m);
    return m ? 0 : -1;
 }
 int32_t shim_pthread_mutex_lock(uint32_t *a) {
@@ -416,7 +408,6 @@ int32_t shim_pthread_cond_init(uint32_t *a) {
    if (old) { pthread_cond_destroy((pthread_cond_t *)old); free(old); }
    void *attr = a[1] ? (void *)(uintptr_t)a[1] : NULL;
    pthread_cond_t *c = cnd_native(a[0], attr);
-   if (psx_trace()) fprintf(stderr, "[psx] cond_init i386=%#x -> %p\n", a[0], (void *)c);
    return c ? 0 : -1;
 }
 int32_t shim_pthread_cond_signal(uint32_t *a) {
@@ -611,10 +602,6 @@ int32_t shim_pthread_once(uint32_t *a) {
       if (stk == NULL) { pthread_mutex_unlock(&e->lk); return -1; }
       const uint64_t top =
          ((uint64_t)(uintptr_t)stk + PSX_ONCE_STACK_SZ) & ~0xfULL;
-      if (psx_trace()) {
-         fprintf(stderr, "[psx_once] key=0x%x init=0x%x (first run)\n",
-                 once, init);
-      }
       _86x64_call_i386((uint64_t)init, 0, NULL, top);
       free(stk);
       __atomic_store_n(&e->done, 1, __ATOMIC_RELEASE);
@@ -756,10 +743,6 @@ int32_t shim_pthread_create(uint32_t *a) {
    if (no_token < 0) { no_token = getenv("M64_NO_PTHREAD_TOKEN") ? 1 : 0; }
    uint32_t tok = psx_thread_token(nat);
    if (slot && !no_token) { *slot = tok; }
-   if (psx_trace()) {
-      fprintf(stderr, "[psx] create -> nat=%p token=%#x slot=%p\n",
-              (void *)nat, tok, (void *)slot);
-   }
    return 0;
 }
 

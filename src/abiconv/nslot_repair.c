@@ -155,8 +155,7 @@ static void *abic_resolve_native(const char *asm_name) {
    return 0;
 }
 
-static void abic_repair_table(const abic_nslot_ent *tab, uint64_t n,
-                              int trace) {
+static void abic_repair_table(const abic_nslot_ent *tab, uint64_t n) {
    uint64_t i;
    for (i = 0; i < n; ++i) {
       const char *nm = tab[i].name;
@@ -168,18 +167,11 @@ static void abic_repair_table(const abic_nslot_ent *tab, uint64_t n,
       }
       cur = *slot;
       if (!abic_is_marshal_shim(cur)) {
-         if (trace) {
-            fprintf(stderr, "abiconv nslot: %s ok (%p, not a shim)\n", nm, cur);
-         }
          continue;
       }
       fix = abic_resolve_native(nm);
       if (fix != 0) {
          *slot = fix;
-         if (trace) {
-            fprintf(stderr, "abiconv nslot: repaired %s: shim %p -> native %p\n",
-                    nm, cur, fix);
-         }
       } else {
          /* Old behavior kept (double-marshal) — but now diagnosable. */
          fprintf(stderr, "abiconv nslot: WARNING: %s is captured by a "
@@ -201,12 +193,11 @@ static void abic_repair_table(const abic_nslot_ent *tab, uint64_t n,
  * the fallback is benign by construction: an (impossible) pre-repair call
  * would get the slot's static link-time binding = exactly the OLD behavior. */
 __attribute__((constructor(101))) static void abic_nslot_repair_init(void) {
-   const int trace = getenv("ABICONV_NSLOT_TRACE") != 0;
    Dl_info di;
    if (dladdr((void *)(uintptr_t)&abic_nslot_repair_init, &di) != 0) {
       abic_own_fbase = di.dli_fbase;
       abic_own_bname = abic_basename(di.dli_fname);
    }
-   abic_repair_table(_abiconv_nslot_tab0, _abiconv_nslot_tab0_n, trace);
-   abic_repair_table(_abiconv_nslot_tab1, _abiconv_nslot_tab1_n, trace);
+   abic_repair_table(_abiconv_nslot_tab0, _abiconv_nslot_tab0_n);
+   abic_repair_table(_abiconv_nslot_tab1, _abiconv_nslot_tab1_n);
 }

@@ -43,8 +43,7 @@
  * UNIVERSAL: triggers only on the classic QuickDraw entry points (Mach-O
  * symbol surface), never on an app name. Reached from translated i386 code via
  * the ___<Name> MTSHIM trampolines (maptable_tramp.asm; rdi -> &i386 args[0],
- * result in eax); excluded from abigen via custom.syms. ABICONV_QD_TRACE=1
- * logs operations.
+ * result in eax); excluded from abigen via custom.syms.
  */
 
 #include "carbon_shim.h"
@@ -66,14 +65,6 @@ extern uint64_t x64_objc_unwrap(uint32_t h);
  * a low-4GB Handle holding a COPY of the resource bytes. GetPicture routes here
  * to load 'PICT' resources for real. arg block: a[0]=ResType, a[1]=id. */
 extern uint32_t shim_GetResource(uint32_t *a);
-
-static int qd_trace(void)
-{
-   static int t = -1;
-   if (t < 0) t = getenv("ABICONV_QD_TRACE") ? 1 : 0;
-   return t;
-}
-#define QDLOG(...) do { if (qd_trace()) fprintf(stderr, "[qd] " __VA_ARGS__); } while (0)
 
 /* ---- classic records (mac68k / i386 2-byte packing) --------------------- */
 #pragma pack(push, 2)
@@ -298,8 +289,6 @@ static uint32_t port_create(uint32_t outPtr, const QDRect *bounds, int depth,
    os_unfair_lock_unlock(&g_ports_lk);
 
    put_u32(outPtr, to_i386(p));
-   QDLOG("port_create %dx%d d=%d rb=%d base=%p ctx=%p -> %08x\n",
-         w, h, depth, rowBytes, p->base, (void *)p->ctx, to_i386(p));
    qd_set_err(qdNoErr);
    return 0;
 }
@@ -426,7 +415,6 @@ uint32_t qd_port_for_window(void *win)
    qd_port *np = port_from_i386(h);
    if (np) np->win = win; else h = 0;
    os_unfair_lock_unlock(&g_winport_lk);
-   QDLOG("port_for_window win=%p -> %08x (%dx%d)\n", win, h, r.right, r.bottom);
    return h;
 }
 
@@ -966,14 +954,14 @@ static void copybits_core(uint32_t srcRec, uint32_t dstRec, const QDRect *srcR,
       int dd = isPix ? pm->pixelSize : 1;
       int w = pm->bounds.right - pm->bounds.left, h = pm->bounds.bottom - pm->bounds.top;
       void *b = i386_ptr(pm->baseAddr);
-      if (!b || (dd != 32 && dd != 16)) { QDLOG("CopyBits: foreign dst depth %d unsupported\n", dd); return; }
+      if (!b || (dd != 32 && dd != 16)) { return; }
       ctx = make_ctx(b, w, h, drb, dd);
       made_ctx = 1; dbx = pm->bounds.left; dby = pm->bounds.top;
    }
    if (!ctx) return;
 
    CGImageRef img = image_from_record(srcRec, srcR);
-   if (!img) { if (made_ctx) CGContextRelease(ctx); QDLOG("CopyBits: src decode failed\n"); return; }
+   if (!img) { if (made_ctx) CGContextRelease(ctx); return; }
 
    double dx = dstR->left - dbx, dy = dstR->top - dby;
    double dw = dstR->right - dstR->left, dhh = dstR->bottom - dstR->top;
@@ -990,7 +978,6 @@ static void copybits_core(uint32_t srcRec, uint32_t dstRec, const QDRect *srcR,
    CGImageRelease(img);
    if (made_ctx) CGContextRelease(ctx);
    (void)mode;
-   QDLOG("CopyBits src=%08x dst=%08x -> (%g,%g %gx%g)\n", srcRec, dstRec, dx, dy, dw, dhh);
 }
 /* void CopyBits(const BitMap*src, const BitMap*dst, const Rect*srcR,
  *               const Rect*dstR, short mode, RgnHandle maskRgn) */
@@ -1047,7 +1034,6 @@ static uint32_t make_main_gdevice(void)
    gd->gdCCDepth = 32;
    g_main_gdevice = gdh;
    os_unfair_lock_unlock(&g_gd_lk);
-   QDLOG("main GDevice %dx%d -> %08x\n", w, h, gdh);
    return gdh;
 }
 /* ---- GDevice <-> CGDirectDisplayID ---------------------------------------
@@ -1165,9 +1151,8 @@ uint32_t shim_DrawPicture(uint32_t *a)
    void    *body = cm_handle_block(a[0]);
    uint32_t len  = cm_handle_size(a[0]);
    CGImageRef img = pict_decode(body, len);
-   if (!img) { QDLOG("DrawPicture: decode failed (len=%u)\n", len); return 0; }
+   if (!img) { return 0; }
    draw_image_into_port(p, img, (const QDRect *)i386_ptr(a[1]));
-   QDLOG("DrawPicture %ldx%ld\n", CGImageGetWidth(img), CGImageGetHeight(img));
    CGImageRelease(img);
    return 0;
 }

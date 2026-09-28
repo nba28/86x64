@@ -43,15 +43,6 @@ int shim_sysctl(uint32_t *a) {
    int r = sysctl(name, namelen, oldp, oldlenp, newp, newlen);
 
    if (ol32) { *ol32 = (uint32_t)oldlen; }
-
-   if (getenv("ABICONV_SYSCTL_TRACE")) {
-      unsigned long long v = 0;
-      if (oldp && oldlen >= 4) v = (oldlen >= 8) ? *(unsigned long long *)oldp
-                                                  : *(uint32_t *)oldp;
-      fprintf(stderr, "[sysctl] mib[%u]={%d,%d} -> r=%d oldlen=%zu val=%llu\n",
-              namelen, (namelen > 0 && name) ? name[0] : -1,
-              (namelen > 1 && name) ? name[1] : -1, r, oldlen, v);
-   }
    return r;
 }
 
@@ -94,9 +85,6 @@ int shim_sysctlbyname(uint32_t *a) {
    /* CPU-frequency sanity floor. Only touch a real value buffer (>=4 bytes),
     * never the oldp==NULL size-probe form. FLOOR (2.4 GHz) fits in 32 bits so
     * it is representable whether the caller asked for 4 or 8 bytes. */
-   int      nat_r   = r;                /* native return, kept for the trace */
-   uint64_t nat_val = 0;
-   int      floored = 0;
    if (cpufreq_key(name) && oldp && reqlen >= 4) {
       const uint64_t FLOOR = 2400000000ULL;
       uint64_t cur = 0;
@@ -104,26 +92,13 @@ int shim_sysctlbyname(uint32_t *a) {
          if (oldlen >= 8)      cur = *(uint64_t *)oldp;
          else if (oldlen >= 4) cur = *(uint32_t *)oldp;
       }
-      nat_val = cur;
       if (r != 0 || cur < FLOOR) {
          if (reqlen >= 8) { *(uint64_t *)oldp = FLOOR;            oldlen = 8; }
          else             { *(uint32_t *)oldp = (uint32_t)FLOOR; oldlen = 4; }
          if (ol32) { *ol32 = (uint32_t)oldlen; }
          r = 0;
-         floored = 1;
       }
    }
 
-   /* Diagnostic: show BOTH the native return and what we delivered, so a
-    * display run can prove whether the CPU-speed gate reads a low freq (fixed
-    * here) or a plausible one (the failing check is elsewhere). */
-   if (getenv("ABICONV_SYSCTL_TRACE") && cpufreq_key(name)) {
-      unsigned long long v = (oldp && oldlen >= 8) ? *(unsigned long long *)oldp
-                           : (oldp && oldlen >= 4) ? *(uint32_t *)oldp : 0ULL;
-      fprintf(stderr, "[sysctl] %s native(r=%d val=%llu) delivered(r=%d val=%llu "
-              "MHz=%llu) reqlen=%zu%s\n",
-              name, nat_r, (unsigned long long)nat_val, r, v, v / 1000000ULL,
-              reqlen, floored ? " [FLOORED]" : "");
-   }
    return r;
 }

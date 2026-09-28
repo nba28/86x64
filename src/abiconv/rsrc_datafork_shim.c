@@ -64,13 +64,6 @@ typedef int32_t RD_OSStatus;
 #define RDDL(fn, ret, args) \
     static ret (*fn) args; if (!fn) fn = (ret (*) args)dlsym(RTLD_DEFAULT, #fn)
 
-static int rd_debug(void) {
-    static int v = -1;
-    if (v < 0) v = getenv("ABICONV_RSRC_DEBUG") != NULL;
-    return v;
-}
-#define RDLOG(...) do { if (rd_debug()) fprintf(stderr, "[rsrcfork] " __VA_ARGS__); } while (0)
-
 /* Build <dir>/.86x64rsrc/<name> from a POSIX path. Returns 0 on success. */
 static int rd_sidecar_path(const char *path, char *out, size_t outsz) {
     const char *slash = strrchr(path, '/');
@@ -110,14 +103,13 @@ uint32_t shim_FSOpenResFile(uint32_t *a) {
 
     /* 1. the real HFS resource fork */
     int32_t rn = FSOpenResFile(ref, perm);
-    if (rn > 0) { RDLOG("resource fork -> refnum=%d\n", rn); return (uint32_t)rn; }
+    if (rn > 0) { return (uint32_t)rn; }
     if (!FSOpenResourceFile) { return (uint32_t)rn; }
 
     /* 2. the file's own DATA fork (flattened resource file, like a .dfont) */
     int32_t drn = -1;
     int16_t e = FSOpenResourceFile(ref, 0, NULL, perm, &drn);
     if (e == 0 && drn > 0) {
-        RDLOG("data fork -> refnum=%d\n", drn);
         return (uint32_t)drn;
     }
 
@@ -131,13 +123,10 @@ uint32_t shim_FSOpenResFile(uint32_t *a) {
                 drn = -1;
                 e = FSOpenResourceFile(sideref, 0, NULL, perm, &drn);
                 if (e == 0 && drn > 0) {
-                    RDLOG("sidecar %s -> refnum=%d\n", (const char *)side, drn);
                     return (uint32_t)drn;
                 }
             }
         }
-        RDLOG("no resources for %s (rsrc=%d data-err=%d)\n", (const char *)path,
-              rn, (int)e);
     }
     return (uint32_t)rn;
 }

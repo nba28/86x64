@@ -83,20 +83,6 @@ int ccw_available(void) {
     return state;
 }
 
-int ccw_trace(void) {
-    static int v = -1;
-    if (v < 0) v = (getenv("CARBON_ALERT_TRACE") != NULL ||
-                    getenv("CARBON_DIALOG_TRACE") != NULL) ? 1 : 0;
-    return v;
-}
-void ccw_log(const char *fmt, ...) {
-    va_list ap; va_start(ap, fmt);
-    fprintf(stderr, "[classic] ");
-    vfprintf(stderr, fmt, ap);
-    fflush(stderr);
-    va_end(ap);
-}
-
 /* ------------------------------ classic text ------------------------------
  * Lucida Grande is the real classic system font and is still shipped in
  * /System/Library/Fonts; fall back to Helvetica — never the modern system font,
@@ -384,7 +370,6 @@ CCWWindowRef ccw_create_window(uint32_t cls, uint32_t extraAttrs, double w, doub
             attrs &= ccw_GetAvailableWindowAttributes(classes[i]) | must;
         CCWStatus s = ccw_CreateNewWindow(classes[i], attrs, &wr, &win);
         if (s != 0 || !win) {
-            CCW_LOG("CreateNewWindow(class=%u attrs=0x%x) -> %d\n", classes[i], attrs, (int)s);
             win = NULL;
             /* retry that class with the bare mandatory attributes */
             if (ccw_CreateNewWindow(classes[i], must, &wr, &win) != 0) win = NULL;
@@ -515,7 +500,6 @@ void ccw_button_fire(ccw_button *b) {
     else if (b->kind == CCW_BTN_RADIO) b->value = 1;
     if (b->resultOut) *b->resultOut = b->item;
     if (b->doneOut)   *b->doneOut = 1;
-    CCW_LOG("button '%s' -> item %d\n", b->title, b->item);
 }
 
 /* Classic press-and-track: keep the button drawn "pressed" while the mouse is
@@ -534,14 +518,6 @@ static CCWStatus btn_track(void *call, CCWEventRef ev, void *ud) {
     (void)call; (void)ev;
     ccw_button *b = (ccw_button *)ud;
     if (!b) return ccwEventNotHandled;
-    if (ccw_trace()) {
-        double dx = 0, dy = 0;
-        ccw_mouse_in_content(b->win, &dx, &dy);
-        CCW_LOG("track enter '%s' (item %d) mousedown=%d ptr=%.0f,%.0f "
-                "rect=%.0f,%.0f,%.0fx%.0f\n", b->title, b->item,
-                mouse_is_down(), dx, dy, b->frame.origin.x, b->frame.origin.y,
-                b->frame.size.width, b->frame.size.height);
-    }
     if (b->disabled) return 0;
     /* A track with no mouse held is not a track: never synthesize a hit from it. */
     if (!mouse_is_down()) { b->justTracked = 1; return 0; }
@@ -577,7 +553,6 @@ static CCWStatus btn_hit(void *call, CCWEventRef ev, void *ud) {
     if (!b) return ccwEventNotHandled;
     if (b->justTracked) { b->justTracked = 0; return 0; }   /* already resolved */
     if (b->disabled) return 0;
-    CCW_LOG("hit '%s' (item %d) — untracked activation\n", b->title, b->item);
     ccw_button_fire(b);
     return 0;
 }
@@ -907,11 +882,6 @@ CCWViewRef ccw_edit_install(ccw_edit *e, CCWViewRef parent) {
 /* =============================== MODAL PUMP ============================== */
 /* Verbose per-event pump trace — separate from CARBON_*_TRACE because it is
  * far too noisy to leave on with the ordinary structural trace. */
-static int pump_trace(void) {
-    static int v = -1;
-    if (v < 0) v = getenv("CARBON_PUMP_TRACE") != NULL;
-    return v;
-}
 
 int ccw_run_modal_pump(int *done, const int *drew, ccw_edit *const *caretSlot,
                        double proofSecs) {
@@ -927,12 +897,6 @@ int ccw_run_modal_pump(int *done, const int *drew, ccw_edit *const *caretSlot,
         CCWStatus s = ccw_ReceiveNextEvent(0, NULL, tick, 1 /*pull*/, &ev);
         if (s == 0 && ev) {
             idle = 0;
-            if (pump_trace()) {
-                uint32_t c = ccw_GetEventClass ? ccw_GetEventClass(ev) : 0;
-                uint32_t k = ccw_GetEventKind ? ccw_GetEventKind(ev) : 0;
-                CCW_LOG("pump ev %c%c%c%c/%u\n", (char)(c>>24), (char)(c>>16),
-                        (char)(c>>8), (char)c, k);
-            }
             ccw_SendEventToEventTarget(ev, disp);
             if (ccw_ReleaseEvent) ccw_ReleaseEvent(ev);
             continue;
@@ -948,7 +912,6 @@ int ccw_run_modal_pump(int *done, const int *drew, ccw_edit *const *caretSlot,
             }
         }
         if (drew && !*drew && proofSecs > 0 && idle >= proofSecs) {
-            CCW_LOG("pump proved dead (no events, never drew) -> fall back\n");
             return 0;
         }
     }

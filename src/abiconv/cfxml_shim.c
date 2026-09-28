@@ -74,13 +74,6 @@ enum {
    kNodeAttributeListDeclaration = 15
 };
 
-static int g_cfxml_trace = -1;
-static int cfxml_trace(void) {
-   if (g_cfxml_trace < 0)
-      g_cfxml_trace = getenv("ABICONV_CFXML_TRACE") ? 1 : 0;
-   return g_cfxml_trace;
-}
-
 /* ---- i386-record readers -------------------------------------------------- */
 /* i386 pointer/CFTypeRef field: a 4-byte proxy handle -> real 64-bit CF ref. */
 static inline const void *i386_ref(const uint32_t *rec, unsigned off_bytes) {
@@ -222,11 +215,6 @@ uint32_t shim_CFXMLNodeCreate(uint32_t *a) {
                       native_info, (CFIndex)version);
 
    uint32_t h = node ? x64_objc_wrap((uint64_t)(uintptr_t)node) : 0;
-   if (cfxml_trace())
-      fprintf(stderr, "[cfxml] Create type=%ld data=%p info=%p(->native %p) "
-              "ver=%ld -> node=%p handle=0x%x\n",
-              xmlType, (void *)dataStr, (void *)i386info, native_info,
-              version, (void *)node, h);
    return h;
 }
 
@@ -331,8 +319,5 @@ uint32_t shim_CFXMLNodeGetInfoPtr(uint32_t *a) {
    CFXMLNodeRef node = (CFXMLNodeRef)(uintptr_t)_86x64_unwrap_obj_arg(a[0]);
    if (!node) { return 0; }
    uint32_t r = node_to_i386_info(node);
-   if (cfxml_trace())
-      fprintf(stderr, "[cfxml] GetInfoPtr node=%p -> i386info=0x%x\n",
-              (void *)node, r);
    return r;
 }

@@ -33,8 +33,6 @@
    global _____fixunsdfdi
    global _____fixunssfdi
    extern __dyld_stub_binder_flag
-   extern _abiconv_libgcc_log     ; gated runtime breadcrumb (osatomic_shim.c)
-   extern _abiconv_libgcc_divzero ; gated zero-divisor breadcrumb (osatomic_shim.c)
 
 ;; If we were reached through a lazy stub, dyld_stub_binder may have left rsp
 ;; needing the same fixup the other custom shims apply (see getopt.asm). The
@@ -60,52 +58,14 @@
    jmp r11
 %endmacro
 
-;; Gated runtime breadcrumb. Calls the C logger _abiconv_libgcc_log(a,b,result,
-;; which) (inert unless ABICONV_LIBGCC_TRACE is set) while preserving the i386
-;; callee-saved rsi/rdi AND the result register across the SysV call, and keeping
-;; the stack 16-aligned. %4 (result) is restored after the call; %1/%2/%3 may be
-;; regs or immediates. Used only to diagnose Portal 2 CalculateCPUFreq=0.
-%macro LG_TRACE 4               ; %1=which, %2=a, %3=b, %4=result(reg, preserved)
-   push rbp
-   mov rbp, rsp
-   and rsp, ~0xf
-   push rsi
-   push rdi
-   push %4                      ; save result (call-clobbered)
-   sub rsp, 8                   ; pad: rbp+3 pushes+8 = 16-aligned before call
-   mov rdi, %2                  ; arg0 = a
-   mov rsi, %3                  ; arg1 = b
-   mov rdx, %4                  ; arg2 = result
-   mov rcx, %1                  ; arg3 = which
-   call _abiconv_libgcc_log
-   add rsp, 8
-   pop %4                       ; restore result
-   pop rdi
-   pop rsi
-   mov rsp, rbp
-   pop rbp
-%endmacro
-
-;; When the 64-bit divisor (r9) is 0, a hardware `div`/`idiv` raises #DE (SIGFPE)
-;; -- the crash class this instrumentation diagnoses. Instead of faulting, log a
-;; gated breadcrumb naming the i386 caller (its 4-byte return address is at
-;; [rsp], the args being just above it) and return 0 (quotient AND remainder),
-;; which matches how well-behaved i386 code already guards its own div-by-zero
-;; (Halo site 0x1b460b: `testl %edx,%edx; jne ..; xorl %eax,%eax` -> 0). This
-;; keeps a mis-computed divisor from taking down the process while the upstream
-;; source is fixed, and the trace pinpoints WHICH divide. %1 = which (0..3).
-%macro DIVZERO_GUARD 1
+;; When the 64-bit divisor (r9) is 0, a hardware `div`/`idiv` raises #DE (SIGFPE).
+;; Instead of faulting, return 0 (quotient AND remainder), which matches how
+;; well-behaved i386 code already guards its own div-by-zero (Halo site 0x1b460b:
+;; `testl %edx,%edx; jne ..; xorl %eax,%eax` -> 0). This keeps a mis-computed
+;; divisor from taking down the process.
+%macro DIVZERO_GUARD 0
    test r9, r9
    jne %%ok
-   push rbp                     ; align + preserve across the SysV log call
-   mov rbp, rsp
-   and rsp, ~0xf
-   mov rdi, r8                  ; arg0 = dividend
-   mov esi, [rbp + 8]           ; arg1 = i386 return address (was [rsp] pre-push)
-   mov rdx, %1                  ; arg2 = which
-   call _abiconv_libgcc_divzero
-   mov rsp, rbp
-   pop rbp
    xor eax, eax                 ; result low = 0
    xor edx, edx                 ; result high = 0
    mov r11d, [rsp]              ; i386 return address
@@ -118,18 +78,17 @@ _____udivdi3:
    STUB_FIXUP
    mov r8, [rsp + 4]            ; a
    mov r9, [rsp + 12]           ; b
-   DIVZERO_GUARD 0
+   DIVZERO_GUARD
    mov rax, r8
    xor edx, edx
    div r9                       ; rax = quotient, rdx = remainder
-   LG_TRACE 0, r8, r9, rax      ; breadcrumb: dividend, divisor, quotient
    RET_I386_64 rax
 
 _____umoddi3:
    STUB_FIXUP
    mov r8, [rsp + 4]
    mov r9, [rsp + 12]
-   DIVZERO_GUARD 1
+   DIVZERO_GUARD
    mov rax, r8
    xor edx, edx
    div r9
@@ -139,7 +98,7 @@ _____divdi3:
    STUB_FIXUP
    mov r8, [rsp + 4]
    mov r9, [rsp + 12]
-   DIVZERO_GUARD 2
+   DIVZERO_GUARD
    mov rax, r8
    cqo                          ; sign-extend rax into rdx:rax
    idiv r9                      ; rax = quotient, rdx = remainder
@@ -149,7 +108,7 @@ _____moddi3:
    STUB_FIXUP
    mov r8, [rsp + 4]
    mov r9, [rsp + 12]
-   DIVZERO_GUARD 3
+   DIVZERO_GUARD
    mov rax, r8
    cqo
    idiv r9
@@ -177,20 +136,17 @@ _____fixsfdi:                   ; (long long) float, signed
 _____fixunsdfdi:                ; (unsigned long long) double
    STUB_FIXUP
    movsd xmm0, [rsp + 4]
-   mov r10, [rsp + 4]           ; breadcrumb: capture input double bits (r10 survives)
    mov rax, 0x43e0000000000000  ; 2^63 as a double bit pattern
    movq xmm1, rax
    comisd xmm0, xmm1
    jae .big
    cvttsd2si rax, xmm0          ; value < 2^63: direct
-   LG_TRACE 1, r10, 0, rax      ; breadcrumb: input double bits, int64 out
    RET_I386_64 rax
 .big:
    subsd xmm0, xmm1             ; value - 2^63
    cvttsd2si rax, xmm0
    mov rcx, 0x8000000000000000
    add rax, rcx                 ; + 2^63
-   LG_TRACE 1, r10, 0, rax      ; breadcrumb: input double bits, int64 out
    RET_I386_64 rax
 
 _____fixunssfdi:                ; (unsigned long long) float

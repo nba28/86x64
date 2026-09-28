@@ -69,13 +69,6 @@ typedef struct { double x, y, w, h; } HIRectD;
 #define WRAPH(p) ((p) ? (((uint64_t)(uintptr_t)(p) >> 32) ? x64_objc_wrap((uint64_t)(uintptr_t)(p)) : (uint32_t)(uintptr_t)(p)) : 0)
 #define DL(fn, ret, args) static ret (*fn) args; if (!fn) fn = (ret (*) args)dlsym(RTLD_DEFAULT, #fn)
 
-static int st_debug(void) {
-    static int v = -1;
-    if (v < 0) v = getenv("ABICONV_SCROLLTEXT_DEBUG") != NULL;
-    return v;
-}
-#define STLOG(...) do { if (st_debug()) fprintf(stderr, "[scrolltext] " __VA_ARGS__); } while (0)
-
 /* ---- text-box registry (single-threaded UI) ---- */
 #define NBOX 8
 static struct box {
@@ -213,7 +206,6 @@ static void box_layout(struct box *b, double w, double h) {
     b->frame = CTFramesetterCreateFrame(b->fs, CFRangeMake(0, 0), p, NULL);
     CGPathRelease(p);
     b->frame_w = w;
-    STLOG("layout w=%.0f text_h=%.0f\n", w, b->text_h);
 }
 
 /* ---- kEventControlDraw: paint the text with CoreText ---- */
@@ -225,7 +217,6 @@ static OSStatus box_draw_handler(void *call, void *event, void *user) {
     CGContextRef ctx = NULL;
     if (!GetEventParameter ||
         GetEventParameter(event, 'cntx', 'cntx', NULL, sizeof ctx, NULL, &ctx) || !ctx) {
-        STLOG("draw: no CGContext param\n");
         return -9874;
     }
     HIRectD vb = { 0, 0, 0, 0 };
@@ -233,7 +224,6 @@ static OSStatus box_draw_handler(void *call, void *event, void *user) {
     double w = vb.w > 8 ? vb.w : 8, h = vb.h > 8 ? vb.h : 8;
     const double pad = BOX_PAD, scroller = BOX_SCROLLER;
     b->view_w = w; b->view_h = h;             /* remembered for hit-mapping */
-    STLOG("draw: view %.0fx%.0f scroll=%.0f\n", w, h, b->scroll);
 
     CGContextSaveGState(ctx);
     /* background + border (the classic box drew a 1px frame) */
@@ -286,7 +276,6 @@ static OSStatus box_wheel_handler(void *call, void *event, void *user) {
     if (b->scroll < 0) b->scroll = 0;
     if (b->maxscroll > 0 && b->scroll > b->maxscroll) b->scroll = b->maxscroll;
     if (HIViewSetNeedsDisplay && b->ctrl) HIViewSetNeedsDisplay(b->ctrl, 1);
-    STLOG("wheel delta=%d scroll=%.0f/%.0f\n", delta, b->scroll, b->maxscroll);
     return 0;
 }
 
@@ -351,7 +340,6 @@ static OSStatus box_track_handler(void *call, void *event, void *user) {
         /* let the compositor repaint between samples */
         CFRunLoopRunInMode(kCFRunLoopDefaultMode, 1.0 / 60.0, false);
     }
-    STLOG("track: scroll=%.0f/%.0f\n", b->scroll, b->maxscroll);
     return 0;
 }
 
@@ -363,7 +351,6 @@ void carbon_scrolltext_control_disposed(void *ctrl) {
     if (b->frame) CFRelease(b->frame);
     if (b->fs) CFRelease(b->fs);
     memset(b, 0, sizeof *b);
-    STLOG("disposed\n");
 }
 
 /* OSStatus CreateScrollingTextBoxControl(WindowRef window, const Rect *bounds,
@@ -392,21 +379,19 @@ uint32_t shim_CreateScrollingTextBoxControl(uint32_t *a) {
     int16_t resID = (int16_t)a[2];
     uint32_t *out = (uint32_t *)(uintptr_t)a[7];
     if (out) *out = 0;
-    STLOG("create win=%p rect=%p resID=%d\n", win, (void *)rect, resID);
     if (!win || !rect || !Get1Resource || !HIObjectCreate) return (uint32_t)-50;
 
     /* 1. the classic resource load — from the app's own current res file
      *    (Get1Resource; fall back to the whole chain like the classic CDEF) */
     void *th = Get1Resource('TEXT', resID);
     if (!th && GetResource) th = GetResource('TEXT', resID);
-    if (!th) { STLOG("TEXT %d not found\n", resID); return (uint32_t)-192; }
+    if (!th) { return (uint32_t)-192; }
     long tlen = GetHandleSize ? GetHandleSize(th) : 0;
     void *sh = Get1Resource('styl', resID);
     long slen = sh && GetHandleSize ? GetHandleSize(sh) : 0;
     CFAttributedStringRef text = styled_text(*(const uint8_t **)th, tlen,
                                              sh ? *(const uint8_t **)sh : NULL, slen);
     if (ReleaseResource) { ReleaseResource(th); if (sh) ReleaseResource(sh); }
-    STLOG("TEXT %d loaded: %ld bytes, styl %ld bytes\n", resID, tlen, slen);
 
     /* 2. a real compositing HIView at `rect` */
     void *ctrl = NULL;
@@ -445,7 +430,6 @@ uint32_t shim_CreateScrollingTextBoxControl(uint32_t *a) {
     }
 
     if (out) *out = WRAPH(ctrl);
-    STLOG("created ctrl=%p\n", ctrl);
     return 0;
 }
 

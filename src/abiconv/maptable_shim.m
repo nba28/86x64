@@ -547,9 +547,6 @@ void x64_safe_remove_rect(id self, SEL sel, long tag) {
    @try {
       ((void (*)(id, SEL, long))objc_msgSend)(self, sel, tag);
    } @catch (NSException *e) {
-      if (getenv("ABICONV_TAG_TRACE"))
-         fprintf(stderr, "[tag] remove tag=0x%lx threw %s -> ignored "
-                 "(legacy silent-invalid-remove leniency)\n",
-                 (unsigned long)tag, [[e name] UTF8String]);
+      (void)e;   /* legacy silent-invalid-remove leniency */
    }
 }

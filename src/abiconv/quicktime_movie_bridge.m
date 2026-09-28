@@ -26,7 +26,6 @@
  * UNIVERSAL: any translated i386 app that plays a movie through the Movie Toolbox
  * (Civ IV intro/diplo movies, iMovie/QuickTime Player, countless Carbon apps) is
  * served — no app-specific logic; keyed only on the Movie Toolbox API shape.
- * Set ABICONV_QT_TRACE=1 to trace the movie calls.
  *
  * MEMORY MODEL: the Movie the i386 caller holds is just the (low-4GB, since
  * libabiconv's malloc heap is < 4GB — see carbon_shim.h) pointer to our qt_movie,
@@ -51,9 +50,6 @@
  * bound GWorld/port (0 => current port) to its low-4GB ARGB pixel buffer. This
  * is the SAME accessor the GraphicsImporter (quicktime_image.c) draws through. */
 extern int qd_port_pixels(uint32_t port_h, void **base, int *rowBytes, int *w, int *h);
-
-static int qt_trace(void) { static int t=-1; if(t<0) t=getenv("ABICONV_QT_TRACE")?1:0; return t; }
-#define MVLOG(...) do { if (qt_trace()) fprintf(stderr, "[qtmovie] " __VA_ARGS__); } while (0)
 
 /* couldNotResolveDataRef (-2000): "this data reference can't be opened". */
 #define QT_COULD_NOT_RESOLVE_DATAREF (-2000)
@@ -122,7 +118,6 @@ static CFURLRef qt_url_from_dataref(uint32_t dataRef, uint32_t dataRefType) {
       if (!s) return NULL;
       CFURLRef url = CFURLCreateWithString(NULL, s, NULL);
       CFRelease(s);
-      MVLOG("dataref url='%s'\n", u);
       return url;
    }
    if (dataRefType == kHandleDataRef) {
@@ -137,11 +132,9 @@ static CFURLRef qt_url_from_dataref(uint32_t dataRef, uint32_t dataRefType) {
       ssize_t wr = write(fd, bytes, len);
       close(fd);
       if (wr != (ssize_t)len) { unlink(tmpl); return NULL; }
-      MVLOG("dataref handle bytes=%u -> %s\n", len, tmpl);
       return CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)tmpl,
                                                       (CFIndex)strlen(tmpl), false);
    }
-   MVLOG("dataref UNHANDLED type=0x%08x\n", dataRefType);
    return NULL;
 }
 
@@ -179,7 +172,6 @@ static qt_movie *qt_open_url(CFURLRef url) {
       m->player.actionAtItemEnd = AVPlayerActionAtItemEndPause;
 
       qt_register(m);
-      MVLOG("opened movie %p  %dx%d  %.2fs\n", (void*)m, m->natW, m->natH, m->durationSec);
       return m;
    }
 }
@@ -209,7 +201,6 @@ static void qt_pump_frame(qt_movie *m) {
       for (int y = 0; y < rows; y++)
          memcpy((uint8_t *)dbase + (size_t)y * drb, sbase + (size_t)y * srb, (size_t)cols * 4);
       CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
-      MVLOG("pump frame %dx%d -> gworld %dx%d\n", sw, sh, dw, dh);
    }
    CVPixelBufferRelease(pb);
 }
@@ -243,14 +234,13 @@ uint32_t shim_DisposeMovie(uint32_t *a) {
    if (m->asset)  [m->asset release];
    m->magic = 0;
    free(m);
-   MVLOG("disposed movie %p\n", (void*)m);
    return cmNoErr;
 }
 
 /* void SetMovieGWorld(Movie, CGrafPtr port, GDHandle gd); */
 uint32_t shim_SetMovieGWorld(uint32_t *a) {
    qt_movie *m = qt_from_i386(a[0]);
-   if (m) { m->gw = a[1]; MVLOG("SetMovieGWorld(port=%08x)\n", a[1]); }
+   if (m) { m->gw = a[1]; }
    return cmNoErr;
 }
 /* void GetMovieGWorld(Movie, CGrafPtr *port, GDHandle *gd); */
@@ -278,7 +268,7 @@ uint32_t shim_SetMovieBox(uint32_t *a) { (void)a; return cmNoErr; }
 /* void StartMovie(Movie); */
 uint32_t shim_StartMovie(uint32_t *a) {
    qt_movie *m = qt_from_i386(a[0]);
-   if (m) { m->started = 1; [m->player play]; MVLOG("StartMovie %p\n", (void*)m); }
+   if (m) { m->started = 1; [m->player play]; }
    return cmNoErr;
 }
 /* void StopMovie(Movie); */
@@ -392,11 +382,7 @@ static CGImageRef qt_frame_cgimage(qt_movie *m, double sec) {
    g.requestedTimeToleranceBefore = kCMTimeZero;
    g.requestedTimeToleranceAfter  = kCMTimePositiveInfinity;   /* nearest at/after */
    CMTime t = CMTimeMakeWithSeconds(sec < 0 ? 0 : sec, m->timeScale);
-   NSError *err = nil;
-   CGImageRef img = [g copyCGImageAtTime:t actualTime:NULL error:&err];
-   if (!img) MVLOG("frame decode failed @%.2fs: %s\n", sec,
-                   err.localizedDescription.UTF8String ?: "?");
-   return img;   /* caller releases */
+   return [g copyCGImageAtTime:t actualTime:NULL error:NULL];   /* caller releases */
 }
 
 /* Encode a CGImage to PNG bytes (retained CFData), or NULL. */
@@ -435,6 +421,5 @@ uint32_t shim_GetMoviePict(uint32_t *a) {
    memcpy(blk + 10, QT_WRAPPIC_TAG, 4);
    memcpy(blk + 14, CFDataGetBytePtr(png), pnglen);
    CFRelease(png);
-   MVLOG("GetMoviePict @%.2fs -> %dx%d PicHandle=%08x (%u png bytes)\n", sec, w, h, handle, pnglen);
    return handle;
 }

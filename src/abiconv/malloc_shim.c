@@ -337,8 +337,7 @@ static void heap_report_requesters(void)
     * which is why an earlier version of this report saw a couple of translated
     * frames and missed the rest of the chain. */
    const uint32_t *sp = (const uint32_t *)__builtin_frame_address(0);
-   const char *w = getenv("ABICONV_HEAP_WORDS");
-   int words = w ? atoi(w) : 2048;   /* 8 KB at 4 bytes/step */
+   int words = 2048;   /* 8 KB at 4 bytes/step */
    /* Never read past the stack's own mapping: the main thread runs near the
     * top of the wrapper's low 16 MB stack, so a fixed 8 KB scan faulted at the
     * region end and turned an ALLOCATION FAILED report into a SIGSEGV here
@@ -368,7 +367,7 @@ static void heap_report_requesters(void)
       ++shown;
    }
    if (shown == 0) {
-      fprintf(stderr, "[heap]     (none found -- raise ABICONV_HEAP_WORDS)\n");
+      fprintf(stderr, "[heap]     (none found)\n");
    }
 
    /* Now the stack that actually matters. A translated static initializer runs on
@@ -379,8 +378,7 @@ static void heap_report_requesters(void)
     * base runs oldest-to-newest. */
    uintptr_t istop = 0, isbot = 0;
    if (_86x64_init_stack_range(&istop, &isbot)) {
-      const char *iw = getenv("ABICONV_HEAP_I386_WORDS");
-      const int iwords = iw ? atoi(iw) : 4096;          /* 16 KB of stack */
+      const int iwords = 4096;          /* 16 KB of stack */
       fprintf(stderr, "[heap]   i386 init-stack frames (base %#lx, newest LAST; "
                       "feed an offset to pcmap-diff.py):\n",
               (unsigned long)istop);
@@ -405,8 +403,7 @@ static void heap_report_requesters(void)
          ++ishown;
       }
       if (ishown == 0) {
-         fprintf(stderr, "[heap]     (no translated frames found -- raise "
-                         "ABICONV_HEAP_I386_WORDS)\n");
+         fprintf(stderr, "[heap]     (no translated frames found)\n");
       }
    }
    fflush(stderr);
@@ -515,18 +512,6 @@ void *malloc(size_t n) {
    if (cap >= (64UL << 20) && getenv("ABICONV_HEAP_TRACE")) {
       fprintf(stderr, "[heap] large malloc %llu bytes (0x%llx) -> %p\n",
               (unsigned long long)cap, (unsigned long long)cap, p);
-      /* A SERVED request can still be a mistranslated size, and then nothing
-       * ever fails -- so the requester report cannot be reserved for the
-       * failure path. Portal 2 2026-09-13: after the stale-anchor fix the fatal
-       * 1-2 GiB request was gone, but two ~300 MB requests per run remained,
-       * varying with ASLR (low 12 bits always 0x460) and SERVED, i.e. invisible
-       * to every signal-based tool. ABICONV_HEAP_WHO names who asked, at a
-       * threshold of its own so it does not fire on legitimate big buffers. */
-      const char *who = getenv("ABICONV_HEAP_WHO");
-      if (who != NULL) {
-         unsigned long long lo = strtoull(who, NULL, 0);   /* "1" = any large */
-         if (lo <= 1 || cap >= lo) { heap_report_requesters(); }
-      }
    }
    return p;
 }

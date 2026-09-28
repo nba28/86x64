@@ -71,8 +71,7 @@
 static int ir_verbose(void) {
    static int v = -1;
    if (v < 0) {
-      v = getenv("ABICONV_IMPORT_REPAIR_VERBOSE") != NULL ||
-          getenv("ABICONV_OBJC_SLIDE_VERBOSE") != NULL ||
+      v = getenv("ABICONV_OBJC_SLIDE_VERBOSE") != NULL ||
           getenv("VERBOSE") != NULL;
    }
    return v;
@@ -85,7 +84,7 @@ static void ir_stub_binder_abort(void) {
    fprintf(stderr,
            "abiconv import_repair: translated image called a lazy import "
            "that could not be repaired (see the load-time "
-           "ABICONV_IMPORT_REPAIR_VERBOSE listing); aborting instead of "
+           "ABICONV_OBJC_SLIDE_VERBOSE listing); aborting instead of "
            "jmp *0\n");
    fflush(stderr);
    abort();
