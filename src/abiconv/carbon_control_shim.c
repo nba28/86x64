@@ -34,6 +34,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <dlfcn.h>
+#include "carbon_shim.h"
 
 extern uint64_t x64_objc_unwrap(uint32_t h);
 extern uint32_t x64_objc_wrap(uint64_t real);
@@ -307,19 +308,15 @@ void     shim_DrawGrowIcon(uint32_t *a)         { (void)a; }
 
 // ---------------- Window Manager ----------------
 
-// WindowRef NewCWindow(void* storage, const Rect* bounds, ConstStr255Param title,
-//   Boolean visible, SInt16 procID, WindowRef behind, Boolean goAwayFlag,
-//   SInt32 refCon) — bridge to modern CreateNewWindow (compositing document class).
-uint32_t shim_NewCWindow(uint32_t *a) {
+// The classic window creators (NewWindow/NewCWindow and their 'WIND'-resource
+// forms) are absent on 64-bit; all four bridge to modern CreateNewWindow
+// (compositing document class) through this one body.
+static uint32_t classic_new_window(const CRect *bounds, const uint8_t *pstr,
+                                   int visible, int32_t refcon) {
     void carbon_ensure_window_host(void);   /* carbon_appkit_host.c */
     carbon_ensure_window_host();
     DL(CreateNewWindow, OSStatus, (uint32_t, uint32_t, const CRect *, void **));
-    DL(SetWRefCon, void, (void *, int32_t));
     DL(ShowWindow, void, (void *));
-    const CRect *bounds = (const CRect *)(uintptr_t)a[1];
-    const uint8_t *pstr = (const uint8_t *)(uintptr_t)a[2];   // Str255 (pascal)
-    int visible = (int)a[3];
-    int32_t refcon = (int32_t)a[7];
     void *win = 0;
     if (!CreateNewWindow) return 0;
     uint32_t attrs = (1u << 19) | (1u << 25) | (1u << 0) | (1u << 3); // compositing|stdhandler|close|collapse
@@ -341,10 +338,41 @@ uint32_t shim_NewCWindow(uint32_t *a) {
                      if (CFRelease) CFRelease(s); }
         }
     }
-    if (SetWRefCon) SetWRefCon(win, refcon);
+    void carbon_set_wrefcon(void *win, uint32_t refcon);   /* carbon_ui_shim.c */
+    carbon_set_wrefcon(win, (uint32_t)refcon);
     if (visible && ShowWindow) ShowWindow(win);
     return WRAP(win);
 }
+
+// WindowRef NewCWindow / NewWindow(void* storage, const Rect* bounds,
+//   ConstStr255Param title, Boolean visible, SInt16 procID, WindowRef behind,
+//   Boolean goAwayFlag, SInt32 refCon). NewWindow differs only in colour.
+uint32_t shim_NewCWindow(uint32_t *a) {
+    return classic_new_window((const CRect *)(uintptr_t)a[1],
+                              (const uint8_t *)(uintptr_t)a[2], (int)a[3], (int32_t)a[7]);
+}
+uint32_t shim_NewWindow(uint32_t *a) { return shim_NewCWindow(a); }
+
+// WindowRef GetNewCWindow / GetNewWindow(SInt16 windowID, void* storage,
+//   WindowRef behind): the same, parameters from the 'WIND' resource:
+//   Rect bounds, SInt16 procID, visible, goAwayFlag (Boolean words), SInt32
+//   refCon, Str255 title. The Resource Manager's registered 'WIND' flipper has
+//   already swapped these to HOST order (MEASURED: bounds 100,120 arrive as
+//   64 00 78 00), exactly as the i386 app saw them on an Intel 10.6 Mac.
+uint32_t shim_GetResource(uint32_t *a);   /* rm_shim.c */
+uint32_t shim_GetNewCWindow(uint32_t *a) {
+    uint32_t ra[2] = { 'WIND', a[0] };
+    uint32_t h = shim_GetResource(ra);
+    if (!h || cm_handle_size(h) < 19) return 0;
+    const uint8_t *w = (const uint8_t *)cm_handle_block(h);
+    if (cm_handle_size(h) < 19u + w[18]) return 0;           /* title runs past the data */
+    struct { CRect bounds; int16_t procID, visible, goAway; int32_t refCon; }
+        __attribute__((packed)) f;
+    memcpy(&f, w, sizeof f);
+    const CRect bounds = f.bounds;
+    return classic_new_window(&bounds, w + 18, f.visible != 0, f.refCon);
+}
+uint32_t shim_GetNewWindow(uint32_t *a) { return shim_GetNewCWindow(a); }
 
 // Boolean IsWindowContainedInGroup(WindowRef) -> false (no classic window groups)
 uint32_t shim_IsWindowContainedInGroup(uint32_t *a) { (void)a; return 0; }

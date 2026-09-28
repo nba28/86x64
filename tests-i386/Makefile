@@ -1838,6 +1838,16 @@ $(BUILD_DIR)/97_carbon_fixed32_paramrec.i386: $(BUILD_DIR)/97_carbon_fixed32_par
 $(BUILD_DIR)/99_carbon_window_compositing.i386: $(BUILD_DIR)/99_carbon_window_compositing.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 99_classic_window_resource: GetNewCWindow/NewWindow (absent on 64-bit Carbon;
+# carbon_control_shim.c). Carbon is undefined dynamic_lookup (bound by
+# static-interpose), and the 'WIND' resource is compiled by Rez into the
+# resource fork of build/99_classic_window_resource.rsrc (git cannot hold a
+# fork). Overrides %.i386.
+$(BUILD_DIR)/99_classic_window_resource.i386: $(BUILD_DIR)/99_classic_window_resource.o $(BUILD_DIR)/99_classic_window_resource.rsrc
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+$(BUILD_DIR)/99_classic_window_resource.rsrc: $(SRC_DIR)/99_classic_window_resource.r | $(BUILD_DIR)
+	rm -f $@ && touch $@ && Rez $< -o $@
+
 # 99_agl_window_drawable: neither Carbon/HIToolbox nor AGL is in the i386
 # sysroot, and libabiconv exports a ___<sym> shim for every symbol this fixture
 # needs (___CreateNewWindow/___GetWindowPort/___GetWindowFromPort/___DisposeWindow

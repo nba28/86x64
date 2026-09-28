@@ -38,8 +38,30 @@ extern int sd_ctrl_get_value(void *ctrl, int32_t *out);
 // ---- Window Manager update / port / refcon (no classic window): no-op or noErr ----
 void     shim_BeginUpdate(uint32_t *args)       { (void)args; }
 void     shim_EndUpdate(uint32_t *args)         { (void)args; }
-void     shim_SetWRefCon(uint32_t *args)        { (void)args; }
 void     shim_SetPortWindowPort(uint32_t *args) { (void)args; }
+
+// SetWRefCon / GetWRefCon. 64-bit HIToolbox dropped SetWRefCon but kept
+// GetWRefCon, so the refCon was stuck at 0: an app's SetWRefCon (the classic
+// place to hang its own window object) was silently dropped and every
+// GetWRefCon answered 0. Keep the i386 refCon as a window property: it lives
+// and dies with the window, and every libabiconv copy sees the same value.
+#define REFCON_CREATOR 0x78363472u   /* 'x64r' */
+#define REFCON_TAG     0x72636f6eu   /* 'rcon' */
+void carbon_set_wrefcon(void *win, uint32_t refcon) {
+    UIDL(SetWindowProperty, int32_t, (void *, uint32_t, uint32_t, uint64_t, const void *));
+    if (SetWindowProperty && win) SetWindowProperty(win, REFCON_CREATOR, REFCON_TAG, 4, &refcon);
+}
+void shim_SetWRefCon(uint32_t *args) { carbon_set_wrefcon(UICTRL(0), args[1]); }
+uint32_t shim_GetWRefCon(uint32_t *args) {
+    void *win = UICTRL(0);
+    if (!win) return 0;
+    UIDL(GetWindowProperty, int32_t, (void *, uint32_t, uint32_t, uint64_t, uint64_t *, void *));
+    uint32_t v = 0;
+    if (GetWindowProperty && GetWindowProperty(win, REFCON_CREATOR, REFCON_TAG, 4, NULL, &v) == 0)
+        return v;
+    UIDL(GetWRefCon, intptr_t, (void *));   /* never set through us: native answer */
+    return GetWRefCon ? (uint32_t)GetWRefCon(win) : 0;
+}
 // GetWindowPort(WindowRef) / GetWindowFromPort(CGrafPtr): REAL window-backed
 // ports from the QuickDraw registry (qd_gworld.c).  Both entry points are gone
 // from 64-bit macOS, and the old `return 0` pair broke far more than drawing:

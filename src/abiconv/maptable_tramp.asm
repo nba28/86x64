@@ -1104,6 +1104,7 @@ _x64_exc_longjmp:
 	MTSHIM	___SetControlMaximum,                 _shim_SetControlMaximum
 	MTSHIM	___SetPortWindowPort,                 _shim_SetPortWindowPort
 	MTSHIM	___SetWRefCon,                        _shim_SetWRefCon
+	MTSHIM	___GetWRefCon,                        _shim_GetWRefCon
 	MTSHIM	___SetWindowContentColor,             _shim_SetWindowContentColor
 	MTSHIM	___SetWindowProxyCreatorAndType,      _shim_SetWindowProxyCreatorAndType
 	MTSHIM	___ValidWindowRect,                   _shim_ValidWindowRect
@@ -1162,6 +1163,9 @@ _x64_exc_longjmp:
 	MTSHIM	___IsWindowContainedInGroup,                _shim_IsWindowContainedInGroup
 	MTSHIM	___IsWindowUpdatePending,                   _shim_IsWindowUpdatePending
 	MTSHIM	___NewCWindow,                              _shim_NewCWindow
+	MTSHIM	___NewWindow,                               _shim_NewWindow
+	MTSHIM	___GetNewCWindow,                           _shim_GetNewCWindow
+	MTSHIM	___GetNewWindow,                            _shim_GetNewWindow
 	MTSHIM	___ReleaseWindowGroup,                      _shim_ReleaseWindowGroup
 	MTSHIM	___ReverseKeyboardFocus,                    _shim_ReverseKeyboardFocus
 	MTSHIM	___SetControl32BitMinimum,                  _shim_SetControl32BitMinimum

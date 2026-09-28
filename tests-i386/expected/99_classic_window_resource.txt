@@ -1,0 +1,3 @@
+GetNewCWindow: bounds 100,120,300,420 refcon 0x12345678 ok
+NewWindow: bounds 60,70,160,270 refcon 0x7 ok
+exit_code: 42
