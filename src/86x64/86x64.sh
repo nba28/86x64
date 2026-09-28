@@ -223,8 +223,10 @@ SYMS_FILE="$TMPDIR_PIPE/${STEM}.syms"
 printf '%s\n' $SYMS > "$SYMS_FILE"
 v "$ROOTDIR"/static-interpose.sh -l "$LIBABICONV" -n "$LIBABICONV_NAME" -p "__" -o "$INTERPOSE64" "$DOLLAR64" < "$SYMS_FILE" || error
 
-if [ "$HAS_DYLD_INFO" -gt 0 ]; then
-    # interpose dyld_stub_binder (modern lazy-binding entry point)
+# interpose dyld_stub_binder (modern lazy-binding entry point), when the image
+# binds it at all: one with no lazy imports has no such bind.
+if [ "$HAS_DYLD_INFO" -gt 0 ] &&
+   "$MACHO_TOOL" print --bind "$INTERPOSE64" 2>/dev/null | awk '{print $5}' | grep -qx dyld_stub_binder; then
     DYLD_ORD=$("$MACHO_TOOL" translate --load-dylib "$LIBABICONV_NAME" "$INTERPOSE64")
     v "$MACHO_TOOL" modify --update bind,old_sym="dyld_stub_binder",new_sym="__dyld_stub_binder",new_dylib="$DYLD_ORD" "$INTERPOSE64" "$DYLD64" || error
 else
