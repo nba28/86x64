@@ -1050,8 +1050,18 @@ static int is_real_x86_object(uint32_t p) {
  * translated binary can pass: arena proxy handle, class-name cstring
  * pointer (for class messages), or nil. An unmapped value is none of these:
  * log it and fall back to nil rather than crashing objc_getClass. */
+/* Class-message receivers are the i386 class-NAME string; resolving one tried
+ * three other classifications and objc_getClass twice per send. Memoized per
+ * thread by address, only for a name the final path resolved (the bytes are
+ * immutable while the image is mapped; dropped when the image count moves). */
+#define CLS_MEMO_WAYS 64u
+static __thread struct { uint32_t p, imgs; id cls; } t_cls_memo[CLS_MEMO_WAYS];
+
 static id resolve_self_raw(uint32_t self32) {
    uintptr_t sp = self32;
+   const uint32_t imgs = x64_img_count();
+   __typeof__(&t_cls_memo[0]) cm = &t_cls_memo[(self32 >> 2) % CLS_MEMO_WAYS];
+   if (cm->p == self32 && cm->imgs == imgs && cm->cls) { return cm->cls; }
    /* A legacy instance method runs with self32 = its i386 shadow; a `[self ...]`
     * inside it must re-dispatch on the real modern object (so inherited/AppKit
     * methods hit real impls and our registered legacy methods route back
@@ -1092,6 +1102,7 @@ static id resolve_self_raw(uint32_t self32) {
                  (const char *)(uintptr_t)self32, self32);
          fflush(stderr);
       }
+      if (cls) { cm->p = self32; cm->imgs = imgs; cm->cls = cls; }
       return cls;
    }
    return (id)0;
@@ -1108,12 +1119,20 @@ static id resolve_self_raw(uint32_t self32) {
  * Drop such a receiver to nil (a safe no-op message) instead of crashing.
  * Tagged/low/odd isas are left untouched (can't validate, and they're not the
  * faulting shape). Universal + structural. */
+/* Classes whose isa->metaclass chain resolve_self already proved sound, per
+ * thread (a Class is never freed in practice). The chain probe cost several
+ * page lookups plus metaclass_probe_safe on EVERY send. */
+#define GOOD_ISA_WAYS 64u
+static __thread uintptr_t t_good_isa[GOOD_ISA_WAYS];
+
 static id resolve_self(uint32_t self32) {
    id obj = resolve_self_raw(self32);
    if (!obj) { return obj; }
    uintptr_t o = (uintptr_t)obj;
    if (!mem_readable(o, 8)) { return obj; }
    uintptr_t isa = *(const uint64_t *)o;                 /* obj->isa (candidate Class) */
+   uintptr_t *good = &t_good_isa[(isa >> 4) % GOOD_ISA_WAYS];
+   if (*good == isa && isa) { return obj; }
    if (isa < 0x100000000ULL || (isa & 0x7) || !mem_readable(isa, 8)) {
       return obj;                                        /* tagged/low/odd: not the bug shape */
    }
@@ -1134,12 +1153,28 @@ static id resolve_self(uint32_t self32) {
       }
       return (id)0;
    }
+   *good = isa;
    return obj;
 }
 
 /* Resolve an i386 cmd32 selector-name pointer to a real SEL, guarding against
- * an unmapped pointer the same way resolve_self does. */
+ * an unmapped pointer the same way resolve_self does. Memoized per thread by
+ * address: the name strings live in the app's images and cannot change while
+ * mapped, and the memo is dropped whenever the image count moves (an unloaded
+ * bundle's address may be reused). sel_registerName + the probe were ~9% of
+ * every forward send. */
+#define SEL_MEMO_WAYS 256u
+static __thread struct { uint32_t cmd32, imgs; SEL sel; } t_sel_memo[SEL_MEMO_WAYS];
+static SEL resolve_sel_uncached(uint32_t cmd32);
 static SEL resolve_sel(uint32_t cmd32) {
+   const uint32_t imgs = x64_img_count();
+   __typeof__(&t_sel_memo[0]) e = &t_sel_memo[(cmd32 >> 2) % SEL_MEMO_WAYS];
+   if (e->cmd32 == cmd32 && e->imgs == imgs && e->sel) { return e->sel; }
+   SEL sel = resolve_sel_uncached(cmd32);
+   e->cmd32 = cmd32; e->imgs = imgs; e->sel = sel;
+   return sel;
+}
+static SEL resolve_sel_uncached(uint32_t cmd32) {
    if (cmd32 != 0 && !mem_readable((uintptr_t)cmd32, 1)) {
       if (BRIDGE_TRACE()) {
          fprintf(stderr, "[bp] resolve_sel: unmapped cmd32=0x%08x -> NULL\n",
@@ -1830,8 +1865,10 @@ static void enc_narrow(const char *t, int conv, const uint8_t *native_src,
  * entries so the forward bridge later can't recover an arg encoding. */
 #define SELTYPES_CAP 131072u
 static struct { SEL sel; const char *types; } g_seltypes[SELTYPES_CAP];
+static uint32_t g_seltypes_gen = 1;   /* bumped on every insert: see fma_plan */
 static void seltypes_insert(SEL s, const char *types) {
    if (!s || !types) { return; }
+   __atomic_add_fetch(&g_seltypes_gen, 1, __ATOMIC_RELEASE);
    uint32_t i = (uint32_t)(((uintptr_t)s >> 3) * 2654435761u) & (SELTYPES_CAP - 1);
    for (uint32_t n = 0; n < SELTYPES_CAP; ++n) {
       if (g_seltypes[i].sel == NULL || g_seltypes[i].sel == s) {
@@ -2202,22 +2239,55 @@ static unsigned sel_arg_count(SEL sel) {
    return n;
 }
 
-static unsigned fill_method_args(struct objc_call_plan *plan,
-                                 const uint32_t *args32,
-                                 unsigned *ai,
-                                 Method m, SEL sel,
-                                 struct mcur *cur) {
-   /* No Method (m==NULL): the receiver forwards this selector (RKInvoker /
-    * NSProxy / NSInvocation-style) or it was resolved dynamically. Without a
-    * type encoding we previously marshalled ZERO explicit args, so every
-    * forwarded message silently lost its arguments (e.g. RKInvoker forwarding
-    * -[NSNotificationCenter postNotification:] delivered a NIL notification ->
-    * NSInvalidArgumentException). Derive the count from the selector so the args
-    * survive; each is marshalled as an object below (forwarded sends are object
-    * messages — see the !enc path). Universal: any forwarding proxy in any app. */
+/* ★PER-METHOD ARG PLAN. Everything fill_method_args needs to know about an
+ * argument except its VALUE is a function of (Method, IMP, registry state):
+ * the arg count, each arg's encoding (method_copyArgumentType, possibly
+ * refined by the seltypes registry or the CGFloat mask) and its convention.
+ * Re-deriving it per send (a malloc+free per arg, two enc_nth_arg scans, two
+ * table lookups) was most of the forward bridge's fixed cost. It is derived
+ * once into a per-thread cache slot keyed by (Method, IMP) and tagged with
+ * g_seltypes_gen, so a swizzle (new IMP => new legacy verdict) or a newly
+ * registered legacy selector re-derives it. When a plan cannot be kept
+ * (M64_NO_FMA_CACHE, no Method, the intern table full) it is
+ * derived into a stack slot for this send only: same code, just not kept. */
+#define FMA_MAX  24u   /* explicit args; the largest AppKit initializer has 11 */
+#define FMA_WAYS 128u   /* power of two, per thread */
+enum { FMA_MARSHAL = 0, FMA_RAW_GP = 1 };
+struct fma_arg { const char *enc; const char *full; uint8_t aconv, kind; };
+struct fma_plan {
+   Method m; IMP imp; uint32_t gen; uint8_t nargs;
+   int8_t ret_kind; uint8_t sret_conv;   /* see fill_args_and_return */
+   uint8_t legacy;                       /* method_is_legacy(m) */
+   struct fma_arg a[FMA_MAX];
+};
+static int8_t ret_kind_of(Method m, uint8_t *sret_conv);
+static __thread struct fma_plan *t_fma;   /* FMA_WAYS entries, lazily allocated */
+
+/* Permanent copy of an arg encoding (method_copyArgumentType hands back a
+ * malloc'd string a plan cannot keep). Few hundred distinct strings. */
+#define ENC_INTERN_CAP 8192u
+static const char *g_enc_intern[ENC_INTERN_CAP];
+static os_unfair_lock g_enc_intern_lock = OS_UNFAIR_LOCK_INIT;
+static const char *enc_intern(const char *e) {
+   uint32_t h = 2166136261u;
+   for (const char *c = e; *c; ++c) { h = (h ^ (uint8_t)*c) * 16777619u; }
+   const char *out = NULL;
+   os_unfair_lock_lock(&g_enc_intern_lock);
+   for (uint32_t n = 0, i = h & (ENC_INTERN_CAP - 1); n < ENC_INTERN_CAP;
+        ++n, i = (i + 1) & (ENC_INTERN_CAP - 1)) {
+      if (!g_enc_intern[i]) { g_enc_intern[i] = out = strdup(e); break; }
+      if (strcmp(g_enc_intern[i], e) == 0) { out = g_enc_intern[i]; break; }
+   }
+   os_unfair_lock_unlock(&g_enc_intern_lock);
+   return out;   /* NULL only if the table is full: the caller won't cache */
+}
+
+/* Derive p for (m, sel). Returns 0 when it cannot be kept (more than
+ * FMA_MAX explicit args, or the intern table full). */
+static int fma_derive(struct fma_plan *p, Method m, SEL sel) {
    unsigned nargs = m ? method_getNumberOfArguments(m) : (2 + sel_arg_count(sel));
-   const int trace = BRIDGE_TRACE();
-   const int conv = method_is_legacy(m) ? CONV_I386 : CONV_NATIVE;
+   p->legacy = (uint8_t)method_is_legacy(m);
+   const int conv = p->legacy ? CONV_I386 : CONV_NATIVE;
    /* legacy-registry override only matters for native methods */
    const char *lt = (conv == CONV_NATIVE && sel) ? seltypes_lookup(sel) : NULL;
    if (lt) {
@@ -2231,14 +2301,12 @@ static unsigned fill_method_args(struct objc_call_plan *plan,
     * metadata): bit k marks explicit arg k as a CGFloat (i386 4-byte float). */
    const uint32_t cgf_mask = (conv == CONV_NATIVE && sel)
       ? cgfloat_mask_lookup(sel) : 0;
-   if (trace) {
-      fprintf(stderr, "[fma] m=%p nargs=%u conv=%s%s types=\"%s\"\n", (void *)m,
-              nargs, conv == CONV_I386 ? "i386" : "native",
-              lt ? "+registry" : "",
-              m ? method_getTypeEncoding(m) : "(null)");
-      fflush(stderr);
-   }
+   p->nargs = (uint8_t)nargs;
+   p->ret_kind = ret_kind_of(m, &p->sret_conv);
+   if (nargs - 2 > FMA_MAX) { return 0; }   /* see fma_get */
+   const char *types = m ? method_getTypeEncoding(m) : NULL;
    for (unsigned i = 2; i < nargs; ++i) {
+      struct fma_arg *fa = &p->a[i - 2];
       char *rt_alloc = m ? method_copyArgumentType(m, i) : NULL;
       const char *enc = rt_alloc;
       int aconv = conv;
@@ -2259,32 +2327,96 @@ static unsigned fill_method_args(struct objc_call_plan *plan,
          const char *bb = enc_skip_quals(enc);
          if (*bb == 'd') { enc = "f"; aconv = CONV_I386; }
       }
+      fa->full = types ? enc_nth_arg(types, i - 2) : NULL;
       if (!enc || !*enc) {
-         if (!m) {
-            /* Forwarded/dynamic selector with no type info: marshal as an
-             * object so an i386 proxy handle resolves to the real object the
-             * forwarding target expects (a non-object int/BOOL resolves to
-             * itself). Without this the arg is dropped -> nil at the target. */
-            marshal_arg_fwd(plan, cur, "@", CONV_I386, args32, ai);
-         } else {                              /* no type info: raw GP slot */
-            mcur_put_gp(plan, cur, (uint64_t)args32[(*ai)++]);
+         /* No type info. Forwarded/dynamic selector (no Method): marshal as an
+          * object so an i386 proxy handle resolves to the real object the
+          * forwarding target expects (a non-object int/BOOL resolves to
+          * itself); without this the arg is dropped -> nil at the target.
+          * A Method without an encoding: raw GP slot. */
+         fa->kind = m ? FMA_RAW_GP : FMA_MARSHAL;
+         fa->enc = "@"; fa->aconv = CONV_I386;
+      } else {
+         fa->kind = FMA_MARSHAL; fa->aconv = (uint8_t)aconv;
+         if (enc == rt_alloc) {           /* the only non-persistent string */
+            enc = enc_intern(rt_alloc);
+            if (!enc) { free(rt_alloc); return 0; }
          }
-         free(rt_alloc);
+         fa->enc = enc;
+      }
+      free(rt_alloc);
+   }
+   return 1;
+}
+
+/* The plan for (m, sel): this thread's cached one, or `slow` derived for this
+ * send only. */
+static const struct fma_plan *fma_get(Method m, SEL sel, struct fma_plan *slow) {
+   static int no_cache = -1;
+   if (__builtin_expect(no_cache < 0, 0)) { no_cache = KNOB("M64_NO_FMA_CACHE") != NULL; }
+   if (m && !no_cache) {
+      if (__builtin_expect(!t_fma, 0)) { t_fma = calloc(FMA_WAYS, sizeof *t_fma); }
+      if (t_fma) {
+         const uint32_t gen = __atomic_load_n(&g_seltypes_gen, __ATOMIC_ACQUIRE);
+         const IMP imp = method_getImplementation(m);
+         struct fma_plan *p = &t_fma[((uintptr_t)m >> 4) * 2654435761u % FMA_WAYS];
+         if (p->m == m && p->imp == imp && p->gen == gen) { return p; }
+         p->m = NULL;                     /* invalid while re-deriving */
+         if (fma_derive(p, m, sel)) {
+            p->m = m; p->imp = imp; p->gen = gen;
+            return p;
+         }
+      }
+   }
+   if (!fma_derive(slow, m, sel) && slow->nargs - 2u > FMA_MAX) {
+      /* ponytail: no ObjC method has >24 explicit args; if one ever does,
+       * fail loudly rather than marshal a truncated frame. */
+      fprintf(stderr, "objc_shim: %s has %u args (> %u); not marshalled\n",
+              sel ? sel_getName(sel) : "?", slow->nargs - 2u, FMA_MAX);
+      abort();
+   }
+   return slow;
+}
+
+static unsigned fill_method_args(struct objc_call_plan *plan,
+                                 const uint32_t *args32,
+                                 unsigned *ai,
+                                 const struct fma_plan *p, Method m,
+                                 struct mcur *cur) {
+   /* No Method (m==NULL): the receiver forwards this selector (RKInvoker /
+    * NSProxy / NSInvocation-style) or it was resolved dynamically. Without a
+    * type encoding we previously marshalled ZERO explicit args, so every
+    * forwarded message silently lost its arguments (e.g. RKInvoker forwarding
+    * -[NSNotificationCenter postNotification:] delivered a NIL notification ->
+    * NSInvalidArgumentException). The plan derives the count from the selector
+    * so the args survive; each is marshalled as an object (forwarded sends are
+    * object messages — see the fma_derive no-encoding case). Universal: any
+    * forwarding proxy in any app. */
+   const int trace = BRIDGE_TRACE();
+   const unsigned nargs = p->nargs;
+   if (trace) {
+      fprintf(stderr, "[fma] m=%p nargs=%u types=\"%s\"\n", (void *)m, nargs,
+              m ? method_getTypeEncoding(m) : "(null)");
+      fflush(stderr);
+   }
+   for (unsigned i = 2; i < nargs; ++i) {
+      const struct fma_arg *fa = &p->a[i - 2];
+      if (fa->kind == FMA_RAW_GP) {                /* no type info: raw GP slot */
+         mcur_put_gp(plan, cur, (uint64_t)args32[(*ai)++]);
          continue;
       }
       unsigned ai_before = *ai;
-      g_fma_full_arg = m ? enc_nth_arg(method_getTypeEncoding(m), i - 2) : NULL;
-      marshal_arg_fwd(plan, cur, enc, aconv, args32, ai);
+      g_fma_full_arg = fa->full;
+      marshal_arg_fwd(plan, cur, fa->enc, fa->aconv, args32, ai);
       g_fma_full_arg = NULL;
       if (trace) {
          fprintf(stderr, "[fma]   arg%u slots[%u..%u) t=\"%s\" conv=%s "
                  "gp=%u xmm=%u stk=%zu\n",
-                 i - 2, ai_before, *ai, enc,
-                 aconv == CONV_I386 ? "i386" : "native",
+                 i - 2, ai_before, *ai, fa->enc,
+                 fa->aconv == CONV_I386 ? "i386" : "native",
                  cur->gp, cur->xmm, cur->stk);
          fflush(stderr);
       }
-      free(rt_alloc);
    }
    return nargs;
 }
@@ -2754,6 +2886,64 @@ uint32_t shim_CFStringAppendFormatAndArguments(const uint32_t *a) {
  * already metaclass-converted it for class-method super calls — passing it
  * through object_getClass here would over-step to the metaclass and miss
  * every instance method, leaving m=NULL → args unmarshalled, ret untyped). */
+/* The return KIND for the asm trampoline (see the table in
+ * fill_args_and_return). A function of the Method alone: kept in its plan. */
+static int8_t ret_kind_of(Method m, uint8_t *sret_conv) {
+   int8_t k = 0;
+   char *rt = m ? method_copyReturnType(m) : NULL;
+   const int rconv = method_is_legacy(m) ? CONV_I386 : CONV_NATIVE;
+   char rb = rt ? *enc_skip_quals(rt) : 0;
+   if (rt && (rb == '@' || rb == '#')) {
+      k = 1;
+   } else if (rt && rb == '*') {
+      k = 2;
+   } else if (enc_is_objptr_struct(rt) || enc_is_cfptr(rt)) {
+      k = 1;          /* ^{Class=#...} obj / ^{CF=} ref -> wrap */
+   } else if (enc_is_opaque_voidptr(rt) || enc_is_handle_structptr(rt)) {
+      /* `^v` (void*) opaque-pointer return, e.g. -[NSGraphicsContext graphicsPort]
+       * -> CGContextRef. A >4GB native pointer truncates in the i386 caller's eax;
+       * conditionally wrap it (>4GB only, like abigen's `.cfretlow`) into a low-4GB
+       * arena handle so the opaque-pointer-consuming C shims recover the real
+       * pointer (CGContext* via convert_cf_ptr's __86x64_unwrap_obj_arg). The
+       * symmetric inverse of the `^v` ARG unwrap in fill_method_args. Quinn
+       * 3.5.7's _QuinnGeneralFastDrawCells fetches its draw context this way; the
+       * pre-fix truncated CGContextRef made every CGContextDrawImage/FillRect
+       * silently draw into an invalid context -> invisible Tetris blocks. */
+      k = 10;
+   } else if (rb == 'd' || (rb == 'f' && rconv == CONV_I386)) {
+      /* CGFloat/double: the i386 caller dispatched via _fpret and reads st0.
+       * A legacy 'f' (CGFloat) return arrives as a double too (the reverse
+       * bridge widens st0 -> xmm0 double). */
+      k = 4;
+   } else if (rb == 'f') {
+      k = 7;          /* genuine float: xmm0 single -> st0 */
+   } else if (rb == '{' || rb == '(' || rb == '[') {
+      /* aggregate return through the NON-stret entry: i386 size <= 8 (else
+       * the caller would have used _stret), native <= 16 (register classes) */
+      size_t isz = 0, nsz = 0; uint8_t sse[8];
+      enc_classify(rt ? enc_skip_quals(rt) : "", rconv, &isz, &nsz, sse);
+      if (nsz > 0 && nsz <= 16 && isz <= 8) {
+         k = 5;
+         *sret_conv = (uint8_t)rconv;
+      } else {
+         k = 0;
+      }
+   } else if (rb == 'q' || rb == 'Q' || rb == 'l' || rb == 'L') {
+      /* 64-bit integer return (NSInteger/NSUInteger/long/long long). The native
+       * value is truncated to eax by the i386 caller; the ONLY value that breaks
+       * is the NSNotFound sentinel (NSIntegerMax = 0x7fffffffffffffff on x86_64
+       * vs 0x7fffffff on i386), whose truncation (0xffffffff) never matches the
+       * i386's `cmp eax,0x7fffffff` -> infinite loops in NSIndexSet /
+       * NSArray indexOfObject: enumeration. Kind 8 remaps just that sentinel in
+       * the asm; every other value (incl. genuine int64 edx:eax) passes through. */
+      k = 8;
+   } else {
+      k = 0;
+   }
+   free(rt);
+   return k;
+}
+
 static Method fill_args_and_return(struct objc_call_plan *plan,
                                    const uint32_t *args32,
                                    unsigned arg_base_idx,
@@ -2800,7 +2990,9 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
 
    struct mcur cur = { reg_base, 0, 0 };
    unsigned ai = arg_base_idx;
-   unsigned nargs = fill_method_args(plan, args32, &ai, m, sel, &cur);
+   struct fma_plan slow;
+   const struct fma_plan *fp = fma_get(m, sel, &slow);
+   unsigned nargs = fill_method_args(plan, args32, &ai, fp, m, &cur);
 
    /* Varargs continuation. Foundation methods like initWithObjects: take
     * a nil-terminated id list past their fixed-arg count. The signature
@@ -2820,7 +3012,9 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
     * _86x64_reverse_imp address won't match the registered IMP) — so consult the
     * SHARED rvariadic registry the registering copy published. lookup/sel are
     * process-global Class/SEL, valid in any copy. */
-   int legacy_va = (m && !va32 && !is_varargs_sel((const char *)sel))
+   /* Only a LEGACY method can be one of these, so a native m (the common
+    * case) skips the superclass walk. */
+   int legacy_va = (m && fp->legacy && !va32 && !is_varargs_sel((const char *)sel))
                       ? rvar_contains(lookup, sel) : 0;
    if (va32) {
       char fmtbuf[2048];
@@ -2901,64 +3095,17 @@ static Method fill_args_and_return(struct objc_call_plan *plan,
     *   9 = token wrap    (plain >4GB token -> 32-bit arena handle, no obj deref)
     *  10 = opaque void*  (`^v` return: conditionally wrap a >4GB native pointer
     *                      into a 32-bit arena handle, low pointers pass through) */
-   char *rt = m ? method_copyReturnType(m) : NULL;
-   const int rconv = method_is_legacy(m) ? CONV_I386 : CONV_NATIVE;
-   char rb = rt ? *enc_skip_quals(rt) : 0;
-   if (rt && (rb == '@' || rb == '#')) {
-      plan->ret_is_obj = 1;
-   } else if (rt && rb == '*') {
-      plan->ret_is_obj = 2;
-   } else if (enc_is_objptr_struct(rt) || enc_is_cfptr(rt)) {
-      plan->ret_is_obj = 1;          /* ^{Class=#...} obj / ^{CF=} ref -> wrap */
-   } else if (enc_is_opaque_voidptr(rt) || enc_is_handle_structptr(rt)) {
-      /* `^v` (void*) opaque-pointer return, e.g. -[NSGraphicsContext graphicsPort]
-       * -> CGContextRef. A >4GB native pointer truncates in the i386 caller's eax;
-       * conditionally wrap it (>4GB only, like abigen's `.cfretlow`) into a low-4GB
-       * arena handle so the opaque-pointer-consuming C shims recover the real
-       * pointer (CGContext* via convert_cf_ptr's __86x64_unwrap_obj_arg). The
-       * symmetric inverse of the `^v` ARG unwrap in fill_method_args. Quinn
-       * 3.5.7's _QuinnGeneralFastDrawCells fetches its draw context this way; the
-       * pre-fix truncated CGContextRef made every CGContextDrawImage/FillRect
-       * silently draw into an invalid context -> invisible Tetris blocks. */
-      plan->ret_is_obj = 10;
-   } else if (rb == 'd' || (rb == 'f' && rconv == CONV_I386)) {
-      /* CGFloat/double: the i386 caller dispatched via _fpret and reads st0.
-       * A legacy 'f' (CGFloat) return arrives as a double too (the reverse
-       * bridge widens st0 -> xmm0 double). */
-      plan->ret_is_obj = 4;
-   } else if (rb == 'f') {
-      plan->ret_is_obj = 7;          /* genuine float: xmm0 single -> st0 */
-   } else if (rb == '{' || rb == '(' || rb == '[') {
-      /* aggregate return through the NON-stret entry: i386 size <= 8 (else
-       * the caller would have used _stret), native <= 16 (register classes) */
-      size_t isz = 0, nsz = 0; uint8_t sse[8];
-      enc_classify(rt ? enc_skip_quals(rt) : "", rconv, &isz, &nsz, sse);
-      if (nsz > 0 && nsz <= 16 && isz <= 8) {
-         plan->ret_is_obj = 5;
-         plan->sret_enc  = method_getTypeEncoding(m);  /* stable runtime str */
-         plan->sret_conv = (uint32_t)rconv;
-      } else {
-         plan->ret_is_obj = 0;
-      }
-   } else if (rb == 'q' || rb == 'Q' || rb == 'l' || rb == 'L') {
-      /* 64-bit integer return (NSInteger/NSUInteger/long/long long). The native
-       * value is truncated to eax by the i386 caller; the ONLY value that breaks
-       * is the NSNotFound sentinel (NSIntegerMax = 0x7fffffffffffffff on x86_64
-       * vs 0x7fffffff on i386), whose truncation (0xffffffff) never matches the
-       * i386's `cmp eax,0x7fffffff` -> infinite loops in NSIndexSet /
-       * NSArray indexOfObject: enumeration. Kind 8 remaps just that sentinel in
-       * the asm; every other value (incl. genuine int64 edx:eax) passes through. */
-      plan->ret_is_obj = 8;
-   } else {
-      plan->ret_is_obj = 0;
+   plan->ret_is_obj = fp->ret_kind;
+   if (fp->ret_kind == 5) {
+      plan->sret_enc  = method_getTypeEncoding(m);  /* stable runtime str */
+      plan->sret_conv = fp->sret_conv;
    }
    if (BRIDGE_TRACE() && sel) {
-      fprintf(stderr, "[bp]   ret_kind=%d rt=\"%s\" sel=%s m=%p nxmm=%u nstk=%u\n",
-              plan->ret_is_obj, rt ? rt : "(null)", sel_getName(sel), (void*)m,
-              plan->nxmm, plan->nstack);
+      fprintf(stderr, "[bp]   ret_kind=%d types=\"%s\" sel=%s m=%p nxmm=%u nstk=%u\n",
+              plan->ret_is_obj, m ? method_getTypeEncoding(m) : "(null)",
+              sel_getName(sel), (void*)m, plan->nxmm, plan->nstack);
       fflush(stderr);
    }
-   free(rt);
    return m;
 }
 
