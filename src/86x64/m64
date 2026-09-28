@@ -821,31 +821,6 @@ def _dylib_deps(macho):
     return out
 
 
-def _native_bound_syms(macho):
-    """Symbols a translated binary still imports from a NATIVE framework (i.e.
-    NOT already redirected to @loader_path/libabiconv.dylib). These are the
-    static-interpose rebind candidates: if libabiconv has since grown a
-    `___<sym>` shim, the symbol can now be routed instead of reaching native
-    code with the i386 ABI (whose 8-byte ret over-pops the 4-byte i386 ret
-    slot -> fused-PC crash). Both bind flavours (lazy = functions, non-lazy =
-    data consts) are scanned."""
-    out = set()
-    for flag in ("--lazy-bind", "--bind"):
-        try:
-            p = subprocess.run([str(MACHO_TOOL), "print", flag, str(macho)],
-                               capture_output=True, text=True, errors="replace")
-        except OSError:
-            continue
-        for line in p.stdout.splitlines()[1:]:
-            f = line.split()
-            if len(f) < 5:
-                continue
-            dylib, sym = f[3], f[4]
-            if "libabiconv.dylib" not in dylib:   # already-routed → skip
-                out.add(sym)
-    return out
-
-
 def cmd_reinterpose(args):
     """Re-run static-interpose against the CURRENT libabiconv for every
     translated binary in a bundle. `resync` only COPIES libabiconv; a binary's
@@ -856,6 +831,7 @@ def cmd_reinterpose(args):
     Run it after `m64 build abiconv && m64 resync` whenever libabiconv grew new
     shims that already-deployed bundle binaries should pick up."""
     require(MACHO_TOOL, LIBABICONV)
+    exports = _shim_exports(LIBABICONV)
     app = Path(args.app)
     si = SCRIPT_DIR / "static-interpose.sh"
     require(si)
@@ -864,9 +840,9 @@ def cmd_reinterpose(args):
     info(f"reinterpose translated binaries in {app.name} -> current libabiconv")
     n_bins = 0
     for macho in iter_machos(app):
-        if not links_our_runtime(macho):
-            continue                              # native / non-output → leave
-        syms = _native_bound_syms(macho)
+        if not _links_libabiconv(macho):
+            continue                              # native / wrapper → leave
+        syms = {sym for sym, _, _ in _stale_syms(macho, exports)}
         if not syms:
             continue
         rel = macho.relative_to(app)
@@ -995,35 +971,47 @@ def _shim_for(sym, exports):
     return None
 
 
+def _system_provider(dylib):
+    """True iff a bind's provider column (macho-tool print) names a SYSTEM
+    library. Only those are native code a translated caller reaches with the
+    wrong ABI. `special` (flat namespace / self / main executable) and bundle
+    paths (@rpath, @loader_path, @executable_path) may resolve to another
+    TRANSLATED image (PyObjC's flat `_PyDict_GetItem` -> the app's translated
+    Python), where a libabiconv bridge to the same name would be wrong."""
+    return dylib.startswith(("/System/", "/usr/lib/"))
+
+
 def _stale_syms(macho, exports):
-    """Stale imports of one translated binary: symbols still bound to a NATIVE
-    framework (NOT @loader_path/libabiconv.dylib) for which libabiconv now HAS a
-    shim (per _shim_for). Such a binary was translated BEFORE that shim landed —
-    the import rename was baked at translate time and a resync won't move it (a
-    code-preserving `reinterpose`, or a full retranslate, does).
+    """Stale imports of one translated binary: symbols bound to a SYSTEM
+    library for which libabiconv now has a shim (per _shim_for) — the binary
+    was translated before that shim landed. static-interpose renames every bind
+    of a symbol, so a symbol with ANY non-system bind is left alone.
 
     Returns a sorted list of (sym, shim_export, native_dylib_leaf). Both bind
     flavours are scanned (lazy = functions, non-lazy = data consts)."""
-    hits = {}
+    hits, foreign = {}, set()
     for flag in ("--bind", "--lazy-bind"):
         try:
             p = subprocess.run([str(MACHO_TOOL), "print", flag, str(macho)],
                                capture_output=True, text=True, errors="replace")
         except OSError:
             continue
-        for line in p.stdout.splitlines()[1:]:
+        for line in p.stdout.splitlines():
             f = line.split()
-            if len(f) < 5:
+            if len(f) < 5 or not f[2].startswith("0x"):   # header / warnings
                 continue
             dylib, sym = f[3], f[4]
             if "libabiconv.dylib" in dylib:          # already routed → not stale
                 continue
             if sym in LINKER_SYNTHESIZED:             # runtime-fixup machinery
                 continue                              # (never interposed)
+            if not _system_provider(dylib):
+                foreign.add(sym)
+                continue
             shim = _shim_for(sym, exports)
             if shim and sym not in hits:
                 hits[sym] = (shim, dylib.rsplit("/", 1)[-1])
-    return sorted((s, v[0], v[1]) for s, v in hits.items())
+    return sorted((s, v[0], v[1]) for s, v in hits.items() if s not in foreign)
 
 
 def cmd_stale_check(args):

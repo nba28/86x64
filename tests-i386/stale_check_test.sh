@@ -117,6 +117,17 @@ else:
             print(f"FAIL: {s} tempting-matches a shim but is not excluded"); ok = False
     print("linker-synthesized false-positive guard: active for", sorted(tempting))
 
+# (5) Only SYSTEM providers are stale candidates: a flat-namespace (`special`)
+# or bundle-path bind may resolve to another translated image, and routing it
+# to a same-named libabiconv bridge would send i386 callers into native code.
+for dylib, want in (("/usr/lib/libz.1.dylib", True),
+                    ("/System/Library/Frameworks/Carbon.framework/Versions/A/Carbon", True),
+                    ("special", False),
+                    ("@rpath/Python.framework/Versions/2.6/Python", False),
+                    ("@loader_path/../Frameworks/QuickTime.framework/QuickTime", False)):
+    if m._system_provider(dylib) != want:
+        print(f"FAIL: _system_provider({dylib!r}) != {want}"); ok = False
+
 print("matcher unit checks:", "PASS" if ok else "FAIL")
 sys.exit(0 if ok else 1)
 PY
@@ -137,6 +148,20 @@ if [ -f "$HR" ] && [ -x "$MT" ]; then
   fi
 else
   echo "HeliumRender not deployed / macho-tool missing — skipping end-to-end leg"
+fi
+
+# ---- 5: end-to-end on PyObjC's _objc.so (if deployed): its Python API binds
+# are flat-namespace (-> the app's translated Python). libabiconv exports
+# ___PyDict_GetItem, so a detector that ignored the provider would flag it.
+OBJC_SO="$HOME/projects/translations/Apps64/iPhoto.app/Contents/Frameworks/Python.framework/Versions/2.6/Extras/lib/python/PyObjC/objc/_objc.so"
+if [ -f "$OBJC_SO" ] && [ -x "$MT" ]; then
+  if python3 "$M64" stale-check --libabiconv "$LIBAB" "$OBJC_SO" 2>&1 | grep -q "_PyDict_GetItem "; then
+    echo "FAIL: flat-namespace _PyDict_GetItem reported stale"; fail=1
+  else
+    echo "_objc.so flat-namespace end-to-end: PASS"
+  fi
+else
+  echo "_objc.so not deployed — skipping flat-namespace leg"
 fi
 
 if [ "$fail" = 0 ]; then echo "stale_check_test: PASS"; exit 0; fi
