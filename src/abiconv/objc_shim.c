@@ -1879,6 +1879,28 @@ static const char *seltypes_lookup(SEL s) {
    return NULL;
 }
 
+/* Whether a registry (legacy i386) arg encoding may replace a NATIVE method's
+ * arg encoding. The registry is keyed by selector alone, so its entry may come
+ * from an unrelated legacy class that shares the name (iPhoto's
+ * `addObject:(void *)` vs -[__NSArrayM addObject:(id)]). It exists only to
+ * recover the i386 WIDTH a native encoding leaves ambiguous: 'd' (double or
+ * CGFloat), 'q'/'Q' (long long or NSInteger), and aggregates built from them.
+ * Every other native arg (object, class, SEL, pointer, char*, float, a
+ * fixed-width int) already has one i386 layout, and the override must keep
+ * the arg's kind, or an object skips unwrap and reaches native code as a raw
+ * i386 pointer. M64_NO_SELTYPES_KIND_GUARD restores the any-kind override
+ * (the seltypes-kind guard's OFF arm). */
+static int seltypes_refines(const char *native, const char *legacy) {
+   static int off = -1;
+   if (off < 0) { off = KNOB("M64_NO_SELTYPES_KIND_GUARD") != NULL; }
+   if (off || !native) { return 1; }
+   const char n = *enc_skip_quals(native), l = *enc_skip_quals(legacy);
+   if (n == 'd') { return l == 'd' || l == 'f'; }
+   if (n == 'q' || n == 'Q') { return l && strchr("cCsSiIlLqQ", l) != NULL; }
+   if (n == '{' || n == '(') { return l == n; }
+   return 0;
+}
+
 /* ---- selector -> CGFloat explicit-arg bitmask registry ----
  * A `CGFloat` is a 4-byte float on i386 but an 8-byte double on x86_64, and the
  * modern runtime encodes BOTH a CGFloat and a true `double` parameter as 'd' —
@@ -2194,8 +2216,8 @@ static int marshal_arg_fwd(struct objc_call_plan *plan, struct mcur *c,
  * the last consumed slot). `cur` carries the SysV gp/xmm/stack cursors (gp
  * pre-advanced past self/_cmd/retbuf by the caller). Encodings come from the
  * resolved Method; when that is a NATIVE method but the legacy seltypes
- * registry knows the selector, the legacy i386 encoding wins (it
- * disambiguates CGFloat vs double and NSInteger vs long long). Returns the
+ * registry knows the selector, the legacy i386 encoding refines each arg whose
+ * native width is ambiguous (seltypes_refines). Returns the
  * method-arg count (incl. self+_cmd). */
 /* Explicit-argument count of a selector = number of ':' in its name (keyword
  * selectors); a no-colon selector takes 0 explicit args. Used when the runtime
@@ -2251,7 +2273,9 @@ static unsigned fill_method_args(struct objc_call_plan *plan,
       int overridden = 0;
       if (lt) {
          const char *le = enc_nth_arg(lt, i - 2);
-         if (le) { enc = le; aconv = CONV_I386; overridden = 1; }
+         if (le && seltypes_refines(enc, le)) {
+            enc = le; aconv = CONV_I386; overridden = 1;
+         }
       }
       /* CGFloat override: a native 'd'/'f' arg the registry marks as CGFloat is
        * an i386 4-byte float in ONE slot (not an 8-byte double). Force the
