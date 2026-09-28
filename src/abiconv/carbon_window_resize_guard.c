@@ -74,15 +74,10 @@ typedef int32_t (*wrg_getb_fn)(void *, uint32_t, WRGRect *);
  * pre-show resizes too and produced a misaligned menu; now that it only
  * suppresses the genuinely fatal post-show ones, leaving it off just means a
  * guaranteed SIGILL. M64_NO_WINDOW_RESIZE_GUARD=1 disables it (A/B kill
- * switch); M64_WINDOW_RESIZE_GUARD is still accepted and now redundant. */
+ * switch). */
 static int wrg_off(void) {
    static int t = -1;
    if (t < 0) { t = getenv("M64_NO_WINDOW_RESIZE_GUARD") ? 1 : 0; }
-   return t;
-}
-static int wrg_trace(void) {
-   static int t = -1;
-   if (t < 0) { t = getenv("ABICONV_WINRESIZE_TRACE") ? 1 : 0; }
    return t;
 }
 
@@ -146,14 +141,7 @@ uint32_t shim_SetWindowBounds(uint32_t *args) {
    /* Never shown: the bounds change is free, and this is the ONLY moment the
     * app can legally establish its real geometry. Do not touch it. */
    if (!wrg_ever_shown(win)) {
-      const int32_t st0 = setb(win, region, want);
-      if (wrg_trace()) {
-         fprintf(stderr, "[winresize] win=%p pre-show bounds -> %dx%d at %d,%d "
-                         "PASSED THROUGH (window never shown), st=%d\n", win,
-                 want->right - want->left, want->bottom - want->top,
-                 want->left, want->top, (int)st0);
-      }
-      return (uint32_t)st0;
+      return (uint32_t)setb(win, region, want);
    }
 
    /* Some window CLASSES survive a post-show size change and some trap. The
@@ -180,12 +168,6 @@ uint32_t shim_SetWindowBounds(uint32_t *args) {
                   dlsym(RTLD_DEFAULT, "GetWindowClass");
       }
       uint32_t wc = 0;
-      /* A/B isolation: force the old suppress-everything behaviour even for a
-       * class that survives. With M64_DOC_WINDOW_CLASS_SUB=1 this yields
-       * "new class, NO resize", which is the arm that separates a class effect
-       * from a resize effect on the menu backdrop. Diagnostic; remove with the
-       * window-geometry task. */
-      if (getenv("M64_RESIZE_FORCE_SUPPRESS")) { getcls = NULL; }
       if (getcls && getcls(win, &wc) == 0) {
          const int survives = (wc == 1 || wc == 2 || wc == 3 || wc == 4 ||
                                wc == 5 || wc == 8 || wc == 9 || wc == 10 ||
@@ -196,19 +178,7 @@ uint32_t shim_SetWindowBounds(uint32_t *args) {
              * a context that is not told will keep drawing into a backing store
              * of the old dimensions. */
             extern int agl_update_contexts_for_window(void *);
-            const int nctx = agl_update_contexts_for_window(win);
-            if (wrg_trace() && nctx) {
-               fprintf(stderr, "[winresize] win=%p aglUpdateContext on %d "
-                               "attached GL context(s) after the resize\n",
-                       win, nctx);
-            }
-            if (wrg_trace()) {
-               fprintf(stderr, "[winresize] win=%p POST-SHOW resize -> %dx%d "
-                               "PERFORMED (class %u survives a post-show "
-                               "resize), st=%d\n", win,
-                       want->right - want->left, want->bottom - want->top,
-                       wc, (int)stc);
-            }
+            (void)agl_update_contexts_for_window(win);
             return (uint32_t)stc;
          }
       }
@@ -219,10 +189,6 @@ uint32_t shim_SetWindowBounds(uint32_t *args) {
       /* Cannot establish the current size, so cannot prove this is a pure move.
        * Refuse the operation rather than risk the panic: a window that did not
        * move is recoverable, a trapped process is not. */
-      if (wrg_trace()) {
-         fprintf(stderr, "[winresize] GetWindowBounds failed; bounds change "
-                         "SUPPRESSED (cannot prove it is a pure move)\n");
-      }
       return 0;
    }
 
@@ -233,42 +199,10 @@ uint32_t shim_SetWindowBounds(uint32_t *args) {
       return (uint32_t)setb(win, region, want);      /* pure move: safe */
    }
 
-   /* ---- EXPERIMENT (opt-in): report the failure instead of faking success.
-    *
-    * Measured 2026-08-23 with window identity in the trace: Halo drives TWO
-    * windows here. The visible one (A) is shown early and is refused 640x480
-    * three times; a SECOND window (B) is never shown and is sized to exactly
-    * the target 640x480 at exactly the origin we keep moving A to. That is the
-    * shape of a resolution-change routine which PREPARES a correctly-sized
-    * replacement window and then swaps to it.
-    *
-    * If so, returning noErr for a resize we did not perform is the active
-    * defect: the app concludes A really is 640x480, discards the replacement it
-    * had ready, keeps displaying A at 800x600 and renders 640x480 into it --
-    * which is precisely the letterboxed picture and the 120pt click offset.
-    *
-    * Telling the truth costs nothing if the app has no fallback (it is already
-    * not getting the resize either way) and fixes it outright if it does.
-    * OPT-IN until a run says which: M64_RESIZE_REPORT_FAILURE=1. */
-   if (getenv("M64_RESIZE_REPORT_FAILURE")) {
-      if (wrg_trace()) {
-         fprintf(stderr, "[winresize] win=%p POST-SHOW resize %dx%d -> %dx%d "
-                         "REFUSED, reporting paramErr (not faking success)\n",
-                 win, cw, ch, ww, wh);
-      }
-      return (uint32_t)-50;   /* paramErr */
-   }
-
    /* Keep the requested ORIGIN, keep the CURRENT size. */
    const WRGRect moved = { want->top, want->left,
                            (int16_t)(want->top  + ch),
                            (int16_t)(want->left + cw) };
-   const int32_t st = setb(win, region, &moved);
-   if (wrg_trace()) {
-      fprintf(stderr, "[winresize] win=%p POST-SHOW resize %dx%d -> %dx%d "
-                      "SUPPRESSED (would NSCGSPanic); moved to %d,%d instead, "
-                      "st=%d\n", win, cw, ch, ww, wh, moved.left, moved.top,
-              (int)st);
-   }
+   (void)setb(win, region, &moved);
    return 0;   /* report success: the app's own logic must continue */
 }

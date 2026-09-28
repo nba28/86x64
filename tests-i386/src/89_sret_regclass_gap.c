@@ -2,8 +2,7 @@
  * 89_sret_regclass_gap — abigen emits NO hidden-sret slot for a by-value struct
  * return that is MEMORY on i386 but REGISTER on x86_64.
  *
- * THE GAP (measured with ABIGEN_SRET_GAP_TRACE=1: 5 functions in the modern
- * pass). i386 cdecl returns any struct larger than the eax:edx pair through a
+ * THE GAP (5 functions in the modern pass). i386 cdecl returns any struct larger than the eax:edx pair through a
  * hidden buffer pointer passed as the implicit FIRST stack arg — and, verified
  * from real `clang -arch i386 -O1 -S` codegen, the CALLEE POPS IT (`retl $4`).
  * x86_64 SysV returns any aggregate <= 16 bytes in REGISTERS instead. All three

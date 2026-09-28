@@ -144,7 +144,7 @@ static void init_leave(void) {
 }
 extern void abiconv_init_trampoline(void);
 /* Run one translated __mod_init_func on the low-4GB init stack and return (see
- * init_trampoline.asm). Used by the run-now init path below (default; ABICONV_NO_RUN_INITS opts out). */
+ * init_trampoline.asm). Used by the run-now init path below. */
 extern void abiconv_call_init(void *target, long argc, char **argv,
                               char **envp, char **apple);
 
@@ -441,7 +441,7 @@ static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
             void **slots = (void **)base;
             size_t wrapped = 0;
             /* Two strategies (see the Portal 2 translation notes s3b):
-             *  - DEFAULT (run-now; was opt-in as ABICONV_RUN_INITS): COLLECT
+             *  - run-now (whenever the caller passes a collect list): COLLECT
              *    each init target, NULL the slot so dyld skips it, and let
              *    slide_objc run the collected list at its very END (after all
              *    per-image fixups), on the low-4GB init stack. This sidesteps
@@ -452,20 +452,12 @@ static void wrap_mod_init_funcs(const struct mach_header_64 *mh64,
              *    deploys idempotent: a later libabiconv copy's re-scan finds
              *    nothing left to collect (vs. the stub path's stub-of-stub
              *    re-wrapping).
-             *  - ABICONV_NO_RUN_INITS (legacy stub path, opt-out): rewrite each
+             *  - stub path (no collect list, or the list is full): rewrite each
              *    slot to a low-stack JIT stub and let dyld call it. Works on
              *    the dyld that shipped with the iPhoto-era macOS, but dyld4
              *    VALIDATES __mod_init_func entries are in-image and SILENTLY
-             *    SKIPS our out-of-image stubs → the initializers never run.
-             *    Civ IV s26 (2026-07-06): with run-now still opt-in, any launch
-             *    that forgot ABICONV_RUN_INITS=1 (m64 run, Finder) silently
-             *    lost ALL 1063 static ctors on this path; the zeroed static
-             *    std::set header (GameRanger MSG_Mac sCallbackList) then
-             *    crashed _Rb_tree_decrement at NULL+4 in main→CheckPreferences
-             *    →InitGameRanger. Run-now is therefore the DEFAULT — the env
-             *    var must not be a correctness switch. */
-            const int run_now =
-               collect != NULL && getenv("ABICONV_NO_RUN_INITS") == NULL;
+             *    SKIPS our out-of-image stubs → the initializers never run. */
+            const int run_now = collect != NULL;
             for (size_t j = 0; j < n; j++) {
                if (!slots[j]) { continue; }
                /* Skip patch_dyld_section's __dyld+8 artifact (multi-copy
@@ -799,15 +791,7 @@ static void slide_section_4byte(const char *imgname,
       }
    }
 
-   /* Optionally lock RO so libobjc's legacy walker can't write uniqued
-    * SEL pointers back into the 4-byte slots (which would truncate to
-    * low 32 bits of an 8-byte SEL ptr → garbage cstring ptr on the
-    * translated binary's next read of that slot). Defaults to leaving
-    * RW because some legacy metadata layouts depend on libobjc's
-    * mutability — only flip RO when troubleshooting. */
-   if (getenv("ABICONV_OBJC_SLIDE_LOCK_RO")) {
-      (void)mprotect((void *)addr_aligned, len_aligned, PROT_READ);
-   }
+   /* Left RW: some legacy metadata layouts depend on libobjc's mutability. */
 
    if (g_verbose) {
       fprintf(stderr, "abiconv objc_slide: slid %zu/%zu slots in %s,%s of %s\n",
@@ -1081,9 +1065,8 @@ static void patch_text_abs32(const struct mach_header_64 *mh64, intptr_t slide,
     * integer constants aliasing the image span (MD5 IVs 0x10325476 among
     * them) silently slid. Idempotent across the N libabiconv copies and the
     * wrapper's later pass: a slid value falls outside the pre-slide window
-    * and is skipped. ABICONV_ABS32_NO_TABLE=1 forces the legacy scan (A/B
-    * debugging). */
-   if (getenv("ABICONV_ABS32_NO_TABLE") == NULL) {
+    * and is skipped. */
+   {
       unsigned long absz = 0;
       const uint8_t *ab = getsectiondata(mh64, "__DATA", "__86x64_abs32", &absz);
       if (ab != NULL && absz >= 8 &&
@@ -1433,21 +1416,11 @@ static void slide_data_fnptrs(const struct mach_header_64 *mh64, intptr_t slide,
                               uint64_t vmaddr_lo, uint64_t vmaddr_hi,
                               const char *imgname) {
    if (slide == 0 || vmaddr_lo >= vmaddr_hi) { return; }
-   /* Kill switch. This pass identifies pointers by VALUE -- any 4-byte word whose
-    * content falls inside the image's pre-slide vmaddr span -- so an INTEGER that
-    * merely aliases that window is indistinguishable from a pointer and gets slid,
-    * turning a plain number into an address. When a translated program computes a
-    * nonsensical, load-address-dependent value, this pass is the first suspect;
-    * being able to switch it off tells you in one run whether it is responsible.
-    * ⚠ Switching it off breaks any image that genuinely needs the slide, so this
-    * is a diagnostic, not a supported mode. */
-   if (getenv("ABICONV_NO_DATA_PTR_SLIDE")) {
-      if (g_verbose) {
-         fprintf(stderr, "abiconv objc_slide: data-pointer slide DISABLED for %s "
-                 "(ABICONV_NO_DATA_PTR_SLIDE)\n", imgname ? imgname : "?");
-      }
-      return;
-   }
+   /* This pass identifies pointers by VALUE -- any 4-byte word whose content
+    * falls inside the image's pre-slide vmaddr span -- so an INTEGER that merely
+    * aliases that window is indistinguishable from a pointer and gets slid. When
+    * a translated program computes a nonsensical, load-address-dependent value,
+    * this pass is the first suspect. */
    const uint8_t *p = (const uint8_t *)(mh64 + 1);
    size_t total_slid = 0;
    for (uint32_t i = 0; i < mh64->ncmds; i++) {
@@ -1597,14 +1570,7 @@ extern uint32_t x64_objc_wrap(uint64_t real);
  * raw -> macOS libc++abi's 8-byte-layout vtable -> >4GB -> proxy handle, so
  * cxx_shim's ti_kind_of() saw a pointer matching none of its sentinels, called
  * every typeinfo TI_UNKNOWN, and returned NULL from EVERY typed dynamic_cast
- * (guard 97_dynamic_cast_crosscast).
- *
- * Kill switch ABICONV_XREL_NO_SHIM_PREFIX=1 restores the raw-name-only lookup. */
-static int xrel_no_shim_prefix(void) {
-   static int v = -1;
-   if (v < 0) { v = getenv("ABICONV_XREL_NO_SHIM_PREFIX") != NULL; }
-   return v;
-}
+ * (guard 97_dynamic_cast_crosscast). */
 
 /* libabiconv's replacement for `name`, or 0. The dlsym argument is the symbol
  * name minus ONE leading underscore (dlsym re-adds it), so asking for the
@@ -1612,7 +1578,7 @@ static int xrel_no_shim_prefix(void) {
  * lands <4GB — a >4GB "replacement" would have to be proxy-wrapped, which is
  * exactly the opaque outcome this path exists to avoid. */
 static uint64_t xrel_shim_lookup(const char *name) {
-   if (xrel_no_shim_prefix() || name[0] != '_') { return 0; }
+   if (name[0] != '_') { return 0; }
    size_t n = strlen(name);
    char stackbuf[256], *buf = stackbuf;
    if (n + 2 > sizeof stackbuf) {           /* mangled C++ names can be huge */
@@ -2419,8 +2385,7 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
     * stack, in collection (≈section, bottom-up dependency) order; a nested
     * dlopen during one of these re-enters slide_objc and runs its own inits
     * first (the trampoline's shadow stack keeps nesting LIFO-correct).
-    * n_init>0 in run-now mode (default); the legacy ABICONV_NO_RUN_INITS path wrapped the
-    * slots into dyld-called stubs instead and leaves n_init==0. */
+    * n_init==0 when the stub path wrapped the slots into dyld-called stubs. */
    for (size_t i = 0; i < n_init; i++) {
       if (getenv("ABICONV_INIT_TRACE")) {
          fprintf(stderr, "[abiconv] call_init[%zu/%zu] in %s fn=%p\n",

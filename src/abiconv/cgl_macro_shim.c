@@ -83,7 +83,6 @@
  * KILL SWITCH  M64_NO_CGL_MACRO=1 — hand back plain arena handles exactly as
  *   before, i.e. reproduce the pre-fix `jmp *0`. Used by the tests-i386 A/B guard,
  *   which fails if the two arms do not differ.
- * TRACE        ABICONV_AGL_TRACE=1 (shared with the other AGL shims).
  *
  * ABI: MTSHIM convention — rdi -> &i386 args[0] (4-byte cdecl slots), result in
  * eax.
@@ -110,15 +109,6 @@ extern uint8_t  g_gli_argbytes[];        /* exact i386 arg-block size per slot  
 
 typedef unsigned char GLboolean;
 typedef int           GLint;
-
-static int agl_trace(void)
-{
-   static int t = -1;
-   if (t < 0) t = getenv("ABICONV_AGL_TRACE") ? 1 : 0;
-   return t;
-}
-#define CGLLOG(...) do { if (agl_trace()) { \
-      fprintf(stderr, "[cglmacro] " __VA_ARGS__); fflush(stderr); } } while (0)
 
 static int disarmed(void)
 {
@@ -166,21 +156,17 @@ static void gli_targets_init(void)
       self = dlopen(di.dli_fname, RTLD_NOLOAD | RTLD_LAZY);
 
    char key[128];
-   int mapped = 0, missing = 0;
    for (uint32_t i = 0; i < GLI_DISPATCH_SLOTS; i++) {
       const char *nm = gli_slot_name[i];
-      if (!nm) { missing++; continue; }
+      if (!nm) { continue; }
       snprintf(key, sizeof(key), "__%s", nm);
       void *fn = self ? dlsym(self, key) : NULL;
       if (!fn) fn = dlsym(RTLD_DEFAULT, key);
       if (fn) {
          g_gli_target[i]   = (uint64_t)(uintptr_t)fn;
          g_gli_argbytes[i] = gli_slot_argbytes[i];
-         mapped++;
-      } else { missing++; }
+      }
    }
-   CGLLOG("dispatch table: %d/%d slots bound, %d unmapped (loud stub)\n",
-          mapped, GLI_DISPATCH_SLOTS, missing);
 }
 
 /* Called from gli_tramp.asm for a slot with no verified bridge. Loud ONCE per
@@ -232,8 +218,6 @@ static uint32_t shadow_for(uint64_t native)
    s->next   = g_shadows;
    g_shadows = s;
    os_unfair_lock_unlock(&g_lk);
-   CGLLOG("shadow %08x <- native context %p (disp[117]=%08x)\n",
-          (uint32_t)(uintptr_t)o, (void *)(uintptr_t)native, o->disp[117]);
    return (uint32_t)(uintptr_t)o;
 }
 
@@ -306,7 +290,6 @@ uint32_t shim_aglCreateContext(uint32_t *a)
    void *pix   = (void *)(uintptr_t)x64_objc_unwrap(a[0]);
    void *share = ctx_in(a[1]);
    void *ctx   = aglCreateContext(pix, share);
-   CGLLOG("aglCreateContext(pix=%p, share=%p) = %p\n", pix, share, ctx);
    return ctx_out(ctx);
 }
 
@@ -331,18 +314,11 @@ uint32_t shim_aglSetCurrentContext(uint32_t *a)
 {
    void *ctx = ctx_in(a[0]);
    GLboolean ok = aglSetCurrentContext(ctx);
-   CGLLOG("aglSetCurrentContext(%08x -> %p) = %d\n", a[0], ctx, (int)ok);
    return ok;
 }
 
 uint32_t shim_aglUpdateContext(uint32_t *a) { return aglUpdateContext(ctx_in(a[0])); }
-void     shim_aglSwapBuffers(uint32_t *a)   {
-   /* A frame exists now, so any window whose first show we are holding back is
-    * finally worth showing (carbon_window_deferred_show.c). */
-   { extern void carbon_deferred_show_on_frame(void);
-     carbon_deferred_show_on_frame(); }
-   aglSwapBuffers(ctx_in(a[0]));
-}
+void     shim_aglSwapBuffers(uint32_t *a)   { aglSwapBuffers(ctx_in(a[0])); }
 
 uint32_t shim_aglSetInteger(uint32_t *a)
 {
@@ -393,7 +369,6 @@ uint32_t shim_CGLCreateContext(uint32_t *a)
    int err = CGLCreateContext((void *)(uintptr_t)x64_objc_unwrap(a[0]),
                               ctx_in(a[1]), &ctx);
    if (!err && out) *out = ctx_out(ctx);
-   CGLLOG("CGLCreateContext -> err=%d ctx=%p\n", err, ctx);
    return (uint32_t)err;
 }
 

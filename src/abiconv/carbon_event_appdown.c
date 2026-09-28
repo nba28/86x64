@@ -54,8 +54,7 @@
  *
  * Universal: triggers on the shape (a classic app dispatching mouse events to
  * the dispatcher while holding its handlers on the application target), not on
- * any app identity. Kill switch M64_NO_APP_MOUSEDOWN_FIX=1 restores the
- * unmodified behaviour; guard 99_app_mousedown_route.
+ * any app identity.
  */
 
 #include <stdint.h>
@@ -74,18 +73,6 @@ static const void     *ad_seen[AD_RING];
 static int             ad_seen_i;
 static EventHandlerRef ad_sentinel;
 static int             ad_installed;
-static unsigned long   ad_fwd, ad_skipped, ad_onview;
-
-static int ad_disabled(void) {
-   static int t = -1;
-   if (t < 0) { t = getenv("M64_NO_APP_MOUSEDOWN_FIX") ? 1 : 0; }
-   return t;
-}
-static int ad_trace(void) {
-   static int t = -1;
-   if (t < 0) { t = getenv("ABICONV_APPDOWN_TRACE") ? 1 : 0; }
-   return t;
-}
 
 static void ad_note(const void *e) {
    pthread_mutex_lock(&ad_lk);
@@ -175,8 +162,6 @@ uint32_t shim_SendEventToEventTarget(uint32_t *args) {
    EventRef       e = (EventRef)      (uintptr_t)x64_objc_unwrap(args[0]);
    EventTargetRef t = (EventTargetRef)(uintptr_t)x64_objc_unwrap(args[1]);
 
-   if (ad_disabled()) { return (uint32_t)SendEventToEventTarget(e, t); }
-
    const UInt32 cl = e ? GetEventClass(e) : 0;
    const UInt32 ki = e ? GetEventKind(e)  : 0;
    const int    is_down = (cl == kEventClassMouse && ki == kEventMouseDown);
@@ -202,32 +187,14 @@ uint32_t shim_SendEventToEventTarget(uint32_t *args) {
    const OSStatus r = SendEventToEventTarget(e, t);
 
    if (is_down && t == GetEventDispatcherTarget()) {
-      if (ad_was_seen((const void *)e)) {
-         /* Propagation worked here; touching it would double-deliver. */
-         ad_skipped++;
-      } else if (ad_view_owns_click(e)) {
-         /* A real control took it — forwarding would be a phantom click. */
-         ad_onview++;
-         if (ad_trace()) {
-            fprintf(stderr, "[appdown] a VIEW owns this click; not forwarding\n");
-         }
-      } else {
-         /* Re-send the SAME EventRef so location, modifiers and click count
-          * survive intact rather than being reconstructed from parameters. */
-         const OSStatus fr = SendEventToEventTarget(e, GetApplicationEventTarget());
-         ad_fwd++;
-         if (ad_trace()) {
-            fprintf(stderr, "[appdown] dispatcher consumed a mouse-DOWN on bare "
-                            "window content; re-sent to APPLICATION -> %d\n", (int)fr);
-         }
+      /* Already seen: propagation worked here; touching it would double-deliver.
+       * A view owns it: a real control took it — forwarding would be a phantom
+       * click. Otherwise re-send the SAME EventRef so location, modifiers and
+       * click count survive intact rather than being reconstructed. */
+      if (!ad_was_seen((const void *)e) && !ad_view_owns_click(e)) {
+         (void)SendEventToEventTarget(e, GetApplicationEventTarget());
       }
    }
    return (uint32_t)r;
 }
 
-__attribute__((destructor))
-static void ad_summary(void) {
-   if (!ad_trace()) { return; }
-   fprintf(stderr, "[appdown] forwarded=%lu already-delivered=%lu "
-                   "owned-by-a-view=%lu\n", ad_fwd, ad_skipped, ad_onview);
-}
