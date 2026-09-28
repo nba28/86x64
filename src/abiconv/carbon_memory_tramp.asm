@@ -105,3 +105,5 @@
 	MTSHIM	___BlockMoveData,	_shim_BlockMoveData
 	MTSHIM	___BlockZero,		_shim_BlockZero
 	MTSHIM	___BlockZeroData,	_shim_BlockZeroData
+	MTSHIM	___BlockMoveUncached,	_shim_BlockMoveUncached
+	MTSHIM	___BlockMoveDataUncached,	_shim_BlockMoveDataUncached

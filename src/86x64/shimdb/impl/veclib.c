@@ -3,8 +3,8 @@
  * 10.4-era vecLib exported create_fftsetup / destroy_fftsetup / fft_zip (and
  * friends) alongside the vDSP_-prefixed names; modern Accelerate keeps only
  * the vDSP_ ones. Same arguments, same semantics — forward. (BASS audio in
- * Plants vs. Zombies binds these. Translated i386 callers reach them through
-
+ * Plants vs. Zombies binds these.) Translated i386 callers reach this same code
+ * through libabiconv's glue (vdsp_legacy_shim.c), which links it hidden.
  */
 #include <Accelerate/Accelerate.h>
 

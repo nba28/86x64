@@ -469,35 +469,27 @@ CSMEM_ALIAS(HSetState)        CSMEM_ALIAS(NewPtrClear)
 CSMEM_ALIAS(GetPtrSize)       CSMEM_ALIAS(SetPtrSize)
 
 /* ---- BlockMove / BlockZero: removed from macOS, and NOT optional ---------
- * These are the classic bulk-copy primitives, and `find_null_jump_bridges.py`
- * flagged them as NULL-JUMP ORPHANS: libabiconv exported a bridge, the native
- * definition is gone from modern macOS, so the bridge jumped to 0. Nothing else
- * in the process provides them, so unlike the QuickTime family this cannot be
- * fixed by staying out of the path -- it has to be implemented. Almost every
- * classic app calls BlockMoveData, so this was a latent jump-to-zero across the
- * whole target set.
- *
- * BlockMove is defined to tolerate OVERLAPPING regions, so memmove (not memcpy)
- * is the correct primitive. The only difference between BlockMove and
- * BlockMoveData historically was instruction-cache flushing on 68K/PPC, which
- * has no meaning here, so they share an implementation. */
+ * find_null_jump_bridges.py flagged them as NULL-JUMP ORPHANS (the native
+ * definitions are gone, so abigen's bridges jumped to 0), and almost every
+ * classic app calls BlockMoveData. The implementation lives in
+ * shimdb/impl/memory.c (linked hidden); this is only the i386 glue: 4-byte
+ * pointer slots, and Size is a SIGNED 32-bit count on i386. */
+void BlockMove(const void *src, void *dst, long n);
+void BlockMoveData(const void *src, void *dst, long n);
+void BlockMoveUncached(const void *src, void *dst, long n);
+void BlockMoveDataUncached(const void *src, void *dst, long n);
+void BlockZero(void *dst, long n);
+void BlockZeroData(void *dst, long n);
 
-/* void BlockMove(const void *srcPtr, void *destPtr, Size byteCount); */
 uint32_t shim_BlockMove(uint32_t *a)
-{
-   void *src = i386_ptr(a[0]), *dst = i386_ptr(a[1]);
-   uint32_t n = a[2];
-   if (src && dst && n) memmove(dst, src, n);
-   return 0;
-}
-uint32_t shim_BlockMoveData(uint32_t *a)     { return shim_BlockMove(a); }
-
-/* void BlockZero(void *destPtr, Size byteCount); */
+{ BlockMove(i386_ptr(a[0]), i386_ptr(a[1]), (int32_t)a[2]); return 0; }
+uint32_t shim_BlockMoveData(uint32_t *a)
+{ BlockMoveData(i386_ptr(a[0]), i386_ptr(a[1]), (int32_t)a[2]); return 0; }
+uint32_t shim_BlockMoveUncached(uint32_t *a)
+{ BlockMoveUncached(i386_ptr(a[0]), i386_ptr(a[1]), (int32_t)a[2]); return 0; }
+uint32_t shim_BlockMoveDataUncached(uint32_t *a)
+{ BlockMoveDataUncached(i386_ptr(a[0]), i386_ptr(a[1]), (int32_t)a[2]); return 0; }
 uint32_t shim_BlockZero(uint32_t *a)
-{
-   void *dst = i386_ptr(a[0]);
-   uint32_t n = a[1];
-   if (dst && n) memset(dst, 0, n);
-   return 0;
-}
-uint32_t shim_BlockZeroData(uint32_t *a)     { return shim_BlockZero(a); }
+{ BlockZero(i386_ptr(a[0]), (int32_t)a[1]); return 0; }
+uint32_t shim_BlockZeroData(uint32_t *a)
+{ BlockZeroData(i386_ptr(a[0]), (int32_t)a[1]); return 0; }

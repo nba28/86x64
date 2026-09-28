@@ -785,6 +785,14 @@ add_library(abiconv SHARED
 # the wrapper executable (_86x64_stderr_shim, _86x64_alloc_low_4gb) that
 # only exist once the wrapper is in the process.
 target_link_options(abiconv PRIVATE -Wl,-undefined,dynamic_lookup)
+# Removed-API IMPLEMENTATIONS live once, in shimdb/impl (runtime_jurisdictions):
+# shimgen compiles them per app for native callers; libabiconv's i386 glue calls
+# the same code, linked HIDDEN so libabiconv never re-exports native API names.
+add_library(shimdb_impl STATIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl/memory.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl/veclib.c)
+add_dependencies(abiconv shimdb_impl)
+target_link_options(abiconv PRIVATE "-Wl,-load_hidden,$<TARGET_FILE:shimdb_impl>")
 # objc_shim.c bridges into the live ObjC runtime; Foundation must be loaded
 # so objc_getClass("NSString") etc. resolve. The C-function shims call the
 # real x86_64 framework entry points (_Gestalt, _CFRetain, _LSCopy..., etc.),

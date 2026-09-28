@@ -1492,6 +1492,18 @@ $(BUILD_DIR)/99_cstr_pagezero_arg.i386: $(BUILD_DIR)/99_cstr_pagezero_arg.o
 	  || $(MAKE) --no-print-directory sysroot-objc
 	$(LD) $(LDFLAGS_I386) -e _main -framework CoreFoundation -o $@ $<
 
+# 99_memmgr_blockmove binds the Memory Manager by CoreServices' install name.
+# The framework binary is not staged (needs the SL DVD), so link a symbols-only
+# i386 stub carrying that install name; translation re-binds to libabiconv.
+$(BUILD_DIR)/coreservices_stub.dylib: | $(BUILD_DIR)
+	@printf 'void BlockMove(){}\nvoid BlockMoveData(){}\nvoid BlockMoveUncached(){}\nvoid BlockMoveDataUncached(){}\nvoid BlockZero(){}\nvoid BlockZeroData(){}\n' > $(BUILD_DIR)/coreservices_stub.c
+	@$(CC_I386) -c $(BUILD_DIR)/coreservices_stub.c -o $(BUILD_DIR)/coreservices_stub.o
+	@$(LD) -arch i386 -macos_version_min 10.6 -syslibroot $(I386_SYSROOT) -lSystem -dylib \
+	  -install_name /System/Library/Frameworks/CoreServices.framework/Versions/A/CoreServices \
+	  -o $@ $(BUILD_DIR)/coreservices_stub.o
+$(BUILD_DIR)/99_memmgr_blockmove.i386: $(BUILD_DIR)/99_memmgr_blockmove.o $(BUILD_DIR)/coreservices_stub.dylib
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $< $(BUILD_DIR)/coreservices_stub.dylib
+
 # 99_cfnumber_i386_width links CoreFoundation the same way (see above).
 $(BUILD_DIR)/99_cfnumber_i386_width.i386: $(BUILD_DIR)/99_cfnumber_i386_width.o
 	@[ -f "$(I386_SYSROOT)/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation" ] \
