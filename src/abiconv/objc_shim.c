@@ -870,6 +870,18 @@ static struct pgmemo_ent *pgmemo_table(uint32_t *cap_out) {
    return g_pgmemo_boot;
 }
 
+/* ★BOUNDED PROBE WINDOW. Entries are never deleted (other libabiconv copies,
+ * possibly older builds, read this table without any eviction protocol), so the
+ * table only fills. With an unbounded walk a lookup degraded into a scan of the
+ * whole 262144-entry table once it was nearly full. MEASURED (Quinn, 10.5 h
+ * session, paused): 66% of main-thread samples in this loop, reached per
+ * native->app call from bp_block_copy -> i386_block_kind -> mem_readable; the
+ * game crawled. Now a page is looked for in PGMEMO_WINDOW slots only; if it is
+ * absent and the window is full, the verdict is simply not cached (one real
+ * probe). Guard: make pgmemo-saturation. */
+#define PGMEMO_WINDOW 32u
+static int g_pgmemo_unbounded = -1;   /* M64_NO_PGMEMO_WINDOW: pre-fix full walk */
+
 /* Genuinely-readable byte count from page base pg (page-aligned, nonzero). */
 static uint32_t page_readable_len(uintptr_t pg) {
    uint32_t cap;
@@ -879,7 +891,11 @@ static uint32_t page_readable_len(uintptr_t pg) {
    uint32_t h0 = (uint32_t)((pg >> 12) * 2654435761u) & mask;
    uint32_t h = h0, slot = h0;
    int have_slot = 0;
-   for (uint32_t n = 0; n < cap; ++n) {
+   if (__builtin_expect(g_pgmemo_unbounded < 0, 0)) {
+      g_pgmemo_unbounded = KNOB("M64_NO_PGMEMO_WINDOW") != NULL;
+   }
+   const uint32_t window = g_pgmemo_unbounded ? cap : PGMEMO_WINDOW;
+   for (uint32_t n = 0; n < window && n < cap; ++n) {
       if (!memo[h].used) { slot = h; have_slot = 1; break; }
       if (memo[h].pg == pg) {
          if (memo[h].rb > 0) { return memo[h].rb; }       /* permanent positive */
@@ -908,6 +924,9 @@ static uint32_t page_readable_len(uintptr_t pg) {
    }
    return rb;
 }
+
+/* test hook for pgmemo_saturation_test.sh */
+int _86x64_test_mem_readable(uintptr_t p, size_t len) { return mem_readable(p, len); }
 
 static int mem_readable(uintptr_t p, size_t len) {
    if (p == 0) { return 0; }
