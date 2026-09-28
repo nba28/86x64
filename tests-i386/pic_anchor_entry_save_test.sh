@@ -56,8 +56,8 @@ dis=$(otool -tV "$I386" 2>/dev/null)
 #
 #   (i)   an entry save `movl %ebx,-0xc(%ebp)` BEFORE the `popl %ebx` anchor,
 #   (ii)  an epilogue restore `movl -0xc(%ebp),%ebx` AFTER it,
-#   (iii) an indirect `jmpl *%eax` dispatch, with the anchored load UNDER TEST
-#         sitting after the restore and reached by no direct branch.
+#   (iii) the anchored load UNDER TEST after the restore, reached only by a
+#         BACKWARD branch (no snapshot; see the fixture header).
 # ⚠ strtonum() is a GAWK extension: macOS ships BSD awk, which answers
 # "calling undefined function strtonum" and yields an EMPTY address for every
 # probe below — so the precondition block failed unconditionally and this guard
@@ -71,29 +71,29 @@ addr_of() {   # first matching instruction's address, DECIMAL; empty if no match
 save_at=$(addr_of '/movl[ \t]+%ebx, -0xc\(%ebp\)/')
 pop_at=$(addr_of  '/popl[ \t]+%ebx/')
 rest_at=$(addr_of '/movl[ \t]+-0xc\(%ebp\), %ebx/')
-jmpi_at=$(addr_of '/jmpl[ \t]+\*%eax/')
 # the anchored load under test: `movl <disp32>(%ebx), %eax`
 load_at=$(addr_of '/movl[ \t]+0x[0-9a-f]+\(%ebx\), %eax/')
-# no direct branch may target it — otherwise branch_anchor_snap would rescue it
+# exactly ONE branch may target it and it must be BACKWARD: only forward
+# branches record anchor snapshots, so a forward one would rescue the anchor
 # and the OFF arm would silently pass.
 load_hex=$(printf '%x' "${load_at:-0}")
-direct_br=$(printf '%s\n' "$dis" | grep -cE "^[0-9a-f]+[[:space:]]+j(mp|[a-z]+)[[:space:]]+0x0*$load_hex$")
+br_hex=$(printf '%s\n' "$dis" | awk -v t="0x$load_hex" '$2 ~ /^j/ && $3 == t {print $1}')
+br_n=$(printf '%s' "$br_hex" | grep -c .)
+br_at=$([ "$br_n" = 1 ] && printf '%d' "$((16#$br_hex))")
 
 if [ -n "$save_at" ] && [ -n "$pop_at" ] && [ -n "$rest_at" ] && \
-   [ -n "$jmpi_at" ] && [ -n "$load_at" ] && \
-   [ "$save_at" -lt "$pop_at" ] && [ "$pop_at" -lt "$jmpi_at" ] && \
-   [ "$jmpi_at" -lt "$rest_at" ] && [ "$rest_at" -lt "$load_at" ] && \
-   [ "$direct_br" -eq 0 ]; then
+   [ -n "$load_at" ] && [ -n "$br_at" ] && \
+   [ "$save_at" -lt "$pop_at" ] && [ "$pop_at" -lt "$rest_at" ] && \
+   [ "$rest_at" -lt "$load_at" ] && [ "$load_at" -lt "$br_at" ]; then
   echo "  precondition:         entry save 0x$(printf '%x' $save_at) < anchor pop"
-  echo "                        0x$(printf '%x' $pop_at) < indirect jmp 0x$(printf '%x' $jmpi_at) <"
-  echo "                        epilogue restore 0x$(printf '%x' $rest_at) < anchored load"
-  echo "                        0x$load_hex, which no direct branch targets  OK"
+  echo "                        0x$(printf '%x' $pop_at) < epilogue restore 0x$(printf '%x' $rest_at) <"
+  echo "                        anchored load 0x$load_hex, reached only by the"
+  echo "                        backward branch at 0x$br_hex  OK"
 else
   echo "  precondition:         FAILED — the fixture layout moved, so the three"
   echo "                        ingredients are no longer ordered as required."
-  echo "                        (save=${save_at:-?} pop=${pop_at:-?} jmp=${jmpi_at:-?}"
-  echo "                         restore=${rest_at:-?} load=${load_at:-?}"
-  echo "                         direct-branches-to-load=$direct_br)"
+  echo "                        (save=${save_at:-?} pop=${pop_at:-?} restore=${rest_at:-?}"
+  echo "                         load=${load_at:-?} branches-to-load=$br_n at ${br_hex:-?})"
   echo "                        Re-derive them; do NOT trust the arms below."
   fail=1
 fi
@@ -122,13 +122,13 @@ done
 ./build/99_pic_anchor_entry_save.off.x86_64 >/dev/null 2>&1; off_rc=$?
 
 if [ "$on_rc" = 0 ]; then
-  echo "  ON  (gate armed):     the jump-table case body's anchored load is"
+  echo "  ON  (gate armed):     the backward-reached block's anchored load is"
   echo "                        rip-relative and reads _magic; exit 0  OK"
 else
   case "$on_rc" in
     7) echo "  ON  (gate armed):     the load read the __text padding, not _magic — the"
        echo "                        anchor was still erased at the epilogue restore" ;;
-    *) echo "  ON  (gate armed):     rc=$on_rc (99 = the dispatch went to the wrong case;"
+    *) echo "  ON  (gate armed):     rc=$on_rc (99 = the dead early exit ran;"
        echo "                        139 = the stale displacement faulted)" ;;
   esac
   fail=1

@@ -24,15 +24,17 @@
 ## 0x51033 past the translated anchor landed 0x1d87 inside __TEXT,__cstring and
 ## the following dereference read the ASCII "e AS" -> SIGSEGV at 0x53412065.
 ##
-## branch_anchor_snap repairs a block reached by a DIRECT forward branch, but it
-## is keyed on branch displacements and therefore cannot see a jump-table case
-## body. That is why every existing pic_anchor_* fixture passes over this.
+## branch_anchor_snap repairs a block reached by a DIRECT FORWARD branch, and
+## (since d28d254) the case bodies of a claimed jump table. It cannot see a block
+## reached only by a BACKWARD branch — the same linear-walk blind spot, and the
+## one shape left that isolates this gate (the old jump-table form of this
+## fixture went inert once case bodies got snapshots).
 ##
 ## THE FIXTURE reproduces all three required ingredients:
 ##   (i)   %ebx saved to a frame slot BEFORE the `calll .+0; popl %ebx` anchor,
 ##   (ii)  an epilogue restore of that slot early in the byte stream,
-##   (iii) a case body reachable ONLY through the indirect `jmp *%eax`.
-## Lcase1 loads _magic anchor-relative and checks it.
+##   (iii) a block reached ONLY by a backward `jmp Lbody`.
+## Lbody loads _magic anchor-relative and checks it.
 ##   ON  (gate armed):     the load is rewritten rip-relative -> exit 0.
 ##   OFF (M64_NO_PIC_ANCHOR_ENTRY_SAVE=1): the load keeps its i386 displacement,
 ##       reads the __text nop padding instead of _magic -> exit 7 (or a fault).
@@ -56,32 +58,25 @@ _main:
 Lpic0:
 	popl	%ebx
 
-	## PIC switch dispatch, table folded into the load's own addressing
-	## (`movl tbl(%anchor,%idx,4)` — the GCC/clang combined form).
+	## Leave for the body through a FORWARD branch to a trampoline that jumps
+	## BACKWARD into it: only forward branches record anchor snapshots, so the
+	## body is reached by no snapshot and inherits the linear-walk state.
 	movl	$1, %edi
-	movl	(Ltab - Lpic0)(%ebx,%edi,4), %eax
-	addl	%ebx, %eax
-	jmp	*%eax
+	testl	%edi, %edi
+	jne	Lhead
 
-	.p2align 2
-Ltab:
-	.long	Lcase0 - Lpic0
-	.long	Lcase1 - Lpic0
-
-	## (ii) Case 0 doubles as the function's early exit path: it restores the
-	## callee-saved registers from their entry slots and tail-jumps out. The
-	## LINEAR walk reaches this restore before Lcase1 below.
-Lcase0:
+	## (ii) Early exit path (dead at run time): restores the callee-saved
+	## registers from their entry slots. The LINEAR walk reaches this restore
+	## before Lbody below.
 	movl	-12(%ebp), %ebx
 	movl	-8(%ebp), %esi
 	movl	-4(%ebp), %edi
 	movl	$99, %eax
 	jmp	Lfinish
 
-	## (iii) Case 1 is reachable ONLY through the indirect `jmp *%eax` above —
-	## no direct branch targets it, so branch_anchor_snap cannot restore the
-	## anchor here. This is the load the bug corrupts.
-Lcase1:
+	## (iii) Reached ONLY by the backward `jmp Lbody` below. This is the load
+	## the bug corrupts.
+Lbody:
 	movl	(_magic - Lpic0)(%ebx), %eax
 	cmpl	$0x5A17C0DE, %eax
 	jne	Lbad
@@ -89,6 +84,9 @@ Lcase1:
 	jmp	Lfinish
 Lbad:
 	movl	$7, %eax
+	jmp	Lfinish
+Lhead:
+	jmp	Lbody
 
 Lfinish:
 	pushl	%eax
