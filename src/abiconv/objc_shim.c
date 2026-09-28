@@ -1886,7 +1886,7 @@ static int seltypes_refines(const char *native, const char *legacy) {
  * after self/_cmd) so the bridge reads them as a single 4-byte i386 float and
  * cvtss2sd-widens to the double the native method expects — at any arg position,
  * any arity. Keyed by real (interned) SEL: pointer compare is exact. */
-#define CGFLOAT_MASK_CAP 256u   /* power of two; only a curated handful seeded */
+#define CGFLOAT_MASK_CAP 4096u  /* power of two; ~710 generated entries, load < 0.2 */
 static struct { SEL sel; uint32_t mask; } g_cgfloat_mask[CGFLOAT_MASK_CAP];
 static void cgfloat_mask_insert(SEL s, uint32_t mask) {
    if (!s) { return; }
@@ -2249,13 +2249,15 @@ static unsigned fill_method_args(struct objc_call_plan *plan,
             enc = le; aconv = CONV_I386; overridden = 1;
          }
       }
-      /* CGFloat override: a native 'd'/'f' arg the registry marks as CGFloat is
+      /* CGFloat override: a native 'd' arg the registry marks as CGFloat is
        * an i386 4-byte float in ONE slot (not an 8-byte double). Force the
        * i386-float reading so marshal_arg_fwd widens it (cvtss2sd) and consumes
-       * a single slot, keeping every following arg aligned. */
+       * a single slot, keeping every following arg aligned. A native 'f' is a
+       * real `float` on both sides (+numberWithFloat:) and needs nothing:
+       * widening it would hand the callee a double. */
       if (!overridden && cgf_mask && ((cgf_mask >> (i - 2)) & 1u) && enc) {
          const char *bb = enc_skip_quals(enc);
-         if (*bb == 'd' || *bb == 'f') { enc = "f"; aconv = CONV_I386; }
+         if (*bb == 'd') { enc = "f"; aconv = CONV_I386; }
       }
       if (!enc || !*enc) {
          if (!m) {
@@ -10848,118 +10850,26 @@ uint32_t shim_dealloc_vec(uint32_t *a) {
 extern void x64_dealloc_vec_tramp(void);
 uint32_t ___dealloc = 0;            /* exported as ____dealloc */
 
-/* AppKit/Foundation/QuartzCore methods with CGFloat explicit args — on i386 a
- * 4-byte float, on x86_64 an 8-byte double. The translated app only CALLS these
- * (it doesn't declare/override them), so the seltypes registry — which learns
- * i386 widths from the app's own __OBJC metadata — never sees them, and the
- * forward bridge falls back to the NATIVE 'd' encoding (CGFloat and double are
- * BOTH 'd' there) and reads 8 bytes off the i386 frame (a 4-byte float + 4 bytes
- * of the NEXT slot) -> a fused garbage double AND a one-slot misalignment of
- * every following arg. iPhoto: -[NSTableView setRowHeight:] got -6.9e38,
- * collapsing the main library window to 0x0; iWeb:
- * +[NSRulerView registerUnitWithName:...unitToPointsConversionFactor:...] got a
- * denormal ~0 conversion factor (the CGFloat is arg2, BETWEEN object args, so
- * the fix MUST be positional) -> "Registration information not complete or
- * valid" uncaught exception. The bitmask (bit k => explicit arg k is CGFloat)
- * makes the bridge read each marked arg as ONE 4-byte i386 float and
- * cvtss2sd-widen it, at any position in any-arity method.
+/* System methods with CGFloat explicit args — on i386 a 4-byte float, on
+ * x86_64 an 8-byte double. The translated app only CALLS these (it doesn't
+ * declare/override them), so the seltypes registry — which learns i386 widths
+ * from the app's own __OBJC metadata — never sees them, and the forward bridge
+ * would read 8 bytes off the i386 frame for a 4-byte float (a fused garbage
+ * double AND a one-slot misalignment of every following arg: iPhoto
+ * setRowHeight:, iWeb's ruler factor, Quinn's NSColor creators and
+ * NSTableColumn widths). The bitmask (bit k => explicit arg k is CGFloat) makes
+ * the bridge read each marked arg as ONE 4-byte i386 float and widen it.
  *
- * Keyed by BARE SEL (applies to every class's same-named method), so list only
- * selectors whose marked args are unambiguously CGFloat across ALL frameworks —
- * never a double/NSTimeInterval/NSInteger elsewhere. This is a curated
- * STRUCTURAL seed; the complete fix (eliminating the list) is to seed the
- * seltypes registry from the i386 system frameworks' own __OBJC metadata. */
+ * cgfloat_sels.inc is GENERATED from the i386 Snow Leopard frameworks' own
+ * method lists (gen_cgfloat_sels.py; inputs in
+ * ~/projects/Library/Frameworks/i386-originals/sl-objc/). Keyed by bare SEL: a
+ * selector with a real double where another definition has a CGFloat is left
+ * out. Only post-10.6 API, absent from those frameworks, is listed by hand. */
 static const struct { const char *name; uint32_t mask; } g_cgfloat_sels[] = {
-   { "setRowHeight:",            0x1 },  /* NSTableView / NSOutlineView (grid + source list) */
-   /* NSTableColumn's width family — the COLUMN counterpart of setRowHeight:.
-    * An app that builds its columns in code (addTableColumn: + setMinWidth:/
-    * setMaxWidth:, then letting AppKit size them) never declares these, so
-    * unmasked each one read the caller's 4-byte float fused with the next slot.
-    * MEASURED with a native swizzle probe on Quinn's highscore board
-    * (2026-09-23): every bound arrived as a denormal — Rank 4.68e-291, UpDown /
-    * ComparisonValue / Date / ResultCount ~8.53e-304 — so AppKit clamped each
-    * column to width 0 and the headers wrapped one letter per line ("S/c",
-    * "R/e") while the one nib-sized column took the whole table.
-    * (setWidth: is NOT listed: AppKit itself calls it natively, and nothing
-    * measured needs it masked.) Guard: tests-i386 tablecolumn-width. */
-   { "setMinWidth:",             0x1 },  /* NSTableColumn                                     */
-   { "setMaxWidth:",             0x1 },  /* NSTableColumn                                     */
-   { "setIndentationPerLevel:",  0x1 },  /* NSOutlineView              (source list)         */
-   { "setAlphaValue:",           0x1 },  /* NSView / NSWindow / NSCell                        */
-   { "setLineWidth:",            0x1 },  /* NSBezierPath                                      */
-   { "registerUnitWithName:abbreviation:unitToPointsConversionFactor:"
-     "stepUpCycle:stepDownCycle:", 0x4 },/* +[NSRulerView ...]: arg2 is the CGFloat factor   */
-   { "colorWithCalibratedRed:green:blue:alpha:", 0xF }, /* +[NSColor ...]: 4 CGFloats        */
-   { "colorWithDeviceRed:green:blue:alpha:",     0xF }, /* +[NSColor ...]: 4 CGFloats        */
-   /* NSColor WHITE/HSB/component creators — same all-CGFloat shape as the RGBA
-    * creators above, and the SAME standalone-'d' denormal~0 failure the app
-    * never declares. -[LCDCell] builds its digit ON colour (glowing light) and
-    * OFF/ghost colour via +[NSColor colorWithCalibratedWhite:alpha:] and its
-    * labels' light-gray text likewise -> unmasked, both CGFloats read as fused
-    * garbage doubles -> a black/transparent colour -> Quinn's LCD lit digits
-    * rendered DARK, the faint unlit-ghost segments collapsed to alpha~0
-    * (invisible), and the NEXT/SCORE/LINES/LEVEL/LPM labels went invisible
-    * (light text -> dark on the dark box). Guard: tests-i386 lcd-color. */
-   { "colorWithCalibratedWhite:alpha:",          0x3 }, /* +[NSColor ...]: white, alpha      */
-   { "colorWithDeviceWhite:alpha:",              0x3 }, /* +[NSColor ...]: white, alpha      */
-   { "colorWithWhite:alpha:",                    0x3 }, /* +[NSColor ...] (10.9+ generic)    */
-   { "colorWithCalibratedHue:saturation:brightness:alpha:", 0xF }, /* +[NSColor ...]: 4 CGFloats */
-   { "colorWithDeviceHue:saturation:brightness:alpha:",     0xF }, /* +[NSColor ...]: 4 CGFloats */
-   { "colorWithHue:saturation:brightness:alpha:",           0xF }, /* +[NSColor ...] (generic)  */
-   { "colorWithAlphaComponent:",                 0x1 }, /* -[NSColor ...]: single CGFloat    */
-   { "highlightWithLevel:",                      0x1 }, /* -[NSColor ...]                    */
-   { "shadowWithLevel:",                         0x1 }, /* -[NSColor ...]                    */
-   { "blendedColorWithFraction:ofColor:",        0x1 }, /* -[NSColor ...]: CGFloat then obj  */
-   { "scaleBy:",                 0x1 },  /* -[NSAffineTransform ...]                          */
-   { "scaleXBy:yBy:",            0x3 },  /* -[NSAffineTransform ...]: 2 CGFloats              */
-   { "translateXBy:yBy:",        0x3 },  /* -[NSAffineTransform ...]: 2 CGFloats              */
-   { "rotateByDegrees:",         0x1 },  /* -[NSAffineTransform ...]                          */
-   /* -[NSImage] compositing family: a CGFloat `fraction:` (opacity) at the END,
-    * AFTER CGPoint/CGRect struct args. Standalone 'd' the registry never learns
-    * (NSImage isn't declared by the app) -> read as an 8-byte double = a denormal
-    * ~0 -> the image composites fully TRANSPARENT. Quinn renders each falling/
-    * placed Tetris piece into an offscreen NSImage, then composites it with
-    * `drawAtPoint:fromRect:operation:fraction:(boardOpacity)` -> fraction~0 -> the
-    * blocks drew INVISIBLY (board chrome, drawn separately, stayed visible). The
-    * `fraction:` index varies by arity; masks below mark exactly that arg. */
-   { "drawAtPoint:fromRect:operation:fraction:",       0x8 }, /* pt,rect,op,FRAC -> arg3 */
-   { "drawInRect:fromRect:operation:fraction:",        0x8 }, /* rect,rect,op,FRAC -> arg3 */
-   { "compositeToPoint:fromRect:operation:fraction:",  0x8 }, /* pt,rect,op,FRAC -> arg3 */
-   { "compositeToPoint:operation:fraction:",           0x4 }, /* pt,op,FRAC -> arg2 */
-   { "dissolveToPoint:fromRect:fraction:",             0x4 }, /* pt,rect,FRAC -> arg2 */
-   { "dissolveToPoint:fraction:",                      0x2 }, /* pt,FRAC -> arg1 */
-   /* Core Image value-object creators: all-CGFloat arg lists (same denormal~0
-    * mechanism as the fraction: family above — unmasked they read as 8-byte
-    * doubles -> ~0). A transparent CIColor turns CIConstantColorGenerator +
-    * CISourceInCompositing composites fully EMPTY; a zero CIVector collapses
-    * CILinearGradient endpoints / CIColorMatrix vectors. (Quinn splash+board
-    * paint everything through exactly these: logo, credits, background
-    * gradient, opacity fades — all-black content areas, correct extents.) */
-   { "colorWithRed:green:blue:alpha:",  0xF }, /* +[CIColor / NSColor ...] */
-   { "colorWithRed:green:blue:",        0x7 }, /* +[CIColor ...]           */
-   { "vectorWithX:",                    0x1 }, /* +[CIVector ...]          */
-   { "vectorWithX:Y:",                  0x3 }, /* +[CIVector ...]          */
-   { "vectorWithX:Y:Z:",                0x7 }, /* +[CIVector ...]          */
-   { "vectorWithX:Y:Z:W:",              0xF }, /* +[CIVector ...]          */
-   /* NSFont size-taking creators (CGFloat point size). Unmasked, the native
-    * 'd' reads TWO i386 slots from the caller's ONE float slot -> a denormal
-    * ~0-point font -> zero-size text -> "Cannot lock focus on image ... size
-    * zero" NSImageCacheException (Quinn pausedImage lane). */
-   { "fontWithName:size:",          0x2 },
-   { "fontWithDescriptor:size:",    0x2 },
-   { "convertFont:toSize:",         0x2 }, /* -[NSFontManager ...] */
-   { "systemFontOfSize:",           0x1 },
-   { "boldSystemFontOfSize:",       0x1 },
-   { "userFontOfSize:",             0x1 },
-   { "userFixedPitchFontOfSize:",   0x1 },
-   { "labelFontOfSize:",            0x1 },
-   { "menuFontOfSize:",             0x1 },
-   { "menuBarFontOfSize:",          0x1 },
-   { "messageFontOfSize:",          0x1 },
-   { "paletteFontOfSize:",          0x1 },
-   { "titleBarFontOfSize:",         0x1 },
-   { "toolTipsFontOfSize:",         0x1 },
-   { "controlContentFontOfSize:",   0x1 },
+#include "cgfloat_sels.inc"
+   /* post-10.6 NSColor creators (10.9+ generic), measured on Quinn */
+   { "colorWithWhite:alpha:",                    0x3 },
+   { "colorWithHue:saturation:brightness:alpha:", 0xf },
 };
 
 __attribute__((constructor))
