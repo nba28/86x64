@@ -792,7 +792,8 @@ add_library(shimdb_impl STATIC
   ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl/memory.c
   ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl/veclib.c
   ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl/datetime.c
-  ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl/fsspec.c)
+  ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl/fsspec.c
+  ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl/alias.c)
 target_include_directories(shimdb_impl PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl)
 target_include_directories(abiconv PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/../86x64/shimdb/impl)
 add_dependencies(abiconv shimdb_impl)
