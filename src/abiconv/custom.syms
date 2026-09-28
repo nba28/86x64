@@ -852,3 +852,4 @@ _AudioDeviceAddIOProc
 _AudioDeviceRemoveIOProc
 _AudioDeviceStart
 _AudioDeviceStop
+_AudioDeviceGetPropertyInfo

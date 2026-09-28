@@ -269,6 +269,7 @@
 	MTSHIM	___pthread_threadid_np,       _shim_pthread_threadid_np
 	MTSHIM	___AudioHardwareGetProperty,  _shim_AudioHardwareGetProperty
 	MTSHIM	___AudioDeviceGetProperty,    _shim_AudioDeviceGetProperty
+	MTSHIM	___AudioDeviceGetPropertyInfo, _shim_AudioDeviceGetPropertyInfo
 	MTSHIM	___AudioDeviceAddIOProc,      _shim_AudioDeviceAddIOProc
 	MTSHIM	___AudioDeviceRemoveIOProc,   _shim_AudioDeviceRemoveIOProc
 	MTSHIM	___AudioDeviceStart,          _shim_AudioDeviceStart

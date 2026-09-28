@@ -21,6 +21,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdio.h>
 
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
@@ -99,6 +100,15 @@ static OSStatus hal_ioproc(AudioDeviceID dev, const AudioTimeStamp *now,
    if (outTime) { e->ts[2] = *outTime; }
    abl32 *i32 = lower(e, 0, e->in32, in, 1);
    abl32 *o32 = lower(e, 1, e->out32, out, 0);
+   static int traced;
+   if (!traced && getenv("ABICONV_HAL_TRACE")) {
+      traced = 1;
+      fprintf(stderr, "[hal] ioproc in=%p(n=%u) out=%p(n=%u)", (void *)i32, i32 ? i32->n : 0,
+              (void *)o32, o32 ? o32->n : 0);
+      for (uint32_t i = 0; o32 && i < o32->n; ++i)
+         fprintf(stderr, " out[%u]={nch %u size %u data %#x}", i, o32->b[i].nch, o32->b[i].size, o32->b[i].data);
+      fprintf(stderr, " ts=%p client=%#x\n", (void *)e->ts, e->client32);
+   }
    const OSStatus r = (OSStatus)e->call(dev, now ? P32(&e->ts[0]) : 0, P32(i32),
                                         inTime ? P32(&e->ts[1]) : 0, P32(o32),
                                         outTime ? P32(&e->ts[2]) : 0, e->client32);
