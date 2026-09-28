@@ -279,14 +279,38 @@ namespace MachO {
     *
     * M64_NO_MEMDISP_CODE_ALIAS_GATE=1 disarms it (A/B guard
     * `memdisp_code_alias_test.sh`). */
+   /* ★A MEMORY ACCESS (not `lea`) at disp(%base) never addresses data from a
+    * function's entry: entry evidence at disp says "function", which is exactly
+    * what a base-relative load/store is NOT indexing. So for accesses, any
+    * instructions-section alias is an integer. MEASURED, PvZ: `movl %edx,
+    * 0x558c(%eax)` (a member store) — 0x558c is a real function entry (after
+    * `retl`), so the entry rule rebased it and the store hit the GPU driver.
+    * `lea` keeps the entry rule (it can form a function pointer).
+    * Kill switch M64_MEMDISP_ACCESS_ENTRY_RULE=1. */
+   template <Bits bits>
+   static bool disp_in_instructions(ParseEnv<bits>& env, std::size_t disp) {
+      for (auto *seg : env.archive.segments()) {
+         for (auto *sect : seg->sections) {
+            if (sect->contains_vmaddr(disp)) {
+               return (sect->sect.flags & (S_ATTR_PURE_INSTRUCTIONS |
+                                           S_ATTR_SOME_INSTRUCTIONS)) != 0;
+            }
+         }
+      }
+      return false;
+   }
+
    template <Bits bits>
    static bool memdisp_code_alias_is_constant(const Image& img, ParseEnv<bits>& env,
-                                              std::size_t disp) {
+                                              std::size_t disp, bool is_lea) {
       static const bool disabled =
          std::getenv("M64_NO_MEMDISP_CODE_ALIAS_GATE") != nullptr;
+      static const bool access_entry_rule =
+         std::getenv("M64_MEMDISP_ACCESS_ENTRY_RULE") != nullptr;
       if (disabled) { return false; }
       if (bits != Bits::M32) { return false; }
       if (disp < 0x1000 || disp >= 0x80000000U) { return false; }
+      if (!is_lea && !access_entry_rule && disp_in_instructions(env, disp)) { return true; }
       return imm32_code_alias_is_constant(img, env, (uint32_t) disp);
    }
 
@@ -976,7 +1000,8 @@ namespace MachO {
                 * loop bound), not a table vmaddr. See
                 * memdisp_code_alias_is_constant — Civ IV's
                 * `lea 0x27ec(%ecx),%edx` free-list terminator. */
-               if (memdisp_code_alias_is_constant(img, env, (std::size_t) disp)) {
+               if (memdisp_code_alias_is_constant(img, env, (std::size_t) disp,
+                      xed_decoded_inst_get_iclass(&xedd) == XED_ICLASS_LEA)) {
                   disp_in_seg = false;
                }
                if (disp_in_seg && !memdisp) {
@@ -1067,7 +1092,8 @@ namespace MachO {
                /* CODE-ALIAS gate — identical to the base-only arm above; a
                 * 2-D-array access `tab(%base,%idx,s)` whose disp32 aliases
                 * mid-__text is an integer, not a table vmaddr. */
-               if (memdisp_code_alias_is_constant(img, env, (std::size_t) disp)) {
+               if (memdisp_code_alias_is_constant(img, env, (std::size_t) disp,
+                      xed_decoded_inst_get_iclass(&xedd) == XED_ICLASS_LEA)) {
                   disp_in_seg = false;
                }
                if (disp_in_seg && !memdisp) {
