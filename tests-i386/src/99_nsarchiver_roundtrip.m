@@ -16,6 +16,7 @@
  */
 #include <Foundation/Foundation.h>
 #include <stdio.h>
+#include <stdlib.h>
 
 /* A class DEFINED BY THE TRANSLATED APP, the shape a real save uses: the
  * archive names the class and NSUnarchiver must instantiate it and run its
@@ -103,5 +104,5 @@ int main(void)
 
    printf("bad=%d\n", bad);
    [pool release];
-   return bad ? 1 : 42;
+   exit(bad ? 1 : 42);
 }

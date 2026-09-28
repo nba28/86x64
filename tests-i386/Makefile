@@ -1258,11 +1258,15 @@ closure-data-shadow:
 # (asm/C) suite stays green while ObjC support is still landing. Builds each
 # src/NN_*.m i386 ObjC1 binary, translates it via the full pipeline, runs it,
 # and diffs stdout against expected/. Requires `make sysroot-objc` once.
+# `-undefined dynamic_lookup`: clang defines a class's `.objc_class_name_X` as an
+# absolute symbol, but ld64-95 resolves a same-file `__cls_refs` literal only
+# against a real atom, so any fixture that messages its OWN class failed to link
+# ("undefined .objc_class_name_X"). The reference emits no bind either way.
 objc: $(BUILD_DIR) $(BUILD_DIR)/libabiconv.dylib $(MACHO_TOOL)
 	@pass=0; fail=0; \
 	for t in $(OBJC_TESTS); do \
 	  $(CC_I386_OBJC) -c $(SRC_DIR)/$$t.m -o $(BUILD_DIR)/$$t.o 2>/dev/null || { echo "FAIL $$t (compile)"; fail=$$((fail+1)); continue; }; \
-	  $(LD) $(LDFLAGS_I386_OBJC) -e _main -o $(BUILD_DIR)/$$t.i386 $(BUILD_DIR)/$$t.o 2>/dev/null || { echo "FAIL $$t (link — run 'make sysroot-objc'?)"; fail=$$((fail+1)); continue; }; \
+	  $(LD) $(LDFLAGS_I386_OBJC) -undefined dynamic_lookup -e _main -o $(BUILD_DIR)/$$t.i386 $(BUILD_DIR)/$$t.o 2>/dev/null || { echo "FAIL $$t (link — run 'make sysroot-objc'?)"; fail=$$((fail+1)); continue; }; \
 	  bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) -o $(BUILD_DIR)/$$t.x86_64 $(BUILD_DIR)/$$t.i386 >/dev/null 2>&1 || { echo "FAIL $$t (translate)"; fail=$$((fail+1)); continue; }; \
 	  chmod +x $(BUILD_DIR)/$$t.x86_64; \
 	  actual=$(BUILD_DIR)/$$t.actual; expected=$(EXPECTED_DIR)/$$t.txt; \

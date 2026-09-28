@@ -1,0 +1,18 @@
+   string: archived 55 bytes
+ok string
+   number-int: archived 68 bytes
+ok number-int
+   number-double: archived 74 bytes
+ok number-double
+   array: archived 111 bytes
+ok array
+   dictionary: archived 138 bytes
+ok dictionary
+   date: archived 52 bytes
+ok date
+   custom-class: archived 75 bytes
+ok custom-class
+   custom-array: archived 102 bytes
+ok custom-array
+bad=0
+exit_code: 42
