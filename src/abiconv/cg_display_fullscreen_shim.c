@@ -92,9 +92,11 @@
 #include <os/lock.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
+#include "cgdisp_modes.h"
 
 /* objc_shim.c proxy arena + the full CF-ref resolver abigen's bridges use. */
 extern uint32_t x64_objc_wrap(uint64_t real);
+extern uint64_t x64_objc_unwrap(uint32_t h);
 extern uint64_t _86x64_unwrap_obj_arg(uint32_t h);
 
 /* agl_drawable_shim.c: which WindowRef currently owns a GL drawable, and through
@@ -323,6 +325,100 @@ static void present_window(uint32_t id, int w, int h, double *ox, double *oy)
    }
    *ox = r.left;
    *oy = r.top;
+}
+
+/* ==== THE MODE LIST: the pre-Mojave Retina contract ======================
+ * On 10.7.4-10.13 an app that did not declare Retina support (every 32-bit
+ * app) was shown MAGNIFIED: it saw the screen in POINTS -- modes, bounds,
+ * window sizes, mouse -- and its GL rendered 1 pixel per point, scaled by the
+ * compositor. Its resolution menu therefore only offered sizes that fit the
+ * desktop, and its windowed mode used its own window as written.
+ * Modern lists break that: CGDisplayCopyAllDisplayModes(dpy, NULL) returns only
+ * 1x modes of 1920x1200 and up on a 1512x982-point screen, and the legacy
+ * CGDisplayAvailableModes mixes the point modes with those. A menu built from
+ * them (or from an empty Display Manager list, Halo: 2560x1440 from its own
+ * table) creates a window twice the size of the desktop.
+ * The list is: every point mode macOS offers that fits the desktop, plus the
+ * classic 640x480 / 800x600 / 1024x768 old Retina Macs also listed, deduped by
+ * size, ascending. Nothing here switches a display (see the file header). */
+int cgdisp_point_modes(uint32_t id, cgdisp_mode *out, int max)
+{
+   if (bridge_off()) return 0;   /* the kill switch: the old empty list */
+   const CGRect desk = CGDisplayBounds(id);
+   const int dw = (int)desk.size.width, dh = (int)desk.size.height;
+   int n = 0;
+   #define ADD(W, H, HZ) do { int w_ = (W), h_ = (H), dup_ = 0;                   \
+      if (w_ <= 0 || h_ <= 0 || w_ > dw || h_ > dh) break;                       \
+      for (int k_ = 0; k_ < n; k_++) dup_ |= out[k_].w == w_ && out[k_].h == h_; \
+      if (!dup_ && n < max) { out[n].w = w_; out[n].h = h_; out[n].hz = (HZ); n++; } } while (0)
+   static const int classic[][2] = { { 640, 480 }, { 800, 600 }, { 1024, 768 } };
+   CFDictionaryRef cur = CGDisplayCurrentMode(id);
+   const double cur_hz = cur ? dict_dbl(cur, K_RR, 60.0) : 60.0;
+   for (int k = 0; k < 3; k++) ADD(classic[k][0], classic[k][1], cur_hz);
+   CFArrayRef all = CGDisplayAvailableModes(id);
+   for (CFIndex i = 0; all && i < CFArrayGetCount(all); i++) {
+      CFDictionaryRef d = CFArrayGetValueAtIndex(all, i);
+      ADD(dict_int(d, K_W, 0), dict_int(d, K_H, 0), dict_dbl(d, K_RR, 60.0));
+   }
+   #undef ADD
+   for (int i = 1; i < n; i++)                /* ascending by width, then height */
+      for (int j = i; j > 0 && (out[j].w < out[j-1].w ||
+                                (out[j].w == out[j-1].w && out[j].h < out[j-1].h)); j--) {
+         cgdisp_mode t = out[j]; out[j] = out[j-1]; out[j-1] = t;
+      }
+   return n;
+}
+
+/* CFArrayRef CGDisplayAvailableModes(CGDirectDisplayID) -- not owned by the
+ * caller, so the array is built once per display and kept. */
+uint32_t shim_CGDisplayAvailableModes(uint32_t *a)
+{
+   const uint32_t id = a[0];
+   if (bridge_off()) return ref_out(CGDisplayAvailableModes(id));
+   static struct { uint32_t id; CFArrayRef arr; } cache[MAX_DISP];
+   for (int i = 0; i < MAX_DISP; i++)
+      if (cache[i].arr && cache[i].id == id) return ref_out(cache[i].arr);
+   cgdisp_mode m[64];
+   const int n = cgdisp_point_modes(id, m, 64);
+   CFMutableArrayRef arr = CFArrayCreateMutable(NULL, n, &kCFTypeArrayCallBacks);
+   for (int i = 0; i < n; i++) {
+      CFDictionaryRef d = synth_mode(id, m[i].w, m[i].h, 32, m[i].hz);
+      if (d) CFArrayAppendValue(arr, d);
+   }
+   for (int i = 0; i < MAX_DISP; i++)
+      if (!cache[i].arr) { cache[i].id = id; cache[i].arr = arr; break; }
+   return ref_out(arr);
+}
+
+/* CFArrayRef CGDisplayCopyAllDisplayModes(CGDirectDisplayID, CFDictionaryRef)
+ * -- owned by the caller. CGDisplayModeRefs cannot be synthesised, so the real
+ * modes (Retina duplicates included, so the point modes are there at all) are
+ * filtered down to the list above: one per size, preferring the current
+ * refresh rate. The classic 4:3 sizes have no real mode and are left out. */
+uint32_t shim_CGDisplayCopyAllDisplayModes(uint32_t *a)
+{
+   const uint32_t id = a[0];
+   CFDictionaryRef opt = (CFDictionaryRef)(uintptr_t)x64_objc_unwrap(a[1]);
+   if (bridge_off()) return ref_out(CGDisplayCopyAllDisplayModes(id, opt));
+   const void *k = kCGDisplayShowDuplicateLowResolutionModes, *v = kCFBooleanTrue;
+   CFDictionaryRef dup = CFDictionaryCreate(NULL, &k, &v, 1, &kCFTypeDictionaryKeyCallBacks,
+                                            &kCFTypeDictionaryValueCallBacks);
+   CFArrayRef all = CGDisplayCopyAllDisplayModes(id, dup);
+   CFRelease(dup);
+   cgdisp_mode m[64];
+   const int n = cgdisp_point_modes(id, m, 64);
+   CFMutableArrayRef out = CFArrayCreateMutable(NULL, n, &kCFTypeArrayCallBacks);
+   for (int i = 0; i < n; i++) {
+      CGDisplayModeRef best = NULL;
+      for (CFIndex j = 0; all && j < CFArrayGetCount(all); j++) {
+         CGDisplayModeRef x = (CGDisplayModeRef)CFArrayGetValueAtIndex(all, j);
+         if ((int)CGDisplayModeGetWidth(x) != m[i].w || (int)CGDisplayModeGetHeight(x) != m[i].h) continue;
+         if (!best || CGDisplayModeGetRefreshRate(x) == m[i].hz) best = x;
+      }
+      if (best) CFArrayAppendValue(out, best);
+   }
+   if (all) CFRelease(all);
+   return ref_out(out);
 }
 
 /* ==== entry points ======================================================== */

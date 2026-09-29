@@ -56,6 +56,7 @@
 #include <ImageIO/ImageIO.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include "gap.h"
+#include "cgdisp_modes.h"
 
 /* objc_shim.c proxy arena: 64-bit pointer <-> 32-bit i386 handle. A genuine
  * low value / NULL passes straight through, so a raw <4GB ref is unharmed. */
@@ -1281,13 +1282,8 @@ uint32_t shim_SetCCursor(uint32_t *a) { GAP_STUB(a); return 0; }
 /* ======================================================================== */
 /* The classic Display Manager was removed from 64-bit macOS; the abigen shims
  * for these forward to a REMOVED native and would fault. Screen-device
- * enumeration is REAL (our main-screen GDevice); display-MODE enumeration is a
- * callback+nested-VD-struct subsystem (DMGetIndexedDisplayModeFromList invokes
- * a DMDisplayModeListIteratorUPP with a DMDisplayModeListEntryRec of
- * VDResolutionInfo/VDTimingInfo/... records), so for now we return an EMPTY
- * mode list (count=0) — the safe, non-faulting answer a well-behaved caller
- * handles by using the current mode; full per-mode enumeration is tracked as
- * follow-up. DMGetDisplayIDByGDevice/DMGetGDeviceByDisplayID/DMGetDeskRegion
+ * enumeration is REAL (our main-screen GDevice); display-MODE enumeration hands the
+ * app's iterator a DMDisplayModeListEntryRec tree per mode (below). DMGetDisplayIDByGDevice/DMGetGDeviceByDisplayID/DMGetDeskRegion
  * live in carbon_ui_shim.c. */
 
 /* GDHandle DMGetFirstScreenDevice(Boolean activeOnly) — the main screen. */
@@ -1300,20 +1296,83 @@ uint32_t shim_NewDMDisplayModeListIteratorUPP(uint32_t *a) { return a[0]; }
 uint32_t shim_DisposeDMDisplayModeListIteratorUPP(uint32_t *a) { (void)a; return 0; }
 
 /* OSErr DMNewDisplayModeList(DisplayIDType, UInt32 flags, UInt32 reserved,
- *                            DMListIndexType *count, DMListType *list) */
+ *                            DMListIndexType *count, DMListType *list)
+ * The list is the pre-Mojave Retina contract (cgdisp_modes.h): the point sizes
+ * that fit the desktop. It used to be EMPTY, and Halo then offered sizes from
+ * its own table (2560x1440 on a 1512x982-point screen: a window twice the
+ * desktop). Stored in the handle: magic, count, modes. One display (the main
+ * one, like make_main_gdevice). */
 #define DM_LIST_MAGIC 0x444d4c53u   /* 'DMLS' */
+#define DM_MAX_MODES  32
+typedef struct { uint32_t magic, count; cgdisp_mode m[DM_MAX_MODES]; } dm_list;
 uint32_t shim_DMNewDisplayModeList(uint32_t *a)
 {
-   put_u32(a[3], 0);                                   /* count = 0 (empty) */
-   uint32_t h = cm_new_handle(4, 1);
-   if (h) { uint32_t *b = (uint32_t *)cm_handle_block(h); if (b) *b = DM_LIST_MAGIC; }
+   uint32_t h = cm_new_handle(sizeof(dm_list), 1);
+   dm_list *l = h ? (dm_list *)cm_handle_block(h) : NULL;
+   uint32_t n = 0;
+   if (l) {
+      l->magic = DM_LIST_MAGIC;
+      n = l->count = (uint32_t)cgdisp_point_modes(CGMainDisplayID(), l->m, DM_MAX_MODES);
+   }
+   put_u32(a[3], n);
    put_u32(a[4], h);
-   return 0;                                            /* noErr */
+   return h ? 0 : (uint32_t)qdMemFullErr;
 }
+
 /* OSErr DMGetIndexedDisplayModeFromList(DMListType, DMListIndexType index,
- *   UInt32 reserved, DMDisplayModeListIteratorUPP, void *userData) — empty
- * list => not reached in normal use; return paramErr WITHOUT calling back. */
-uint32_t shim_DMGetIndexedDisplayModeFromList(uint32_t *a) { (void)a; return (uint32_t)qdParamErr; }
+ *   UInt32 reserved, DMDisplayModeListIteratorUPP, void *userData)
+ * Calls the app's i386 iterator (userData, index, DMDisplayModeListEntryPtr)
+ * once, with the classic record tree for that mode built in low memory. The
+ * 10.6 headers pack these 2-byte (mac68k); every offset below was checked with
+ * offsetof against the SDK for i386. One 32bpp depth; timing valid + safe. */
+extern void *x64_lowstack_get(size_t sz);
+extern void  x64_lowstack_put(void *p, size_t sz);
+extern uint32_t _86x64_call_i386(uint64_t fn, uint64_t nwords, const uint32_t *words, uint64_t top);
+extern void x64_cb_enter(void);
+extern void x64_cb_leave(void);
+#define DM_LOWSTACK_SZ (1u * 1024u * 1024u)
+static void w16(uint8_t *b, int o, uint16_t v) { memcpy(b + o, &v, 2); }
+static void w32(uint8_t *b, int o, uint32_t v) { memcpy(b + o, &v, 4); }
+uint32_t shim_DMGetIndexedDisplayModeFromList(uint32_t *a)
+{
+   dm_list *l = a[0] ? (dm_list *)cm_handle_block(a[0]) : NULL;
+   const uint32_t idx = a[1], upp = a[3], user = a[4];
+   if (!l || l->magic != DM_LIST_MAGIC || idx >= l->count || !upp) return (uint32_t)qdParamErr;
+   const cgdisp_mode *m = &l->m[idx];
+   const uint32_t id = 0x1000u + idx;              /* DisplayModeID: unique per mode */
+
+   enum { ENTRY = 0, SWITCH = 32, RES = 48, TIMING = 78, DBLOCK = 98, DINFO = 118,
+          VPB = 138, TINFO = 180, NAME = 260, TOTAL = 292 };
+   uint8_t *b = calloc(1, TOTAL);                  /* the i386 heap: low 4GB */
+   if (!b) return (uint32_t)qdMemFullErr;
+   const uint32_t B = (uint32_t)(uintptr_t)b;
+   w32(b, ENTRY + 4, B + SWITCH);   w32(b, ENTRY + 8, B + RES);   w32(b, ENTRY + 12, B + TIMING);
+   w32(b, ENTRY + 16, B + DBLOCK);  /* version 0 */ w32(b, ENTRY + 24, B + NAME);
+   w32(b, ENTRY + 28, B + TINFO);
+   w16(b, SWITCH + 0, 133);         w32(b, SWITCH + 2, id);        /* kDepthMode6 = 32bpp */
+   w32(b, RES + 4, id);             w32(b, RES + 8, (uint32_t)m->w);  w32(b, RES + 12, (uint32_t)m->h);
+   w32(b, RES + 16, (uint32_t)(m->hz * 65536.0)); w16(b, RES + 20, 133);
+   w32(b, TIMING + 0, id);          w32(b, TIMING + 16, (1u << 0) | (1u << 1));  /* kModeValid|kModeSafe */
+   w32(b, DBLOCK + 0, 1);           w32(b, DBLOCK + 4, B + DINFO);
+   w32(b, DINFO + 0, B + SWITCH);   w32(b, DINFO + 4, B + VPB);
+   w16(b, VPB + 4, (uint16_t)(m->w * 4));                          /* vpRowBytes */
+   w16(b, VPB + 10, (uint16_t)m->h); w16(b, VPB + 12, (uint16_t)m->w); /* vpBounds bottom,right */
+   w32(b, VPB + 22, 72u << 16);     w32(b, VPB + 26, 72u << 16);  /* 72 dpi, Fixed */
+   w16(b, VPB + 30, 16);            w16(b, VPB + 32, 32);          /* RGBDirect, 32bpp */
+   w16(b, VPB + 34, 3);             w16(b, VPB + 36, 8);
+   b[NAME] = (uint8_t)snprintf((char *)b + NAME + 1, 31, "%d x %d", m->w, m->h);
+
+   void *stk = x64_lowstack_get(DM_LOWSTACK_SZ);
+   if (!stk) { free(b); return (uint32_t)qdMemFullErr; }
+   const uint64_t top = ((uint64_t)(uintptr_t)stk + DM_LOWSTACK_SZ) & ~0xfULL;
+   const uint32_t words[3] = { user, idx, B + ENTRY };
+   x64_cb_enter();
+   _86x64_call_i386(upp, 3, words, top);
+   x64_cb_leave();
+   x64_lowstack_put(stk, DM_LOWSTACK_SZ);
+   free(b);
+   return 0;
+}
 /* OSErr DMDisposeList(DMListType list) */
 uint32_t shim_DMDisposeList(uint32_t *a) { if (a[0]) cm_dispose_handle(a[0]); return 0; }
 

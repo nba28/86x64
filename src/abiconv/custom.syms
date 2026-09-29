@@ -708,6 +708,10 @@ _CGDisplayCaptureWithOptions
 _CGReleaseAllDisplays
 _CGDisplayRelease
 _CGDisplayIsCaptured
+# The MODE LIST (same file): answered in points, only modes that fit the
+# desktop -- what a non-Retina app saw on 10.7.4-10.13 (see cgdisp_point_modes).
+_CGDisplayAvailableModes
+_CGDisplayCopyAllDisplayModes
 
 # carbon_memory.c / carbon_memory_tramp.asm — the classic Memory Manager on the
 # low-4GB heap. CarbonCore exports every entry point twice (classic name +

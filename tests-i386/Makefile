@@ -834,6 +834,10 @@ gap-stub: $(BUILD_DIR)/99_gap_stub.x86_64
 # first hit (gap.c's one-shot stub on the bound slot); M64_GAP=0 arms nothing.
 gap-raw: $(BUILD_DIR)/99_gap_raw.x86_64
 	@bash gap_raw_test.sh
+# display-point-modes: every display-mode list describes the desktop in POINTS and
+# only lists sizes that fit -- the pre-Mojave Retina contract (headless).
+display-point-modes: $(BUILD_DIR)/99_display_point_modes.x86_64
+	@bash display_point_modes_test.sh
 # carbon-datetime: A/B guard for the classic Date & Time Utilities, REMOVED from
 # modern macOS. abigen still emits a bridge; the pipeline weakens the dangling
 # bind to NULL, so the classic call jumps to 0 (Halo, rip=0, 2026-08-03).
@@ -2135,6 +2139,11 @@ $(BUILD_DIR)/99_carbon_alias.i386: $(BUILD_DIR)/99_carbon_alias.o
 # 99_gap_stub: TextWidth/EqualPt are QuickDraw, absent from the i386 sysroot;
 # static-interpose redirects them into libabiconv's shims. Overrides %.i386.
 $(BUILD_DIR)/99_gap_stub.i386: $(BUILD_DIR)/99_gap_stub.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_display_point_modes: CoreGraphics/Display Manager/CF are absent from the i386
+# sysroot; static-interpose redirects them into libabiconv. Overrides %.i386.
+$(BUILD_DIR)/99_display_point_modes.i386: $(BUILD_DIR)/99_display_point_modes.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 99_carbon_datetime: the whole family is undefined dynamic_lookup — these

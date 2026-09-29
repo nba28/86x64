@@ -84,6 +84,8 @@
 	;; --- the mode half: never reconfigures a display -------------------
 	MTSHIM      ___CGDisplaySwitchToMode,                     _shim_CGDisplaySwitchToMode
 	MTSHIM      ___CGDisplayCurrentMode,                      _shim_CGDisplayCurrentMode
+	MTSHIM      ___CGDisplayAvailableModes,                   _shim_CGDisplayAvailableModes
+	MTSHIM      ___CGDisplayCopyAllDisplayModes,              _shim_CGDisplayCopyAllDisplayModes
 	MTSHIM      ___CGDisplayBestModeForParameters,            _shim_CGDisplayBestModeForParameters
 	MTSHIM      ___CGDisplayBestModeForParametersAndRefreshRate, _shim_CGDisplayBestModeForParametersAndRefreshRate
 	MTSHIM      ___CGDisplayPixelsWide,                       _shim_CGDisplayPixelsWide
