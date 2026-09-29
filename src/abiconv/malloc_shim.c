@@ -32,6 +32,7 @@
 #include <string.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <errno.h>
 #include <os/lock.h>
 #include <malloc/malloc.h>
@@ -485,6 +486,32 @@ static void *bump(size_t cap, size_t align) {
    return NULL;
 }
 
+/* M64_HEAP_GUARD=1 -- catch a heap overrun or use-after-free AT THE WRITE, the
+ * way libgmalloc does: each block ends exactly at a page boundary followed by a
+ * PROT_NONE page, and free() makes the block's pages PROT_NONE and never reuses
+ * them. The fault reporter then names the culprit instead of the allocator
+ * tripping over a corrupted free list later (Halo "new campaign", 2026-09-29: a
+ * free block's `next` read 6, written 8 bytes past its neighbour's end).
+ * Costs >= 2 pages per allocation: a diagnostic mode, never the default.
+ * Slack below 16 bytes (the rounding of `cap`) is not guarded. */
+#define GUARD_PG 4096UL
+static int heap_guard(void) {
+   static int g = -1;
+   if (__builtin_expect(g < 0, 0)) { g = getenv("M64_HEAP_GUARD") != NULL; }
+   return g;
+}
+static void *guard_malloc(size_t cap) {   /* heap lock held */
+   const size_t span = round_up(cap + sizeof(struct block), GUARD_PG);
+   char *base = bump(span + GUARD_PG, GUARD_PG);
+   if (!base) { return NULL; }
+   char *user = base + span - cap;
+   struct block *b = (struct block *)(user - sizeof(struct block));
+   b->size = cap;
+   b->next = NULL;
+   mprotect(base + span, GUARD_PG, PROT_NONE);
+   return user;
+}
+
 void *malloc(size_t n) {
    if (n == 0) n = 16;
    const size_t cap = round_up(n, 16);
@@ -495,6 +522,12 @@ void *malloc(size_t n) {
       os_unfair_lock_unlock(&g_hc->lock);
       errno = ENOMEM;
       return NULL;
+   }
+   if (heap_guard()) {
+      void *g = guard_malloc(cap);
+      os_unfair_lock_unlock(&g_hc->lock);
+      if (!g) errno = ENOMEM;
+      return g;
    }
    /* first-fit reuse (16-aligned blocks always satisfy default alignment).
     *
@@ -568,6 +601,13 @@ void free(void *p) {
       return;
    }
    b->size |= BLK_FREED_BIT;
+   if (heap_guard()) {   /* never reused: any later touch faults at the culprit */
+      const uintptr_t lo = (uintptr_t)b & ~(GUARD_PG - 1);
+      const uintptr_t hi = round_up((uintptr_t)p + BLK_CAP(b), GUARD_PG);
+      os_unfair_lock_unlock(&g_hc->lock);
+      mprotect((void *)lo, hi - lo, PROT_NONE);
+      return;
+   }
    /* Diagnostic poison: stamp freed payload (header is before p, untouched) so
     * a use-after-free read shows 0xCD bytes instead of stale/zero data — this
     * distinguishes UAF from an explicit zero write at the fault site. Off

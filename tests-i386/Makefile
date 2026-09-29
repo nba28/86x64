@@ -838,6 +838,10 @@ gap-raw: $(BUILD_DIR)/99_gap_raw.x86_64
 # only lists sizes that fit -- the pre-Mojave Retina contract (headless).
 display-point-modes: $(BUILD_DIR)/99_display_point_modes.x86_64
 	@bash display_point_modes_test.sh
+# heap-guard: M64_HEAP_GUARD=1 (malloc_shim.c) faults AT a heap overrun or
+# use-after-free write; without it the same writes land silently.
+heap-guard: $(BUILD_DIR)/99_heap_guard.x86_64
+	@bash heap_guard_test.sh
 # memerr: MemError() reports the result of our Memory Manager shims (a refused
 # SetPtrSize grow reads back as an error; Halo corrupted its heap without it).
 memerr: $(BUILD_DIR)/99_memerr.x86_64
