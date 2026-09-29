@@ -69,6 +69,18 @@ set(ABICONV_SYM_SOURCES
   # (convert_cf_ptr) then unwraps the CFURLRef/CFDictionaryRef args. Generic:
   # any i386 app that decodes images via ImageIO. See includes.h (<ImageIO/*>).
   /System/Library/Frameworks/ImageIO.framework/ImageIO
+  # libcurl exports the curl_easy_* transfer API (curl_easy_init/perform/
+  # cleanup/duphandle/escape/unescape/strerror/upstream_recv, ...). Legacy
+  # i386 apps that make their own HTTP requests (Portal 2's Steam-less HTTP
+  # fallback) call these directly via i386 cdecl (4-byte pushed return
+  # address); unshimmed the call reaches native libcurl whose 8-byte `ret`
+  # over-pops the i386 4-byte frame, fusing the return addr with an adjacent
+  # stack word into a bogus PC. curl_easy_setopt/getinfo are VARIADIC so
+  # abigen still skips those two (need a hand va_list shim like printf); every
+  # other plain entry point gets a normal marshalling bridge. On macOS 11+
+  # the dylib is cache-only, so print_exports_trie.sh falls back to the SDK
+  # .tbd. See includes.h (<curl/curl.h>).
+  /usr/lib/libcurl.dylib
   # DiskArbitration: iPhoto's PhotoCDManager registerWithDiskArb: calls
   # DASessionCreate / DADiskCreateFromBSDName / DADiskCopyDescription (opaque
   # DASessionRef/DADiskRef + CFDictionaryRef). Unshimmed they reached native
@@ -854,6 +866,10 @@ target_link_libraries(abiconv System objc
   # raw cross-ABI calls.
   "-framework OpenAL"
   "-framework ForceFeedback"
+  # curl_easy_* bridges (Portal 2 HTTP fallback) call the real libcurl entry
+  # points; link explicitly for the same reason as OpenAL/ForceFeedback above
+  # (the nulljump probe is a clean process with no app deps loaded).
+  "-lcurl"
   )
 add_dependencies(abiconv abiconv_asm)
 if(TARGET abiconv_legacy_asm)

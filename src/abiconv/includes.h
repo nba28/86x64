@@ -174,6 +174,34 @@ extern CFStringRef CGImageSourceGetTypeWithURL(CFURLRef url);
  * here would clash. */
 #include <arpa/inet.h>
 
+/* libcurl (Portal 2 HTTP fallback: curl_easy_init/perform/cleanup/duphandle/
+ * escape/unescape/strerror/...). See ABICONV_SYM_SOURCES for the ABI-hazard
+ * writeup. curl_easy_setopt/curl_easy_getinfo are variadic and abigen skips
+ * them (need a hand va_list shim, same family as printf); every other entry
+ * point here gets a normal marshalling bridge. */
+#include <curl/curl.h>
+
+/* objc_assign_global / objc_enumerationMutation: the ObjC garbage-collector
+ * write-barrier family. GC itself is long gone on 64-bit, but old i386 code
+ * still calls these two directly as part of manual retain/release-adjacent
+ * bookkeeping (clang used to emit objc_assign_global calls for `static id`
+ * stores under -fobjc-gc); unshimmed they reach native x86_64 objc_assign_global
+ * (SysV register args) from an i386 cdecl call site -> wrong args, and the
+ * native 8-byte `ret` over-pops the i386 4-byte return push (fused PC), same
+ * family as every other unbridged native call. Both are plain pointer-in/
+ * pointer-out C functions, so abigen marshals them like any other. */
+#include <objc/objc-auto.h>
+/* objc_enumerationMutation itself lives in <objc/runtime.h>, which nothing
+ * above transitively includes (Foundation's NSObjCRuntime.h does not pull it
+ * in) -- so it and every other plain-C runtime.h entry point abigen can
+ * marshal (object_getClassName, sel_isEqual, class_conformsToProtocol, ...)
+ * were invisible to abigen even though they were already in the consider
+ * set. The runtime-mutation family that objc_shim.c/objc_msgSend.asm hand-
+ * implement (objc_getClass, objc_retain, objc_msgSend*, ...) is already
+ * excluded via custom.syms's ignore list, so this only ADDS coverage for the
+ * plain marshalling-only entry points that list already anticipated. */
+#include <objc/runtime.h>
+
 /* <servers/bootstrap.h> — bootstrap_look_up & friends (Portal 2 2026-09-14).
  * WHY THIS MATTERS BEYOND ONE SYMBOL: _bootstrap_look_up was ALREADY in the
  * consider set, but with no prototype abigen could not emit a bridge, so
