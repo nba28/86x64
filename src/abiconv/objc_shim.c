@@ -29,6 +29,7 @@
 #include "dyld_image_list.h"
 extern void *x64_lowstack_get(size_t sz);          /* lowstack_pool.c */
 extern void  x64_lowstack_put(void *p, size_t sz);
+extern void  x64_cfdata_mirror_flush(uint64_t ref); /* cfdata_bytebuf_shim.c */
 extern id objc_retain(id);   /* libobjc ARC entrypoint; not in runtime.h */
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
@@ -1257,6 +1258,26 @@ const char *x64_cstr_ret_low(const char *p) {
    char *low = (char *)malloc(n);                 /* low-4GB shim heap */
    if (!low || (uintptr_t)low >= 0x100000000UL) { return p; }
    memcpy(low, p, n);
+   return low;
+}
+
+/* The BYTE-BUFFER sibling of x64_cstr_ret_low, for a return that is a pointer
+ * into a buffer whose size comes from somewhere OTHER than a NUL terminator —
+ * CFDataGetBytePtr/CFDataGetMutableBytePtr (length = CFDataGetLength),
+ * CFStringGetPascalStringPtr (length = 1 + the leading Pascal length byte).
+ * strlen() cannot stand in for these: a 0x00 byte anywhere in the buffer is
+ * legitimate CONTENT, not a terminator (Halo's "Graphics Options" pref is an
+ * 88-byte struct starting 0x00 — the cstring bounce truncated it to a 1-byte
+ * copy, so the app's memcpy of the true length read 87 bytes of low-heap
+ * garbage past it). Same policy as x64_cstr_ret_low otherwise: a low return
+ * passes straight through, and a fresh copy is correct for a read-only
+ * accessor (no cache). */
+void *x64_databuf_ret_low(const void *p, size_t n);
+void *x64_databuf_ret_low(const void *p, size_t n) {
+   if (!p || (uintptr_t)p < 0x100000000ULL) { return (void *)p; }
+   void *low = malloc(n ? n : 1);                  /* low-4GB shim heap */
+   if (!low || (uintptr_t)low >= 0x100000000UL) { return (void *)p; }
+   if (n) { memcpy(low, p, n); }
    return low;
 }
 
@@ -9017,6 +9038,13 @@ static uint64_t unwrap_obj_arg_core(uint32_t a) {
 static uint64_t unwrap_obj_arg(uint32_t a) {
    uint64_t r = unwrap_obj_arg_core(a);
    if (g_mb_n && r) { mb_flush((id)(uintptr_t)r, 0); }   /* shadow -> real */
+   /* A resolved ref is about to be handed to native code (a call this very
+    * unwrap is marshalling for). If it is a CFMutableDataRef whose bytes the
+    * app last touched through our low mirror (cfdata_bytebuf_shim.c's
+    * CFDataGetMutableBytePtr bounce), push the write back into the REAL
+    * buffer first — otherwise the native call would see stale pre-write
+    * bytes (cfdata_mirror_flush no-ops in O(1) when nothing is mirrored). */
+   if (r) { x64_cfdata_mirror_flush(r); }
    return r;
 }
 

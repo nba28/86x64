@@ -580,6 +580,16 @@ add_library(abiconv SHARED
   # cfnumber_width_shim.c / cfnumber_width_tramp.asm: ONE job — the CFNumber types
   # named after a C type (Long, CFIndex, NSInteger, CGFloat) have the i386 width.
   cfnumber_width_shim.c
+  # cfdata_bytebuf_shim.c / cfdata_bytebuf_tramp.asm: ONE job — a byte-buffer
+  # return pointer (CFDataGetBytePtr/CFDataGetMutableBytePtr's length from
+  # CFDataGetLength, CFStringGetPascalStringPtr's leading length byte) is NOT a
+  # C string: abigen's generic cstring-return bounce (strlen) truncates any
+  # buffer whose first byte is 0x00, which a Halo prefs blob starting 0x00 hit
+  # on every launch (see the file header for the full chain). The mutable
+  # accessor keeps a per-CFData low mirror, flushed write-through by
+  # objc_shim.c's CF-ref arg unwrap before the ref's next native use.
+  # Symbols listed in custom.syms so abigen never dup-emits them.
+  cfdata_bytebuf_shim.c
   # carbon_datetime_shim.c / carbon_datetime_tramp.asm: ONE job — the classic
   # Date & Time Utilities (SecondsToDate / DateToSeconds / LongSecondsToDate /
   # LongDateToSeconds), which modern macOS REMOVED. abigen still emits a bridge,
@@ -783,6 +793,7 @@ add_library(abiconv SHARED
   cg_display_tramp.asm
   cfstring_range_tramp.asm
   cfnumber_width_tramp.asm
+  cfdata_bytebuf_tramp.asm
   carbon_datetime_tramp.asm
   carbon_fscatinfo_tramp.asm
   carbon_memory_tramp.asm

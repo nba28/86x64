@@ -477,6 +477,16 @@ agl-renderer-info: $(BUILD_DIR)/99_agl_renderer_info.x86_64
 # M64_NO_CFSTRING_RANGE_CLAMP=1 side and fails if the arms do not differ.
 cfstring-range: $(BUILD_DIR)/99_cfstring_range_overrun.x86_64
 	@bash cfstring_range_test.sh
+# cfdata-bytebuf-bounce: A/B guard for the byte-buffer CF-return LENGTH
+# contract. CFDataGetBytePtr/CFDataGetMutableBytePtr/CFStringGetPascalStringPtr
+# return a pointer into a buffer whose length is carried separately (never a
+# NUL terminator), so abigen's generic cstring-return bounce (strlen) silently
+# truncates any buffer whose first byte is 0x00 — exactly the shape of Halo's
+# real "Graphics Options" preference. The ON side is the main-suite fixture
+# 99_cfdata_bytebuf_bounce; this adds the M64_NO_CFDATA_BYTEBUF_BOUNCE=1 side
+# and fails if the arms do not differ.
+cfdata-bytebuf-bounce: $(BUILD_DIR)/99_cfdata_bytebuf_bounce.x86_64
+	@bash cfdata_bytebuf_bounce_test.sh
 # nulljump-no-shadow: A/B guard proving static-interpose refuses to redirect a
 # bind into a bridge that can only jump to NULL. abigen emits ___X while a native
 # _X exists; when Apple removes the API the bridge survives, the pipeline weakens
@@ -2024,6 +2034,16 @@ $(BUILD_DIR)/99_cf_key_concat_replace.i386: $(BUILD_DIR)/99_cf_key_concat_replac
 # clamp trampoline (cfstring_range_tramp.asm) rather than an abigen bridge.
 # Overrides %.i386.
 $(BUILD_DIR)/99_cfstring_range_overrun.i386: $(BUILD_DIR)/99_cfstring_range_overrun.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_cfdata_bytebuf_bounce: CFDataCreate / CFDataGetLength / CFDataGetBytePtr /
+# CFDataCreateMutable / CFDataAppendBytes / CFDataGetMutableBytePtr / CFRelease
+# are undefined dynamic_lookup imports resolved at translate time by
+# static-interpose -> libabiconv's ___CF* shims, and ___CFDataGetBytePtr /
+# ___CFDataGetMutableBytePtr are now the hand-written length-aware bounce
+# (cfdata_bytebuf_tramp.asm) rather than abigen's generic cstring-return
+# bridge. Overrides %.i386.
+$(BUILD_DIR)/99_cfdata_bytebuf_bounce.i386: $(BUILD_DIR)/99_cfdata_bytebuf_bounce.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 99_nulljump_no_shadow: CTabChanged is a removed classic QuickDraw call, so it

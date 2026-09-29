@@ -224,6 +224,13 @@ _CFStringGetCharacters
 _CFNumberGetValue
 _CFNumberCreate
 
+# cfdata_bytebuf_shim.c / cfdata_bytebuf_tramp.asm — a byte-buffer return whose
+# length comes from CFDataGetLength / a leading Pascal length byte, never
+# strlen (a 0x00 byte inside the buffer is content, not a terminator).
+_CFDataGetBytePtr
+_CFDataGetMutableBytePtr
+_CFStringGetPascalStringPtr
+
 _NSUnionRect
 _NSIntersectionRect
 _NSInsetRect
