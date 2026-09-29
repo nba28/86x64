@@ -88,6 +88,7 @@ PIPELINE_SH      = SCRIPT_DIR / "86x64.sh"
 RPATH_SWEEP      = SCRIPT_DIR / "_rpath_sweep.py"
 VENDOR_DEPS      = SCRIPT_DIR / "_vendor_deps.py"
 SHIMGEN          = SCRIPT_DIR / "shimgen.py"
+ABI_HAZARD_VENDOR = SCRIPT_DIR / "abi-hazard-vendor.py"
 FIX_SIGNING      = SCRIPT_DIR / "_fix_bundle_signing.py"
 DEPLOY_SH        = SCRIPT_DIR / "_deploy_app.sh"
 LLDB_EXC         = SCRIPT_DIR / "_lldb_exc_trace.py"
@@ -1434,6 +1435,17 @@ def cmd_vendor(args):
     _vendor(Path(args.app), args.source or [], args.dry_run)
 
 
+def cmd_abi_libs(args):
+    """Redirect a translated consumer's bind on a system C++-runtime dylib to
+    our own translated (i386-ABI) replacement — see abi-hazard-vendor.py."""
+    require(ABI_HAZARD_VENDOR)
+    cmd = ["python3", str(ABI_HAZARD_VENDOR)]
+    if args.list:
+        cmd.append("--list")
+    cmd.append(str(Path(args.app)))
+    run(cmd, dry=args.dry_run)
+
+
 def cmd_shim(args):
     require(SHIMGEN)
     target = Path(args.app)
@@ -1803,6 +1815,19 @@ def build_parser():
     ve.add_argument("--source", action="append", metavar="DIR",
                     help="extra dir to search for original frameworks (repeatable)")
     common(ve); ve.set_defaults(func=cmd_vendor)
+
+    # abi-libs
+    al = sub.add_parser(
+        "abi-libs",
+        help="redirect a translated consumer's bind on a system C++-runtime "
+             "dylib (e.g. libstdc++.6.dylib) to our own translated i386-ABI "
+             "replacement — a bundle .app or a flat tree (e.g. Portal 2's "
+             "bin/osx64); walked recursively for Mach-O files")
+    al.add_argument("app")
+    al.add_argument("--list", action="store_true",
+                    help="report translated consumers of a registered ABI-hazard "
+                         "dylib; write nothing")
+    common(al); al.set_defaults(func=cmd_abi_libs)
 
     # shim
     sh = sub.add_parser(
