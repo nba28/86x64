@@ -33,3 +33,10 @@ Build any of them:
   replacement path for every translated Carbon+AGL app.
 
 See the Halo target notes for how this reframed the Halo blocker.
+
+- `aglpresent.m` — can an AGL context attached to a shown Carbon window be
+  re-presented in a native NSWindow (`NSOpenGLContext initWithCGLContextObj:` +
+  `setView:`)? Result: yes — an AGLContext IS its CGLContextObj, every later
+  `aglSwapBuffers` lands in the NSView, and `aglUpdateContext` does NOT pull it
+  back (only an explicit `aglSetWindowRef` would). Basis of the windowed-context
+  fullscreen presentation (cgl_fullscreen_shim.m).

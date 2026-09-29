@@ -100,6 +100,12 @@ extern uint64_t _86x64_unwrap_obj_arg(uint32_t h);
 /* agl_drawable_shim.c: which WindowRef currently owns a GL drawable, and through
  * which native context. THE structural identification of the render target. */
 extern int agl_gl_render_target(void **win_out, void **ctx_out);
+extern void agl_reattach_window(void *ctx);
+
+/* cgl_fullscreen_shim.m: the fullscreen SURFACE (a native window in its own
+ * Space; the app's context renders there at the virtual size, scaled). */
+extern int   cglfs_present(void *ctx, uint32_t dpy);
+extern void *cglfs_dismiss(void);
 
 /* The deprecated CoreGraphics surface, declared by hand: the modern SDK still
  * ships the prototypes but behind availability macros, and this file IS the
@@ -255,6 +261,28 @@ static uint32_t ref_out(const void *p)
    return (v >> 32) ? x64_objc_wrap(v) : (uint32_t)v;
 }
 
+/* Back to windowed (mode restored / displays released): the context goes back
+ * into the window it was attached to. */
+static void dismiss_surface(void)
+{
+   void *ctx = cglfs_dismiss();
+   if (ctx) agl_reattach_window(ctx);
+}
+
+/* agl_drawable_shim.c: a context attached AFTER the mode switch (the window
+ * existed, its GL did not yet) still belongs on the surface. Returns the
+ * display carrying a virtual mode, 0 when none is. */
+uint32_t cgdisp_virtual_display(void)
+{
+   uint32_t id = 0;
+   if (bridge_off()) return 0;
+   os_unfair_lock_lock(&g_lk);
+   for (int i = 0; i < MAX_DISP; i++)
+      if (g_disp[i].used && g_disp[i].installed) { id = g_disp[i].id; break; }
+   os_unfair_lock_unlock(&g_lk);
+   return id;
+}
+
 /* ---- presentation -------------------------------------------------------
  * Move the GL render target to the display's origin so the virtual display and
  * the real screen share a coordinate system. MOVE ONLY: a resize is the exact
@@ -269,6 +297,13 @@ static void present_window(uint32_t id, int w, int h, double *ox, double *oy)
 
    void *win = NULL, *ctx = NULL;
    if (!agl_gl_render_target(&win, &ctx) || !win) {
+      return;          /* attached later: agl_drawable_shim.c presents it then */
+   }
+   /* The app's window is not where a fullscreen game belongs, and it cannot be
+    * resized to the screen: present its CONTEXT on the fullscreen surface. The
+    * virtual display then starts at the physical origin (input is mapped by the
+    * surface, cglfs_map_global). */
+   if (cglfs_present(ctx, id)) {
       return;
    }
    static win_getbounds_fn getb; static win_setbounds_fn setb;
@@ -333,6 +368,7 @@ uint32_t shim_CGDisplaySwitchToMode(uint32_t *a)
    os_unfair_lock_unlock(&g_lk);
 
    if (restore) {
+      dismiss_surface();
       return 0;
    }
 
@@ -587,6 +623,7 @@ uint32_t shim_CGReleaseAllDisplays(uint32_t *a)
       if (g_disp[i].used) { g_disp[i].captured = 0; g_disp[i].installed = 0;
                             g_disp[i].mode = NULL; }
    os_unfair_lock_unlock(&g_lk);
+   dismiss_surface();
    return 0;
 }
 
@@ -597,6 +634,7 @@ uint32_t shim_CGDisplayRelease(uint32_t *a)
    int s = slot_for(a[0]);
    if (s >= 0) { g_disp[s].captured = 0; g_disp[s].installed = 0; g_disp[s].mode = NULL; }
    os_unfair_lock_unlock(&g_lk);
+   dismiss_surface();
    return 0;
 }
 

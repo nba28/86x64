@@ -255,6 +255,41 @@ int cglfs_map_global(double *x, double *y)
    return 1;
 }
 
+/* The WINDOWED-context twin of the idiom: capture + CGDisplaySwitchToMode, then
+ * keep rendering through a context attached to the app's own (Carbon/AGL)
+ * window. cg_display_fullscreen_shim.c calls this with that window's context;
+ * an AGL context IS a CGL context (measured, probes/aglpresent.m), and it
+ * re-targets to our view with neither aglUpdateContext nor aglSwapBuffers
+ * pulling it back to the Carbon window. Returns 0 when the bridge is off. */
+int cglfs_present(CGLContextObj ctx, CGDirectDisplayID dpy)
+{
+   if (bridge_off() || !ctx) return 0;
+   present(ctx, dpy);
+   return 1;
+}
+
+/* Is ctx the context on the fullscreen surface? (agl_drawable_shim.c must not
+ * re-attach it to a Carbon window while it is.) */
+int cglfs_presenting(const void *ctx)
+{
+   return g_active && ctx && ctx == g_ctx;
+}
+
+/* Take the surface down; returns the context that was on it (NULL if none),
+ * so the caller can give it back to whatever it was drawing into before. */
+CGLContextObj cglfs_dismiss(void)
+{
+   if (!g_active) return NULL;
+   CGLContextObj was = g_ctx;
+   g_active = 0;
+   on_main(^{
+      [g_ns clearDrawable];
+      [g_win orderOut:nil];
+      g_ns = nil; g_ctx = NULL;
+   });
+   return was;
+}
+
 /* CGLError CGLSetFullScreen(CGLContextObj) */
 uint32_t shim_CGLSetFullScreen(uint32_t *a)
 {
@@ -279,11 +314,6 @@ uint32_t shim_CGLClearDrawable(uint32_t *a)
 {
    CGLContextObj ctx = ctx_in(a[0]);
    if (bridge_off() || !ctx || ctx != g_ctx) return (uint32_t)CGLClearDrawable(ctx);
-   g_active = 0;
-   on_main(^{
-      [g_ns clearDrawable];
-      [g_win orderOut:nil];
-      g_ns = nil; g_ctx = NULL;
-   });
+   cglfs_dismiss();
    return kCGLNoError;
 }

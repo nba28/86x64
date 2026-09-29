@@ -34,9 +34,10 @@
  *   captured    the capture family is tracked (CGDisplayIsCaptured says yes)
  *               without a real capture, which would shield the screen over the
  *               app's own window.
- *   moved       the window that owns the GL drawable is MOVED to the display
- *               origin, so virtual-display coordinates and screen coordinates
- *               coincide.  Move only — a RESIZE is the fatal operation.
+ *   kept        the window that owns the GL drawable is left EXACTLY where and
+ *               as big as the app made it: its context is presented on the
+ *               fullscreen surface instead (cgl_fullscreen_shim.m; guard
+ *               agl-fullscreen-present). A RESIZE is the fatal operation.
  *   gl2         and the AGL drawable is still LIVE afterwards.  A no-crash run
  *               with a dead drawable is not success.
  *   release     CGReleaseAllDisplays drops the capture AND the virtual mode
@@ -186,11 +187,10 @@ int main(int argc, char **argv)
                               CGDisplayPixelsHigh(dpy) == REQ_H));
     printf("bpp_ok=%d\n", CGDisplayBitsPerPixel(dpy) == 32);
 
-    /* The window must have been MOVED to the display origin (so the virtual
-     * display and the screen share coordinates) and must NOT have been resized. */
+    /* The window must be untouched: neither moved nor resized. */
     Rect after = { -1, -1, -1, -1 };
     if (win) GetWindowBounds(win, kWindowContentRgn, &after);
-    printf("moved=%d\n", (win && after.left == (short)b.x && after.top == (short)b.y) ? 1 : 0);
+    printf("kept=%d\n", (win && after.left == r.left && after.top == r.top) ? 1 : 0);
     printf("size_kept=%d\n",
            (win && after.right - after.left == REQ_W && after.bottom - after.top == REQ_H) ? 1 : 0);
     printf("gl2=%d\n", ctx ? live_gl() : 0);

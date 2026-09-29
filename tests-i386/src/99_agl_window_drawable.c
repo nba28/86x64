@@ -79,6 +79,20 @@ extern GLboolean      aglSetCurrentContext(AGLContext ctx);
 extern void           aglDestroyPixelFormat(AGLPixelFormat pix);
 extern void glGetIntegerv(unsigned int pname, int *params);
 
+/* present mode (AGL_PRESENT set; driven by agl_fullscreen_present_test.sh) */
+extern char    *getenv(const char *);
+extern void     ShowWindow(WindowRef w);
+extern int      RunCurrentEventLoop(double seconds);
+extern GLboolean aglSwapBuffers(AGLContext ctx);
+extern void     glClear(unsigned int mask);
+extern int      CGCaptureAllDisplays(void);
+extern int      CGReleaseAllDisplays(void);
+extern unsigned CGMainDisplayID(void);
+extern const void *CGDisplayBestModeForParameters(unsigned dpy, unsigned long bpp,
+                                                  unsigned long w, unsigned long h,
+                                                  int *exact);
+extern int      CGDisplaySwitchToMode(unsigned dpy, const void *mode);
+
 #define kDocumentWindowClass          6u
 #define kWindowCompositingAttribute   (1u << 19)
 #define kWindowStandardDocumentAttrs  0x0000000fu
@@ -136,6 +150,22 @@ int main(void)
     aglSetDrawable(ctx, 0);                       /* detach */
     GLboolean back = aglSetDrawable(ctx, saved);  /* restore */
     printf("restore=%d\n", (back && aglSetCurrentContext(ctx)) ? live_renderer() : 0);
+
+    /* The windowed-context fullscreen idiom: capture + switch while the GL
+     * window is up. The bridge presents the context on its fullscreen surface
+     * (cgl_fullscreen_shim.m); the script reads the window list meanwhile. */
+    if (getenv("AGL_PRESENT")) {
+        int exact = 0;
+        ShowWindow(win);
+        CGCaptureAllDisplays();
+        CGDisplaySwitchToMode(CGMainDisplayID(),
+            CGDisplayBestModeForParameters(CGMainDisplayID(), 32, 640, 480, &exact));
+        glClear(0x4000);
+        aglSwapBuffers(ctx);
+        printf("presented\n");
+        RunCurrentEventLoop(4.0);
+        CGReleaseAllDisplays();
+    }
 
     DisposeWindow(win);
     exit(0);

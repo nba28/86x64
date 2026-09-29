@@ -89,6 +89,13 @@ extern int   qd_agl_windowref_enabled(void);
 
 typedef unsigned char GLboolean;
 
+/* cgl_fullscreen_shim.m / cg_display_fullscreen_shim.c: while an app's virtual
+ * fullscreen mode is up, its context renders on the fullscreen surface, and a
+ * native aglSetWindowRef would pull it back into the (hidden) Carbon window. */
+extern int      cglfs_present(void *ctx, uint32_t dpy);
+extern int      cglfs_presenting(const void *ctx);
+extern uint32_t cgdisp_virtual_display(void);
+
 /* ---- make libabiconv's AGL bridges self-sufficient ------------------------
  * libabiconv exports ~52 ___agl* ABI bridges whose bodies do a flat-namespace
  * `call _aglXxx`, and this file dlsym's aglSetWindowRef.  Both need AGL to be
@@ -192,6 +199,17 @@ int agl_update_contexts_for_window(void *win)
    return n;
 }
 
+static uint32_t bind_get(void *ctx);
+
+/* The fullscreen surface was taken down: give ctx back to the window it is
+ * bound to (the surface never changed the binding, only the native target). */
+void agl_reattach_window(void *ctx)
+{
+   void *win = qd_port_window(bind_get(ctx));
+   AGL_NATIVE(setwin, agl_set_win, "aglSetWindowRef");
+   if (win && setwin) (void)setwin(ctx, win);
+}
+
 static uint32_t bind_get(void *ctx)
 {
    uint32_t d = 0;
@@ -216,15 +234,27 @@ uint32_t shim_aglSetDrawable(uint32_t *a)
    void *win = qd_agl_windowref_enabled() ? qd_port_window(draw_h) : NULL;
 
    if (win) {
+      if (cglfs_presenting(ctx)) { bind_set(ctx, draw_h); return 1; }
       AGL_NATIVE(setwin, agl_set_win, "aglSetWindowRef");
       if (setwin) {
          GLboolean ok = setwin(ctx, win);
-         if (ok) { bind_set(ctx, draw_h); return 1; }
+         if (ok) {
+            bind_set(ctx, draw_h);
+            const uint32_t dpy = cgdisp_virtual_display();
+            if (dpy) cglfs_present(ctx, dpy);   /* attached after the switch */
+            return 1;
+         }
          bind_set(ctx, 0);
          return 0;
       }
    }
 
+   if (!draw_h && was_ours && cglfs_presenting(ctx)) {
+      /* Save/restore around QuickDraw UI while on the surface: nothing to
+       * detach natively, and the restore re-binds through the branch above. */
+      bind_set(ctx, 0);
+      return 1;
+   }
    if (!draw_h && was_ours) {
       /* The classic detach on a WindowRef-attached context. */
       AGL_NATIVE(setwin, agl_set_win, "aglSetWindowRef");
