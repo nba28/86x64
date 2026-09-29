@@ -197,7 +197,14 @@ static void *ios_native(const char *sym) {
    static void *ctor = (void *)-1, *dtor = (void *)-1;
    int want_ctor = sym[strlen(sym) - 3] == 'C';   /* ...C1Ev vs ...D1Ev */
    void **slot = want_ctor ? &ctor : &dtor;
-   if (*slot == (void *)-1) { *slot = dlsym(RTLD_DEFAULT, sym); }
+   if (*slot == (void *)-1) {
+      /* The NATIVE library by path, never RTLD_DEFAULT: a translated
+       * libstdc++.6.dylib (abi-hazard-vendor.py) exports the same name, and a
+       * native call into translated code returns with a 4-byte ret, leaving
+       * rsp 4 off (Portal 2: rip = <this shim's return>:00000000). */
+      void *h = dlopen("/usr/lib/libstdc++.6.dylib", RTLD_LAZY | RTLD_LOCAL);
+      *slot = h ? dlsym(h, sym) : NULL;
+   }
    return *slot;
 }
 uint32_t shim_ios_base_Init_ctor(uint32_t *a) {
