@@ -575,6 +575,9 @@ uint32_t shim_GetGWorld(uint32_t *a)
 }
 uint32_t shim_SetGWorld(uint32_t *a) { tl_cur_port = a[0]; tl_cur_gd = a[1]; return 0; }
 void shim_GetPort(uint32_t *a) { put_u32(a[0], tl_cur_port); }
+/* The calling thread's current port (classic_input_coords.c: GlobalToLocal & co.
+ * are relative to it). */
+uint32_t qd_current_port(void) { return tl_cur_port; }
 void shim_SetPort(uint32_t *a) { tl_cur_port = a[0]; }
 void shim_SetOrigin(uint32_t *a)
 { qd_port *p = cur_port(); if (p) { p->origin_h = (int16_t)a[0]; p->origin_v = (int16_t)a[1]; } }

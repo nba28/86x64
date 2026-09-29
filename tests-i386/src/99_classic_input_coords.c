@@ -63,6 +63,8 @@ extern void HideWindow(WindowRef w);
 extern void DisposeWindow(WindowRef w);
 
 extern void GlobalToLocal(Point *p);
+extern void *GetWindowPort(WindowRef w);
+extern void SetPort(void *port);
 extern void LocalToGlobal(Point *p);
 extern void GetMouse(Point *p);
 extern void GetGlobalMouse(Point *p);
@@ -144,6 +146,26 @@ int main(void) {
     say((g.h - l.h == content.left && g.v - l.v == content.top)
         ? "mouse_local=1\n" : "mouse_local=0\n");
     say((g.h == l.h && g.v == l.v) ? "mouse_identity=1\n" : "mouse_identity=0\n");
+
+    /* --- the CURRENT PORT decides, not the active window ------------------
+     * A second window elsewhere becomes active while the app draws into (and
+     * converts against) the first -- PvZ after fullscreen->windowed, 2026-09-29. */
+    {
+        Rect want2 = { 120, 60, 320, 360 };
+        WindowRef w2 = (WindowRef)0;
+        if (CreateNewWindow(kDocumentWindowClass, kWindowNoConstrain, &want2, &w2) == 0 && w2) {
+            ShowWindow(w2);
+            SelectWindow(w2);
+            usleep(150000);
+            SetPort(GetWindowPort(w));
+            p.v = 0; p.h = 0;
+            LocalToGlobal(&p);
+            say((p.h == content.left && p.v == content.top) ? "port_wins=1\n" : "port_wins=0\n");
+            HideWindow(w2); DisposeWindow(w2);
+        } else {
+            say("port_wins=0\n");
+        }
+    }
 
     HideWindow(w);
     DisposeWindow(w);

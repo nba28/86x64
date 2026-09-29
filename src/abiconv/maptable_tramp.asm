@@ -1102,6 +1102,12 @@ _x64_exc_longjmp:
 	;     that produces or consumes a context is owned here so the i386-layout
 	;     SHADOW is the only thing the app ever holds — token ownership has to
 	;     be end to end.
+	; --- Carbon event PARAMETERS (carbon_event_param_shim.c): refs are 4-byte
+	;     handles on i386 and 8-byte pointers natively, CGFloat geometry is float
+	;     vs double, HICommand embeds a MenuRef. The generic bridge truncated a
+	;     WindowRef to its low half (PvZ windowed ignored every click).
+	MTSHIM	___GetEventParameter,                 _shim_GetEventParameter
+	MTSHIM	___SetEventParameter,                 _shim_SetEventParameter
 	MTSHIM	___aglCreateContext,                  _shim_aglCreateContext
 	MTSHIM	___aglDestroyContext,                 _shim_aglDestroyContext
 	MTSHIM	___aglGetCurrentContext,              _shim_aglGetCurrentContext

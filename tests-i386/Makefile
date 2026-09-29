@@ -838,6 +838,10 @@ gap-raw: $(BUILD_DIR)/99_gap_raw.x86_64
 # only lists sizes that fit -- the pre-Mojave Retina contract (headless).
 display-point-modes: $(BUILD_DIR)/99_display_point_modes.x86_64
 	@bash display_point_modes_test.sh
+# event-params: Carbon event parameters with an ABI-dependent layout (refs,
+# CGFloat geometry, HICommand) cross intact (carbon_event_param_shim.c).
+event-params: $(BUILD_DIR)/99_event_params.x86_64
+	@bash event_params_test.sh
 # carbon-datetime: A/B guard for the classic Date & Time Utilities, REMOVED from
 # modern macOS. abigen still emits a bridge; the pipeline weakens the dangling
 # bind to NULL, so the classic call jumps to 0 (Halo, rip=0, 2026-08-03).
@@ -2144,6 +2148,11 @@ $(BUILD_DIR)/99_gap_stub.i386: $(BUILD_DIR)/99_gap_stub.o
 # 99_display_point_modes: CoreGraphics/Display Manager/CF are absent from the i386
 # sysroot; static-interpose redirects them into libabiconv. Overrides %.i386.
 $(BUILD_DIR)/99_display_point_modes.i386: $(BUILD_DIR)/99_display_point_modes.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_event_params: the Carbon Event Manager is not in the i386 sysroot;
+# static-interpose redirects it into libabiconv. Overrides %.i386.
+$(BUILD_DIR)/99_event_params.i386: $(BUILD_DIR)/99_event_params.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 99_carbon_datetime: the whole family is undefined dynamic_lookup — these

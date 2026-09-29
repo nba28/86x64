@@ -116,6 +116,7 @@ static void ad_ensure_sentinel(void) {
 /* These are still present in HIToolbox but were dropped from the modern public
  * headers, so declare what we call rather than guessing at replacements. */
 extern short     FindWindow(Point, WindowRef *);
+extern WindowRef FrontNonFloatingWindow(void);
 extern HIViewRef HIViewGetRoot(WindowRef);
 extern HIViewRef HIViewGetSuperview(HIViewRef);
 extern OSStatus  HIViewGetViewForMouseEvent(HIViewRef, EventRef, HIViewRef *);
@@ -128,6 +129,17 @@ extern OSStatus  HIViewGetViewForMouseEvent(HIViewRef, EventRef, HIViewRef *);
  * window content — all a game window ever has — and anything DEEPER is a real
  * control that legitimately consumed the click. */
 static int ad_view_owns_click(EventRef e) {
+   /* Only the CONTENT region can hold a bare game view. A title-bar / frame
+    * click hits the root (the frame view, depth 0) and used to read as "bare
+    * content" -- forwarded to the app as a click (PvZ spy, 2026-09-29). */
+   {
+      HIPoint hp;
+      if (GetEventParameter(e, kEventParamMouseLocation, typeHIPoint, NULL,
+                            sizeof hp, NULL, &hp) != noErr) { return 1; }
+      Point at = { (short)hp.y, (short)hp.x };
+      WindowRef fw = NULL;
+      if (FindWindow(at, &fw) != inContent) { return 1; }
+   }
    WindowRef w = NULL;
    if (GetEventParameter(e, kEventParamWindowRef, typeWindowRef, NULL,
                          sizeof w, NULL, &w) != noErr || !w) {
@@ -157,6 +169,19 @@ static int ad_view_owns_click(EventRef e) {
 extern uint64_t x64_objc_unwrap(uint32_t h);
 extern int cglfs_map_global(double *x, double *y);   /* cgl_fullscreen_shim.m */
 
+/* A DOWN in the content of the FRONTMOST visible window that no real control
+ * owns. (Not ActiveNonFloatingWindow: an app can leave a hidden window active.) */
+static int ad_bare_content_click(EventRef e) {
+   HIPoint hp;
+   if (GetEventParameter(e, kEventParamMouseLocation, typeHIPoint, NULL,
+                         sizeof hp, NULL, &hp) != noErr) { return 0; }
+   Point where = { (short)hp.y, (short)hp.x };
+   WindowRef w = NULL;
+   if (FindWindow(where, &w) != inContent || !w) { return 0; }
+   if (w != FrontNonFloatingWindow()) { return 0; }   /* not frontmost: an activation click */
+   return !ad_view_owns_click(e);
+}
+
 /* OSStatus SendEventToEventTarget(EventRef, EventTargetRef) */
 uint32_t shim_SendEventToEventTarget(uint32_t *args) {
    EventRef       e = (EventRef)      (uintptr_t)x64_objc_unwrap(args[0]);
@@ -182,6 +207,17 @@ uint32_t shim_SendEventToEventTarget(uint32_t *args) {
             SetEventParameter(e, kEventParamMouseLocation, typeHIPoint, sizeof p, &p);
          }
       }
+   }
+
+   /* A plain content click in the ACTIVE window goes straight to the app. The
+    * dispatcher's default handling of a DOWN in a compositing window's content
+    * TRACKS the press in its own loop until release: the app's pump, and with
+    * it its rendering, stops while the button is held (PvZ's clouds froze), and
+    * the release is eaten inside that loop (measured: 11 presses, 3 releases). Pre-compositing Carbon never tracked
+    * a bare content click. Window chrome, an activation click on an inactive
+    * window and a real control still go to the dispatcher. */
+   if (is_down && t == GetEventDispatcherTarget() && ad_bare_content_click(e)) {
+      return (uint32_t)SendEventToEventTarget(e, GetApplicationEventTarget());
    }
 
    const OSStatus r = SendEventToEventTarget(e, t);

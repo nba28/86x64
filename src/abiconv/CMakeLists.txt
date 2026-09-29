@@ -762,6 +762,7 @@ add_library(abiconv SHARED
   # state; used by GetMouse, GlobalToLocal/LocalToGlobal and StillDown/WaitMouseUp
   classic_input_coords.c
   carbon_event_appdown.c
+  carbon_event_param_shim.c  # Get/SetEventParameter: refs, CGFloat geometry, HICommand across the ABI
   carbon_window_resize_guard.c
   carbon_window_show_shim.c
   tec_shim.c

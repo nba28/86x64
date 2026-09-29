@@ -67,6 +67,9 @@ typedef void *CIWindowRef;
 typedef CIWindowRef (*ci_frontwindow_fn)(void);
 typedef int32_t     (*ci_getbounds_fn)(CIWindowRef, uint16_t, CIRect *);
 
+extern uint32_t qd_current_port(void);          // qd_gworld.c
+extern void    *qd_port_window(uint32_t port_h);  // qd_gworld.c
+
 int ci_input_fix_disabled(void) {
    static int t = -1;
    if (t < 0) { t = getenv("M64_NO_CLASSIC_INPUT_FIX") ? 1 : 0; }
@@ -97,8 +100,14 @@ int ci_content_origin(int16_t *ox, int16_t *oy) {
    }
    if (!get_bounds) { return 0; }
 
-   CIWindowRef w = 0;
-   if (active_win) { w = active_win(); }
+   /* The CURRENT PORT's window first: GlobalToLocal, LocalToGlobal and GetMouse
+    * are defined against the port the app SetPort()'d, not against whichever
+    * window happens to be active -- an app can leave a hidden window active
+    * (PvZ keeps its fullscreen-era one; ActiveNonFloatingWindow read NULL or
+    * another window in probes/appdownspy.m runs). Active/front window only when the port
+    * is not a window (an offscreen GWorld, or none set on this thread). */
+   CIWindowRef w = (CIWindowRef)qd_port_window(qd_current_port());
+   if (!w && active_win) { w = active_win(); }
    if (!w && front_win) { w = front_win(); }
    if (!w) { return 0; }
 
