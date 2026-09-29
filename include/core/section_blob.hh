@@ -1,5 +1,6 @@
 #pragma once
 #include <cassert>
+#include <cstdlib>
 
 #include <vector>
 
@@ -69,7 +70,14 @@ namespace MachO {
        * parse-time resolver map.  Used by Section::Build to even-align function
        * entries (see SectionBlob::func_entry).  The byte sits between functions
        * and is never executed. */
-      static DataBlob<bits> *Padding() { return new DataBlob<bits>((uint8_t)0); }
+      /* A NOP, not 0x00: code may FALL THROUGH into a function symbol (an
+       * alternate entry before the label: Portal 2 libbink `movl 4(%esp),%eax`
+       * falls into _RADCB_resume_handler), and `00 48 8d ...` decodes as
+       * `addb %cl,-0x73(%rax)`, swallowing the translated push after it. */
+      static DataBlob<bits> *Padding() {
+         static const bool zero = std::getenv("M64_ZERO_ENTRY_PAD") != nullptr;   /* guard OFF arm */
+         return new DataBlob<bits>((uint8_t)(zero ? 0 : 0x90));
+      }
 
       virtual DataBlob<opposite<bits>> *Transform_one(TransformEnv<bits>& env) const override {
          return new DataBlob<opposite<bits>>(*this, env);
