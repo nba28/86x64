@@ -470,6 +470,7 @@ __Unwind_Resume_or_Rethrow
 
 _OSAtomicAdd32
 _OSAtomicAdd32Barrier
+_OTAtomicAdd32
 
 ___udivdi3
 ___umoddi3

@@ -398,6 +398,9 @@
 	;; refcount-Release helper during reverse-bridged teardown. osatomic_shim.c.
 	MTSHIM	___OSAtomicAdd32,        _shim_OSAtomicAdd32
 	MTSHIM	___OSAtomicAdd32Barrier, _shim_OSAtomicAdd32Barrier
+	;; Open Transport's OTAtomicAdd32(toAdd, dest) -> new value: the same
+	;; contract, gone from 64-bit Carbon (Portal 2's Bink, 2026-09-30).
+	MTSHIM	___OTAtomicAdd32,        _shim_OSAtomicAdd32Barrier
 
 	;; CFAllocator allocate/reallocate/deallocate -> the low-4GB heap. abigen's
 	;; native shims hand back >4GB pointers the i386 program truncates, then
