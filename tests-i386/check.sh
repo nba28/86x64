@@ -17,12 +17,26 @@ with_deadline() {
         alarm $t; waitpid($pid, 0); exit($? & 127 ? 128 + ($? & 127) : $? >> 8)' "$DEADLINE" "$@"
 }
 
-META='all clean list run-only build-only objc cpp check sysroot sysroot-objc sysroot-cpp sysroot-gl'
+META='all clean list run-only build-only objc cpp check check-gui sysroot sysroot-objc sysroot-cpp sysroot-gl'
 if [ $# -gt 0 ]; then
     targets="$*"
 else
     targets="run-only objc cpp $(grep -o '^[a-z][a-z0-9-]*:' Makefile | tr -d : | sort -u |
         grep -vxF -f <(tr ' ' '\n' <<<"$META"))"
+fi
+
+# Guards that put windows, alerts or a display capture/fullscreen switch on the
+# REAL screen (they need a WindowServer and steal focus). A plain `make check`
+# skips them so it can run while someone works; they run with CHECK_GUI=1
+# (`make check-gui`) or when named explicitly (`bash check.sh <target>`).
+GUI='agl-fullscreen-present agl-oversize-window agl-window-drawable cgl-fullscreen
+display-fullscreen-bridge classic-input-coords carbon-window-compositing
+classic-alert classic-dialog standard-alert carbon-dangling
+focus-ring layerback-invariance snapshot-compat window-chrome'
+skipped=()
+if [ $# -eq 0 ] && [ -z "${CHECK_GUI:-}" ]; then
+    for g in $GUI; do grep -qx "$g" <<<"$(tr ' ' '\n' <<<"$targets")" && skipped+=("$g"); done
+    targets=$(tr ' ' '\n' <<<"$targets" | grep -vxF -f <(tr ' \n' '\n\n' <<<"$GUI") | tr '\n' ' ')
 fi
 
 pass=0; fail=0; failed=()
@@ -40,5 +54,5 @@ for t in $targets; do
     printf '%-32s %-14s %4ss\n' "$t" "$st" "$dt"
 done
 echo
-echo "===== check: $pass passed, $fail failed ====="
+echo "===== check: $pass passed, $fail failed${skipped:+, ${#skipped[@]} GUI guards skipped (CHECK_GUI=1 / make check-gui)} ====="
 [ $fail = 0 ] || { printf '  %s\n' "${failed[@]}"; echo "logs: $LOGDIR/<target>.log"; exit 1; }
