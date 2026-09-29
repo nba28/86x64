@@ -121,6 +121,26 @@ static int live_renderer(void)
     return max_tex > 0;
 }
 
+/* Halo's mouse idiom, once per frame: warp to a window point in GLOBAL
+ * coordinates, then read it back; the delta must be zero every time or the
+ * cursor walks on its own. Repeated because a re-centre that lands on a
+ * slightly different point than it reads back drifts a little EVERY frame
+ * (Halo windowed at 0.29 pt/px: (-2,-1) px per frame, 2026-09-29). */
+static void warp_roundtrip(WindowRef win)
+{
+    int ok = 1;
+    QDPt p = { 80, 100 }, q = { 0, 0 };
+    SetPort(GetWindowPort(win));
+    LocalToGlobal(&p);
+    for (int i = 0; i < 5; i++) {
+        CGPt32 w = { (float)p.h, (float)p.v };
+        CGWarpMouseCursorPosition(w);
+        GetGlobalMouse(&q);
+        ok &= q.h == p.h && q.v == p.v;
+    }
+    printf("warp_roundtrip=%d (%d,%d)->(%d,%d)\n", ok, p.h, p.v, q.h, q.v);   /* exact: any residue creeps */
+}
+
 int main(void)
 {
     Rect r = { 100, 100, 400, 500 };
@@ -168,6 +188,7 @@ int main(void)
         ShowWindow(win);
         printf("shown\n");
         CFRunLoopRunInMode(__builtin___CFStringMakeConstantString("kCFRunLoopDefaultMode"), 4.0, 0);
+        warp_roundtrip(win);
     }
     if (getenv("AGL_PRESENT")) {
         int exact = 0;
@@ -182,19 +203,7 @@ int main(void)
          * imports it (todo_gaps), and raw it reads its timeout from xmm0 and
          * returns at once, so the surface was sampled after the fixture exited. */
         CFRunLoopRunInMode(__builtin___CFStringMakeConstantString("kCFRunLoopDefaultMode"), 4.0, 0);
-        /* Halo's mouse idiom: warp to a window point in GLOBAL coordinates, then
-         * read it back; the delta must be zero or the cursor creeps. */
-        {
-            QDPt p = { 80, 100 }, q = { 0, 0 };
-            SetPort(GetWindowPort(win));
-            LocalToGlobal(&p);
-            CGPt32 w = { (float)p.h, (float)p.v };
-            CGWarpMouseCursorPosition(w);
-            GetGlobalMouse(&q);
-            int dh = q.h - p.h, dv = q.v - p.v;
-            printf("warp_roundtrip=%d (%d,%d)->(%d,%d)\n",
-                   dh == 0 && dv == 0, p.h, p.v, q.h, q.v);   /* exact: any residue creeps */
-        }
+        warp_roundtrip(win);
         CGReleaseAllDisplays();
     }
 

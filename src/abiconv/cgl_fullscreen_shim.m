@@ -130,6 +130,11 @@ static CGFloat          g_vw, g_vh;          /* virtual mode size */
  * coordinates (top-left origin, points) and its scale. */
 static volatile double  g_gx, g_gy, g_scale;
 static volatile int     g_active;
+/* The last re-centre: the virtual point the app asked for (without the window
+ * origin) and the WHOLE screen point the cursor was put on. Reads measure
+ * motion from there (see shim_CGWarpMouseCursorPosition). */
+static volatile double  g_wvx, g_wvy, g_wpx, g_wpy;
+static volatile int     g_warped;
 
 static void on_main(void (^b)(void))
 {
@@ -147,6 +152,7 @@ static void relayout(void)
    g_view.frame = vr;
    const NSRect sr = [g_win convertRectToScreen:[g_win.contentView convertRect:vr toView:nil]];
    const CGFloat top = NSMaxY(NSScreen.screens.firstObject.frame);   /* Carbon: y down */
+   g_warped = 0;
    g_gx = sr.origin.x;
    g_gy = top - NSMaxY(sr);
    g_scale = k;
@@ -166,6 +172,17 @@ extern WindowRef  GetNextWindowOfClass(WindowRef w, WindowClass c, Boolean mustB
 extern CGWindowID HIWindowGetCGWindowID(WindowRef w);
 extern Boolean    IsWindowVisible(WindowRef w);
 extern int CGSOrderWindow(int cid, int wid, int place, int relative);
+/* The windows the shield hides. Any of them becoming KEY is the app selecting
+ * its own (now invisible) window -- Halo does, after the surface is up -- which
+ * leaves the visible surface inactive: gray traffic lights, and window managers
+ * (yabai) act on a window nobody can see. Key goes back to the surface. */
+enum { SHIELD_MAX = 16 };
+static int g_shielded[SHIELD_MAX], g_nshielded;
+static int shielded(NSInteger wid)
+{
+   for (int i = 0; i < g_nshielded; i++) if (g_shielded[i] == wid) return 1;
+   return 0;
+}
 static void shield_others(void)
 {
    if (!g_active || !g_win) { return; }
@@ -176,6 +193,8 @@ static void shield_others(void)
       const int wid = (int)HIWindowGetCGWindowID(w);
       if (!wid || wid == (int)g_win.windowNumber || !IsWindowVisible(w)) { continue; }
       CGSOrderWindow(CGSMainConnectionID(), wid, 0 /* out */, 0);
+      if (!shielded(wid) && g_nshielded < SHIELD_MAX) g_shielded[g_nshielded++] = wid;
+      if (NSApp.keyWindow.windowNumber == wid) [g_win makeKeyWindow];
    }
 }
 
@@ -215,6 +234,11 @@ static void present_sized(CGLContextObj ctx, CGDirectDisplayID dpy, CGFloat w, C
             object:g_win queue:nil usingBlock:^(NSNotification *n) { (void)n; relayout(); }];
          [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidMoveNotification
             object:g_win queue:nil usingBlock:^(NSNotification *n) { (void)n; relayout(); }];
+         [NSNotificationCenter.defaultCenter addObserverForName:NSWindowDidBecomeKeyNotification
+            object:nil queue:nil usingBlock:^(NSNotification *n) {
+               if (g_active && n.object != g_win && shielded(((NSWindow *)n.object).windowNumber))
+                  [g_win makeKeyWindow];
+            }];
          /* ponytail: 0.5 s poll; hook ShowWindow if a flash is ever visible. */
          [NSRunLoop.mainRunLoop addTimer:[NSTimer timerWithTimeInterval:0.5 repeats:YES
                                             block:^(NSTimer *t) { (void)t; shield_others(); }]
@@ -271,7 +295,14 @@ int cglfs_present_window(CGLContextObj ctx, int w, int h)
 int cglfs_map_global(double *x, double *y)
 {
    if (!g_active || g_scale <= 0) { return 0; }
-   double vx = (*x - g_gx) / g_scale, vy = (*y - g_gy) / g_scale;
+   double vx, vy;
+   if (g_warped) {   /* relative to the last warp: no motion reads back exactly */
+      vx = g_wvx + (*x - g_wpx) / g_scale;
+      vy = g_wvy + (*y - g_wpy) / g_scale;
+   } else {
+      vx = (*x - g_gx) / g_scale;
+      vy = (*y - g_gy) / g_scale;
+   }
    vx = vx < 0 ? 0 : vx > g_vw - 1 ? g_vw - 1 : vx;
    vy = vy < 0 ? 0 : vy > g_vh - 1 ? g_vh - 1 : vy;
    /* Plus exactly the origin the app's GlobalToLocal will subtract (qd_shim.c),
@@ -285,9 +316,13 @@ int cglfs_map_global(double *x, double *y)
 /* CGError CGWarpMouseCursorPosition(CGPoint) — i386 CGPoint is two floats.
  * The inverse of cglfs_map_global: a game that re-centres the cursor every
  * frame (Halo: warp to its window's centre, then delta = GetGlobalMouse -
- * centre) must land where GetGlobalMouse will read that same point back, or
- * every frame sees a false delta and the cursor creeps. Unmapped while no
- * surface is up. */
+ * centre) must read back EXACTLY the point it warped to while the mouse is
+ * still, or every frame sees a false delta and the cursor walks on its own.
+ * MEASURED (Halo windowed, 2560x1440 in a ~740pt window, 0.29 pt/px): the
+ * mapped target (379.6,748.2) lands on (379.0,748.0) — the cursor sits on whole
+ * points — which reads back as (-2,-1) px every frame. So: warp to a whole
+ * point, remember it and the virtual point it stands for, and measure reads
+ * relative to it. Exact at any scale. Unmapped while no surface is up. */
 uint32_t shim_CGWarpMouseCursorPosition(uint32_t *a)
 {
    float fx, fy;
@@ -298,12 +333,12 @@ uint32_t shim_CGWarpMouseCursorPosition(uint32_t *a)
    if (!off && g_active && g_scale > 0) {
       int16_t ox = 0, oy = 0;
       ci_content_origin(&ox, &oy);
-      /* The CENTRE of the virtual pixel: cglfs_map_global truncates, so a
-       * warp to the pixel's top-left edge reads back one pixel up-left after
-       * any rounding of the physical point, and the per-frame re-centre then
-       * sees a constant (-1,-1) delta (Halo's slow upward creep). */
-      p.x = g_gx + (fx - ox + 0.5) * g_scale;
-      p.y = g_gy + (fy - oy + 0.5) * g_scale;
+      const double vx = fx - ox, vy = fy - oy;
+      p.x = floor(g_gx + vx * g_scale);
+      p.y = floor(g_gy + vy * g_scale);
+      g_warped = 0;
+      g_wvx = vx; g_wvy = vy; g_wpx = p.x; g_wpy = p.y;
+      g_warped = 1;
    }
    return (uint32_t)CGWarpMouseCursorPosition(p);
 }
