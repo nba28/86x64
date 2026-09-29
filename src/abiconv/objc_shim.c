@@ -19,6 +19,7 @@
  */
 
 #include <stdint.h>
+#include "gap.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -8291,8 +8292,8 @@ uint32_t shim_objc_getProperty(const uint32_t *a) {
  * the NATIVE functions, whose x86_64 64-bit `ret` over-pops the translated
  * i386 4-byte return address -> fused PC crash. Shim them as no-ops returning
  * noErr; MTSHIM makes the call respect the i386 ABI. */
-uint32_t shim_RequestVolumeNotification(const uint32_t *a) { (void)a; return 0; }
-uint32_t shim_DeclineVolumeNotification(const uint32_t *a) { (void)a; return 0; }
+uint32_t shim_RequestVolumeNotification(const uint32_t *a) { GAP_STUB(a); return 0; }
+uint32_t shim_DeclineVolumeNotification(const uint32_t *a) { GAP_STUB(a); return 0; }
 
 /* Return-value wrap that PRESERVES legacy-object identity (objc_msgSend asm
  * ret_kind==1 path). A (super) call returning a legacy-class instance — most

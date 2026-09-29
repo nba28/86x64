@@ -50,6 +50,7 @@
 #include <pthread.h>
 #include <runetype.h>
 #include "dyld_image_list.h"
+#include "gap.h"
 
 static int g_verbose = 0;
 
@@ -274,28 +275,10 @@ static void *make_init_stub(void *target) {
    return s;
 }
 
-/* Is this a TRANSLATED image (vs. a native system dylib)? Every binary the
- * pipeline emits links libabiconv (an LC_LOAD_DYLIB is inserted); native
- * dylibs do not, and libabiconv itself does not depend on itself. This is the
- * "is translated" signal for images WITHOUT an __OBJC segment — pure C++ GCC
- * dylibs (e.g. Portal 2's libtier0) — which the objc_seg gate misses. We must
- * only wrap the init funcs of translated images: a native initializer expects
- * the native ABI and would break if funnelled through the i386 low-stack
- * trampoline. */
-static int image_links_libabiconv(const struct mach_header_64 *mh64) {
-   const uint8_t *p = (const uint8_t *)(mh64 + 1);
-   for (uint32_t i = 0; i < mh64->ncmds; i++) {
-      const struct load_command *lc = (const struct load_command *)p;
-      if (lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB ||
-          lc->cmd == LC_REEXPORT_DYLIB || lc->cmd == LC_LOAD_UPWARD_DYLIB) {
-         const struct dylib_command *dc = (const struct dylib_command *)p;
-         const char *name = (const char *)p + dc->dylib.name.offset;
-         if (strstr(name, "libabiconv")) { return 1; }
-      }
-      p += lc->cmdsize;
-   }
-   return 0;
-}
+/* "Is this image translated?" = x64_img_is_translated (dyld_image_list.c).
+ * It also covers images WITHOUT an __OBJC segment -- pure C++ GCC dylibs (e.g.
+ * Portal 2's libtier0) -- which the objc_seg gate misses; only translated
+ * images' init funcs may go through the i386 low-stack trampoline. */
 
 /* Per-process set of mach_headers we have already fully processed in slide_objc
  * (slid + initialized). dyld invokes our add-image callback once per image, but
@@ -2181,7 +2164,7 @@ static void process_deps(const struct mach_header_64 *mh64) {
             const struct mach_header *dmh = find_loaded_image(leaf, &dslide);
             if (dmh && !already_processed(dmh) &&
                 dmh->magic == MH_MAGIC_64 &&
-                image_links_libabiconv((const struct mach_header_64 *)dmh)) {
+                x64_img_is_translated(dmh)) {
                slide_objc(dmh, dslide);
             }
          }
@@ -2257,7 +2240,7 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
    }
 
    /* Repair never-bound indirect-pointer slots FIRST (import_repair.c).
-    * Deliberately NOT gated on image_links_libabiconv: the half-wired
+    * Deliberately NOT gated on x64_img_is_translated: the half-wired
     * translated artifacts this cures (Civ IV s29, bundled QuickTime) have no
     * libabiconv dependency at all — that missing wiring IS the defect. The
     * repair itself gates structurally (macho-tool __TEXT layout base +
@@ -2266,6 +2249,9 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
     * initializers below: a translated static init may call straight through
     * an unbound stub (jmp *0). */
    _86x64_import_repair(mh64, slide, imgname);
+   /* Slots dyld bound at load straight to a NATIVE function (no bridge) get a
+    * one-shot stub that reports the first call (gap.c). */
+   if (x64_img_is_translated(mh64)) { x64_gap_arm_raw_slots(mh64, slide); }
 
    /* Run translated static initializers on a low-4GB stack. Independent of
     * slide (the >4GB-stack bug bites even at the preferred vmaddr) AND of
@@ -2276,7 +2262,7 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
     * translated" (links libabiconv), NOT on objc_seg. See the init high-stack bug. */
    void *init_targets[INIT_COLLECT_MAX];
    size_t n_init = 0;
-   if (image_links_libabiconv(mh64)) {
+   if (x64_img_is_translated(mh64)) {
       wrap_mod_init_funcs(mh64, slide, imgname, text_lo, text_hi,
                           init_targets, &n_init);
       /* Re-register static TERMINATORS (__DATA,__mod_term_func) through the
@@ -2340,7 +2326,7 @@ static void slide_objc(const struct mach_header *mh, intptr_t slide) {
     * 0x800xxxxx" _objc_fatal (Civ IV CFStringReplace, trace-verified:
     * "[cfstr] 0x0d7165d0 REJECT strnlen cstr=0x10dae5f4 got=2"). Triggers
     * on the structural presence of __cfstring, not on __OBJC. */
-   if (image_links_libabiconv(mh64) && slide != 0 && vmaddr_lo <= vmaddr_hi) {
+   if (x64_img_is_translated(mh64) && slide != 0 && vmaddr_lo <= vmaddr_hi) {
       slide_cfstrings(mh64, slide, vmaddr_lo, vmaddr_hi, imgname);
    }
 

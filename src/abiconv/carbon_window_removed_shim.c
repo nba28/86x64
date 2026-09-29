@@ -14,6 +14,7 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <dlfcn.h>
+#include "gap.h"
 
 extern uint64_t x64_objc_unwrap(uint32_t h);
 
@@ -47,6 +48,6 @@ uint32_t shim_SetWindowGroupParent(uint32_t *a) {
    static int n; (void)a; if (!n++) once("SetWindowGroupParent"); return 0;
 }
 /* CGrafPtr CreateQDContextForCollapsedWindowDockTile(WindowRef) */
-uint32_t shim_CreateQDContextForCollapsedWindowDockTile(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_CreateQDContextForCollapsedWindowDockTile(uint32_t *a) { GAP_STUB(a); return 0; }
 /* OSStatus ReleaseQDContextForCollapsedWindowDockTile(WindowRef, CGrafPtr) */
 uint32_t shim_ReleaseQDContextForCollapsedWindowDockTile(uint32_t *a) { (void)a; return 0; }

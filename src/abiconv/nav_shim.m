@@ -45,6 +45,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <dispatch/dispatch.h>
+#include "gap.h"
 
 /* libabiconv object wrap table (objc_shim.c): native ptr <-> 32-bit handle,
  * the SAME table abigen's AE/CF shims use, so our marshalled handles round-trip
@@ -331,7 +332,7 @@ uint32_t shim_NavDialogSetSaveFileName(const uint32_t *a) {
  * crash. Return NULL — callers use it only for optional customization/parenting,
  * which they must tolerate skipping (Halo's single use). */
 uint32_t shim_NavDialogGetWindow(const uint32_t *a) {
-   (void)a; return 0;
+   GAP_STUB(a); return 0;
 }
 
 /* NavDialogDispose(NavDialogRef) */
@@ -420,7 +421,7 @@ uint32_t shim_NavDisposeReply(const uint32_t *a) {
 
 /* NavCompleteSave(NavReplyRecord*, howToTranslate) — NSSavePanel already applied
  * extension policy; nothing left to finalize. */
-uint32_t shim_NavCompleteSave(const uint32_t *a) { (void)a; return navNoErr; }
+uint32_t shim_NavCompleteSave(const uint32_t *a) { GAP_STUB(a); return navNoErr; }
 
 /* NavGetDefaultDialogCreationOptions(NavDialogCreationOptions*) */
 uint32_t shim_NavGetDefaultDialogCreationOptions(const uint32_t *a) {

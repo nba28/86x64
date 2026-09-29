@@ -55,6 +55,7 @@
 #include <CoreGraphics/CoreGraphics.h>
 #include <ImageIO/ImageIO.h>
 #include <CoreFoundation/CoreFoundation.h>
+#include "gap.h"
 
 /* objc_shim.c proxy arena: 64-bit pointer <-> 32-bit i386 handle. A genuine
  * low value / NULL passes straight through, so a raw <4GB ref is unharmed. */
@@ -615,8 +616,8 @@ uint32_t shim_QDFlushPortBuffer(uint32_t *a)
    if (p && p->ctx) CGContextFlush(p->ctx);
    return 0;
 }
-uint32_t shim_QDIsPortBuffered(uint32_t *a)   { (void)a; return 0; }
-uint32_t shim_QDIsPortBufferDirty(uint32_t *a){ (void)a; return 0; }
+uint32_t shim_QDIsPortBuffered(uint32_t *a)   { GAP_STUB(a); return 0; }
+uint32_t shim_QDIsPortBufferDirty(uint32_t *a){ GAP_STUB(a); return 0; }
 
 /* ---- color / pen / text state -------------------------------------------- */
 void shim_RGBForeColor(uint32_t *a)
@@ -1073,7 +1074,7 @@ uint32_t qd_gdevice_for_display_id(uint32_t display_id)
 uint32_t shim_GetMainDevice(uint32_t *a)  { (void)a; return make_main_gdevice(); }
 uint32_t shim_GetDeviceList(uint32_t *a)  { (void)a; return make_main_gdevice(); }
 uint32_t shim_GetGDevice(uint32_t *a)     { (void)a; return tl_cur_gd ? tl_cur_gd : make_main_gdevice(); }
-uint32_t shim_GetNextDevice(uint32_t *a)  { (void)a; return 0; }
+uint32_t shim_GetNextDevice(uint32_t *a)  { GAP_STUB(a); return 0; }
 void     shim_SetGDevice(uint32_t *a)     { tl_cur_gd = a[0]; }
 uint32_t shim_GetGWorldDevice(uint32_t *a){ (void)a; return make_main_gdevice(); }
 uint32_t shim_TestDeviceAttribute(uint32_t *a)
@@ -1271,9 +1272,9 @@ uint32_t shim_QDPictRelease(uint32_t *a)
  * Point hotSpot} = 16+16+4 = 68 bytes. */
 uint32_t shim_GetCursor(uint32_t *a) { (void)a; return cm_new_handle(68, 1); }
 /* void SetCursor(const Cursor *crsr) */
-uint32_t shim_SetCursor(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_SetCursor(uint32_t *a) { GAP_STUB(a); return 0; }
 /* void SetCCursor(CCrsrHandle) / void SetCursorComponent — cosmetic no-ops. */
-uint32_t shim_SetCCursor(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_SetCCursor(uint32_t *a) { GAP_STUB(a); return 0; }
 
 /* ======================================================================== */
 /* Display Manager (DM*) — screen-device + display-mode enumeration         */
@@ -1292,7 +1293,7 @@ uint32_t shim_SetCCursor(uint32_t *a) { (void)a; return 0; }
 /* GDHandle DMGetFirstScreenDevice(Boolean activeOnly) — the main screen. */
 uint32_t shim_DMGetFirstScreenDevice(uint32_t *a) { (void)a; return make_main_gdevice(); }
 /* GDHandle DMGetNextScreenDevice(GDHandle theDevice, Boolean activeOnly) — one device. */
-uint32_t shim_DMGetNextScreenDevice(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_DMGetNextScreenDevice(uint32_t *a) { GAP_STUB(a); return 0; }
 
 /* DMDisplayModeListIteratorUPP: a UPP is the proc pointer itself on Carbon-X. */
 uint32_t shim_NewDMDisplayModeListIteratorUPP(uint32_t *a) { return a[0]; }

@@ -29,6 +29,7 @@
 #include <string.h>
 #include <dlfcn.h>
 #include "dyld_image_list.h"
+#include "gap.h"
 #include <os/lock.h>
 #include <mach/vm_prot.h>
 #include <mach-o/dyld.h>
@@ -212,6 +213,8 @@ static uint32_t dlsym_make_thunk(uint64_t native, const char *name) {
          g_dlsym_target[i] = native;
          uint32_t stub = (uint32_t)x64_dlsym_thunk_table[i];
          os_unfair_lock_unlock(&lk);
+         /* no bridge: the generic int-only marshaller serves it (gap.c) */
+         x64_gap_hit("byname", name ? name : "?", "dlsym_make_thunk", 0);
          if (posix_trace()) {
             fprintf(stderr, "[posix] dlsym: %s native=0x%llx -> callable thunk "
                     "slot %llu @0x%x\n", name ? name : "?",
@@ -238,7 +241,6 @@ static uint32_t dlsym_make_thunk(uint64_t native, const char *name) {
  * address is already callable and passes through; a >4GB DATA symbol keeps the
  * arena-handle path (it is dereferenced, not called). Shared by every
  * lookup-by-name shim so the function-vs-data discipline stays in one place. */
-static int image_is_translated(const void *base);
 
 /* ★"FITS IN 32 BITS" IS NOT "IS TRANSLATED". This used to return any sub-4GB
  * address to the i386 caller unchanged, on the reasoning that a low address must
@@ -292,7 +294,7 @@ static int addr_is_translated_code(uint64_t v) {
       }
    }
    if (abiconv_base != NULL && di.dli_fbase == abiconv_base) { return 1; }
-   return image_is_translated(di.dli_fbase);
+   return x64_img_is_translated(di.dli_fbase);
 }
 
 static int32_t fnptr_lookup_result(uint64_t v, const char *name) {
@@ -384,24 +386,6 @@ static int translated_provider_defer_disabled(void) {
  * libabiconv? Every product of the translate pipeline does (static-interpose
  * adds the load command before rewriting binds into it); no native system image
  * does. Reads the mapped header only — no dlopen, no file I/O. */
-static int image_is_translated(const void *base) {
-   const struct mach_header_64 *mh = (const struct mach_header_64 *)base;
-   if (mh == NULL || mh->magic != MH_MAGIC_64) { return 0; }
-   const struct load_command *lc = (const struct load_command *)(mh + 1);
-   for (uint32_t i = 0; i < mh->ncmds; i++) {
-      if (lc->cmdsize < sizeof *lc) { return 0; }   /* malformed: refuse to walk */
-      if (lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB ||
-          lc->cmd == LC_REEXPORT_DYLIB || lc->cmd == LC_LOAD_UPWARD_DYLIB) {
-         const struct dylib_command *dc = (const struct dylib_command *)lc;
-         if (dc->dylib.name.offset < dc->cmdsize) {
-            const char *nm = (const char *)lc + dc->dylib.name.offset;
-            if (strstr(nm, "libabiconv") != NULL) { return 1; }
-         }
-      }
-      lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
-   }
-   return 0;
-}
 
 /* Is `_<bare>` defined by a TRANSLATED image in this process, at an address the
  * i386 caller can hold and call directly? Returns that address, else 0.
@@ -419,7 +403,7 @@ static uint32_t translated_provider_for(const char *bare) {
    if ((uintptr_t)sym >= 0x100000000ULL) { return 0; }  /* not i386-callable */
    Dl_info di;
    if (!dladdr(sym, &di) || di.dli_fbase == NULL) { return 0; }
-   if (!image_is_translated(di.dli_fbase)) { return 0; }
+   if (!x64_img_is_translated(di.dli_fbase)) { return 0; }
    return (uint32_t)(uintptr_t)sym;
 }
 

@@ -57,6 +57,7 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <CoreGraphics/CoreGraphics.h>
+#include "gap.h"
 
 /* objc_shim.c proxy arena: 64-bit pointer <-> 32-bit i386 handle. */
 extern uint32_t x64_objc_wrap(uint64_t real);
@@ -82,7 +83,8 @@ static int renderer_info_enabled(void)
  * by shared-cache path for the whole library, so RTLD_DEFAULT finds it here. */
 #define AGL_NATIVE(var, ty, name) \
    static ty var; static int var##_done; \
-   if (!var##_done) { var = (ty)dlsym(RTLD_DEFAULT, name); var##_done = 1; }
+   if (!var##_done) { var = (ty)dlsym(RTLD_DEFAULT, name); var##_done = 1; \
+      if (!var) GAP_ONCE("dlsym", name, __func__, 0); }
 
 typedef AGLRendererInfo (*agl_q_gd)(const void *, GLint);
 typedef AGLRendererInfo (*agl_q_cg)(const CGDirectDisplayID *, GLint);

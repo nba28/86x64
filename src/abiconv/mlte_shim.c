@@ -14,6 +14,7 @@
 // MTSHIM convention: rdi -> &i386 args[0]; OSStatus result in eax.
 
 #include <stdint.h>
+#include "gap.h"
 
 #define MLTE_NO_ERR   (0)
 #define MLTE_PARAM_ERR (-50)
@@ -28,9 +29,9 @@ uint32_t shim_TXNGetDataEncoded(uint32_t *args)      { (void)args; return (uint3
 uint32_t shim_TXNGetHIRect(uint32_t *args)           { (void)args; return (uint32_t)MLTE_PARAM_ERR; }
 uint32_t shim_TXNSetDataFromCFURLRef(uint32_t *args) { (void)args; return (uint32_t)MLTE_PARAM_ERR; }
 uint32_t shim_TXNSetDataFromFile(uint32_t *args)     { (void)args; return (uint32_t)MLTE_PARAM_ERR; }
-void     shim_TXNSetHIRectBounds(uint32_t *args)     { (void)args; }
+void     shim_TXNSetHIRectBounds(uint32_t *args)     { GAP_STUB(args); }
 
 // ---- Carbon HIView text/image ----
 uint32_t shim_HITextViewCreate(uint32_t *args)       { (void)args; return (uint32_t)MLTE_PARAM_ERR; }
-uint32_t shim_HITextViewGetTXNObject(uint32_t *args) { (void)args; return 0; }   // TXNObject NULL
-uint32_t shim_HIImageViewSetImage(uint32_t *args)    { (void)args; return MLTE_NO_ERR; }
+uint32_t shim_HITextViewGetTXNObject(uint32_t *args) { GAP_STUB(args); return 0; }   // TXNObject NULL
+uint32_t shim_HIImageViewSetImage(uint32_t *args)    { GAP_STUB(args); return MLTE_NO_ERR; }

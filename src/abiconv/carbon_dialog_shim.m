@@ -71,6 +71,7 @@
 #include <stdlib.h>
 #include <dlfcn.h>
 #include <dispatch/dispatch.h>
+#include "gap.h"
 
 /* AppKit window-host bootstrap (carbon_appkit_host.c): a pure-Carbon translated
  * process has no WindowManagement delegate until NSApplicationLoad runs. */
@@ -778,7 +779,7 @@ uint32_t shim_GetDialogCancelItem(uint32_t *a)  { Dialog *d = dlg_from(a[0]); re
 /* TEHandle GetDialogTextEditHandle(DialogRef) — no classic TextEdit; the app
  * uses it only for TESetSelect (caret positioning), which is cosmetic under our
  * NSTextField editing. Return NULL; TESetSelect is a no-op. */
-uint32_t shim_GetDialogTextEditHandle(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_GetDialogTextEditHandle(uint32_t *a) { GAP_STUB(a); return 0; }
 
 /* SInt16 StopAlert/CautionAlert/NoteAlert(SInt16 alertID, ModalFilterUPP):
  * these show a modal 'ALRT'/'DITL'. When called in a validation-retry loop the
@@ -845,8 +846,8 @@ uint32_t shim_GetModalDialogEventMask(uint32_t *a) {
     if (outMask) *outMask = (int16_t)0xFFFF;
     return 0;
 }
-uint32_t shim_AppendDialogItemList(uint32_t *a) { (void)a; return 0; }
-uint32_t shim_AutoSizeDialog(uint32_t *a)       { (void)a; return 0; }
-uint32_t shim_MoveDialogItem(uint32_t *a)       { (void)a; return 0; }
-uint32_t shim_SizeDialogItem(uint32_t *a)       { (void)a; return 0; }
-uint32_t shim_SetPortDialogPort(uint32_t *a)    { (void)a; return 0; }
+uint32_t shim_AppendDialogItemList(uint32_t *a) { GAP_STUB(a); return 0; }
+uint32_t shim_AutoSizeDialog(uint32_t *a)       { GAP_STUB(a); return 0; }
+uint32_t shim_MoveDialogItem(uint32_t *a)       { GAP_STUB(a); return 0; }
+uint32_t shim_SizeDialogItem(uint32_t *a)       { GAP_STUB(a); return 0; }
+uint32_t shim_SetPortDialogPort(uint32_t *a)    { GAP_STUB(a); return 0; }

@@ -10,6 +10,7 @@
 // MTSHIM convention: rdi -> &i386 args[0] (4-byte cdecl slots), uint32_t result in eax.
 
 #include <stdint.h>
+#include "gap.h"
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
@@ -33,12 +34,13 @@ extern void    *qd_port_window(uint32_t port_h);
 extern int sd_ctrl_set_value(void *ctrl, int32_t value);
 extern int sd_ctrl_get_value(void *ctrl, int32_t *out);
 #define UICTRL(n) ((void *)(uintptr_t)x64_objc_unwrap(args[(n)]))
-#define UIDL(fn, ret, a) static ret (*fn) a; if (!fn) fn = (ret (*) a)dlsym(RTLD_DEFAULT, #fn)
+#define UIDL(fn, ret, a) static ret (*fn) a; \
+   if (!fn && !(fn = (ret (*) a)dlsym(RTLD_DEFAULT, #fn))) GAP_ONCE("dlsym", #fn, __func__, 0)
 
 // ---- Window Manager update / port / refcon (no classic window): no-op or noErr ----
 void     shim_BeginUpdate(uint32_t *args)       { (void)args; }
 void     shim_EndUpdate(uint32_t *args)         { (void)args; }
-void     shim_SetPortWindowPort(uint32_t *args) { (void)args; }
+void     shim_SetPortWindowPort(uint32_t *args) { GAP_STUB(args); }
 
 // SetWRefCon / GetWRefCon. 64-bit HIToolbox dropped SetWRefCon but kept
 // GetWRefCon, so the refCon was stuck at 0: an app's SetWRefCon (the classic
@@ -84,18 +86,18 @@ uint32_t shim_GetWindowFromPort(uint32_t *args)
     // compares work.
     return win ? x64_objc_wrap((uint64_t)(uintptr_t)win) : 0;
 }
-uint32_t shim_InvalWindowRect(uint32_t *args)   { (void)args; return UI_NO_ERR; }
-uint32_t shim_ValidWindowRect(uint32_t *args)   { (void)args; return UI_NO_ERR; }
-uint32_t shim_SetWindowContentColor(uint32_t *args)        { (void)args; return UI_NO_ERR; }
-uint32_t shim_SetWindowProxyCreatorAndType(uint32_t *args) { (void)args; return UI_NO_ERR; }
+uint32_t shim_InvalWindowRect(uint32_t *args)   { GAP_STUB(args); return UI_NO_ERR; }
+uint32_t shim_ValidWindowRect(uint32_t *args)   { GAP_STUB(args); return UI_NO_ERR; }
+uint32_t shim_SetWindowContentColor(uint32_t *args)        { GAP_STUB(args); return UI_NO_ERR; }
+uint32_t shim_SetWindowProxyCreatorAndType(uint32_t *args) { GAP_STUB(args); return UI_NO_ERR; }
 // GetWindowRegion(window, code, RgnHandle ioWinRgn): leaves the caller's region as-is.
-uint32_t shim_GetWindowRegion(uint32_t *args)   { (void)args; return UI_NO_ERR; }
+uint32_t shim_GetWindowRegion(uint32_t *args)   { GAP_STUB(args); return UI_NO_ERR; }
 
 // ---- Control Manager (classic 16/32-bit value controls) ----
-void     shim_Draw1Control(uint32_t *args)           { (void)args; }
-void     shim_SetControl32BitMaximum(uint32_t *args) { (void)args; }
-void     shim_SetControlMaximum(uint32_t *args)      { (void)args; }
-uint32_t shim_GetControlPopupMenuHandle(uint32_t *a) { (void)a; return 0; }  // MenuRef NULL
+void     shim_Draw1Control(uint32_t *args)           { GAP_STUB(args); }
+void     shim_SetControl32BitMaximum(uint32_t *args) { GAP_STUB(args); }
+void     shim_SetControlMaximum(uint32_t *args)      { GAP_STUB(args); }
+uint32_t shim_GetControlPopupMenuHandle(uint32_t *a) { GAP_STUB(a); return 0; }  // MenuRef NULL
 
 // SetControl32BitValue(ControlRef, SInt32 value): for a self-drawn popup this
 // selects the pushed menu item; for a real (checkbox/radio) control forward to

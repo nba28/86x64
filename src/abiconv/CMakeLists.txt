@@ -676,6 +676,9 @@ add_library(abiconv SHARED
   # Diagnostic only, OFF unless M64_FAULT_REPORT=1, and it chains to the previous
   # handler so the process still dies identically.
   fault_report_shim.c
+  # gap.c: ONE job — a silent gap (constant-return STUB shim, failed by-name
+  # native lookup) reports its first hit + appends to the reach ledger.
+  gap.c
   # carbon_nib_shim.c: REAL IBCarbon nib window/control materialization (fixes the
   # -5601 non-compositing window failure + dropped IBCarbonEditText UserPane gap).
   carbon_nib_shim.c
@@ -823,6 +826,7 @@ add_library(abiconv SHARED
   cb_tramp.asm
   block_tramp.asm
   dlsym_tramp.asm
+  gap_tramp.asm
   # gli_tramp.asm: the 760 dispatch-slot thunks for cgl_macro_shim.c's shadow
   # context. Each drops the leading `rend` argument (a signature-independent
   # frame edit, because i386 cdecl passes everything in 4-byte stack slots) and

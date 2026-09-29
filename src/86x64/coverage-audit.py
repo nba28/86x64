@@ -22,8 +22,17 @@ STATICALLY, before anything runs:
 Input: the i386 ORIGINALS (Apps32 bundles, non-bundle game trees). An import a
 sibling module of the same target defines is not a system call and is skipped.
 
+REACH. The static list is an upper bound (IMPORTED, not called). Every STUB
+and failed by-name lookup reports its first hit per process at run time
+(src/abiconv/gap.c) and appends it to $TMPDIR/86x64-reach/<prog>.<pid>.txt;
+so does every RAW call (a one-shot stub on each bound call slot whose target is
+native) and every by-name lookup served by the generic int-only thunk. `--reach
+DIR` ranks what real runs hit: that is the work queue. DEAD bridges abort in
+dyld on first call (naming the symbol), so they are loud without the ledger.
+
 usage: coverage-audit.py [--lib libabiconv.dylib] [--nulljump file] [--top N]
                          [--target NAME]... [root]...
+       coverage-audit.py --reach [DIR]     (default $TMPDIR/86x64-reach)
        roots default to every Apps32 bundle + the Portal 2 tree.
 """
 import argparse, collections, glob, os, re, subprocess, sys
@@ -99,7 +108,7 @@ def c_functions(src):
     return out
 
 
-STUB_BODY = re.compile(r"^\{\s*(\(void\)\s*[\w\[\]]+\s*;\s*)*(return\s+[^;()]*;)?\s*\}$")
+STUB_BODY = re.compile(r"^\{\s*((\(void\)\s*[\w\[\]]+|GAP_STUB\(\w+\))\s*;\s*)*(return\s+[^;()]*;)?\s*\}$")
 
 
 def shim_facts():
@@ -145,6 +154,30 @@ def load_ok():
     return ok
 
 
+def reach(d):
+    """Aggregate the gap.c ledgers: one row per (kind, symbol), ranked by how
+    many processes hit it, with the apps and first callers seen."""
+    procs, apps, callers = collections.Counter(), collections.defaultdict(set), collections.defaultdict(set)
+    files = glob.glob(os.path.join(d, "*.txt"))
+    for p in files:
+        app, seen = os.path.basename(p).rsplit(".", 2)[0], set()
+        for l in open(p, errors="replace"):
+            f = l.split()
+            if len(f) < 2:
+                continue
+            k = (f[0], f[1])
+            procs[k] += k not in seen
+            seen.add(k)
+            apps[k].add(app)
+            if len(f) > 2:
+                callers[k].add(f[2])
+    print(f"== reached gaps: {len(procs)} from {len(files)} process ledgers in {d}")
+    for (kind, sym), n in sorted(procs.items(), key=lambda kv: (-len(apps[kv[0]]), -kv[1], kv[0])):
+        k = (kind, sym)
+        print(f"  {kind:5s} {sym:40s} {n:3d}  {','.join(sorted(apps[k]))[:40]:40s} {' '.join(sorted(callers[k])[:3])}")
+    return 0
+
+
 # ---- main ------------------------------------------------------------------
 def main():
     ap = argparse.ArgumentParser()
@@ -153,7 +186,11 @@ def main():
     ap.add_argument("--nulljump", default=os.path.join(REPO, "build/src/abiconv/libabiconv.nulljump"))
     ap.add_argument("--top", type=int, default=60)
     ap.add_argument("--all", action="store_true", help="list OK/RAW-data too")
+    ap.add_argument("--reach", nargs="?", const=os.path.join(os.environ.get("TMPDIR", "/tmp"), "86x64-reach"),
+                    help="rank the gaps real runs reached (gap.c ledger dir)")
     a = ap.parse_args()
+    if a.reach:
+        return reach(a.reach)
     roots = a.roots or [r for r in DEF_ROOTS if os.path.exists(r)]
 
     exported = {s[3:] for s in sh(["nm", "-gUj", a.lib]).split() if s.startswith("___")}
@@ -187,7 +224,8 @@ def main():
             return "DEAD", ""
         fn = mt.get(s)
         if fn:
-            dead = sorted(n for n in byname.get(fn, ()) if n not in live)
+            # our own internal names (_86x64_*, x64_*) are not OS exports
+            dead = sorted(n for n in byname.get(fn, ()) if n not in live and not n.startswith(("_86x64_", "x64_")))
             if dead:
                 return "DEADNAME", fn + " -> " + ",".join(dead)
             if fn in stubs:

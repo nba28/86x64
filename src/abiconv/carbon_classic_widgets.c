@@ -25,6 +25,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <dlfcn.h>
+#include "gap.h"
 
 /* ---------------------------- native binding ----------------------------- */
 CCWStatus  (*ccw_CreateNewWindow)(uint32_t, uint32_t, const CCWRect *, CCWWindowRef *);
@@ -63,7 +64,7 @@ uint32_t   (*ccw_GetEventKind)(CCWEventRef);
 int ccw_available(void) {
     static int state = -1;
     if (state >= 0) return state;
-#define R(f) ccw_##f = (void *)dlsym(RTLD_DEFAULT, #f)
+#define R(f) if (!(ccw_##f = (void *)dlsym(RTLD_DEFAULT, #f))) GAP_ONCE("dlsym", #f, __func__, 0)
     R(CreateNewWindow); R(GetAvailableWindowAttributes); R(SetWindowTitleWithCFString);
     R(ShowWindow); R(SelectWindow); R(DisposeWindow); R(RepositionWindow);
     R(GetWindowBounds); R(SetWindowBounds);

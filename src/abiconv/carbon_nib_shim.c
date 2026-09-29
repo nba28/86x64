@@ -55,6 +55,7 @@
 #include <objc/runtime.h>
 #include "carbon_nib_parse.h"   // pure, headless-testable nib XML reader
 #include "carbon_classic_widgets.h" // THE shared classic-Carbon widget substrate
+#include "gap.h"
 
 // arena bridge (objc_shim.c): i386 handle / i386 CFSTR constant <-> real 64-bit ptr.
 extern uint64_t x64_objc_unwrap(uint32_t h);
@@ -168,7 +169,7 @@ static int g_resolved;
 static void resolve_once(void) {
     if (g_resolved) return;
     g_resolved = 1;
-#define R(f) n_##f = (void *)dlsym(RTLD_DEFAULT, #f)
+#define R(f) if (!(n_##f = (void *)dlsym(RTLD_DEFAULT, #f))) GAP_ONCE("dlsym", #f, __func__, 0)
     R(CreateNibReference); R(CreateNibReferenceWithCFBundle); R(CreateWindowFromNib);
     R(DisposeNibReference); R(SetMenuBarFromNib); R(CreateNewWindow);
     R(SetWindowTitleWithCFString); R(CreateRootControl); R(HIViewGetRoot);

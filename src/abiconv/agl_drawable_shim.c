@@ -62,6 +62,7 @@
 #include <string.h>
 #include <dlfcn.h>
 #include <os/lock.h>
+#include "gap.h"
 
 /* objc_shim.c proxy arena: 64-bit pointer <-> 32-bit i386 handle. A genuine
  * low value / NULL passes straight through. */
@@ -115,7 +116,8 @@ static void agl_load_framework(void)
 }
 
 #define AGL_NATIVE(var, ty, name) \
-   static ty var; if (!var) { var = (ty)dlsym(RTLD_DEFAULT, name); }
+   static ty var; \
+   if (!var && !(var = (ty)dlsym(RTLD_DEFAULT, name))) GAP_ONCE("dlsym", name, __func__, 0);
 typedef GLboolean (*agl_set_win)(void *, void *);
 typedef GLboolean (*agl_set_draw)(void *, void *);
 typedef void     *(*agl_get_draw)(void *);

@@ -26,6 +26,7 @@
 #include <sys/mount.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "gap.h"
 
 #define PTR(n) ((void *)(uintptr_t)args[(n)])
 
@@ -379,4 +380,4 @@ uint32_t shim_HGetVol(uint32_t *args) {
     if (dirID)   *dirID = 2;         // fsRtDirID — root directory
     return FM_NO_ERR;
 }
-uint32_t shim_HSetVol(uint32_t *args) { (void)args; return FM_NO_ERR; }
+uint32_t shim_HSetVol(uint32_t *args) { GAP_STUB(args); return FM_NO_ERR; }

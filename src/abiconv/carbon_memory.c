@@ -28,6 +28,7 @@
 
 #include "carbon_shim.h"
 #include <string.h>
+#include "gap.h"
 extern char *getenv(const char *);
 
 /* libabiconv's low-4GB allocator (malloc_shim.c). Declared, not <stdlib.h>'d,
@@ -249,7 +250,7 @@ uint32_t shim_ReallocateHandle(uint32_t *a)
  * value) rather than a fabricated Handle that would corrupt on dispose.
  * Recorded in todo_gaps; if a target is ever MEASURED depending on this, the
  * fix is a back-pointer field in struct hblk_hdr (there are two spare words). */
-uint32_t shim_RecoverHandle(uint32_t *a)  { (void)a; return 0; }
+uint32_t shim_RecoverHandle(uint32_t *a)  { GAP_STUB(a); return 0; }
 
 /* Size GetPtrSize(Ptr p); */
 uint32_t shim_GetPtrSize(uint32_t *a)     { return cm_ptr_size(a[0]); }
@@ -338,7 +339,7 @@ uint32_t shim_PtrAndHand(uint32_t *a)
 
 /* char HGetState(Handle h); / void HSetState(Handle h, char flags); */
 uint32_t shim_HGetState(uint32_t *a)      { return cm_state_of(a[0]); }
-uint32_t shim_HSetState(uint32_t *a)      { (void)a; return 0; }
+uint32_t shim_HSetState(uint32_t *a)      { GAP_STUB(a); return 0; }
 
 /* long Munger(Handle h, long offset, const void *ptr1, long len1,
  *             const void *ptr2, long len2);

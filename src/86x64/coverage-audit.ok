@@ -1,0 +1,83 @@
+# coverage-audit.ok — shims whose constant answer IS the correct modern semantic.
+# Listed here (exported symbol # reason) they stay quiet: no GAP_STUB, no audit row.
+# Every other constant-return shim carries GAP_STUB(args) and reports its first hit.
+
+# std::allocator / std::exception / std::locale ctor/dtor: no state to build or free
+_ZNSaIcEC1Ev                                 # std::allocator / std::exception / std::locale ctor/dtor: no state to build or free
+_ZNSaIcED1Ev                                 # std::allocator / std::exception / std::locale ctor/dtor: no state to build or free
+_ZNSaIwEC1Ev                                 # std::allocator / std::exception / std::locale ctor/dtor: no state to build or free
+_ZNSaIwED1Ev                                 # std::allocator / std::exception / std::locale ctor/dtor: no state to build or free
+_ZNSaIcEC2Ev                                 # std::allocator / std::exception / std::locale ctor/dtor: no state to build or free
+_ZNSaIcED2Ev                                 # std::allocator / std::exception / std::locale ctor/dtor: no state to build or free
+_ZNSaIwEC2ERKS_                              # std::allocator / std::exception / std::locale ctor/dtor: no state to build or free
+_ZNSaIwEC2Ev                                 # std::allocator / std::exception / std::locale ctor/dtor: no state to build or free
+_ZNSaIwED2Ev                                 # std::allocator / std::exception / std::locale ctor/dtor: no state to build or free
+_ZNSt9exceptionD1Ev                          # std::allocator / std::exception / std::locale ctor/dtor: no state to build or free
+_ZNSt9exceptionD2Ev                          # std::allocator / std::exception / std::locale ctor/dtor: no state to build or free
+_ZNSt6localeD1Ev                             # std::allocator / std::exception / std::locale ctor/dtor: no state to build or free
+
+# C-locale numpunct answers (the classic default)
+np_decimal_point                             # C-locale numpunct answers (the classic default)
+np_nop                                       # C-locale numpunct answers (the classic default)
+np_thousands_sep                             # C-locale numpunct answers (the classic default)
+
+# the native unwinder finds FDEs itself; keymgr registration is obsolete
+__keymgr_dwarf2_register_sections            # the native unwinder finds FDEs itself; keymgr registration is obsolete
+
+# custom allocator hook: OpenSSL keeps the system allocator, which frees its own blocks
+
+# UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+DisposeControlActionUPP                      # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+DisposeControlUserPaneDrawUPP                # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+DisposeControlUserPaneHitTestUPP             # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+DisposeControlUserPaneTrackingUPP            # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+DisposeDMDisplayModeListIteratorUPP          # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+DisposeEventHandlerUPP                       # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+DisposeEventLoopTimerUPP                     # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+DisposeSndCallBackUPP                        # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+NewControlActionUPP                          # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+NewControlUserPaneDrawUPP                    # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+NewControlUserPaneHitTestUPP                 # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+NewControlUserPaneTrackingUPP                # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+NewDMDisplayModeListIteratorUPP              # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+NewEventHandlerUPP                           # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+NewEventLoopTimerUPP                         # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+NewSndCallBackUPP                            # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+
+# library init/teardown/availability with no state: always available, nothing to do
+EnterMovies                                  # library init/teardown/availability with no state: always available, nothing to do
+EnterMoviesOnThread                          # library init/teardown/availability with no state: always available, nothing to do
+ExitMovies                                   # library init/teardown/availability with no state: always available, nothing to do
+ExitMoviesOnThread                           # library init/teardown/availability with no state: always available, nothing to do
+NavLoad                                      # library init/teardown/availability with no state: always available, nothing to do
+NavServicesAvailable                         # library init/teardown/availability with no state: always available, nothing to do
+NavServicesCanRun                            # library init/teardown/availability with no state: always available, nothing to do
+NavUnload                                    # library init/teardown/availability with no state: always available, nothing to do
+TXNInitTextension                            # library init/teardown/availability with no state: always available, nothing to do
+
+# real implementation (Point is one packed 4-byte slot)
+EqualPt                                      # real implementation (Point is one packed 4-byte slot)
+
+# no component aliases exist: a component is its own target
+ResolveComponentAlias                        # no component aliases exist: a component is its own target
+
+# our GWorld pixels are never purgeable: lock always succeeds, unlock has nothing to do
+LockPixels                                   # our GWorld pixels are never purgeable: lock always succeeds, unlock has nothing to do
+UnlockPixels                                 # our GWorld pixels are never purgeable: lock always succeeds, unlock has nothing to do
+
+# compositing windows need no update bracketing or grow box; debug/idle hooks do nothing
+BeginUpdate                                  # compositing windows need no update bracketing or grow box; debug/idle hooks do nothing
+DrawGrowIcon                                 # compositing windows need no update bracketing or grow box; debug/idle hooks do nothing
+DumpControlHierarchy                         # compositing windows need no update bracketing or grow box; debug/idle hooks do nothing
+EndUpdate                                    # compositing windows need no update bracketing or grow box; debug/idle hooks do nothing
+IdleControls                                 # compositing windows need no update bracketing or grow box; debug/idle hooks do nothing
+TEIdle                                       # compositing windows need no update bracketing or grow box; debug/idle hooks do nothing
+
+# dispose-only: at worst a leak, never wrong output (the creator is real or itself a loud stub)
+DisposeCTable                                # dispose-only: at worst a leak, never wrong output (the creator is real or itself a loud stub)
+DisposeThemeDrawingState                     # dispose-only: at worst a leak, never wrong output (the creator is real or itself a loud stub)
+KillPicture                                  # dispose-only: at worst a leak, never wrong output (the creator is real or itself a loud stub)
+LDispose                                     # dispose-only: at worst a leak, never wrong output (the creator is real or itself a loud stub)
+ReleaseQDContextForCollapsedWindowDockTile   # dispose-only: at worst a leak, never wrong output (the creator is real or itself a loud stub)
+TEDispose                                    # dispose-only: at worst a leak, never wrong output (the creator is real or itself a loud stub)
+TXNDeleteObject                              # dispose-only: at worst a leak, never wrong output (the creator is real or itself a loud stub)

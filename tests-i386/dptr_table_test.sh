@@ -49,7 +49,7 @@ OBJC_SLIDE_O="$PROJ_ROOT/build/src/abiconv/CMakeFiles/abiconv.dir/objc_slide.c.o
 # objc_slide.c's image-list helpers live in their own object (dyld_image_list.c).
 IMGLIST_O="$(dirname "$OBJC_SLIDE_O")/dyld_image_list.c.o"
 clang -arch x86_64 -Wl,-pagezero_size,0x1000 -o build/dptr_table_test \
-   src/dptr_table_fixture.c "$OBJC_SLIDE_O" "$IMGLIST_O" \
+   src/dptr_table_fixture.c "$OBJC_SLIDE_O" "$IMGLIST_O" "$(dirname "$OBJC_SLIDE_O")/gap.c.o" "$(dirname "$OBJC_SLIDE_O")/gap_tramp.asm.o" \
    2>build/dptr_table_cc.log || { sed 's/^/    /' build/dptr_table_cc.log; fail compile; }
 codesign -f -s - build/dptr_table_test >/dev/null 2>&1
 

@@ -45,6 +45,7 @@
 #include <stdio.h>
 #include <pthread.h>
 #include "carbon_shim.h"
+#include "gap.h"
 
 /* The CG-backed classic QuickDraw offscreen substrate (qd_gworld.c): resolve a
  * bound GWorld/port (0 => current port) to its low-4GB ARGB pixel buffer. This
@@ -263,7 +264,7 @@ static uint32_t qt_fill_bounds(uint32_t *a) {
 uint32_t shim_GetMovieBox(uint32_t *a)                { return qt_fill_bounds(a); }
 uint32_t shim_GetMovieNaturalBoundsRect(uint32_t *a)  { return qt_fill_bounds(a); }
 /* void SetMovieBox(Movie, const Rect *boxRect); — scaling ignored for now */
-uint32_t shim_SetMovieBox(uint32_t *a) { (void)a; return cmNoErr; }
+uint32_t shim_SetMovieBox(uint32_t *a) { GAP_STUB(a); return cmNoErr; }
 
 /* void StartMovie(Movie); */
 uint32_t shim_StartMovie(uint32_t *a) {
@@ -354,9 +355,9 @@ uint32_t shim_UpdateMovie(uint32_t *a) {
    return cmNoErr;
 }
 /* OSErr PrerollMovie(Movie, TimeValue, Fixed); — AVFoundation buffers itself. */
-uint32_t shim_PrerollMovie(uint32_t *a) { (void)a; return cmNoErr; }
+uint32_t shim_PrerollMovie(uint32_t *a) { GAP_STUB(a); return cmNoErr; }
 /* void SetMovieActive(Movie, Boolean); / void SetMovieVolume(Movie, short); */
-uint32_t shim_SetMovieActive(uint32_t *a) { (void)a; return cmNoErr; }
+uint32_t shim_SetMovieActive(uint32_t *a) { GAP_STUB(a); return cmNoErr; }
 uint32_t shim_SetMovieVolume(uint32_t *a) {
    qt_movie *m = qt_from_i386(a[0]);
    if (m) { int16_t v = (int16_t)a[1]; m->player.volume = (v <= 0) ? 0.f : (float)v / 256.f; }

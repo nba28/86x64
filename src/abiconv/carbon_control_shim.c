@@ -35,6 +35,7 @@
 #include <stdlib.h>
 #include <dlfcn.h>
 #include "carbon_shim.h"
+#include "gap.h"
 
 extern uint64_t x64_objc_unwrap(uint32_t h);
 extern uint32_t x64_objc_wrap(uint64_t real);
@@ -152,16 +153,16 @@ uint32_t shim_GetControlCommandID(uint32_t *a) {
 // Classic value/min/max: no surviving getter/setter. GetControlValue survives and
 // is the meaningful one; min/max sit on inert placeholder controls -> benign.
 // SInt16 GetControlMinimum(ControlRef) -> 0 ; GetControlMaximum -> 1 (non-degenerate)
-uint32_t shim_GetControlMinimum(uint32_t *a) { (void)a; return 0; }
-uint32_t shim_GetControlMaximum(uint32_t *a) { (void)a; return 1; }
-void     shim_SetControlMinimum(uint32_t *a) { (void)a; }
-void     shim_SetControl32BitMinimum(uint32_t *a) { (void)a; }
-void     shim_SetControlViewSize(uint32_t *a) { (void)a; }
-void     shim_SetControlColorProc(uint32_t *a) { (void)a; }
+uint32_t shim_GetControlMinimum(uint32_t *a) { GAP_STUB(a); return 0; }
+uint32_t shim_GetControlMaximum(uint32_t *a) { GAP_STUB(a); return 1; }
+void     shim_SetControlMinimum(uint32_t *a) { GAP_STUB(a); }
+void     shim_SetControl32BitMinimum(uint32_t *a) { GAP_STUB(a); }
+void     shim_SetControlViewSize(uint32_t *a) { GAP_STUB(a); }
+void     shim_SetControlColorProc(uint32_t *a) { GAP_STUB(a); }
 // OSStatus GetControlRegion(ControlRef, ControlPartCode, RgnHandle) -> leave rgn as-is
-uint32_t shim_GetControlRegion(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_GetControlRegion(uint32_t *a) { GAP_STUB(a); return 0; }
 // SInt16 GetControlVariant(ControlRef) -> 0 (kControlNoVariant)
-uint32_t shim_GetControlVariant(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_GetControlVariant(uint32_t *a) { GAP_STUB(a); return 0; }
 void     shim_DumpControlHierarchy(uint32_t *a) { (void)a; }
 
 // ---- Control value + data + activation on self-drawn controls ----
@@ -299,11 +300,11 @@ uint32_t shim_CreatePopupButtonControl(uint32_t *a)      { (void)a; return (uint
 uint32_t shim_HIComboBoxCreate(uint32_t *a)              { (void)a; return (uint32_t)-9999; }
 // HIImageView setters removed; the image view still renders with defaults.
 // (HIImageViewSetImage is already shimmed in mlte_shim.c — not duplicated here.)
-uint32_t shim_HIImageViewSetOpaque(uint32_t *a)     { (void)a; return 0; }
-uint32_t shim_HIImageViewSetScaleToFit(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_HIImageViewSetOpaque(uint32_t *a)     { GAP_STUB(a); return 0; }
+uint32_t shim_HIImageViewSetScaleToFit(uint32_t *a) { GAP_STUB(a); return 0; }
 // Keyboard focus advance/reverse: no classic control chain to walk -> noErr.
-uint32_t shim_AdvanceKeyboardFocus(uint32_t *a) { (void)a; return 0; }
-uint32_t shim_ReverseKeyboardFocus(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_AdvanceKeyboardFocus(uint32_t *a) { GAP_STUB(a); return 0; }
+uint32_t shim_ReverseKeyboardFocus(uint32_t *a) { GAP_STUB(a); return 0; }
 void     shim_DrawGrowIcon(uint32_t *a)         { (void)a; }
 
 // ---------------- Window Manager ----------------
@@ -375,15 +376,15 @@ uint32_t shim_GetNewCWindow(uint32_t *a) {
 uint32_t shim_GetNewWindow(uint32_t *a) { return shim_GetNewCWindow(a); }
 
 // Boolean IsWindowContainedInGroup(WindowRef) -> false (no classic window groups)
-uint32_t shim_IsWindowContainedInGroup(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_IsWindowContainedInGroup(uint32_t *a) { GAP_STUB(a); return 0; }
 // Boolean IsWindowUpdatePending(WindowRef) -> false (compositing windows self-update)
-uint32_t shim_IsWindowUpdatePending(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_IsWindowUpdatePending(uint32_t *a) { GAP_STUB(a); return 0; }
 // void ReleaseWindowGroup(WindowGroupRef) -> nothing to release
-uint32_t shim_ReleaseWindowGroup(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_ReleaseWindowGroup(uint32_t *a) { GAP_STUB(a); return 0; }
 // OSStatus SetWindowKind(WindowRef, SInt16) -> noErr (window kind is legacy metadata)
-uint32_t shim_SetWindowKind(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_SetWindowKind(uint32_t *a) { GAP_STUB(a); return 0; }
 // OSStatus ValidWindowRgn(WindowRef, RgnHandle) -> noErr (nothing to validate)
-uint32_t shim_ValidWindowRgn(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_ValidWindowRgn(uint32_t *a) { GAP_STUB(a); return 0; }
 
 // ---------------- Menu Manager ----------------
 
@@ -395,11 +396,11 @@ uint32_t shim_DisposeMenu(uint32_t *a) {
     return 0;
 }
 // OSStatus EnableMenuCommand(MenuRef, MenuCommand) -> noErr (menu items enabled by default)
-uint32_t shim_EnableMenuCommand(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_EnableMenuCommand(uint32_t *a) { GAP_STUB(a); return 0; }
 // void AppendResMenu(MenuRef, ResType) -> no classic resource fork to enumerate
-uint32_t shim_AppendResMenu(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_AppendResMenu(uint32_t *a) { GAP_STUB(a); return 0; }
 // SInt16 GetMenuItemKeyGlyph(...) via out-param -> 0 (no glyph)
-uint32_t shim_GetMenuItemKeyGlyph(uint32_t *a) { (void)a; return 0; }
-uint32_t shim_SetMenuFont(uint32_t *a)     { (void)a; return 0; }
-uint32_t shim_SetMenuItemData(uint32_t *a) { (void)a; return 0; }
-uint32_t shim_SetItemCmd(uint32_t *a)      { (void)a; return 0; }
+uint32_t shim_GetMenuItemKeyGlyph(uint32_t *a) { GAP_STUB(a); return 0; }
+uint32_t shim_SetMenuFont(uint32_t *a)     { GAP_STUB(a); return 0; }
+uint32_t shim_SetMenuItemData(uint32_t *a) { GAP_STUB(a); return 0; }
+uint32_t shim_SetItemCmd(uint32_t *a)      { GAP_STUB(a); return 0; }

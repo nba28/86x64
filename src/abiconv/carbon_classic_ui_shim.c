@@ -17,35 +17,36 @@
 
 #include <stdint.h>
 #include <string.h>
+#include "gap.h"
 
 #define PTR(i) ((void *)(uintptr_t)a[(i)])
 
 // ---------------- TextEdit (TERec world removed) ----------------
 // Editing/redraw entry points are void -> no-op.
-uint32_t shim_TEActivate(uint32_t *a)   { (void)a; return 0; }
-uint32_t shim_TEDeactivate(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_TEActivate(uint32_t *a)   { GAP_STUB(a); return 0; }
+uint32_t shim_TEDeactivate(uint32_t *a) { GAP_STUB(a); return 0; }
 uint32_t shim_TEIdle(uint32_t *a)       { (void)a; return 0; }
-uint32_t shim_TEKey(uint32_t *a)        { (void)a; return 0; }
-uint32_t shim_TECut(uint32_t *a)        { (void)a; return 0; }
-uint32_t shim_TECopy(uint32_t *a)       { (void)a; return 0; }
-uint32_t shim_TEPaste(uint32_t *a)      { (void)a; return 0; }
-uint32_t shim_TEDelete(uint32_t *a)     { (void)a; return 0; }
-uint32_t shim_TEInsert(uint32_t *a)     { (void)a; return 0; }
-uint32_t shim_TESetSelect(uint32_t *a)  { (void)a; return 0; }
-uint32_t shim_TEAutoView(uint32_t *a)   { (void)a; return 0; }
+uint32_t shim_TEKey(uint32_t *a)        { GAP_STUB(a); return 0; }
+uint32_t shim_TECut(uint32_t *a)        { GAP_STUB(a); return 0; }
+uint32_t shim_TECopy(uint32_t *a)       { GAP_STUB(a); return 0; }
+uint32_t shim_TEPaste(uint32_t *a)      { GAP_STUB(a); return 0; }
+uint32_t shim_TEDelete(uint32_t *a)     { GAP_STUB(a); return 0; }
+uint32_t shim_TEInsert(uint32_t *a)     { GAP_STUB(a); return 0; }
+uint32_t shim_TESetSelect(uint32_t *a)  { GAP_STUB(a); return 0; }
+uint32_t shim_TEAutoView(uint32_t *a)   { GAP_STUB(a); return 0; }
 // CharsHandle TEGetText(TEHandle) -> NULL ; TEHandle TEStyleNew(...) -> NULL.
-uint32_t shim_TEGetText(uint32_t *a)    { (void)a; return 0; }
-uint32_t shim_TEStyleNew(uint32_t *a)   { (void)a; return 0; }
+uint32_t shim_TEGetText(uint32_t *a)    { GAP_STUB(a); return 0; }
+uint32_t shim_TEStyleNew(uint32_t *a)   { GAP_STUB(a); return 0; }
 
 // ---------------- List Manager (ListHandle/LDEF removed) ----------------
-uint32_t shim_LActivate(uint32_t *a) { (void)a; return 0; }
-uint32_t shim_LScroll(uint32_t *a)   { (void)a; return 0; }
+uint32_t shim_LActivate(uint32_t *a) { GAP_STUB(a); return 0; }
+uint32_t shim_LScroll(uint32_t *a)   { GAP_STUB(a); return 0; }
 // Boolean LNextCell(Boolean hNext, Boolean vNext, Cell *ioCell, ListHandle) -> false
 // (no next selected cell); leave *ioCell as staged.
-uint32_t shim_LNextCell(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_LNextCell(uint32_t *a) { GAP_STUB(a); return 0; }
 // Boolean GetListActive(ListHandle) -> false.
-uint32_t shim_GetListActive(uint32_t *a)        { (void)a; return 0; }
-uint32_t shim_SetListSelectionFlags(uint32_t *a){ (void)a; return 0; }
+uint32_t shim_GetListActive(uint32_t *a)        { GAP_STUB(a); return 0; }
+uint32_t shim_SetListSelectionFlags(uint32_t *a){ GAP_STUB(a); return 0; }
 
 // ---------------- Drag Manager (classic DragRef removed) ----------------
 // Getters zero their out-parameter and report no drag; setters/adders -> noErr.
@@ -91,13 +92,13 @@ uint32_t shim_GetFlavorData(uint32_t *a) {            // (DragRef, ItemRef, Flav
 uint32_t shim_GetScrapFlavorFlags(uint32_t *a) {      // (ScrapRef, ScrapFlavorType, ScrapFlavorFlags*)
     uint32_t *o = (uint32_t *)PTR(2); if (o) *o = 0; return 0;
 }
-uint32_t shim_AddDragItemFlavor(uint32_t *a)    { (void)a; return 0; }
-uint32_t shim_SetDragItemFlavorData(uint32_t *a){ (void)a; return 0; }
-uint32_t shim_SetDropLocation(uint32_t *a)      { (void)a; return 0; }
+uint32_t shim_AddDragItemFlavor(uint32_t *a)    { GAP_STUB(a); return 0; }
+uint32_t shim_SetDragItemFlavorData(uint32_t *a){ GAP_STUB(a); return 0; }
+uint32_t shim_SetDropLocation(uint32_t *a)      { GAP_STUB(a); return 0; }
 
 // ---------------- Theme drawing state (removed) ----------------
 uint32_t shim_DisposeThemeDrawingState(uint32_t *a) { (void)a; return 0; }
-uint32_t shim_SetThemePen(uint32_t *a)              { (void)a; return 0; }
+uint32_t shim_SetThemePen(uint32_t *a)              { GAP_STUB(a); return 0; }
 uint32_t shim_GetThemeScrollBarArrowStyle(uint32_t *a) { // (ThemeScrollBarArrowStyle *out)
     int32_t *o = (int32_t *)PTR(0); if (o) *o = 0; return 0;
 }

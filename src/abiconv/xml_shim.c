@@ -45,6 +45,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "gap.h"
 
 /* malloc/free/realloc resolve, same-image, to libabiconv's low-4GB heap
  * (malloc_shim.c), so every pointer handed back is 32-bit representable. */
@@ -83,7 +84,7 @@ int shim_xml_strdup(uint32_t *a) {
 /* ---- the deprecated override API ------------------------------------------ */
 
 int shim_xmlMemSetup(uint32_t *a) {
-   (void)a;        /* deprecated override: ignore the legacy allocators */
+   GAP_STUB(a);        /* deprecated override: ignore the legacy allocators */
    return 0;       /* report success; libxml2 keeps its default allocators */
 }
 

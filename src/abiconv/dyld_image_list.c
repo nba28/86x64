@@ -237,3 +237,22 @@ const char *x64_img_path_for_header(const struct mach_header *mh)
    }
    return NULL;
 }
+
+int x64_img_is_translated(const void *base) {
+   const struct mach_header_64 *mh = (const struct mach_header_64 *)base;
+   if (mh == NULL || mh->magic != MH_MAGIC_64) { return 0; }
+   const struct load_command *lc = (const struct load_command *)(mh + 1);
+   for (uint32_t i = 0; i < mh->ncmds; i++) {
+      if (lc->cmdsize < sizeof *lc) { return 0; }   /* malformed: refuse to walk */
+      if (lc->cmd == LC_LOAD_DYLIB || lc->cmd == LC_LOAD_WEAK_DYLIB ||
+          lc->cmd == LC_REEXPORT_DYLIB || lc->cmd == LC_LOAD_UPWARD_DYLIB) {
+         const struct dylib_command *dc = (const struct dylib_command *)lc;
+         if (dc->dylib.name.offset < dc->cmdsize) {
+            const char *nm = (const char *)lc + dc->dylib.name.offset;
+            if (strstr(nm, "libabiconv") != NULL) { return 1; }
+         }
+      }
+      lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
+   }
+   return 0;
+}

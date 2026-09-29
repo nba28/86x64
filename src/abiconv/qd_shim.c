@@ -18,6 +18,7 @@
 
 #include <stdint.h>
 #include <string.h>
+#include "gap.h"
 
 #define PTR(n) ((void *)(uintptr_t)args[(n)])
 
@@ -57,23 +58,23 @@ void shim_LocalToGlobal(uint32_t *args) {
 }
 
 // ---- Random-seed setter: no live QDGlobals to mutate.
-void shim_SetQDGlobalsRandomSeed(uint32_t *a) { (void)a; }
+void shim_SetQDGlobalsRandomSeed(uint32_t *a) { GAP_STUB(a); }
 
 // ---- Text: without a wired classic font stack we do not raster QD text (apps
 // draw real UI text through ATSU/CoreText). Provide well-defined metrics so
 // measuring callers don't divide by zero; DrawText is a no-op raster.
-void shim_DrawText(uint32_t *args) { (void)args; }
+void shim_DrawText(uint32_t *args) { GAP_STUB(args); }
 void shim_GetFontInfo(uint32_t *args) {
     QDFontInfo *fi = (QDFontInfo *)PTR(0);
     if (fi) { fi->ascent = 12; fi->descent = 3; fi->widMax = 8; fi->leading = 1; }
 }
-uint32_t shim_TextWidth(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_TextWidth(uint32_t *args) { GAP_STUB(args); return 0; }
 
 // ---- Pictures (PICT record/replay): recording a PICT is not supported; report
 // failure / no-op disposal. (PICT *decode* — DrawPicture — is bridged to ImageIO
 // where a real substrate is available; not here.)
-uint32_t shim_OpenCPicture(uint32_t *args) { (void)args; return 0; }
-void     shim_ClosePicture(uint32_t *args) { (void)args; }
+uint32_t shim_OpenCPicture(uint32_t *args) { GAP_STUB(args); return 0; }
+void     shim_ClosePicture(uint32_t *args) { GAP_STUB(args); }
 void     shim_KillPicture(uint32_t *args)  { (void)args; }
 void     shim_DisposeCTable(uint32_t *args) { (void)args; }
 
@@ -89,10 +90,10 @@ uint32_t shim_GetQDGlobalsLightGray(uint32_t *args) { static const uint8_t p[8]=
 uint32_t shim_GetQDGlobalsDarkGray(uint32_t *args)  { static const uint8_t p[8]={0x77,0xDD,0x77,0xDD,0x77,0xDD,0x77,0xDD}; fill_pat(args,p); return args[0]; }
 
 // ---- Named-pixmap cursors (custom hardware cursors): cosmetic; report success/no-op.
-uint32_t shim_QDRegisterNamedPixMapCursor(uint32_t *a)   { (void)a; return 0; }  // noErr
-uint32_t shim_QDSetNamedPixMapCursor(uint32_t *a)        { (void)a; return 0; }
-uint32_t shim_QDUnregisterNamedPixMapCursur(uint32_t *a) { (void)a; return 0; }  // (sic) Apple typo
-uint32_t shim_QDIsNamedPixMapCursorRegistered(uint32_t *a) { (void)a; return 0; } // Boolean false
+uint32_t shim_QDRegisterNamedPixMapCursor(uint32_t *a)   { GAP_STUB(a); return 0; }  // noErr
+uint32_t shim_QDSetNamedPixMapCursor(uint32_t *a)        { GAP_STUB(a); return 0; }
+uint32_t shim_QDUnregisterNamedPixMapCursur(uint32_t *a) { GAP_STUB(a); return 0; }  // (sic) Apple typo
+uint32_t shim_QDIsNamedPixMapCursorRegistered(uint32_t *a) { GAP_STUB(a); return 0; } // Boolean false
 
 // ---- Point geometry (REAL implementations — exact classic math, not stubs) ----
 // These are pure arithmetic on Point/Rect; abigen cannot emit them because a

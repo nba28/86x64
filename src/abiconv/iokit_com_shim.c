@@ -36,6 +36,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "cb_bridge.h"
+#include "gap.h"
 
 /* The i386-callable trampolines (maptable_tramp.asm). */
 #define IOKCOM_METHODS(X)                                                   \
@@ -350,7 +351,7 @@ uint32_t shim_iokcom_allocQueue(uint32_t *a) {
 }
 
 /* Output transactions are not bridged: NULL is the documented failure. */
-uint32_t shim_iokcom_allocOutputTransaction(uint32_t *a) { (void)a; return 0; }
+uint32_t shim_iokcom_allocOutputTransaction(uint32_t *a) { GAP_STUB(a); return 0; }
 
 /* (self, reportType, reportID, void *buffer, uint32 size, uint32 timeoutMS,
  *  IOHIDReportCallbackFunction, target, refcon). The buffer is app-owned low

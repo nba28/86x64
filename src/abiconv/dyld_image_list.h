@@ -35,4 +35,10 @@ const struct mach_header *x64_img_find_leaf(const char *leaf, intptr_t *slide_ou
 /* Path of the image with this exact header, or NULL. */
 const char *x64_img_path_for_header(const struct mach_header *mh);
 
+/* 1 iff the image at this header speaks the i386 convention: every binary the
+ * pipeline emits loads libabiconv; native dylibs (and libabiconv itself) do not.
+ * THE structural "is translated" test -- keyed on the dependency, never on where
+ * dyld mapped the image (a native dylib can land below 4GB). */
+int x64_img_is_translated(const void *mh);
+
 #endif /* X64_DYLD_IMAGE_LIST_H */

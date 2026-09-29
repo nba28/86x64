@@ -34,6 +34,7 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include <CoreGraphics/CoreGraphics.h>
 #include <ImageIO/ImageIO.h>
+#include "gap.h"
 
 extern void *malloc(size_t);
 extern void *calloc(size_t, size_t);
@@ -357,7 +358,7 @@ uint32_t shim_GraphicsImportSetQuality(uint32_t *a)
    return cmNoErr;
 }
 /* ComponentResult GraphicsImportSetMatrix(ci, const MatrixRecord *m); — ignored */
-uint32_t shim_GraphicsImportSetMatrix(uint32_t *a) { (void)a; return cmNoErr; }
+uint32_t shim_GraphicsImportSetMatrix(uint32_t *a) { GAP_STUB(a); return cmNoErr; }
 /* ComponentResult GraphicsImportSetGraphicsMode / SetFlags variants — n/a */
 
 /* ComponentResult GraphicsImportGetColorSyncProfile(ci, Handle *profile); */
@@ -378,7 +379,7 @@ uint32_t shim_GraphicsImportGetDataOffsetAndSize(uint32_t *a)
 }
 
 /* ComponentResult GraphicsImportGetMetaData(ci, void *outUserData); — none */
-uint32_t shim_GraphicsImportGetMetaData(uint32_t *a) { (void)a; return cmCantOpenErr; }
+uint32_t shim_GraphicsImportGetMetaData(uint32_t *a) { GAP_STUB(a); return cmCantOpenErr; }
 
 /* ComponentResult GraphicsImportReadData(ci, void *buf, ulong off, ulong len); */
 uint32_t shim_GraphicsImportReadData(uint32_t *a)

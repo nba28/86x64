@@ -98,6 +98,10 @@ all: run-only
 check:
 	@bash check.sh
 
+# check-gui: everything, INCLUDING the guards that open windows / go fullscreen.
+check-gui:
+	@CHECK_GUI=1 bash check.sh
+
 # selfref-imm-stage-shift: guard for the STAGE-SHIFT-STALE pointer-immediate fix
 # (core instruction.cc MOV_MEMv_IMMz abs32-dest arm; Civ IV Steam boost.python
 # registry _Rb_tree header left/right stored &_M_header-0x1000 -> rb_decrement
@@ -822,6 +826,14 @@ const-alias-output-image: $(BUILD_DIR)/100_const_alias_output_image.i386
 # this is what proves a real alias. OFF arm is ABICONV_ALIAS_LEGACY=1.
 carbon-alias: $(BUILD_DIR)/99_carbon_alias.x86_64
 	@bash carbon_alias_test.sh
+# gap-stub: a constant-return STUB shim reports its first hit (stderr + reach
+# ledger, src/abiconv/gap.c); an .ok-listed shim stays quiet; M64_GAP=0 silences.
+gap-stub: $(BUILD_DIR)/99_gap_stub.x86_64
+	@bash gap_stub_test.sh
+# gap-raw: a translated call to a NATIVE function with no bridge reports its
+# first hit (gap.c's one-shot stub on the bound slot); M64_GAP=0 arms nothing.
+gap-raw: $(BUILD_DIR)/99_gap_raw.x86_64
+	@bash gap_raw_test.sh
 # carbon-datetime: A/B guard for the classic Date & Time Utilities, REMOVED from
 # modern macOS. abigen still emits a bridge; the pipeline weakens the dangling
 # bind to NULL, so the classic call jumps to 0 (Halo, rip=0, 2026-08-03).
@@ -2118,6 +2130,11 @@ $(BUILD_DIR)/99_record_field_pair.i386: $(BUILD_DIR)/99_record_field_pair.o
 # resolved at translate time by static-interpose redirecting them into
 # libabiconv's shims, which is precisely what this guard measures. Overrides %.i386.
 $(BUILD_DIR)/99_carbon_alias.i386: $(BUILD_DIR)/99_carbon_alias.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_gap_stub: TextWidth/EqualPt are QuickDraw, absent from the i386 sysroot;
+# static-interpose redirects them into libabiconv's shims. Overrides %.i386.
+$(BUILD_DIR)/99_gap_stub.i386: $(BUILD_DIR)/99_gap_stub.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 99_carbon_datetime: the whole family is undefined dynamic_lookup — these

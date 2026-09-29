@@ -32,6 +32,7 @@
 // (Civ IV + Halo both ship this same QuickTime and hit the identical wall).
 
 #include <stdint.h>
+#include "gap.h"
 
 // Every removed HIToolbox UI entry returns the "benign unavailable" value for its
 // signature: OSStatus noErr(0) / Boolean false(0) / Handle|Ref NULL(0) / control
@@ -39,78 +40,78 @@
 
 
 // ---- 0 Toolbox init (1) ----
-uint32_t shim_InitHLTB(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_InitHLTB(uint32_t *args) { GAP_STUB(args); return 0; }
 
 // ---- Appearance / Theme (15) ----
-uint32_t shim_DrawThemeButton(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_DrawThemeEditTextFrame(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_DrawThemeFocusRect(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_DrawThemeListBoxFrame(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_DrawThemePrimaryGroup(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_DrawThemeSeparator(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_DrawThemeButton(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_DrawThemeEditTextFrame(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_DrawThemeFocusRect(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_DrawThemeListBoxFrame(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_DrawThemePrimaryGroup(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_DrawThemeSeparator(uint32_t *args) { GAP_STUB(args); return 0; }
 // shim_DrawThemeText: REAL CoreText implementation in carbon_themetext_shim.c.
-uint32_t shim_DrawThemeTickMark(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_DrawThemeTrack(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetThemeDrawingState(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetThemeFont(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetThemeTrackThumbRgn(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_NormalizeThemeDrawingState(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetThemeBackground(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetThemeDrawingState(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_DrawThemeTickMark(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_DrawThemeTrack(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetThemeDrawingState(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetThemeFont(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetThemeTrackThumbRgn(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_NormalizeThemeDrawingState(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SetThemeBackground(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SetThemeDrawingState(uint32_t *args) { GAP_STUB(args); return 0; }
 
 // ---- Control Manager (20) ----
-uint32_t shim_AutoEmbedControl(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_CreateCustomControl(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_CreateUserPaneControl(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_FindControl(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetControlAction(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetControlDataHandle(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetControlReference(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetControlTitle(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_AutoEmbedControl(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_CreateCustomControl(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_CreateUserPaneControl(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_FindControl(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetControlAction(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetControlDataHandle(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetControlReference(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetControlTitle(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_IdleControls(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_NewControl(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_RegisterSystemControlDefinition(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetControlBounds(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetControlDataHandle(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetControlPopupMenuHandle(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetControlReference(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetControlSupervisor(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetControlTitle(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetUpControlBackground(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_TestControl(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_TrackControl(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_NewControl(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_RegisterSystemControlDefinition(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SetControlBounds(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SetControlDataHandle(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SetControlPopupMenuHandle(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SetControlReference(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SetControlSupervisor(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SetControlTitle(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SetUpControlBackground(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_TestControl(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_TrackControl(uint32_t *args) { GAP_STUB(args); return 0; }
 
 // ---- Dialog Manager (21) ----
-uint32_t shim_Alert(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_DialogCopy(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_DialogCut(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_DialogDelete(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_DialogPaste(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_DrawDialog(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_FindDialogItem(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetDialogKeyboardFocusItem(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetDialogPort(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_HideDialogItem(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_InsertDialogItem(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_IsDialogEvent(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_NewColorDialog(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_NewFeaturesDialog(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_RemoveDialogItems(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SelectDialogItemText(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_Alert(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_DialogCopy(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_DialogCut(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_DialogDelete(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_DialogPaste(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_DrawDialog(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_FindDialogItem(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetDialogKeyboardFocusItem(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetDialogPort(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_HideDialogItem(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_InsertDialogItem(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_IsDialogEvent(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_NewColorDialog(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_NewFeaturesDialog(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_RemoveDialogItems(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SelectDialogItemText(uint32_t *args) { GAP_STUB(args); return 0; }
 /* SetDialogCancelItem is PROMOTED to a real implementation in
  * carbon_dialog_shim.m (it now really sets the Escape / close-box item on the
  * classic Carbon dialog) — see this file's header note on promoting a no-op
  * whose result turns out to matter. Not defined here: duplicate symbol. */
-uint32_t shim_SetDialogItem(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetDialogTracksCursor(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_ShowDialogItem(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_UpdateDialog(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_SetDialogItem(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SetDialogTracksCursor(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_ShowDialogItem(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_UpdateDialog(uint32_t *args) { GAP_STUB(args); return 0; }
 
 // ---- Drag (1) ----
-uint32_t shim_DragGrayRgn(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_DragGrayRgn(uint32_t *args) { GAP_STUB(args); return 0; }
 
 // ---- Event Manager (3) ----
-uint32_t shim_GetNextEvent(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_GetNextEvent(uint32_t *args) { GAP_STUB(args); return 0; }
 // ---- StillDown / WaitMouseUp: REAL mouse-button state ----
 // ★These were `return 0` ("button is not down"), swept in with the genuinely
 // dead List Manager no-ops below. They are NOT dead surface: the classic click
@@ -129,69 +130,69 @@ uint32_t shim_StillDown(uint32_t *args) { (void)args; return (uint32_t)ci_button
 uint32_t shim_WaitMouseUp(uint32_t *args) { (void)args; return (uint32_t)ci_button_is_down(); }
 
 // ---- List Manager (22) ----
-uint32_t shim_CreateCustomList(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetListCellSize(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetListDataBounds(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetListDataHandle(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetListRefCon(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetListVerticalScrollBar(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetScrapFlavorInfoList(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_LAddRow(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_LAutoScroll(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_LCellSize(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_LClick(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_LDelRow(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_CreateCustomList(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetListCellSize(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetListDataBounds(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetListDataHandle(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetListRefCon(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetListVerticalScrollBar(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetScrapFlavorInfoList(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_LAddRow(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_LAutoScroll(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_LCellSize(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_LClick(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_LDelRow(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_LDispose(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_LGetCell(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_LGetSelect(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_LNew(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_LSetCell(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_LSetDrawingMode(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_LSetSelect(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_LSize(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_LUpdate(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetListRefCon(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_LGetCell(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_LGetSelect(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_LNew(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_LSetCell(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_LSetDrawingMode(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_LSetSelect(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_LSize(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_LUpdate(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SetListRefCon(uint32_t *args) { GAP_STUB(args); return 0; }
 
 // ---- Menu Manager (5) ----
-uint32_t shim_AppendMenu(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetMenu(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetMenuItemText(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_MenuKey(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetMenuItemText(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_AppendMenu(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetMenu(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetMenuItemText(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_MenuKey(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SetMenuItemText(uint32_t *args) { GAP_STUB(args); return 0; }
 
 // ---- Scrap Manager (6) ----
-uint32_t shim_ClearCurrentScrap(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetCurrentScrap(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetScrapFlavorCount(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetScrapFlavorData(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GetScrapFlavorSize(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_PutScrapFlavor(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_ClearCurrentScrap(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetCurrentScrap(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetScrapFlavorCount(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetScrapFlavorData(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GetScrapFlavorSize(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_PutScrapFlavor(uint32_t *args) { GAP_STUB(args); return 0; }
 
 // ---- TextEdit (9) ----
-uint32_t shim_TECalText(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_TECalText(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_TEDispose(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_TEGetHeight(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_TENew(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_TEScroll(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_TESetText(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_TETextBox(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_TEToScrap(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_TEUpdate(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_TEGetHeight(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_TENew(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_TEScroll(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_TESetText(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_TETextBox(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_TEToScrap(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_TEUpdate(uint32_t *args) { GAP_STUB(args); return 0; }
 
 // ---- Toolbox misc (2) ----
-uint32_t shim_GetStdFilterProc(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_RegisterToolboxObjectClass(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_GetStdFilterProc(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_RegisterToolboxObjectClass(uint32_t *args) { GAP_STUB(args); return 0; }
 
 // ---- Type-select (3) ----
-uint32_t shim_TypeSelectClear(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_TypeSelectFindItem(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_TypeSelectNewKey(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_TypeSelectClear(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_TypeSelectFindItem(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_TypeSelectNewKey(uint32_t *args) { GAP_STUB(args); return 0; }
 
 // ---- Window / HIView (7) ----
-uint32_t shim_GetWVariant(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_GrowWindow(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_HIViewReshapeStructure(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_HIViewSetNeedsDisplayInRegion(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_InstallWindowContentPaintProc(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_InvalWindowRgn(uint32_t *args) { (void)args; return 0; }
-uint32_t shim_SetWTitle(uint32_t *args) { (void)args; return 0; }
+uint32_t shim_GetWVariant(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_GrowWindow(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_HIViewReshapeStructure(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_HIViewSetNeedsDisplayInRegion(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_InstallWindowContentPaintProc(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_InvalWindowRgn(uint32_t *args) { GAP_STUB(args); return 0; }
+uint32_t shim_SetWTitle(uint32_t *args) { GAP_STUB(args); return 0; }
