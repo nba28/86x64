@@ -136,8 +136,10 @@ def collect(paths):
 
 # dyld_info -fixups rows look like:
 #   __DATA  __la_symbol_ptr  0x1001020   lazy-bind  libSystem/_bootstrap_look_up
+# A weak bind carries a trailing " [weak-import]": without allowing it, every
+# weak-import bind (most of a translated image's __jt_ptrs) was silently skipped.
 ROW = re.compile(r"^\s+(\S+)\s+(\S+)\s+0x([0-9A-Fa-f]+)\s+"
-                 r"(?:lazy-bind|bind|weak-bind)\s+(\S+?)/(\S+)\s*$")
+                 r"(?:lazy-bind|bind|weak-bind)\s+(\S+?)/(\S+)(?:\s+\[weak-import\])?\s*$")
 
 
 def scan(path, translated, want_data):
