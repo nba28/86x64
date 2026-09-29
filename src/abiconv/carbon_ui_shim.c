@@ -105,8 +105,12 @@ void shim_SetControl32BitValue(uint32_t *args) {
     void *c = UICTRL(0);
     int32_t v = (int32_t)args[1];
     if (sd_ctrl_set_value(c, v)) return;
-    UIDL(SetControl32BitValue, void, (void *, int32_t));
-    if (SetControl32BitValue && c) SetControl32BitValue(c, v);
+    /* 64-bit HIToolbox has no SetControl32BitValue/GetControl32BitValue
+     * (dlsym NULL): the HIView pair is the same SInt32 value. Resolving the old
+     * names silently dropped every native control's value (Halo's "Play in a
+     * window" checkbox always read 0). */
+    UIDL(HIViewSetValue, int32_t, (void *, int32_t));
+    if (HIViewSetValue && c) HIViewSetValue(c, v);
 }
 
 // GetControl32BitValue(ControlRef): current value (popup selection / checkbox state).
@@ -114,8 +118,8 @@ uint32_t shim_GetControl32BitValue(uint32_t *args) {
     void *c = UICTRL(0);
     int32_t out = 0;
     if (sd_ctrl_get_value(c, &out)) return (uint32_t)out;
-    UIDL(GetControl32BitValue, int32_t, (void *));
-    if (GetControl32BitValue && c) return (uint32_t)GetControl32BitValue(c);
+    UIDL(HIViewGetValue, int32_t, (void *));
+    if (HIViewGetValue && c) return (uint32_t)HIViewGetValue(c);
     return 0;
 }
 

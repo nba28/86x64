@@ -272,8 +272,12 @@ uint32_t shim_CGWarpMouseCursorPosition(uint32_t *a)
    if (!off && g_active && g_scale > 0) {
       int16_t ox = 0, oy = 0;
       ci_content_origin(&ox, &oy);
-      p.x = g_gx + (fx - ox) * g_scale;
-      p.y = g_gy + (fy - oy) * g_scale;
+      /* The CENTRE of the virtual pixel: cglfs_map_global truncates, so a
+       * warp to the pixel's top-left edge reads back one pixel up-left after
+       * any rounding of the physical point, and the per-frame re-centre then
+       * sees a constant (-1,-1) delta (Halo's slow upward creep). */
+      p.x = g_gx + (fx - ox + 0.5) * g_scale;
+      p.y = g_gy + (fy - oy + 0.5) * g_scale;
    }
    return (uint32_t)CGWarpMouseCursorPosition(p);
 }

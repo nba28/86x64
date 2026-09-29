@@ -185,7 +185,7 @@ int main(void)
             GetGlobalMouse(&q);
             int dh = q.h - p.h, dv = q.v - p.v;
             printf("warp_roundtrip=%d (%d,%d)->(%d,%d)\n",
-                   dh >= -1 && dh <= 1 && dv >= -1 && dv <= 1, p.h, p.v, q.h, q.v);
+                   dh == 0 && dv == 0, p.h, p.v, q.h, q.v);   /* exact: any residue creeps */
         }
         CGReleaseAllDisplays();
     }
