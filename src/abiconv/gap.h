@@ -12,6 +12,8 @@ void x64_gap_hit(const char *kind, const char *sym, const char *who, uint32_t ca
 int  x64_gap_i386_callable(const void *addr);
 struct mach_header_64;
 void x64_gap_arm_raw_slots(const struct mach_header_64 *mh, intptr_t slide);
+// a CALL slot bound to NULL (no native, no shim): one-shot report, returns 0.
+void x64_gap_arm_missing_slot(const char *name, uint64_t *slot);
 
 #define GAP_ONCE(kind, sym, who, caller) do { static int gap_hit_; \
    if (!gap_hit_ && !__atomic_exchange_n(&gap_hit_, 1, __ATOMIC_RELAXED)) \

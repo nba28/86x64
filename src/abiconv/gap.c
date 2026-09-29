@@ -11,6 +11,10 @@
 //     work queue (coverage-audit.py --reach <dir>); imported-but-unreached gaps
 //     stay as they are.
 // Kinds: stub (constant-return shim), dlsym (by-name lookup found nothing),
+// missing (a call slot bound to NULL: the symbol is gone and nothing serves it;
+// it used to die at the translator's null-check ud2 with no name — Portal 2's
+// OTAtomicAdd32. Now it reports and returns 0, the stub policy, so ONE run lists
+// every missing symbol it reaches; import_repair.c arms the slot),
 // raw (a translated image calls a NATIVE function with no bridge: the 4-byte
 // push vs 8-byte ret family, the unbridged native-call bug), byname (an i386
 // dlsym/CFBundle lookup got the generic int-only marshalling thunk, no bridge).
@@ -91,7 +95,7 @@ int x64_gap_i386_callable(const void *addr) {
 }
 
 struct gap_raw { const char *name; uint64_t *slot; uint64_t target; };
-extern char x64_gap_raw_tramp[];
+extern char x64_gap_raw_tramp[], x64_gap_missing_tramp[];
 
 void x64_gap_raw_hit(struct gap_raw *r, uint32_t caller) {
    *r->slot = r->target;                     // later calls go straight to the native
@@ -100,7 +104,7 @@ void x64_gap_raw_hit(struct gap_raw *r, uint32_t caller) {
 
 // 24-byte stub + its 24-byte record, carved from RWX chunks (same recipe as
 // objc_slide.c make_init_stub). Never freed: one per raw slot, a few hundred.
-static struct gap_raw *raw_stub(const char *name, uint64_t *slot, uint64_t target) {
+static struct gap_raw *raw_stub(const char *name, uint64_t *slot, uint64_t target, const void *tramp_fn) {
    static uint8_t *region; static size_t used, cap;
    if (!region || used + 48 > cap) {
       void *m = mmap(NULL, 1 << 16, PROT_READ | PROT_WRITE | PROT_EXEC, MAP_PRIVATE | MAP_ANON | MAP_JIT, -1, 0);
@@ -113,7 +117,7 @@ static struct gap_raw *raw_stub(const char *name, uint64_t *slot, uint64_t targe
    used += 48;
    struct gap_raw *r = (struct gap_raw *)(s + 24);
    r->name = name; r->slot = slot; r->target = target;
-   uint64_t rec = (uint64_t)(uintptr_t)r, tramp = (uint64_t)(uintptr_t)x64_gap_raw_tramp;
+   uint64_t rec = (uint64_t)(uintptr_t)r, tramp = (uint64_t)(uintptr_t)tramp_fn;
    s[0] = 0x49; s[1] = 0xBB; memcpy(s + 2, &rec, 8);                        // movabs r11, rec
    s[10] = 0xFF; s[11] = 0x25; memset(s + 12, 0, 4); memcpy(s + 16, &tramp, 8); // jmp [rip+0]
    return r;
@@ -137,9 +141,21 @@ void x64_gap_arm_raw_slots(const struct mach_header_64 *mh, intptr_t slide) {
             const void *t = (const void *)(uintptr_t)*slot;
             Dl_info di;
             if (!t || x64_gap_i386_callable(t) || !dladdr(t, &di) || !di.dli_sname) continue;
-            struct gap_raw *r = raw_stub(di.dli_sname, slot, *slot);
+            struct gap_raw *r = raw_stub(di.dli_sname, slot, *slot, x64_gap_raw_tramp);
             if (r) *slot = (uint64_t)(uintptr_t)r - 24;
          }
       }
    }
+}
+
+// ---- missing: a call slot bound to NULL -------------------------------------
+
+void x64_gap_missing_hit(struct gap_raw *r, uint32_t caller) {   // target = hit flag
+   if (!__atomic_exchange_n(&r->target, 1, __ATOMIC_RELAXED)) x64_gap_hit("missing", r->name, 0, caller);
+}
+
+void x64_gap_arm_missing_slot(const char *name, uint64_t *slot) {
+   if (!gap_mode() || *slot) return;
+   struct gap_raw *r = raw_stub(name[0] == '_' ? name + 1 : name, slot, 0, x64_gap_missing_tramp);
+   if (r) *slot = (uint64_t)(uintptr_t)r - 24;
 }

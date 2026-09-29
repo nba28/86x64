@@ -64,6 +64,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "gap.h"
 
 /* macho-tool's M64 layout base for translated output (Archive::Build). */
 #define IR_TRANSLATED_TEXT_BASE 0x10000000ULL
@@ -250,6 +251,7 @@ void _86x64_import_repair(const struct mach_header_64 *mh64, intptr_t slide,
                    * NULLs a removed import that libabiconv actually covers. */
                   const uint64_t ws = ir_resolve_shim_only(name);
                   if (ws != 0) { slots[k] = ws; n_unbound++; n_shim++; }
+                  else { x64_gap_arm_missing_slot(name, &slots[k]); }
                   continue;
                } else {
                   /* GENUINELY BOUND — but to WHAT? A translated image's calls
@@ -303,6 +305,10 @@ void _86x64_import_repair(const struct mach_header_64 *mh64, intptr_t slide,
                }
             } else {
                n_missing++;
+               /* a CALL slot only: a NULL data pointer is a weak-import test */
+               if (strncmp(sect->sectname, "__jt_ptrs", 16) == 0) {
+                  x64_gap_arm_missing_slot(name, &slots[k]);
+               }
                if (ir_verbose()) {
                   fprintf(stderr,
                           "abiconv import_repair: %s: no shim or native "

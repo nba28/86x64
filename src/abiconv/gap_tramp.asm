@@ -13,6 +13,8 @@
    segment .text
    global _x64_gap_raw_tramp
    extern _x64_gap_raw_hit
+   global _x64_gap_missing_tramp
+   extern _x64_gap_missing_hit
 
 _x64_gap_raw_tramp:             ; r11 = rec, [rsp] = i386 4-byte return address
    push rbp
@@ -59,3 +61,25 @@ _x64_gap_raw_tramp:             ; r11 = rec, [rsp] = i386 4-byte return address
    pop rax
    pop rbp
    jmp [r11 + 16]
+
+;; A call slot bound to NULL (gap.c x64_gap_arm_missing_slot): report the first
+;; hit and return 0 to the i386 caller (4-byte return address). esi/edi are
+;; callee-saved on i386, so they survive the C call like MTSHIM keeps them.
+_x64_gap_missing_tramp:         ; r11 = rec, [rsp] = i386 4-byte return address
+   push rbp
+   mov rbp, rsp
+   push rdi
+   push rsi
+   and rsp, ~0xf
+   mov rdi, r11
+   mov esi, dword [rbp + 8]
+   call _x64_gap_missing_hit
+   lea rsp, [rbp - 16]
+   pop rsi
+   pop rdi
+   leave
+   xor eax, eax
+   xor edx, edx
+   mov r11d, dword [rsp]
+   add rsp, 4
+   jmp r11
