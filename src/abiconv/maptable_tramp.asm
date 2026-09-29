@@ -1105,6 +1105,7 @@ _x64_exc_longjmp:
 	MTSHIM	___aglCreateContext,                  _shim_aglCreateContext
 	MTSHIM	___aglDestroyContext,                 _shim_aglDestroyContext
 	MTSHIM	___aglGetCurrentContext,              _shim_aglGetCurrentContext
+	MTSHIM	___aglGetCGLContext,                 _shim_aglGetCGLContext
 	MTSHIM	___aglSetCurrentContext,              _shim_aglSetCurrentContext
 	MTSHIM	___aglUpdateContext,                  _shim_aglUpdateContext
 	MTSHIM	___aglSwapBuffers,                    _shim_aglSwapBuffers

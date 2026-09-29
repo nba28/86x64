@@ -273,6 +273,7 @@ extern void *aglCreateContext(void *pix, void *share);
 extern GLboolean aglDestroyContext(void *ctx);
 extern void *aglGetCurrentContext(void);
 extern GLboolean aglSetCurrentContext(void *ctx);
+extern GLboolean aglGetCGLContext(void *ctx, void **cgl);
 extern GLboolean aglUpdateContext(void *ctx);
 extern void aglSwapBuffers(void *ctx);
 extern GLboolean aglSetInteger(void *ctx, unsigned pname, const GLint *params);
@@ -308,6 +309,22 @@ uint32_t shim_aglGetCurrentContext(uint32_t *a)
     * context the app never received would hand it a table for a renderer it did
     * not ask for. ctx_out reuses the existing shadow when there is one. */
    return ctx_out(aglGetCurrentContext());
+}
+
+/* GLboolean aglGetCGLContext(AGLContext, void **cgl_ctx) — the CGLMacro app's
+ * other way in: create an AGL context, then fetch the CGL context behind it for
+ * `cgl_ctx`. The generic bridge wrote a plain arena handle into the out-param,
+ * so the first macro GL call jumped through a 0 slot (PvZ switching fullscreen
+ * off: rip=0 from glDisable(GL_FOG) at `call [ctx+0x100]`, 2026-09-29). Hand
+ * back the shadow, the same one aglCreateContext gave for this context. The
+ * out-param stays defined (0) on failure. */
+uint32_t shim_aglGetCGLContext(uint32_t *a)
+{
+   uint32_t *out = (uint32_t *)I386PTR(a[1]);
+   void *cgl = NULL;
+   GLboolean ok = aglGetCGLContext(ctx_in(a[0]), &cgl);
+   if (out) *out = ok ? ctx_out(cgl) : 0;
+   return ok;
 }
 
 uint32_t shim_aglSetCurrentContext(uint32_t *a)

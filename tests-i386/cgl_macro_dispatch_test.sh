@@ -41,11 +41,13 @@ has() { printf '%s\n' "$1" | grep -q "^$2\$"; }
 # --- ON: the context is an i386-layout shadow with a live dispatch table ------
 on=$("$BIN" 2>/dev/null)
 if has "$on" 'pixfmt=1' && has "$on" 'ctx=1' && has "$on" 'slot=1' &&
-   has "$on" 'islot=1' && has "$on" 'maxtex=1' && has "$on" 'glstr=1'; then
+   has "$on" 'islot=1' && has "$on" 'maxtex=1' && has "$on" 'glstr=1' &&
+   has "$on" 'cgl_slot=1'; then
   echo "  ON  (shim armed):    disp slots at the hardcoded i386 offsets 0x1D8/0x1A4 are"
   echo "                       live thunks; calling them the CGLMacro way read back a real"
   echo "                       hardware limit (twice, stack balanced) and a REAL GL string"
   echo "                       at an address the i386 4-byte slot can hold             OK"
+  echo "                       aglGetCGLContext hands back the same live shadow  OK"
   printf '%s\n' "$on" | grep -E '^(MAX_TEXTURE_SIZE|GL_VENDOR)=' | sed 's/^/      /'
 else
   echo "  ON  (shim armed):    expected callable dispatch slots, a real GL limit and a"
@@ -60,7 +62,7 @@ off=$(M64_NO_CGL_MACRO=1 "$BIN" 2>/dev/null)
 # the i386 side is HANDED, not whether CGL works), so ctx=1 is deliberately an
 # invariant and is not what distinguishes the arms.
 if has "$off" 'ctx=1' && has "$off" 'slot=0' && has "$off" 'islot=0' &&
-   has "$off" 'maxtex=0' && has "$off" 'glstr=0'; then
+   has "$off" 'maxtex=0' && has "$off" 'glstr=0' && has "$off" 'cgl_slot=0'; then
   echo "  OFF (kill-switch):   the arena handle has 0 at offset 0x1D8 — the unfixed"
   echo "                       'jmp *0' state                                        OK"
 else

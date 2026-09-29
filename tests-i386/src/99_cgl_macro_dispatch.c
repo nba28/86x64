@@ -65,6 +65,7 @@ extern AGLContext     aglCreateContext(AGLPixelFormat pix, AGLContext share);
 extern GLboolean      aglDestroyPixelFormat(AGLPixelFormat pix);
 extern GLboolean      aglDestroyContext(AGLContext ctx);
 extern GLboolean      aglSetCurrentContext(AGLContext ctx);
+extern GLboolean      aglGetCGLContext(AGLContext ctx, void **cgl);
 
 #define AGL_NONE          0
 #define AGL_RGBA          4
@@ -111,6 +112,14 @@ int main(void)
 
    printf("slot=%d\n", slot ? 1 : 0);
    printf("islot=%d\n", islot ? 1 : 0);
+
+   /* The OTHER way in (PvZ's windowed path, 2026-09-29): an AGL context, then
+    * aglGetCGLContext for the CGLMacro `cgl_ctx`. That context must be the same
+    * dispatchable shadow; a plain handle has 0 in every slot (rip=0). */
+   void *cgl = (void *)1;
+   GLboolean got = aglGetCGLContext(ctx, &cgl);
+   unsigned int cslot = (got && cgl) ? *(const unsigned int *)((const unsigned char *)cgl + GET_STRING_OFF) : 0;
+   printf("cgl_slot=%d\n", cslot ? 1 : 0);
 
    if (!islot || !slot) {
       /* What the app does next is `jmp *0`. Do NOT reproduce that — report it, so
