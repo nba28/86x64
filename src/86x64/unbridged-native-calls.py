@@ -98,6 +98,10 @@ def text_vmaddr(path):
     return None
 
 
+# "libfoo.6.dylib" / "libfoo.dylib" -> "libfoo" (dyld_info's own leaf naming).
+DYLIB_VERSION_RE = re.compile(r"^(.*?)(?:\.\d[\w.]*)?\.dylib$")
+
+
 def collect(paths):
     """Return (files, translated_basenames)."""
     files = []
@@ -113,7 +117,20 @@ def collect(paths):
     translated = set()
     for p in files:
         if text_vmaddr(p) == TRANSLATED_TEXT_BASE:
-            translated.add(os.path.basename(p).lower())
+            base = os.path.basename(p).lower()
+            translated.add(base)
+            # dyld_info -fixups reports a VERSIONED dylib's dependency by its
+            # STEM: a bind on libstdc++.6.dylib shows dylib="libstdc++", not
+            # "libstdc++.6" or "libstdc++.6.dylib" -- so a translated versioned
+            # library (our own golden libstdc++.6.dylib, co-located and bound
+            # by every consumer abi-hazard-vendor.py redirects) never matched
+            # the plain "+.dylib" reconstruction below and read as an
+            # unbridged raw native call onto itself. Same family as the
+            # Bink/Miles case-insensitivity gap: dyld_info's naming and the
+            # on-disk basename just don't agree, and OUR set must cover both.
+            stem = DYLIB_VERSION_RE.match(base)
+            if stem:
+                translated.add(stem.group(1))
     return files, translated
 
 
@@ -172,8 +189,11 @@ def main(argv):
     if not files:
         print("no Mach-O files found")
         return 2
+    # `translated` also carries version-stripped STEMS (see collect()), so its
+    # size is not a file count -- count files whose own basename is a member.
+    n_translated = sum(1 for p in files if os.path.basename(p).lower() in translated)
     print("scanned %d Mach-O file(s); %d of them are TRANSLATED (__TEXT @ %#x)"
-          % (len(files), len(translated), TRANSLATED_TEXT_BASE))
+          % (len(files), n_translated, TRANSLATED_TEXT_BASE))
 
     per_dylib = {}
     hits = set()
