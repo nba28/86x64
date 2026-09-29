@@ -147,8 +147,12 @@ void x64_cfdata_mirror_flush(uint64_t ref)
  * real buffer (native -> mirror) so this exposure reflects any bytes a
  * native call wrote directly since the app last saw it (CFDataAppendBytes
  * and friends write straight to the real buffer, never through the
- * mirror). Returns NULL if the small pool is exhausted (caller falls back
- * to the raw high pointer — better a later fault than a wrong answer). */
+ * mirror). A mirrored ref is RETAINED: were it freed, its address could be
+ * reused by an unrelated object and the flush would scribble the stale
+ * mirror into it. A full pool evicts round-robin (flush, then release).
+ * ponytail: the last CFDATA_MIRROR_CAP mutable datas stay pinned; track
+ * CFRelease if that ever matters. Returns NULL only on allocation failure. */
+static unsigned g_cfdata_mirror_evict;
 static void *cfdata_mirror_sync_in(CFDataRef ref, const void *native_p, size_t len)
 {
    unsigned i;
@@ -156,11 +160,14 @@ static void *cfdata_mirror_sync_in(CFDataRef ref, const void *native_p, size_t l
       if (g_cfdata_mirror[i].ref == ref) { break; }
    }
    if (i == g_cfdata_mirror_n) {
-      if (g_cfdata_mirror_n >= CFDATA_MIRROR_CAP) { return NULL; }
-      g_cfdata_mirror[i].ref = ref;
-      g_cfdata_mirror[i].low = NULL;
-      g_cfdata_mirror[i].cap = 0;
-      ++g_cfdata_mirror_n;
+      if (g_cfdata_mirror_n >= CFDATA_MIRROR_CAP) {
+         i = g_cfdata_mirror_evict++ % CFDATA_MIRROR_CAP;
+         x64_cfdata_mirror_flush((uint64_t)(uintptr_t)g_cfdata_mirror[i].ref);
+         CFRelease(g_cfdata_mirror[i].ref);
+      } else {
+         ++g_cfdata_mirror_n;
+      }
+      g_cfdata_mirror[i].ref = (CFDataRef)CFRetain(ref);
    }
    if (g_cfdata_mirror[i].cap < len) {
       void *grown = malloc(len);              /* low-4GB shim heap */
