@@ -1,0 +1,8 @@
+install=0
+active=1
+fired=2 self=1
+cleared=1
+remove=0
+left_us=1
+stopped=1
+exit_code: 0

@@ -867,3 +867,16 @@ _AudioUnitAddRenderNotify
 _AudioUnitRemoveRenderNotify
 _AudioConverterFillComplexBuffer
 _qsort
+
+# carbon_timemgr_shim.c — the classic Time Manager. The symbols exist natively;
+# the SHAPE is what abigen gets wrong: a TMTask is a queue element the manager
+# keeps after the call (abigen's deep copy dies with the bridge frame) and tmAddr
+# is an i386 procedure called later (native CarbonCore would call it natively).
+_InsTime
+_InsXTime
+_InstallTimeTask
+_InstallXTimeTask
+_PrimeTime
+_PrimeTimeTask
+_RmvTime
+_RemoveTimeTask

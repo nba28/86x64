@@ -1957,6 +1957,11 @@ $(BUILD_DIR)/99_agl_renderer_info.i386: $(BUILD_DIR)/99_agl_renderer_info.o
 $(BUILD_DIR)/99_cgl_macro_dispatch.i386: $(BUILD_DIR)/99_cgl_macro_dispatch.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
+# 99_time_manager: the Time Manager is CoreServices (not in the i386 sysroot);
+# libabiconv exports the ___<sym> shims, so link dynamic_lookup like above.
+$(BUILD_DIR)/99_time_manager.i386: $(BUILD_DIR)/99_time_manager.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
 # 95_crypto_cdkey_verify: like 39/49/79/85, the i386 sysroot's openssl headers
 # exist but there is no i386 libcrypto to link, so the OpenSSL 0.9.7 CD-key
 # surface (CRYPTO_set_mem_functions / RIPEMD160* / BN_bin2bn / RSA_new/verify/

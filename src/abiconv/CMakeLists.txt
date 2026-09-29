@@ -587,6 +587,10 @@ add_library(abiconv SHARED
   # Classic epoch is 1904-01-01 in LOCAL time (2082844800s before the Unix
   # epoch) — using gmtime here would silently shift every date by the timezone.
   carbon_datetime_shim.c
+  # carbon_timemgr_shim.c: ONE job — the classic Time Manager (InsTime/PrimeTime/
+  # RmvTime family) on dispatch timers, the i386 TMTask kept in place and tmAddr
+  # called through the i386 callback bridge (Portal 2 Bink's RADCB timer).
+  carbon_timemgr_shim.c
   # carbon_fscatinfo_shim.c / carbon_fscatinfo_tramp.asm: ONE job — marshal
   # FSCatalogInfo, the one classic struct whose two layouts genuinely differ
   # (FSPermissionInfo ends in an FSFileSecurityRef POINTER: 144 bytes on i386,

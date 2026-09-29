@@ -1612,6 +1612,17 @@ _x64_exc_longjmp:
 	; cxx_shim's ti_kind_of() range-checks +0 against these to recover the kind.
 	; Binding to the NATIVE 8-byte vtables would truncate to an unusable 32-bit value.
 	; 16 bytes each so adjacent sentinels never alias under the +8 addend.
+	; classic Time Manager (carbon_timemgr_shim.c): the TMTask stays the i386
+	; record and tmAddr runs through the callback bridge
+	MTSHIM	___InsTime,          _shim_InsTime
+	MTSHIM	___InsXTime,         _shim_InsTime
+	MTSHIM	___InstallTimeTask,  _shim_InstallTimeTask
+	MTSHIM	___InstallXTimeTask, _shim_InstallTimeTask
+	MTSHIM	___PrimeTime,        _shim_PrimeTime
+	MTSHIM	___PrimeTimeTask,    _shim_PrimeTimeTask
+	MTSHIM	___RmvTime,          _shim_RmvTime
+	MTSHIM	___RemoveTimeTask,   _shim_RemoveTimeTask
+
 	segment .data
 	global	____ZTVN10__cxxabiv117__class_type_infoE
 	global	____ZTVN10__cxxabiv120__si_class_type_infoE
@@ -1620,3 +1631,4 @@ _x64_exc_longjmp:
 ____ZTVN10__cxxabiv117__class_type_infoE:	times 16 db 0
 ____ZTVN10__cxxabiv120__si_class_type_infoE:	times 16 db 0
 ____ZTVN10__cxxabiv121__vmi_class_type_infoE:	times 16 db 0
+
