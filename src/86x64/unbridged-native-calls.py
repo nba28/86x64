@@ -113,7 +113,7 @@ def collect(paths):
     translated = set()
     for p in files:
         if text_vmaddr(p) == TRANSLATED_TEXT_BASE:
-            translated.add(os.path.basename(p))
+            translated.add(os.path.basename(p).lower())
     return files, translated
 
 
@@ -140,7 +140,12 @@ def scan(path, translated, want_data):
         if dylib.startswith("<"):
             continue                      # weak-def-coalesce &c, not a dylib
         base = dylib if dylib.endswith(".dylib") else dylib + ".dylib"
-        if base in translated or dylib in translated:
+        # APFS is case-insensitive but LC_LOAD_DYLIB install names and the
+        # on-disk leaf name can differ in case (e.g. @executable_path/
+        # libBinkMachOx86.dylib vs. the actual libbinkmachox86.dylib) --
+        # match case-insensitively or a sibling translated module reads as
+        # an unbridged native call.
+        if base.lower() in translated or dylib.lower() in translated:
             continue                      # sibling translated module: same ABI
         yield dylib, sym, sect
 
