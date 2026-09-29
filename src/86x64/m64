@@ -800,6 +800,13 @@ def cmd_consolidate_runtime(args):
                 continue
             c.unlink()
             removed += 1
+    # Symlinks that named a removed copy (a framework's root or version-dir
+    # `libabiconv.dylib -> Libraries/libabiconv.dylib`) now dangle, and codesign
+    # rejects a dangling link. Nothing loads through them any more.
+    for lib in plan:
+        for l in app.rglob(lib):
+            if l.is_symlink() and not l.exists() and not args.dry_run:
+                l.unlink()
     for c, u in kept:
         warn(f"kept {c.relative_to(app)}: {u.relative_to(app)} still resolves to it")
     if not args.dry_run:
