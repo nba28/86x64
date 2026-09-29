@@ -86,7 +86,17 @@ FRAMEWORKS = [
 ]
 
 
-def resolves_on_x86_64(names):
+def system_deps(lib):
+    """The system libraries `lib` itself links (otool -L): loaded whenever it is,
+    so their exports resolve for its bridges whatever the app loads. Without them
+    the probe called every OpenAL/ForceFeedback bridge null although libabiconv
+    links both (Portal 2's OpenAL binds stayed raw)."""
+    out = subprocess.run(["otool", "-L", lib], capture_output=True, text=True).stdout
+    return [l.split()[0] for l in out.splitlines()[1:]
+            if l.strip().startswith(("/System/", "/usr/lib/"))]
+
+
+def resolves_on_x86_64(names, extra_libs=()):
     """Subset of `names` that a translated x86_64 app's dyld would resolve.
 
     Compiles nulljump_probe.c -arch x86_64 and runs it under `arch -x86_64`.
@@ -118,7 +128,7 @@ def resolves_on_x86_64(names):
         if cc.returncode != 0:
             raise SystemExit("find_null_jump_bridges: cannot build the x86_64 probe:\n"
                              + cc.stderr)
-    run = subprocess.run(["arch", "-x86_64", probe] + FRAMEWORKS,
+    run = subprocess.run(["arch", "-x86_64", probe] + FRAMEWORKS + list(extra_libs),
                          input="\n".join(sorted(names)), capture_output=True, text=True)
     if run.returncode != 0:
         raise SystemExit("find_null_jump_bridges: the x86_64 probe failed (is Rosetta "
@@ -181,7 +191,7 @@ def main():
 
     # One batched probe rather than one process per symbol.
     candidates = {br[2:] for br in bridges if br[2:] in undef}
-    live = resolves_on_x86_64(candidates)
+    live = resolves_on_x86_64(candidates, system_deps(lib))
 
     # Symbols provided by any bundle the caller pointed us at (translated
     # frameworks count -- they are real, working implementations).

@@ -833,6 +833,12 @@ target_link_libraries(abiconv System objc
   "-framework AddressBook"
   "-framework DiscRecording"
   "-framework ICADevices"
+  # Present-native families bridged only through the import-driven pass: while
+  # unlinked, the nulljump probe (a clean process) could not resolve them and
+  # blacklisted every bridge, so Portal 2's OpenAL/ForceFeedback binds stayed
+  # raw cross-ABI calls.
+  "-framework OpenAL"
+  "-framework ForceFeedback"
   )
 add_dependencies(abiconv abiconv_asm)
 if(TARGET abiconv_legacy_asm)
