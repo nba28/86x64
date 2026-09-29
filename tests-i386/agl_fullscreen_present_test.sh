@@ -21,9 +21,10 @@ if [ ! -x "$BIN" ]; then
   echo "agl-fullscreen-present: SKIP ($BIN missing; run \`make build-only\` first)"; exit 0
 fi
 
-# prints "<surface on-screen> <carbon on-screen>" as 0/1
+# prints "<surface on-screen> <carbon on-screen> <warp round-trip>" as 0/1
+OUT=$(mktemp)
 arm() {
-  env AGL_PRESENT=1 "$@" perl -e 'alarm 15; exec @ARGV' "$BIN" >/dev/null 2>&1 &
+  env AGL_PRESENT=1 "$@" perl -e 'alarm 15; exec @ARGV' "$BIN" >"$OUT" 2>/dev/null &
   local runner=$! pid=""
   for _ in 1 2 3 4 5 6 7 8 9 10; do
     sleep 0.5; pid=$(pgrep -f "$BIN" | head -1); [ -n "$pid" ] && break
@@ -33,22 +34,31 @@ arm() {
 import sys, Quartz
 pid = int(sys.argv[1] or 0); surf = carb = 0
 for w in Quartz.CGWindowListCopyWindowInfo(Quartz.kCGWindowListOptionAll, 0):
-    if w.get('kCGWindowOwnerPID') != pid or not w.get('kCGWindowIsOnscreen'): continue
+    if w.get('kCGWindowOwnerPID') != pid: continue
     # the surface is titled with the process name (it is scaled to the visible
-    # screen, so its size is not an identity); the Carbon window is untitled 400 wide
-    if w.get('kCGWindowName', '').startswith('99_agl_window_drawable'): surf = 1
-    elif int(w['kCGWindowBounds']['Width']) == 400: carb = 1
-print(surf, carb)
+    # screen, so its size is not an identity); on an UNLOCKED screen it moves into
+    # its own fullscreen Space and reads off-screen here, so its existence is the
+    # signal. The Carbon window is untitled, 400 wide, and must be on screen.
+    if (w.get('kCGWindowName') or '').startswith('99_agl_window_drawable'): surf = 1
+    elif w.get('kCGWindowIsOnscreen') and int(w['kCGWindowBounds']['Width']) == 400: carb = 1
+print(surf, carb, end=' ')
 PY
   wait $runner 2>/dev/null
+  sed -n 's/^warp_roundtrip=\([01]\).*/\1/p' "$OUT" | head -1
 }
 
 fail=0
-read -r s c <<<"$(arm)"
-if [ "$s" = 1 ] && [ "$c" = 0 ]; then echo "  ON : surface up, Carbon window ordered out  OK"
-else echo "  ON : expected surface=1 carbon=0, got surface=$s carbon=$c"; fail=1; fi
-read -r s c <<<"$(arm M64_NO_CGL_FULLSCREEN_BRIDGE=1)"
+read -r s c w <<<"$(arm)"
+if [ "$s" = 1 ] && [ "$c" = 0 ] && [ "$w" = 1 ]; then echo "  ON : surface up, Carbon window ordered out, warp round-trips  OK"
+else echo "  ON : expected surface=1 carbon=0 warp=1, got surface=$s carbon=$c warp=$w"; fail=1; fi
+# CGWarpMouseCursorPosition takes the app's (virtual) global point: unmapped, the
+# cursor lands elsewhere and GetGlobalMouse reads a false delta (Halo's creep).
+read -r s c w <<<"$(arm M64_NO_WARP_UNMAP=1)"
+if [ "$w" = 0 ]; then echo "  OFF: M64_NO_WARP_UNMAP=1 -> warp does not round-trip  OK"
+else echo "  OFF: expected warp=0 with M64_NO_WARP_UNMAP=1, got warp=$w"; fail=1; fi
+read -r s c w <<<"$(arm M64_NO_CGL_FULLSCREEN_BRIDGE=1)"
 if [ "$s" = 0 ] && [ "$c" = 1 ]; then echo "  OFF: no surface, Carbon window stays  OK"
 else echo "  OFF: expected surface=0 carbon=1, got surface=$s carbon=$c"; fail=1; fi
+rm -f "$OUT"
 [ $fail = 0 ] && echo "agl-fullscreen-present: PASS" || echo "agl-fullscreen-present: FAIL"
 exit $fail

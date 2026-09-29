@@ -82,7 +82,6 @@ extern void glGetIntegerv(unsigned int pname, int *params);
 /* present mode (AGL_PRESENT set; driven by agl_fullscreen_present_test.sh) */
 extern char    *getenv(const char *);
 extern void     ShowWindow(WindowRef w);
-extern int      RunCurrentEventLoop(double seconds);
 extern GLboolean aglSwapBuffers(AGLContext ctx);
 extern void     glClear(unsigned int mask);
 extern int      CGCaptureAllDisplays(void);
@@ -92,6 +91,14 @@ extern const void *CGDisplayBestModeForParameters(unsigned dpy, unsigned long bp
                                                   unsigned long w, unsigned long h,
                                                   int *exact);
 extern int      CGDisplaySwitchToMode(unsigned dpy, const void *mode);
+extern int CFRunLoopRunInMode(const void *mode, double seconds, unsigned char returnAfterSource);
+typedef struct { short v, h; } QDPt;
+typedef struct { float x, y; } CGPt32;
+extern void    *GetWindowPort(WindowRef w);
+extern void     SetPort(void *port);
+extern void     LocalToGlobal(QDPt *pt);
+extern void     GetGlobalMouse(QDPt *pt);
+extern int      CGWarpMouseCursorPosition(CGPt32 p);
 
 #define kDocumentWindowClass          6u
 #define kWindowCompositingAttribute   (1u << 19)
@@ -163,7 +170,23 @@ int main(void)
         glClear(0x4000);
         aglSwapBuffers(ctx);
         printf("presented\n");
-        RunCurrentEventLoop(4.0);
+        /* Not RunCurrentEventLoop: it has no abigen bridge unless a target
+         * imports it (todo_gaps), and raw it reads its timeout from xmm0 and
+         * returns at once, so the surface was sampled after the fixture exited. */
+        CFRunLoopRunInMode(__builtin___CFStringMakeConstantString("kCFRunLoopDefaultMode"), 4.0, 0);
+        /* Halo's mouse idiom: warp to a window point in GLOBAL coordinates, then
+         * read it back; the delta must be zero or the cursor creeps. */
+        {
+            QDPt p = { 80, 100 }, q = { 0, 0 };
+            SetPort(GetWindowPort(win));
+            LocalToGlobal(&p);
+            CGPt32 w = { (float)p.h, (float)p.v };
+            CGWarpMouseCursorPosition(w);
+            GetGlobalMouse(&q);
+            int dh = q.h - p.h, dv = q.v - p.v;
+            printf("warp_roundtrip=%d (%d,%d)->(%d,%d)\n",
+                   dh >= -1 && dh <= 1 && dv >= -1 && dv <= 1, p.h, p.v, q.h, q.v);
+        }
         CGReleaseAllDisplays();
     }
 

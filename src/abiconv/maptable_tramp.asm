@@ -1122,6 +1122,7 @@ _x64_exc_longjmp:
 	MTSHIM	___CGLSetFullScreen,                  _shim_CGLSetFullScreen
 	MTSHIM	___CGLSetFullScreenOnDisplay,         _shim_CGLSetFullScreenOnDisplay
 	MTSHIM	___CGLClearDrawable,                  _shim_CGLClearDrawable
+	MTSHIM	___CGWarpMouseCursorPosition,         _shim_CGWarpMouseCursorPosition
 	; --- Carbon HIToolbox UI + Display Mgr (carbon_ui_shim.c) ---
 	MTSHIM	___BeginUpdate,                       _shim_BeginUpdate
 	MTSHIM	___FindWindow,                        _shim_FindWindow

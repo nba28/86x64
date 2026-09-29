@@ -40,6 +40,7 @@
 #import <OpenGL/OpenGL.h>
 #import <Carbon/Carbon.h>
 #include <stdint.h>
+#include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <unistd.h>
@@ -253,6 +254,28 @@ int cglfs_map_global(double *x, double *y)
    ci_content_origin(&ox, &oy);
    *x = ox + vx; *y = oy + vy;
    return 1;
+}
+
+/* CGError CGWarpMouseCursorPosition(CGPoint) — i386 CGPoint is two floats.
+ * The inverse of cglfs_map_global: a game that re-centres the cursor every
+ * frame (Halo: warp to its window's centre, then delta = GetGlobalMouse -
+ * centre) must land where GetGlobalMouse will read that same point back, or
+ * every frame sees a false delta and the cursor creeps. Unmapped while no
+ * surface is up. */
+uint32_t shim_CGWarpMouseCursorPosition(uint32_t *a)
+{
+   float fx, fy;
+   memcpy(&fx, &a[0], 4); memcpy(&fy, &a[1], 4);
+   CGPoint p = CGPointMake(fx, fy);
+   static int off = -1;   /* guard OFF arm only (agl-fullscreen-present) */
+   if (off < 0) off = getenv("M64_NO_WARP_UNMAP") != NULL;
+   if (!off && g_active && g_scale > 0) {
+      int16_t ox = 0, oy = 0;
+      ci_content_origin(&ox, &oy);
+      p.x = g_gx + (fx - ox) * g_scale;
+      p.y = g_gy + (fy - oy) * g_scale;
+   }
+   return (uint32_t)CGWarpMouseCursorPosition(p);
 }
 
 /* The WINDOWED-context twin of the idiom: capture + CGDisplaySwitchToMode, then
