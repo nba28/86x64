@@ -558,6 +558,13 @@ def translate_bundle(bundle, args):
     if not args.no_shim:
         cmd_shim(argparse.Namespace(app=str(bundle), targets=plan_translate,
                                     dry_run=args.dry_run))
+    # One runtime per bundle (runtime_jurisdictions): translation co-locates a
+    # copy next to every translated image and a vendored framework (the golden
+    # QuickTime, a Python.framework) brings its OWN, frozen at whatever build
+    # produced it. Sync them all to the current build (consolidation requires
+    # identical copies), then collapse to the single copy in runtime_home().
+    cmd_resync(argparse.Namespace(app=str(bundle), dry_run=args.dry_run))
+    cmd_consolidate_runtime(argparse.Namespace(app=str(bundle), dry_run=args.dry_run))
     if not args.no_sign:
         cmd_sign(argparse.Namespace(app=str(bundle), dry_run=args.dry_run))
 
@@ -1543,7 +1550,8 @@ def cmd_sign(args):
 
 
 def cmd_deploy(args):
-    """Full post-translate deploy (rpath → shim → resync → sign → clear state)."""
+    """Full post-translate deploy (rpath → shim → resync → sign → clear state →
+    consolidate to one runtime)."""
     require(DEPLOY_SH)
     app = Path(args.app)
     ident = args.identifier or bundle_identifier(app) or app.stem
@@ -1567,6 +1575,11 @@ def cmd_deploy(args):
     finally:
         if cleanup and not args.dry_run:
             os.unlink(cleanup)
+    # One runtime per bundle, as translate leaves it (the deploy script resyncs
+    # every copy first, which consolidation requires), then re-seal.
+    cmd_consolidate_runtime(argparse.Namespace(app=str(app), dry_run=args.dry_run))
+    if app.suffix == ".app":
+        cmd_sign(argparse.Namespace(app=str(app), dry_run=args.dry_run))
 
 
 def cmd_run(args):
