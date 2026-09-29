@@ -34,6 +34,9 @@ set -uo pipefail
 
 P2="${P2:-$HOME/Library/Application Support/Steam/steamapps/common/Portal 2}"
 SRC32="$P2/bin/osx32"
+# The game-dir modules (client, server, matchmaking): the engine dlopens them by
+# leaf name, which DYLD_LIBRARY_PATH resolves in bin/osx64 like the rest.
+GAME32="$P2/portal2/bin/osx32"
 DST64="$P2/bin/osx64"
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
 M64="${M64:-m64}"
@@ -75,9 +78,11 @@ mkdir -p "$STAGE"
 # tree, or is the game root itself (which would target portal2_osx).
 stage_abs="$(cd "$STAGE" && pwd -P)"
 src_abs="$(cd "$SRC32" && pwd -P)"
+game_abs="$(cd "$GAME32" && pwd -P)"
 p2_abs="$(cd "$P2" && pwd -P)"
 case "$stage_abs" in
   "$src_abs"|"$src_abs"/*) echo "FATAL: stage dir is inside the PRISTINE i386 tree ($src_abs). Refusing." >&2; exit 1;;
+  "$game_abs"|"$game_abs"/*) echo "FATAL: stage dir is inside the PRISTINE i386 tree ($game_abs). Refusing." >&2; exit 1;;
   "$p2_abs") echo "FATAL: stage dir is the game root (would overwrite the pristine portal2_osx). Refusing." >&2; exit 1;;
 esac
 
@@ -118,17 +123,18 @@ if [ "$EXEC_ONLY" -eq 1 ]; then
   :                      # targets stays empty; only the exec below is translated
 elif [ ${#ONLY[@]} -gt 0 ]; then
   for n in "${ONLY[@]}"; do
-    [ -f "$SRC32/$n" ] || { echo "FATAL: --only $n not found in osx32" >&2; exit 1; }
-    targets+=("$n")
+    if [ -f "$SRC32/$n" ]; then targets+=("$SRC32/$n")
+    elif [ -f "$GAME32/$n" ]; then targets+=("$GAME32/$n")
+    else echo "FATAL: --only $n not found in bin/osx32 or portal2/bin/osx32" >&2; exit 1; fi
   done
 else
   while IFS= read -r n; do
-    [ "$n" = "libcef.dylib" ] && [ "$INCLUDE_CEF" -eq 0 ] && continue
+    [ "$(basename "$n")" = "libcef.dylib" ] && [ "$INCLUDE_CEF" -eq 0 ] && continue
     # Only Mach-O i386 inputs are translatable. The mss*.asi/.mix Miles plugins
     # are Windows PE32 DLLs that the engine loads as opaque data — copy, never
     # translate.
-    case "$(file -b "$SRC32/$n")" in *i386*) targets+=("$n");; esac
-  done < <(ls -1 "$SRC32")
+    case "$(file -b "$n")" in *i386*) targets+=("$n");; esac
+  done < <(ls -1d "$SRC32"/* "$GAME32"/*)
 fi
 
 # --- arch audit ------------------------------------------------------------
@@ -144,12 +150,12 @@ fi
 # (the SteamAPI_* C API). Print it so the choice stays visible and reviewable.
 native_capable=()
 for n in ${targets[@]+"${targets[@]}"}; do
-  case "$(lipo -info "$SRC32/$n" 2>/dev/null)" in *x86_64*) native_capable+=("$n");; esac
+  case "$(lipo -info "$n" 2>/dev/null)" in *x86_64*) native_capable+=("$n");; esac
 done
 if [ ${#native_capable[@]} -gt 0 ]; then
   echo "==> ⚠ ships a NATIVE x86_64 slice, translating the i386 slice anyway:"
   for n in "${native_capable[@]}"; do
-    echo "      $n  [$(lipo -info "$SRC32/$n" 2>/dev/null | sed 's/.*are: //')]"
+    echo "      $n  [$(lipo -info "$n" 2>/dev/null | sed 's/.*are: //')]"
   done
 fi
 
@@ -182,7 +188,7 @@ results="$STAGE/.results"
 : > "$results"
 {
   for n in ${targets[@]+"${targets[@]}"}; do
-    printf '%s\0%s\0%s\0' "$SRC32/$n" "$STAGE/$n" "$n"
+    printf '%s\0%s\0%s\0' "$n" "$STAGE/$(basename "$n")" "$(basename "$n")"
   done
   if [ "$DO_EXEC" -eq 1 ]; then
     # The exec pipeline emits BOTH the x86_64 wrapper exec `portal2_osx` and its
