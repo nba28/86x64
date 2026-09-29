@@ -690,14 +690,22 @@ int x64_objc_arena_describe(uint64_t addr, char *buf, size_t n) {
       return 1;
    }
    const uint64_t real = *(const uint64_t *)p;
+   /* Name the class WITHOUT the runtime: a stale handle's object is freed or
+    * garbage, and object_getClass + class_getName on it faulted inside the
+    * reporter (PvZ windowed switch, 2026-09-29), losing the stack dump. Read
+    * the isa as plain memory, mask it (x86_64 ISA_MASK) and let dladdr name
+    * the _OBJC_CLASS_$_X symbol it points at: pure reads of dyld's tables. */
    const char *cname = NULL;
+   Dl_info di;
    if (real != 0 && mem_readable((uintptr_t)real, sizeof(uint64_t))) {
-      Class c = object_getClass((id)(uintptr_t)real);
-      if (c) { cname = class_getName(c); }
+      const uintptr_t isa = (uintptr_t)(*(const uint64_t *)(uintptr_t)real & 0x00007ffffffffff8ULL);
+      if (isa && dladdr((void *)isa, &di) && di.dli_sname && (uintptr_t)di.dli_saddr == isa) {
+         cname = di.dli_sname;
+      }
    }
    snprintf(buf, n, "proxy-arena handle, slot %lu -> real %p (%s)",
             (unsigned long)((p - g_arena_base) / sizeof(uint64_t)),
-            (void *)(uintptr_t)real, cname ? cname : "class unreadable");
+            (void *)(uintptr_t)real, cname ? cname : "isa names no image class: freed or not an object");
    return 1;
 }
 
