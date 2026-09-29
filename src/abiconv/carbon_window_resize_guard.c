@@ -124,8 +124,17 @@ static int wrg_ever_shown(void *win) {
    return 0;
 }
 
+static uint32_t set_window_bounds(uint32_t *args);
+
 /* OSStatus SetWindowBounds(WindowRef, WindowRegionCode, const Rect *) */
 uint32_t shim_SetWindowBounds(uint32_t *args) {
+   const uint32_t st = set_window_bounds(args);
+   extern void agl_window_fit(void *);   /* agl_drawable_shim.c: too big for the screen? */
+   agl_window_fit((void *)(uintptr_t)x64_objc_unwrap(args[0]));
+   return st;
+}
+
+static uint32_t set_window_bounds(uint32_t *args) {
    void          *win    = (void *)(uintptr_t)x64_objc_unwrap(args[0]);
    const uint32_t region = args[1];
    const WRGRect *want   = (const WRGRect *)i386_ptr(args[2]);

@@ -201,6 +201,28 @@ int agl_update_contexts_for_window(void *win)
 
 static uint32_t bind_get(void *ctx);
 
+/* A GL window whose content is larger than the screen's usable area goes on the
+ * surface as a scaled ordinary window (cgl_fullscreen_shim.m). Called wherever a
+ * GL window can reach its final size: attach, show, SetWindowBounds. */
+extern int cglfs_present_window(void *ctx, int w, int h);
+void agl_window_fit(void *win)
+{
+   if (!win || cgdisp_virtual_display()) return;   /* fullscreen owns it then */
+   void *ctx = NULL;
+   os_unfair_lock_lock(&g_bind_lk);
+   for (int i = 0; i < AGL_MAX_CTX; i++)
+      if (g_bind[i].ctx && g_bind[i].drawable && qd_port_window(g_bind[i].drawable) == win) {
+         ctx = g_bind[i].ctx; break;
+      }
+   os_unfair_lock_unlock(&g_bind_lk);
+   if (!ctx) return;
+   static int32_t (*getb)(void *, uint16_t, int16_t *);
+   if (!getb) getb = (int32_t (*)(void *, uint16_t, int16_t *))dlsym(RTLD_DEFAULT, "GetWindowBounds");
+   int16_t r[4] = { 0, 0, 0, 0 };                    /* top, left, bottom, right */
+   if (!getb || getb(win, 33 /* kWindowContentRgn */, r) != 0) return;
+   (void)cglfs_present_window(ctx, r[3] - r[1], r[2] - r[0]);
+}
+
 /* The fullscreen surface was taken down: give ctx back to the window it is
  * bound to (the surface never changed the binding, only the native target). */
 void agl_reattach_window(void *ctx)
@@ -242,6 +264,7 @@ uint32_t shim_aglSetDrawable(uint32_t *a)
             bind_set(ctx, draw_h);
             const uint32_t dpy = cgdisp_virtual_display();
             if (dpy) cglfs_present(ctx, dpy);   /* attached after the switch */
+            else agl_window_fit(win);
             return 1;
          }
          bind_set(ctx, 0);

@@ -20,6 +20,8 @@ uint32_t shim_ShowWindow(uint32_t *args) {
    static dsw_void_fn f;
    if (!f) f = (dsw_void_fn)dlsym(RTLD_DEFAULT, "ShowWindow");
    if (f && win) f(win);
+   extern void agl_window_fit(void *);   /* agl_drawable_shim.c: too big for the screen? */
+   agl_window_fit(win);
    return 0;
 }
 

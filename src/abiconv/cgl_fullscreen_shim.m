@@ -179,10 +179,11 @@ static void shield_others(void)
    }
 }
 
-static void present(CGLContextObj ctx, CGDirectDisplayID dpy)
+/* Put ctx on the surface at the app's resolution w x h. `fs`: take the surface
+ * into its own fullscreen Space (the app asked for fullscreen); otherwise it
+ * stays an ordinary window, scaled to fit the screen. */
+static void present_sized(CGLContextObj ctx, CGDirectDisplayID dpy, CGFloat w, CGFloat h, int fs)
 {
-   uint32_t id = dpy;
-   const CGFloat w = shim_CGDisplayPixelsWide(&id), h = shim_CGDisplayPixelsHigh(&id);
    on_main(^{
       [NSApplication sharedApplication];
       g_vw = w; g_vh = h;
@@ -235,8 +236,33 @@ static void present(CGLContextObj ctx, CGDirectDisplayID dpy)
       [g_ns update];
       g_active = 1;
       /* The app asked for fullscreen: give it its own Space. */
-      if (!(g_win.styleMask & NSWindowStyleMaskFullScreen)) { [g_win toggleFullScreen:nil]; }
+      if (fs && !(g_win.styleMask & NSWindowStyleMaskFullScreen)) { [g_win toggleFullScreen:nil]; }
    });
+}
+
+static void present(CGLContextObj ctx, CGDirectDisplayID dpy)
+{
+   uint32_t id = dpy;
+   present_sized(ctx, dpy, shim_CGDisplayPixelsWide(&id), shim_CGDisplayPixelsHigh(&id), 1);
+}
+
+/* A WINDOWED GL window larger than the screen's usable area (Halo "Play in a
+ * window" at a 2560x1440 resolution on a 1512x982 screen: title bar off-screen,
+ * nothing reachable). Its size cannot be changed after show (NSCGSPanic), so its
+ * CONTEXT goes on the surface as an ordinary window scaled to fit, input mapped
+ * back (cglfs_map_global). Returns 1 when it took ctx (or already has it). */
+int cglfs_present_window(CGLContextObj ctx, int w, int h)
+{
+   if (bridge_off() || !ctx || w <= 0 || h <= 0) return 0;
+   __block int over = 0;
+   on_main(^{
+      const NSRect vf = NSScreen.mainScreen.visibleFrame;
+      over = w > vf.size.width || h > vf.size.height - 28;
+   });
+   if (!over) return 0;
+   if (g_active && g_ctx == ctx && g_vw == w && g_vh == h) return 1;
+   present_sized(ctx, CGMainDisplayID(), w, h, 0);
+   return 1;
 }
 
 /* Global screen point (Carbon: main-screen top-left, y down) -> the app's

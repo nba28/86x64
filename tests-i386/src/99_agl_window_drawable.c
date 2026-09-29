@@ -125,6 +125,9 @@ int main(void)
 {
     Rect r = { 100, 100, 400, 500 };
     WindowRef win = 0;
+    /* oversize mode (agl_oversize_window_test.sh): a windowed GL window larger
+     * than any screen must go on the scaled surface, not off the screen edges. */
+    if (getenv("AGL_OVERSIZE")) { r.bottom = 100 + 3000; r.right = 100 + 4000; }
 
     int st = CreateNewWindow(kDocumentWindowClass,
                              kWindowStandardDocumentAttrs | kWindowCompositingAttribute,
@@ -161,6 +164,11 @@ int main(void)
     /* The windowed-context fullscreen idiom: capture + switch while the GL
      * window is up. The bridge presents the context on its fullscreen surface
      * (cgl_fullscreen_shim.m); the script reads the window list meanwhile. */
+    if (getenv("AGL_OVERSIZE")) {
+        ShowWindow(win);
+        printf("shown\n");
+        CFRunLoopRunInMode(__builtin___CFStringMakeConstantString("kCFRunLoopDefaultMode"), 4.0, 0);
+    }
     if (getenv("AGL_PRESENT")) {
         int exact = 0;
         ShowWindow(win);
