@@ -75,6 +75,7 @@
 	MTSHIM	___HSetState,		_shim_HSetState
 	MTSHIM	___GetPtrSize,		_shim_GetPtrSize
 	MTSHIM	___SetPtrSize,		_shim_SetPtrSize
+	MTSHIM	___MemError,		_shim_MemError
 
 	;; --- CarbonCore's CSMem* twins: all 22 the translated QuickTime imports
 	MTSHIM	___CSMemNewHandle,	_shim_CSMemNewHandle

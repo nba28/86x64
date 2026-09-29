@@ -129,13 +129,29 @@ void cm_dispose_ptr(uint32_t p)
 /* Each shim_X reads i386 stack-arg slots from a[] and returns its 4-byte
  * result in eax. Handle/Ptr/Size are all 4-byte on i386. */
 
+/* MemError(): the classic Memory Manager reports void/pointer calls through a
+ * last-error value the caller reads NEXT. It was an abigen bridge to the NATIVE
+ * MemError, which never sees these shims, so it always said noErr. MEASURED
+ * (Halo "new campaign", 2026-09-29, M64_HEAP_GUARD): Halo's realloc wrapper
+ * calls SetPtrSize to grow, checks MemError, and only on an error falls back to
+ * allocate+copy. SetPtrSize refused (a Ptr cannot move) but MemError said
+ * noErr, so Halo memset 8 bytes past the 16-byte block and corrupted the next
+ * heap header; the crash surfaced much later inside malloc. Every call below
+ * that reports through MemError sets it; per thread, as the caller reads it
+ * right after on the same thread. */
+static __thread int32_t g_memerr;
+static uint32_t me(uint32_t err) { g_memerr = (int16_t)err; return err; }
+static uint32_t me_ptr(uint32_t p) { g_memerr = p ? 0 : cmMemFullErr; return p; }
+/* OSErr MemError(void); */
+uint32_t shim_MemError(uint32_t *a) { (void)a; return (uint32_t)g_memerr; }
+
 /* Handle NewHandle(Size logicalSize); */
-uint32_t shim_NewHandle(uint32_t *a)      { return cm_new_handle(a[0], 0); }
+uint32_t shim_NewHandle(uint32_t *a)      { return me_ptr(cm_new_handle(a[0], 0)); }
 /* Handle NewHandleClear(Size logicalSize); */
-uint32_t shim_NewHandleClear(uint32_t *a) { return cm_new_handle(a[0], 1); }
+uint32_t shim_NewHandleClear(uint32_t *a) { return me_ptr(cm_new_handle(a[0], 1)); }
 
 /* void DisposeHandle(Handle h); */
-uint32_t shim_DisposeHandle(uint32_t *a)  { cm_dispose_handle(a[0]); return 0; }
+uint32_t shim_DisposeHandle(uint32_t *a)  { cm_dispose_handle(a[0]); return me(0); }
 
 /* Size GetHandleSize(Handle h); */
 uint32_t shim_GetHandleSize(uint32_t *a)  { return cm_handle_size(a[0]); }
@@ -144,29 +160,29 @@ uint32_t shim_GetHandleSize(uint32_t *a)  { return cm_handle_size(a[0]); }
 uint32_t shim_SetHandleSize(uint32_t *a)
 {
    uint32_t hdl = a[0], newSize = a[1];
-   if (!hdl) return cmParamErr;
+   if (!hdl) return me(cmParamErr);
    uint32_t *mp = (uint32_t *)i386_ptr(hdl);
    void *user = i386_ptr(*mp);
-   if (!user) return cmParamErr;
+   if (!user) return me(cmParamErr);
    char *real = (char *)user - sizeof(struct hblk_hdr);
    char *nreal = (char *)realloc(real, sizeof(struct hblk_hdr) + newSize);
-   if (!nreal) return cmMemFullErr;
+   if (!nreal) return me(cmMemFullErr);
    struct hblk_hdr *h = (struct hblk_hdr *)nreal;
    h->size  = newSize;
    h->magic = HBLK_MAGIC;
    *mp = to_i386(nreal + sizeof(struct hblk_hdr));
-   return 0;
+   return me(0);
 }
 
 /* Ptr blocks carry the SAME 16-byte header as Handle blocks so GetPtrSize is
  * exact and SetPtrSize can realloc. The i386 caller only ever sees `user`. */
 
 /* Ptr NewPtr(Size byteCount); — a nonrelocatable block (no master pointer). */
-uint32_t shim_NewPtr(uint32_t *a)         { return cm_new_ptr(a[0], 0); }
+uint32_t shim_NewPtr(uint32_t *a)         { return me_ptr(cm_new_ptr(a[0], 0)); }
 /* Ptr NewPtrClear(Size byteCount); */
-uint32_t shim_NewPtrClear(uint32_t *a)    { return cm_new_ptr(a[0], 1); }
+uint32_t shim_NewPtrClear(uint32_t *a)    { return me_ptr(cm_new_ptr(a[0], 1)); }
 /* void DisposePtr(Ptr p); */
-uint32_t shim_DisposePtr(uint32_t *a)     { cm_dispose_ptr(a[0]); return 0; }
+uint32_t shim_DisposePtr(uint32_t *a)     { cm_dispose_ptr(a[0]); return me(0); }
 
 /* ======================================================================== *
  *  The rest of the classic Memory Manager, and CarbonCore's CSMem* twins.
@@ -205,9 +221,9 @@ uint32_t shim_NewEmptyHandle(uint32_t *a)
 {
    (void)a;
    uint32_t *mp = (uint32_t *)malloc(sizeof(uint32_t));
-   if (!mp) return 0;
+   if (!mp) return me_ptr(0);
    *mp = 0;
-   return to_i386(mp);
+   return me_ptr(to_i386(mp));
 }
 
 /* void EmptyHandle(Handle h); — free the block, KEEP the master pointer.
@@ -216,12 +232,12 @@ uint32_t shim_NewEmptyHandle(uint32_t *a)
 uint32_t shim_EmptyHandle(uint32_t *a)
 {
    uint32_t hdl = a[0];
-   if (!hdl) return 0;
+   if (!hdl) return me(0);
    uint32_t *mp = (uint32_t *)i386_ptr(hdl);
    void *user = i386_ptr(*mp);
    if (user) free((char *)user - sizeof(struct hblk_hdr));
    *mp = 0;
-   return 0;
+   return me(0);
 }
 
 /* OSErr ReallocateHandle(Handle h, Size newSize); — give an (often emptied)
@@ -230,17 +246,17 @@ uint32_t shim_EmptyHandle(uint32_t *a)
 uint32_t shim_ReallocateHandle(uint32_t *a)
 {
    uint32_t hdl = a[0], newSize = a[1];
-   if (!hdl) return cmParamErr;
+   if (!hdl) return me(cmParamErr);
    uint32_t *mp = (uint32_t *)i386_ptr(hdl);
    void *old = i386_ptr(*mp);
    if (old) free((char *)old - sizeof(struct hblk_hdr));
    *mp = 0;
    char *real = (char *)malloc(sizeof(struct hblk_hdr) + newSize);
-   if (!real) return cmMemFullErr;
+   if (!real) return me(cmMemFullErr);
    struct hblk_hdr *h = (struct hblk_hdr *)real;
    h->size = newSize; h->magic = HBLK_MAGIC;
    *mp = to_i386(real + sizeof(struct hblk_hdr));
-   return 0;
+   return me(0);
 }
 
 /* Handle RecoverHandle(Ptr p); — given a block, find its Handle.
@@ -263,11 +279,11 @@ uint32_t shim_SetPtrSize(uint32_t *a)
 {
    uint32_t p = a[0], newSize = a[1];
    void *user = i386_ptr(p);
-   if (!user) return cmParamErr;
+   if (!user) return me(cmParamErr);
    struct hblk_hdr *h = (struct hblk_hdr *)((char *)user - sizeof(struct hblk_hdr));
-   if (h->magic != HBLK_MAGIC) return cmParamErr;
-   if (newSize <= h->size) { h->size = newSize; return 0; }
-   return cmMemFullErr;
+   if (h->magic != HBLK_MAGIC) return me(cmParamErr);
+   if (newSize <= h->size) { h->size = newSize; return me(0); }
+   return me(cmMemFullErr);
 }
 
 /* OSErr PtrToHand(const void *srcPtr, Handle *dstHndl, Size size); */
@@ -277,10 +293,10 @@ uint32_t shim_PtrToHand(uint32_t *a)
    uint32_t *out = (uint32_t *)i386_ptr(a[1]);
    if (out) *out = 0;                    /* rule A: define the out-param first */
    uint32_t hdl = cm_new_handle(size, 0);
-   if (!hdl) return cmMemFullErr;
+   if (!hdl) return me(cmMemFullErr);
    if (size && src) memcpy(cm_handle_block(hdl), i386_ptr(src), size);
    if (out) *out = hdl;
-   return 0;
+   return me(0);
 }
 
 /* OSErr PtrToXHand(const void *srcPtr, Handle dstHndl, Size size); — copy into
@@ -288,53 +304,53 @@ uint32_t shim_PtrToHand(uint32_t *a)
 uint32_t shim_PtrToXHand(uint32_t *a)
 {
    uint32_t src = a[0], hdl = a[1], size = a[2];
-   if (!hdl) return cmParamErr;
+   if (!hdl) return me(cmParamErr);
    uint32_t rz[2]; rz[0] = hdl; rz[1] = size;
    uint32_t err = shim_SetHandleSize(rz);
-   if (err) return err;
+   if (err) return me(err);
    if (size && src) memcpy(cm_handle_block(hdl), i386_ptr(src), size);
-   return 0;
+   return me(0);
 }
 
 /* OSErr HandToHand(Handle *theHndl); — replace *theHndl with a COPY. */
 uint32_t shim_HandToHand(uint32_t *a)
 {
    uint32_t *slot = (uint32_t *)i386_ptr(a[0]);
-   if (!slot) return cmParamErr;
+   if (!slot) return me(cmParamErr);
    uint32_t src = *slot;
-   if (!src) return cmParamErr;
+   if (!src) return me(cmParamErr);
    uint32_t size = cm_handle_size(src);
    uint32_t dst = cm_new_handle(size, 0);
-   if (!dst) return cmMemFullErr;
+   if (!dst) return me(cmMemFullErr);
    if (size) memcpy(cm_handle_block(dst), cm_handle_block(src), size);
    *slot = dst;
-   return 0;
+   return me(0);
 }
 
 /* OSErr HandAndHand(Handle hand1, Handle hand2); — append hand1 onto hand2. */
 uint32_t shim_HandAndHand(uint32_t *a)
 {
    uint32_t h1 = a[0], h2 = a[1];
-   if (!h1 || !h2) return cmParamErr;
+   if (!h1 || !h2) return me(cmParamErr);
    uint32_t n1 = cm_handle_size(h1), n2 = cm_handle_size(h2);
    uint32_t rz[2]; rz[0] = h2; rz[1] = n1 + n2;
    uint32_t err = shim_SetHandleSize(rz);
-   if (err) return err;
+   if (err) return me(err);
    if (n1) memcpy((char *)cm_handle_block(h2) + n2, cm_handle_block(h1), n1);
-   return 0;
+   return me(0);
 }
 
 /* OSErr PtrAndHand(const void *ptr1, Handle hand2, Size size); */
 uint32_t shim_PtrAndHand(uint32_t *a)
 {
    uint32_t src = a[0], h2 = a[1], size = a[2];
-   if (!h2) return cmParamErr;
+   if (!h2) return me(cmParamErr);
    uint32_t n2 = cm_handle_size(h2);
    uint32_t rz[2]; rz[0] = h2; rz[1] = n2 + size;
    uint32_t err = shim_SetHandleSize(rz);
-   if (err) return err;
+   if (err) return me(err);
    if (size && src) memcpy((char *)cm_handle_block(h2) + n2, i386_ptr(src), size);
-   return 0;
+   return me(0);
 }
 
 /* char HGetState(Handle h); / void HSetState(Handle h, char flags); */

@@ -838,6 +838,10 @@ gap-raw: $(BUILD_DIR)/99_gap_raw.x86_64
 # only lists sizes that fit -- the pre-Mojave Retina contract (headless).
 display-point-modes: $(BUILD_DIR)/99_display_point_modes.x86_64
 	@bash display_point_modes_test.sh
+# memerr: MemError() reports the result of our Memory Manager shims (a refused
+# SetPtrSize grow reads back as an error; Halo corrupted its heap without it).
+memerr: $(BUILD_DIR)/99_memerr.x86_64
+	@bash memerr_test.sh
 # event-params: Carbon event parameters with an ABI-dependent layout (refs,
 # CGFloat geometry, HICommand) cross intact (carbon_event_param_shim.c).
 event-params: $(BUILD_DIR)/99_event_params.x86_64
@@ -2148,6 +2152,11 @@ $(BUILD_DIR)/99_gap_stub.i386: $(BUILD_DIR)/99_gap_stub.o
 # 99_display_point_modes: CoreGraphics/Display Manager/CF are absent from the i386
 # sysroot; static-interpose redirects them into libabiconv. Overrides %.i386.
 $(BUILD_DIR)/99_display_point_modes.i386: $(BUILD_DIR)/99_display_point_modes.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_memerr: the Memory Manager is not in the i386 sysroot; static-interpose
+# redirects NewPtr/SetPtrSize/MemError into libabiconv. Overrides %.i386.
+$(BUILD_DIR)/99_memerr.i386: $(BUILD_DIR)/99_memerr.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 99_event_params: the Carbon Event Manager is not in the i386 sysroot;

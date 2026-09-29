@@ -732,6 +732,7 @@ _HGetState
 _HSetState
 _GetPtrSize
 _SetPtrSize
+_MemError
 _CSMemNewHandle
 _CSMemNewHandleClear
 _CSMemNewEmptyHandle
