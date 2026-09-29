@@ -593,7 +593,10 @@ def translate_bundle(bundle, args):
                 os.replace(tmp, wrapper_preserve)
                 reinjected.append(name)
             if reinjected:
-                run(["codesign", "-f", "-s", "-", str(wrapper_preserve)])
+                # the whole bundle, not the wrapper alone: a bare codesign of
+                # the main executable signs Contents/MacOS as nested code and
+                # dies on a stray non-Mach-O there (iPhoto's libRetouch.a)
+                cmd_sign(argparse.Namespace(app=str(bundle), dry_run=False))
                 good("re-injected dropped bundled load(s): " + ", ".join(reinjected))
 
     info("done. try:  m64 run %s --exc" % Path(bundle).name)
@@ -1548,7 +1551,8 @@ def cmd_sign(args):
         # non-Mach-O there (iPhoto ships libRetouch.a) fails the whole bundle
         # "not signed at all". Sign it on its own (xattr signature).
         for f in (app / "Contents" / "MacOS").glob("*"):
-            if f.is_file() and not f.is_symlink() and not archs_of(f):
+            # macho_magic, not archs_of: lipo lists an ar archive's archs too
+            if f.is_file() and not f.is_symlink() and not macho_magic(f):
                 subprocess.run(["codesign", "-f", "-s", "-", str(f)],
                                capture_output=True)
     run(["python3", FIX_SIGNING, str(app)], dry=args.dry_run, check=False)
