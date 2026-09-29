@@ -85,7 +85,7 @@ CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn
+.PHONY: check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept disp-reloc-accept export-trie-deep jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn
 all: run-only
 
 # check: every suite + every guard target, each under a deadline; exit 1 on any failure.
@@ -615,6 +615,25 @@ classic-reloc-accept: $(BUILD_DIR)/99_classic_reloc_accept.i386 $(BUILD_DIR)/lib
 	    -o $(BUILD_DIR)/99_classic_reloc_accept.$$arm $< >/dev/null 2>&1; \
 	  $(BUILD_DIR)/99_classic_reloc_accept.$$arm; eval r_$$arm=$$?; done; \
 	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "classic-reloc-accept: PASS" || { echo "classic-reloc-accept: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
+# export-trie-deep: a >255-char export must not make the translated image's
+# export trie deeper than ld accepts (Angry Birds). OFF arm is
+# M64_NO_TRIE_EDGE_COMPRESS=1 at TRANSLATE time (the link fails, no binary).
+export-trie-deep: $(BUILD_DIR)/99_export_trie_deep.i386 $(BUILD_DIR)/libabiconv.dylib
+	@for arm in on off; do E=""; [ $$arm = off ] && E="M64_NO_TRIE_EDGE_COMPRESS=1"; \
+	  rm -f $(BUILD_DIR)/99_export_trie_deep.$$arm; \
+	  env $$E bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_export_trie_deep.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_export_trie_deep.$$arm 2>/dev/null; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "export-trie-deep: PASS" || { echo "export-trie-deep: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
+# disp-reloc-accept: an instruction disp32 with a classic local reloc is an
+# address even in a relocatable image (Portal 2 libbink `leal 0x30e60(%edx)`
+# into __bss). OFF arm is M64_NO_DISP_RELOC_ACCEPT=1 at TRANSLATE time.
+disp-reloc-accept: $(BUILD_DIR)/99_disp_reloc_accept.i386 $(BUILD_DIR)/libabiconv.dylib
+	@for arm in on off; do E=""; [ $$arm = off ] && E="M64_NO_DISP_RELOC_ACCEPT=1"; \
+	  env $$E bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_disp_reloc_accept.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_disp_reloc_accept.$$arm; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "disp-reloc-accept: PASS" || { echo "disp-reloc-accept: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
 # jt-esp-spill-push: a PIC table base spilled to an %esp slot survives pushes,
 # a call and `add $imm,%esp` (PvZ libbass MOD switch). OFF arm is
 # M64_NO_JT_ESP_TRACK=1 at TRANSLATE time.
@@ -2212,6 +2231,13 @@ self-weak-rebase: cpp
 .PHONY: shimgen-translated-skip
 shimgen-translated-skip:
 	@bash shimgen_translated_skip_test.sh
+
+# 99_disp_reloc_accept: absolute text relocs in a -pie 10.5 image (classic
+# local relocs on the instruction fields).
+$(BUILD_DIR)/99_disp_reloc_accept.o: $(SRC_DIR)/99_disp_reloc_accept.s | $(BUILD_DIR)
+	$(CC_I386) -c -o $@ $<
+$(BUILD_DIR)/99_disp_reloc_accept.i386: $(BUILD_DIR)/99_disp_reloc_accept.o
+	$(LD) $(filter-out -no_pie -macos_version_min 10.6,$(LDFLAGS_I386)) -macos_version_min 10.5 -pie -read_only_relocs suppress -x -no_compact_linkedit -e _main -o $@ $< $(HOME)/projects/Library/SDKs/MacOSX10.6.sdk/usr/lib/crt1.10.5.o
 
 # 99_classic_reloc_accept: -O2 -fomit-frame-pointer (no prologue at the
 # targets), linked -x -pie for 10.5 so the image carries CLASSIC local relocs.

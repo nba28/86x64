@@ -537,6 +537,19 @@ namespace MachO {
                addr, (const SectionBlob<bits> **) &this->memdisp, &this->memdisp_offset);
          }
       };
+      /* A classic LOCAL reloc on operand i's disp32 field is the linker's own
+       * statement that the field holds an in-image address (a relocatable,
+       * non-PIC classic dylib names its globals by literal address: Portal 2
+       * libbink `leal 0x30e60(%edx),%eax` into __bss stayed raw -> SIGSEGV).
+       * Same authority DataParser gives a relocated data slot. */
+      auto disp_reloc_attested = [&]() {
+         static const bool off = std::getenv("M64_NO_DISP_RELOC_ACCEPT") != nullptr;
+         if (bits != Bits::M32 || off || !env.have_classic_local_relocs) { return false; }
+         const std::size_t immw = xed_operand_values_has_immediate(operands)
+            ? xed_decoded_inst_get_immediate_width(&xedd) : 0;
+         const std::size_t field = loc.vmaddr + instbuf.size() - immw - sizeof(uint32_t);
+         return env.local_reloc_addrs.count(field) != 0;
+      };
       auto parse_imm = [&](std::size_t off, bool is_ptr) {
          imm = Immediate<bits>::Parse(img, loc + off, env, is_ptr);
          imm->heuristic = true;   /* a value-alias guess; see Immediate::heuristic */
@@ -667,12 +680,13 @@ namespace MachO {
                 * arithmetic. A PIC image never names an address with a literal,
                 * so there it is always the arithmetic (Portal 2 libtogl
                 * `lea 0x88e4(,%eax,4)` = GL_STATIC_DRAW + 4*bool). */
-               const bool lea_const = iclass == XED_ICLASS_LEA && !fixed_load;
+               const bool lea_const = iclass == XED_ICLASS_LEA && !fixed_load &&
+                                      !disp_reloc_attested();
                if (!lea_const && ptr32_range((std::size_t) disp) && !memdisp) {
                   capture_table(i, (std::size_t) disp);
                }
 
-            } else if (fixed_load && disp32 &&
+            } else if (disp32 && (fixed_load || disp_reloc_attested()) &&
                        basereg != XED_REG_INVALID &&
                        basereg != select_value(bits, XED_REG_EIP, XED_REG_RIP) &&
                        basereg != select_value(bits, XED_REG_ESP, XED_REG_RSP) &&
@@ -684,8 +698,9 @@ namespace MachO {
                 * never indexes a global. DetectPicAnchoredDisps (2d) cancels it
                 * inside PIC-anchored functions. */
                if (image_addr((std::size_t) disp) &&
-                   !memdisp_code_alias_is_constant(img, env, (std::size_t) disp,
-                                                   iclass == XED_ICLASS_LEA) &&
+                   (disp_reloc_attested() ||
+                    !memdisp_code_alias_is_constant(img, env, (std::size_t) disp,
+                                                    iclass == XED_ICLASS_LEA)) &&
                    !memdisp) {
                   capture_table(i, (std::size_t) disp);
                }
