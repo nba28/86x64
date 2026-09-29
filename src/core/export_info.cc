@@ -1,4 +1,5 @@
 #include "export_info.hh"
+#include <cstdlib>
 #include "parse.hh"
 #include "transform.hh"
 #include "section_blob.hh"
@@ -164,12 +165,31 @@ namespace MachO {
       ++size; /* nedges */
 
       for (auto& child : node.children) {
-         size += 2;
+         std::string label;
+         const auto& tail = EdgeTail(child, label);
+         size += label.size() + 1;
          size += leb128_size(std::numeric_limits<std::size_t>::max()); /* max size of offset */
-         size += NodeSize(child.second);
+         size += NodeSize(tail);
       }
 
       return size;
+   }
+
+   /* An edge's full label: a run of value-less single-child nodes collapses
+    * into one multi-character label (the standard compressed-trie encoding).
+    * One character per edge makes the trie as deep as the longest symbol, and
+    * ld rejects a trie deeper than 255 (long C++ mangled exports, Angry Birds). */
+   template <Bits bits>
+   const typename ExportTrie<bits>::node&
+   ExportTrie<bits>::EdgeTail(const typename children_t::value_type& edge, std::string& label) {
+      static const bool off = std::getenv("M64_NO_TRIE_EDGE_COMPRESS") != nullptr;
+      label.assign(1, edge.first);
+      const node *n = &edge.second;
+      while (!off && !n->value && n->children.size() == 1) {
+         label += n->children.begin()->first;
+         n = &n->children.begin()->second;
+      }
+      return *n;
    }
 
    template <Bits bits>
@@ -202,15 +222,22 @@ namespace MachO {
       img.at<uint8_t>(offset++) = nedges;
       
       /* compute offset past edges */
-      std::size_t offset_past_edges = offset +
-         nedges * (2 /* c + '\0' */ + leb128_size(std::numeric_limits<std::size_t>::max()));
+      std::size_t offset_past_edges = offset;
+      for (auto& child : node.children) {
+         std::string label;
+         EdgeTail(child, label);
+         offset_past_edges += label.size() + 1 /* '\0' */ +
+            leb128_size(std::numeric_limits<std::size_t>::max());
+      }
 
       /* emit edges & children */
       for (auto& child : node.children) {
-         img.at<char>(offset++) = child.first;
+         std::string label;
+         const auto& tail = EdgeTail(child, label);
+         for (char c : label) { img.at<char>(offset++) = c; }
          img.at<char>(offset++) = '\0';
          offset += leb128_encode(img, offset, offset_past_edges - start);
-         offset_past_edges = EmitNode(child.second, img, offset_past_edges, start);
+         offset_past_edges = EmitNode(tail, img, offset_past_edges, start);
       }
 
       return offset_past_edges;

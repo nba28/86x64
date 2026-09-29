@@ -132,6 +132,10 @@ namespace MachO {
       using node = typename trie_map<char, std::string, ExportNode<bits> *>::node;
       static node ParseNode(const Image& img, std::size_t offset, std::size_t start,
                             ParseEnv<bits>& env);
+      using children_t =
+         typename trie_map<char, std::string, ExportNode<bits> *>::children_t;
+      static const node& EdgeTail(const typename children_t::value_type& edge,
+                                  std::string& label);
       static std::size_t NodeSize(const node& node);
       static std::size_t EmitNode(const node& node, Image& img, std::size_t offset,
                                   std::size_t start);
