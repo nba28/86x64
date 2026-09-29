@@ -712,6 +712,18 @@ namespace {
          const CXType pointee = clang_getPointeeType(t);
          const CXType pc = clang_getCanonicalType(pointee);
          if (cb_is_cf_record_ptr(pc)) { return CBA_OBJ; }
+         /* `const void *` is how CF hands a collection ELEMENT to a callback
+          * (CFArrayApplierFunction, CFDictionaryApplierFunction, CFComparator-
+          * Function, ...): a native CF object above 4GB that truncation turned
+          * into a wild low address (Halo's HID element walk: CFGetTypeID on
+          * CFArrayApplyFunction's value, SIGSEGV in CoreFoundation). Same
+          * conditional wrap as the raw-void* RETURN (abigen): a low value, e.g.
+          * the i386 side's own pointer coming back, passes through unchanged.
+          * Const, so the callback can't write through the handle; a high
+          * `const void *` DATA buffer now reads the arena instead of faulting. */
+         if (pc.kind == CXType_Void && clang_isConstQualifiedType(pc)) {
+            return CBA_OBJ;
+         }
          /* A pointer to a COMPLETE record is one the native side may own and
           * the callback will dereference — bounce it (see CBA_PTR_REC). An
           * OPAQUE record was already taken by cb_is_cf_record_ptr above, and a
@@ -1274,6 +1286,16 @@ void conversion::convert_pointer(std::ostream& os, CXType pointee, const Locatio
           ps.find("void") != std::string::npos) {
          emit_runtime_bridge_call(os, "_x64_objc_unwrap", "",
                                   src_, reg_width::D, dst_, reg_width::Q);
+         return;
+      }
+      /* Coming BACK (a `const void **` out-param such as CFDictionaryGetValue-
+       * IfPresent's value, a void* record field): the same conditional wrap as
+       * a raw void* RETURN. Truncating a CF-heap element handed the i386 caller
+       * a wild low pointer (Halo's HID walk: the dict it got back faulted in
+       * the next CFDictionaryGetValueIfPresent). Top-level void* args never get
+       * here: abigen skips their copy-back (clobbered registers). */
+      if (from_arch == arch::x86_64 && pointee_canon.kind == CXType_Void) {
+         convert_cf_ptr(os, src_, dst_);
          return;
       }
       convert_int(os, CXType_Pointer, src_, dst_);

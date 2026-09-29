@@ -1417,8 +1417,12 @@ struct ABIConversion {
             /* CF-ref by-value args: same no-copy-back rule as the objc
              * kinds — the arg registers are clobbered after the call, and
              * the conditional re-wrap would mint arena handles from that
-             * garbage on every call */
-            if (!cf_opaque_ptr_type(type)) {
+             * garbage on every call. A bare void* arg is the same case
+             * (convert_pointer wraps it coming back, for out-params). */
+            if (!cf_opaque_ptr_type(type) &&
+                !(type.kind == CXType_Pointer &&
+                  clang_getCanonicalType(clang_getPointeeType(type)).kind
+                     == CXType_Void)) {
                from_conv.convert(from_ss, type, *dst, load_loc);
             }
             break;
