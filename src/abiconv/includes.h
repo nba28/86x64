@@ -134,6 +134,15 @@
 extern CFArrayRef  CGImageSourceCopyTypeExtensions(CGImageSourceRef isrc);
 extern CFStringRef CGImageSourceGetTypeWithExtension(CFStringRef ext);
 extern CFStringRef CGImageSourceGetTypeWithURL(CFURLRef url);
+
+/* __powidf2: GCC's compiler-rt helper for pow(x, small-int-literal). See
+ * ABICONV_SYM_SOURCES for the ABI-hazard writeup; hand-declared because no
+ * public header ever names a compiler-rt intrinsic. */
+extern double __powidf2(double, int);
+
+/* <unwind.h>: the _Unwind_* personality-routine primitives (see
+ * ABICONV_SYM_SOURCES for the libstdc++-redirect writeup). */
+#include <unwind.h>
 /* DiskArbitration: in ABICONV_SYM_SOURCES so DASessionCreate /
  * DADiskCreateFromBSDName / DADiskCopyDescription (iPhoto's PhotoCDManager
  * registerWithDiskArb:) get ABI shims; opaque DASessionRef/DADiskRef bridge

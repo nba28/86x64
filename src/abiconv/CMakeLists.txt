@@ -45,6 +45,35 @@ set(ABICONV_SYM_SOURCES
   # registers -> derefs a garbage register -> EXC_BAD_ACCESS (iPhoto Thumbnailer
   # teardown). See includes.h (<libkern/OSAtomic.h>).
   /usr/lib/system/libsystem_platform.dylib
+  # libgcc_s exports __powidf2 (GCC lowers pow(x, small-int-literal) to this
+  # compiler-rt helper: double, int -> double). Legacy i386 GCC-built code
+  # (Portal 2's libtier0) calls it directly via i386 cdecl (args on the
+  # stack); unshimmed it binds to the native x86_64 entry (args in
+  # xmm0/edi, 8-byte `ret`) -> the over-pop fuses the return address (same
+  # family as every other unbridged native call). No public header ever
+  # declares a compiler-rt intrinsic (it's compiler-internal, not meant to
+  # be called from C source) -- includes.h hand-declares the one symbol,
+  # same pattern as the ImageIO SPI externs above. On macOS 11+ the dylib is
+  # cache-only, so print_exports_trie.sh falls back to the SDK .tbd.
+  /usr/lib/libgcc_s.1.dylib
+  # libunwind exports the low-level _Unwind_* primitives a C++ personality
+  # routine calls while stepping frames (_Unwind_GetIP/SetIP/SetGR/
+  # GetLanguageSpecificData/GetRegionStart/GetDataRelBase/GetTextRelBase,
+  # _Unwind_RaiseException/DeleteException). A translated i386 libstdc++
+  # (see the libstdc++-redirect abi-hazard-vendor.py mechanism) calls these
+  # directly via i386 cdecl from its own __cxa_throw/personality routine;
+  # unshimmed they bind to the native x86_64 entries -> the usual over-pop
+  # AND, worse, the personality routine reads garbage register/IP state
+  # back from a mismarshalled call, which misdirects unwinding regardless
+  # of whether the return address itself survives ("no matching handler in
+  # any frame" for a throw/catch entirely within one translated image).
+  # <unwind.h> is the Itanium C++ ABI header; every symbol we need takes an
+  # opaque _Unwind_Context* or plain scalar, which abigen marshals like any
+  # other pointer/int C function (_Unwind_Backtrace's callback-fn-ptr
+  # parameter isn't imported by anything here, so its abigen skip is moot).
+  # (there is no standalone libunwind.dylib/.tbd on this SDK -- the umbrella
+  # libSystem re-exports it, which is where print_exports_trie.sh finds these.)
+  /usr/lib/libSystem.dylib
   /System/Library/Frameworks/CoreFoundation.framework/CoreFoundation
   /System/Library/Frameworks/CoreServices.framework/CoreServices
   /System/Library/Frameworks/ApplicationServices.framework/ApplicationServices
