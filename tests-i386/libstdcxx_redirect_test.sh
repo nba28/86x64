@@ -88,8 +88,8 @@ cp "$LIBABICONV" "$TMP/off/" && cp "$LIBABICONV" "$TMP/on/"
 python3 "$VENDOR" "$TMP/on" >/dev/null 2>&1 || fail "abi-hazard-vendor.py"
 # Confirm the redirect actually landed (co-located copy + rewritten bind) --
 # else the ON arm is silently identical to OFF and the guard is inert.
-[ -f "$TMP/on/libstdc++.6.dylib" ] || fail "redirect did not co-locate a copy"
-otool -L "$TMP/on/t.x86_64.dylib" | grep -q '@loader_path/libstdc++.6.dylib' \
+[ -f "$TMP/on/libstdc++.6.i386.dylib" ] && [ ! -f "$TMP/on/libstdc++.6.dylib" ] || fail "redirect did not co-locate a copy"
+otool -L "$TMP/on/t.x86_64.dylib" | grep -q '@loader_path/libstdc++.6.i386.dylib' \
     || fail "redirect did not rewrite the bind"
 
 FIXTURE_DEADLINE=30

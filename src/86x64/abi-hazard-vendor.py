@@ -117,26 +117,41 @@ def iter_machos(root):
             yield p
 
 
+def local_leaf(base):
+    """The co-located copy's file name: NOT the system leaf. dyld resolves an
+    absolute load (/usr/lib/<base>) by leaf name through DYLD_LIBRARY_PATH first
+    (Portal 2's launcher and run-portal2.sh set it to the tree), so a copy named
+    <base> there would replace the REAL system dylib for every native loader too
+    (libabiconv's own binds, cxx_shim.c's dlopen) -- a native call into 4-byte-ret
+    translated code."""
+    stem = base[:-len(".dylib")] if base.endswith(".dylib") else base
+    return f"{stem}.i386.dylib"
+
+
 def redirect(consumer, base, golden_src, dry):
-    """Co-locate `golden_src` beside `consumer` (as `base`) and repoint the
-    ONE dep matching `base` at the co-located copy via @loader_path."""
-    dst = consumer.parent / base
-    new_dep = f"@loader_path/{base}"
+    """Co-locate `golden_src` beside `consumer` under local_leaf(base) and
+    repoint the ONE dep on the system copy (or an older @loader_path/<base>
+    redirect) at it."""
+    leaf = local_leaf(base)
+    dst = consumer.parent / leaf
+    new_dep = f"@loader_path/{leaf}"
     if dry:
         print(f"    dry-run: cp {golden_src} {dst}")
         print(f"    dry-run: install_name_tool -change ... {new_dep} {consumer}")
         return
-    if not dst.exists() or dst.stat().st_size != golden_src.stat().st_size or \
-            dst.read_bytes() != golden_src.read_bytes():
-        shutil.copy2(golden_src, dst)
-        subprocess.run(["codesign", "--force", "--sign", "-", str(dst)],
-                       capture_output=True)
-    # Find the exact existing dep string (absolute path, whatever it is) so
-    # -change has an exact match.
+    # Its own install name too: the golden asset's LC_ID_DYLIB is still the
+    # system path, and dyld matches loaded images by install name.
+    shutil.copy2(golden_src, dst)
+    subprocess.run([INT, "-id", new_dep, str(dst)], capture_output=True, text=True)
+    subprocess.run(["codesign", "--force", "--sign", "-", str(dst)],
+                   capture_output=True)
+    stale = consumer.parent / base    # an older redirect's system-named copy
+    if stale.is_file() and links_our_runtime(stale):
+        stale.unlink()
     old_dep = next((d for d in deps_of(consumer) if os.path.basename(d) == base
-                    and not d.startswith("@")), None)
+                    and (not d.startswith("@") or d == f"@loader_path/{base}")), None)
     if old_dep is None:
-        return   # already redirected (nothing left pointing at the system copy)
+        return
     subprocess.run([INT, "-change", old_dep, new_dep, str(consumer)],
                    capture_output=True, text=True)
     subprocess.run(["codesign", "--force", "--sign", "-", str(consumer)],
@@ -160,9 +175,9 @@ def main(argv):
             if not links_our_runtime(m):
                 continue          # native sibling: leave bound to the real system lib
             for dep in deps_of(m):
-                if dep.startswith("@"):
-                    continue      # already bundle-relative (redirected, or ours)
                 base = os.path.basename(dep)
+                if dep.startswith("@") and dep != f"@loader_path/{base}":
+                    continue      # bundle-relative and not an old redirect
                 golden = GOLDEN.get(base)
                 if golden is None or not golden.is_file():
                     continue
@@ -170,7 +185,7 @@ def main(argv):
                 if list_only:
                     print(f"  {m}  binds {dep}")
                     continue
-                info(f"redirect {m.name}: {dep} -> @loader_path/{base}")
+                info(f"redirect {m.name}: {dep} -> @loader_path/{local_leaf(base)}")
                 redirect(m, base, golden, dry=False)
                 n_redirected += 1
     if list_only:
