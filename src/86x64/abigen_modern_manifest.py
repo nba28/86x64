@@ -76,7 +76,11 @@ UMBRELLA = {
     "Security":              ["<Security/Security.h>"],
     "SystemConfiguration":   ["<SystemConfiguration/SystemConfiguration.h>"],
     "DiskArbitration":       ["<DiskArbitration/DiskArbitration.h>"],
-    "IOKit":                 ["<IOKit/IOKitLib.h>"],
+    # ps/ + graphics/ are not reached from IOKitLib.h (Portal 2 inputsystem/
+    # engine: IOPSCopyPowerSourcesInfo, IODisplayCreateInfoDictionary bound raw).
+    "IOKit":                 ["<IOKit/IOKitLib.h>", "<IOKit/ps/IOPowerSources.h>",
+                              "<IOKit/ps/IOPSKeys.h>", "<IOKit/graphics/IOGraphicsLib.h>"],
+    "ForceFeedback":         ["<ForceFeedback/ForceFeedback.h>"],
     "AudioToolbox":          ["<AudioToolbox/AudioToolbox.h>"],
     # Present-native value-ABI families that were unmapped, so their imports
     # bound raw (PvZ libbass: CoreAudio AudioGetCurrentHostTime /
@@ -106,6 +110,8 @@ UMBRELLA = {
                               "<sys/sysctl.h>", "<time.h>",
                               "<mach-o/dyld.h>", "<poll.h>", "<fnmatch.h>",
                               "<langinfo.h>", "<copyfile.h>", "<sys/statvfs.h>",
+                              "<sys/sem.h>", "<sys/uio.h>", "<sys/timeb.h>",
+                              "<sys/mount.h>",
                               "<CommonCrypto/CommonDigest.h>",
                               "<CommonCrypto/CommonCryptor.h>"],
 }

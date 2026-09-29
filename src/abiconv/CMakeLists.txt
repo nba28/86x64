@@ -173,11 +173,6 @@ set(ABICONV_MODERN_TARGETS
     "$ENV{HOME}/projects/translations/Apps32/Numbers.app/Contents/MacOS/Numbers"
     "$ENV{HOME}/projects/translations/Apps32/Pages.app/Contents/MacOS/Pages"
     "$ENV{HOME}/projects/translations/Apps32/Quinn.app/Contents/MacOS/Quinn"
-    "$ENV{HOME}/Library/Application Support/Steam/steamapps/common/Portal 2/bin/osx32/engine.dylib"
-    # libcef is dlopen'd via vguimatsurface, outside engine's import closure, so
-    # its imports (Security SSL*/SecTrust*, CoreText CT*, libSystem dyld/poll/...)
-    # never entered the consider set and stayed raw cross-ABI binds.
-    "$ENV{HOME}/Library/Application Support/Steam/steamapps/common/Portal 2/bin/osx32/libcef.dylib"
     CACHE STRING "i386 ORIGINAL app executables (Apps32) whose imports drive the universal modern shim set")
 # Extra source pools for the import-closure dep resolution (_i386_closure.py
 # --source; searched before _vendor_deps' DEFAULT_SOURCES). Normally empty —
@@ -202,6 +197,17 @@ foreach(app IN LISTS ABICONV_APPS32_BUNDLES)
   if(rc EQUAL 0 AND EXISTS "${app}/Contents/MacOS/${exe}")
     list(APPEND ABICONV_MODERN_TARGETS "${app}/Contents/MacOS/${exe}")
   endif()
+endforeach()
+# A non-bundle game tree (Source engine): every module is dlopen'd, so each sits
+# outside the launcher's import closure and must be a target itself (Portal 2's
+# sound/input/tier0 modules left OpenAL, ForceFeedback, IOKit, libz, NSModule...
+# as raw cross-ABI binds while only engine.dylib + libcef were listed).
+set(ABICONV_GAME_TREES
+    "$ENV{HOME}/Library/Application Support/Steam/steamapps/common/Portal 2"
+    CACHE STRING "non-bundle i386 game roots: <root>/bin/osx32/*.dylib + the root executables join the targets")
+foreach(root IN LISTS ABICONV_GAME_TREES)
+  file(GLOB tree_mods "${root}/bin/osx32/*.dylib" "${root}/*_osx")
+  list(APPEND ABICONV_MODERN_TARGETS ${tree_mods})
 endforeach()
 list(REMOVE_DUPLICATES ABICONV_MODERN_TARGETS)
 set(ABICONV_APPS32_EXECS "${ABICONV_MODERN_TARGETS}")
