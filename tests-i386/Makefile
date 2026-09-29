@@ -77,7 +77,13 @@ OBJC_SRCS := $(wildcard $(SRC_DIR)/[0-9][0-9]_*.m)
 CPP_SRCS  := $(wildcard $(SRC_DIR)/[0-9][0-9]_*.cc)
 TESTS    := $(notdir $(basename $(ASM_SRCS) $(C_SRCS) $(S_SRCS)))
 OBJC_TESTS := $(notdir $(basename $(OBJC_SRCS)))
-CPP_TESTS  := $(notdir $(basename $(CPP_SRCS)))
+CPP_TESTS  := $(filter-out 99_libstdcxx_redirect,$(notdir $(basename $(CPP_SRCS))))
+# 99_libstdcxx_redirect.cc is excluded from the generic `cpp:` loop: it only
+# passes with (a) the GNU libstdc++ 4.2.1 headers (this SDK's <sstream> etc.
+# are libc++'s std::__1::, wrong ABI -- see libstdcxx_redirect_test.sh) and
+# (b) the libstdc++-redirect applied (abi-hazard-vendor.py) before running,
+# neither of which the generic loop does. It has its own dedicated guard,
+# `libstdcxx-redirect`, which builds/redirects/runs it correctly, twice.
 
 # No crt0 — the 86x64.sh pipeline's wrapper exec calls into the translated
 # _main directly, replacing the libc start crt0 would have provided. Tests
