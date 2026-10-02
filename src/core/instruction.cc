@@ -1748,19 +1748,25 @@ namespace MachO {
             }
 
             /* Stack-pointer widening: if the i386 instruction operates on
-             * %esp or %ebp as a register operand with NO memory operand,
-             * widen to 64-bit by prepending REX.W (0x48). Otherwise the
-             * 32-bit op zero-extends the destination, truncating the
-             * dyld-provided high-address stack pointer to a garbage low
-             * address. Surfaces in C++ static initializers of translated
-             * frameworks (no wrapper exec to fix up the entry stack).
+             * %esp as a register operand with NO memory operand, widen to
+             * 64-bit by prepending REX.W (0x48). Otherwise the 32-bit op
+             * zero-extends the destination, truncating the dyld-provided
+             * high-address stack pointer to a garbage low address. Surfaces
+             * in C++ static initializers of translated frameworks (no wrapper
+             * exec to fix up the entry stack). That covers %ebp as a frame
+             * pointer too: it only meets a register op as `mov %esp,%ebp` /
+             * `mov %ebp,%esp`. A register op on %ebp ALONE is %ebp as a data
+             * register (Intel-compiled Portal 2 libbink: `add $-1,%ebp`,
+             * `neg %ebp`, `cmp %ecx,%ebp`), which must keep i386's 32-bit
+             * result and flags. Guard 99_ebp_gpr_narrow.
              * Limited to reg-only ops to avoid disturbing memidx tracking. */
             {
+               static const bool rbp_reg_wide = std::getenv("M64_RBP_REG_WIDE") != nullptr;
                const auto reg0w = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
                const auto reg1w = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1);
                const bool touches_stack_reg =
-                  (reg0w == XED_REG_ESP || reg0w == XED_REG_EBP ||
-                   reg1w == XED_REG_ESP || reg1w == XED_REG_EBP);
+                  (reg0w == XED_REG_ESP || reg1w == XED_REG_ESP ||
+                   (rbp_reg_wide && (reg0w == XED_REG_EBP || reg1w == XED_REG_EBP)));
                const unsigned n_mem_ops =
                   xed_decoded_inst_number_of_memory_operands(&xedd);
                if (touches_stack_reg && n_mem_ops == 0) {
