@@ -142,12 +142,12 @@ fi
 # silent translate: `file -b` says "i386" for a FAT binary too, which is how
 # libsteam_api.dylib (i386 + x86_64 + arm64) got translated by accident.
 #
-# We still translate it, deliberately: Portal 2's callers are TRANSLATED i386
-# code, and a call from translated code into a natively-built third-party dylib
-# needs an ABI bridge that libabiconv only provides for system frameworks — so
-# for a non-system dylib the i386 slice is the ABI-consistent choice. Deploying
-# the native slice instead would mean hand-bridging its whole exported surface
-# (the SteamAPI_* C API). Print it so the choice stays visible and reviewable.
+# We still translate it: the translated copy keeps every caller ABI-consistent.
+# --deploy ALSO installs the native slice as <name>.native.dylib, which a
+# libabiconv bridge may load: the Steamworks bridge (steam_bridge.c) routes the
+# translated callers' SteamAPI_* imports to libsteam_api.native.dylib, the only
+# copy that can talk to a running (native) Steam. Print the list so the choice
+# stays visible and reviewable.
 native_capable=()
 for n in ${targets[@]+"${targets[@]}"}; do
   case "$(lipo -info "$n" 2>/dev/null)" in *x86_64*) native_capable+=("$n");; esac
@@ -230,6 +230,14 @@ if [ "$DEPLOY" -eq 1 ]; then
   for f in "$STAGE"/*; do
     [ -f "$f" ] || continue
     cp -p "$f" "$DST64/$(basename "$f")"
+  done
+  # Native slices (see the arch audit): thin, renamed, ad-hoc signed.
+  for n in "$SRC32"/*.dylib "$GAME32"/*.dylib; do
+    case "$(lipo -info "$n" 2>/dev/null)" in *x86_64*) ;; *) continue;; esac
+    nat="$DST64/$(basename "$n" .dylib).native.dylib"
+    lipo -thin x86_64 "$n" -o "$nat" &&
+      install_name_tool -id "@loader_path/$(basename "$nat")" "$nat" 2>/dev/null &&
+      codesign -f -s - "$nat" 2>/dev/null && echo "    native slice -> $(basename "$nat")"
   done
   # libabiconv + libinterpose must match the macho-tool that produced the code.
   "$M64" resync "$DST64" || echo "!! m64 resync failed — check by CONTENT before measuring" >&2

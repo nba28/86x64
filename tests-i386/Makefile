@@ -91,7 +91,7 @@ CPP_TESTS  := $(filter-out 99_libstdcxx_redirect,$(notdir $(basename $(CPP_SRCS)
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept disp-reloc-accept imm-reloc-accept call-abs-pagezero pic-anchor-call-adopt entry-pad-fallthrough export-trie-deep jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap sib-rbp-index-wrap abs-base-neg-wrap ebp-gpr-narrow jt-case-in-func jt-back-edge-join lazy-self-def standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-cb-fifo snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn libstdcxx-redirect uidl-resolves agl-oversize-window
+.PHONY: check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept disp-reloc-accept imm-reloc-accept call-abs-pagezero pic-anchor-call-adopt entry-pad-fallthrough export-trie-deep jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap sib-rbp-index-wrap abs-base-neg-wrap ebp-gpr-narrow jt-case-in-func jt-back-edge-join steam-bridge lazy-self-def standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-cb-fifo snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn libstdcxx-redirect uidl-resolves agl-oversize-window
 all: run-only
 
 # check: every suite + every guard target, each under a deadline; exit 1 on any failure.
@@ -640,6 +640,12 @@ jt-back-edge-join: $(BUILD_DIR)/99_jt_back_edge_join.i386
 	    -o $(BUILD_DIR)/99_jt_back_edge_join.$$arm $< >/dev/null 2>&1; \
 	  $(BUILD_DIR)/99_jt_back_edge_join.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
 	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "jt-back-edge-join: PASS (on=$$r_on off=$$r_off)" || { echo "jt-back-edge-join: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
+# steam-bridge: A/B guard for the Steamworks bridge (steam_bridge.c): the
+# translated fixture reaches a fake native libsteam_api through the proxies and
+# gets CSteamID/float/struct returns in the i386 convention. ON exits 42; OFF
+# (ABICONV_STEAM_API=/nonexistent at run time) gets no interfaces and exits 3.
+steam-bridge: $(BUILD_DIR)/99_steam_bridge.x86_64
+	@bash steam_bridge_test.sh
 # pic-push-mem: A/B guard that a PIC-anchored `push disp(%ebx[,idx,s])` reads
 # the translated slot (libbass pthread key). ON exits 42; OFF
 # (M64_NO_PIC_OPERAND_LOWERING=1 at translate time) does not.
@@ -1763,6 +1769,17 @@ $(BUILD_DIR)/coreservices_stub.dylib: | $(BUILD_DIR)
 	  -o $@ $(BUILD_DIR)/coreservices_stub.o
 $(BUILD_DIR)/99_memmgr_blockmove.i386: $(BUILD_DIR)/99_memmgr_blockmove.o $(BUILD_DIR)/coreservices_stub.dylib
 	$(LD) $(LDFLAGS_I386) -e _main -o $@ $< $(BUILD_DIR)/coreservices_stub.dylib
+
+# 99_steam_bridge imports libsteam_api, which the sysroot lacks: link a
+# symbols-only i386 stub, WEAK so the translated binary (every import rebound to
+# libabiconv's bridge) loads without it.
+$(BUILD_DIR)/steam_api_stub.dylib: | $(BUILD_DIR)
+	@printf 'void SteamInternal_FindOrCreateUserInterface(){}\nvoid SteamInternal_FindOrCreateGameServerInterface(){}\n' > $(BUILD_DIR)/steam_api_stub.c
+	@$(CC_I386) -c $(BUILD_DIR)/steam_api_stub.c -o $(BUILD_DIR)/steam_api_stub.o
+	@$(LD) -arch i386 -macos_version_min 10.6 -syslibroot $(I386_SYSROOT) -lSystem -dylib \
+	  -install_name @loader_path/libsteam_api.dylib -o $@ $(BUILD_DIR)/steam_api_stub.o
+$(BUILD_DIR)/99_steam_bridge.i386: $(BUILD_DIR)/99_steam_bridge.o $(BUILD_DIR)/steam_api_stub.dylib
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $< -weak_library $(BUILD_DIR)/steam_api_stub.dylib
 
 # 99_cfnumber_i386_width links CoreFoundation the same way (see above).
 $(BUILD_DIR)/99_cfnumber_i386_width.i386: $(BUILD_DIR)/99_cfnumber_i386_width.o

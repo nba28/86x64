@@ -894,3 +894,31 @@ _PrimeTime
 _PrimeTimeTask
 _RmvTime
 _RemoveTimeTask
+
+# Steamworks bridge (steam_bridge.c / steam_tramp.asm): the C surface a translated
+# Steam game imports from libsteam_api, routed to the game's native x86_64 slice.
+_SteamAPI_Init
+_SteamAPI_InitSafe
+_SteamAPI_Shutdown
+_SteamAPI_RestartAppIfNecessary
+_SteamAPI_RunCallbacks
+_SteamAPI_GetHSteamPipe
+_SteamAPI_GetHSteamUser
+_SteamAPI_SetMiniDumpComment
+_SteamAPI_SetTryCatchCallbacks
+_SteamAPI_UseBreakpadCrashHandler
+_SteamAPI_RegisterCallback
+_SteamAPI_UnregisterCallback
+_SteamAPI_RegisterCallResult
+_SteamAPI_UnregisterCallResult
+_SteamClient
+_SteamInternal_CreateInterface
+_SteamInternal_ContextInit
+_SteamInternal_FindOrCreateUserInterface
+_SteamInternal_FindOrCreateGameServerInterface
+_SteamInternal_GameServer_Init
+_SteamGameServer_GetHSteamPipe
+_SteamGameServer_GetHSteamUser
+_SteamGameServer_GetIPCCallCount
+_SteamGameServer_RunCallbacks
+_SteamGameServer_Shutdown
