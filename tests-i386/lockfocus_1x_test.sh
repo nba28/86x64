@@ -101,6 +101,19 @@ int main(int argc, char **argv) {
             fprintf(stderr, "legacy: TIFF empty\n"); return 1;
         }
 
+        /* --- LEAK: the committed rep must die with its image (the compat's
+         * alloc/init +1 is released once addRepresentation: retains it). --- */
+        __weak NSBitmapImageRep *wrep = nil;
+        @autoreleasepool {
+            NSImage *li = mkImage();
+            set_legacy(1);
+            [li lockFocus]; NSRectFill(NSMakeRect(0,0,2,2)); [li unlockFocus];
+            wrep = (NSBitmapImageRep *)[li representations].firstObject;
+            li = nil;
+        }
+        if (wrep) { fprintf(stderr, "legacy: committed 1x rep outlived its image "
+                            "(leaked +1)\n"); return 1; }
+
         /* --- NATIVE path: flag unset -> original device-scaled backing.
          * On a >1x screen this proves the gate does NOT over-fire. On a 1x
          * screen native is already 1x, so only assert it did NOT get pinned by

@@ -3858,7 +3858,7 @@ static int lf1x_begin(id self) {
    ((void(*)(id, SEL, CGSize))objc_msgSend)(rep, sel_registerName("setSize:"), pts);
    id gc = ((id(*)(id, SEL, id))objc_msgSend)(
       (id)gc_cls, sel_registerName("graphicsContextWithBitmapImageRep:"), rep);
-   if (!gc) { return 0; }
+   if (!gc) { ((void(*)(id, SEL))objc_msgSend)(rep, sel_registerName("release")); return 0; }
    ((void(*)(id, SEL))objc_msgSend)((id)gc_cls, sel_registerName("saveGraphicsState"));
    ((void(*)(id, SEL, id))objc_msgSend)(
       (id)gc_cls, sel_registerName("setCurrentContext:"), gc);
@@ -3921,6 +3921,11 @@ static void img_unlockFocus(id self, SEL _cmd) {
       ((void(*)(id, SEL))objc_msgSend)(copy, sel_registerName("release"));
       ((void(*)(id, SEL, id))objc_msgSend)(
          self, sel_registerName("addRepresentation:"), rep);
+      /* the image now owns the rep; drop our alloc/init +1 (else every legacy
+       * lockFocus leaks a rep + its pixels) */
+      if (!KNOB("M64_NO_LF1X_REP_RELEASE")) {
+         ((void(*)(id, SEL))objc_msgSend)(rep, sel_registerName("release"));
+      }
       return;
    }
    ((void(*)(id, SEL))g_img_unlockFocus)(self, _cmd);
