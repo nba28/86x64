@@ -730,7 +730,20 @@ namespace MachO {
       }
 
       /* ---- immediates ---- */
-      switch (xed_decoded_inst_get_iform_enum(&xedd)) {
+      /* A classic LOCAL reloc on the imm32 field attests an in-image address
+       * whatever the instruction shape: the imm sibling of disp_reloc_attested
+       * (Portal 2 libbink `pushl $0x30aa`, a callback passed by literal address
+       * to its IO setup, stayed raw -> the IO thread called 0x30aa). */
+      if (bits == Bits::M32 && env.have_classic_local_relocs &&
+          xed_operand_values_has_immediate(operands) &&
+          xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
+         static const bool off = std::getenv("M64_NO_IMM_RELOC_ACCEPT") != nullptr;
+         const std::size_t imm_off = instbuf.size() - sizeof(uint32_t);
+         if (!off && env.local_reloc_addrs.count(loc.vmaddr + imm_off) != 0) {
+            parse_imm(imm_off, true);
+         }
+      }
+      if (imm == nullptr) switch (xed_decoded_inst_get_iform_enum(&xedd)) {
       /* `push $X` / `mov $X,%reg` / `add $X,%reg`: a fixed-load image names its
        * own globals and code by literal address (`mov $0xf4c500,%ebx`), with no
        * relocation to mark it. Only full 32-bit immediates can be addresses. */
