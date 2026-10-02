@@ -338,6 +338,13 @@ namespace MachO {
             out.operand = {0x04, (uint8_t)(0x18 | b)};
          }
          out.rex = 0x02;                               /* REX.X: index r11 */
+         /* r11 is an image address (low 4GB), so %base is an offset into it,
+          * and i386 wraps that sum mod 2^32: a negative base (an ICC loop
+          * `movl $-0x1c,%ebx ; call *table+0x1c(%ebx)`, Portal 2 libbink)
+          * must not land 4GB high. Guard 99_abs_base_neg_wrap. */
+         static const bool no_abs_base_addr32 =
+            std::getenv("M64_NO_ABS_BASE_ADDR32") != nullptr;
+         out.addr32 = !no_abs_base_addr32 && wants_addr32(base, XED_REG_R11);
       } else {
          out.operand.assign(instbuf.begin() + L.modrm_idx,
                             instbuf.begin() + L.operand_end);
