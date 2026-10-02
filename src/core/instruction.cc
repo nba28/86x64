@@ -1336,6 +1336,18 @@ namespace MachO {
                   if (!memdisp &&
                       xed_decoded_inst_get_base_reg(mops, 0) == XED_REG_INVALID &&
                       xed_decoded_inst_get_index_reg(mops, 0) == XED_REG_INVALID) {
+                     /* `call *[abs]` into PAGE ZERO: a compiler-folded call
+                      * through a NULL object (Portal 2 client/server
+                      * `movl $0,(%esp); call *0x10`). Both widths fault at the
+                      * load, before any push, so the 8-byte read is exact --
+                      * as an ABSOLUTE [disp32] (SIB, no base): the i386 bytes
+                      * would be rip-relative in x86_64. */
+                     if ((uint64_t) xed_decoded_inst_get_memory_displacement(mops, 0) < 0x1000 &&
+                         instbuf.size() == 6 && instbuf.at(0) == 0xff) {
+                        std::vector<uint8_t> abs = {0xff, (uint8_t) ((instbuf.at(1) & 0x38) | 0x04), 0x25};
+                        abs.insert(abs.end(), instbuf.begin() + 2, instbuf.end());
+                        return {new Instruction<opposite<bits>>(abs)};   /* width guard exempt */
+                     }
                      break;
                   }
                   LoweredMem m;
