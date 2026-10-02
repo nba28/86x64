@@ -631,7 +631,23 @@ namespace MachO {
             auto snap = branch_anchor_snap.find(inst->loc.vmaddr);
             if (snap != branch_anchor_snap.end()) {
                if (no_fallthrough) { anchors = snap->second; }
-               else { intersect_into(anchors, snap->second); }
+               else {
+                  intersect_into(anchors, snap->second);
+                  /* After a CALL the fall-through edge holds nothing in the
+                   * caller-saved eax/ecx/edx, so a caller-saved anchor the
+                   * target uses can only come from the branch: the call never
+                   * returns (Portal 2 client.dylib: EH landing pad ending in
+                   * `call _Unwind_Resume`, then a `je` target that stores via
+                   * the %eax anchor -> raw disp, a write into __text). */
+                  static const bool call_adopt =
+                     std::getenv("M64_NO_PIC_ANCHOR_CALL_ADOPT") == nullptr;
+                  if (call_adopt && prev_inst != nullptr && last_flow_cat == XED_CATEGORY_CALL) {
+                     for (xed_reg_enum_t r : {XED_REG_EAX, XED_REG_ECX, XED_REG_EDX}) {
+                        auto it = snap->second.find(r);
+                        if (it != snap->second.end()) { anchors[r] = it->second; }
+                     }
+                  }
+               }
                branch_anchor_snap.erase(snap);
             }
             auto ssnap = branch_slot_snap.find(inst->loc.vmaddr);
