@@ -1231,6 +1231,21 @@ namespace MachO {
                std::size_t min_target = sect_hi;
                auto ns = env.func_syms.upper_bound(table_base);
                if (ns != env.func_syms.end() && *ns < min_target) { min_target = *ns; }
+               /* A case body lies inside the dispatching function. Without
+                * this, the padding after a table read as one more entry: Portal
+                * 2 server `cmpl $3 ; ja` table (dispatch 0x24aed5) gained a 5th
+                * "case" from its `nopl` alignment, 4 MB away, and that target's
+                * empty-anchor snapshot erased %esi mid-function at 0x64c800 ->
+                * raw PIC stores into __TEXT. Bounded by symbols; a stripped
+                * image keeps the section bounds. Kill M64_NO_JT_CASE_IN_FUNC;
+                * guard 99_jt_case_in_func. */
+               static const bool case_anywhere = std::getenv("M64_NO_JT_CASE_IN_FUNC") != nullptr;
+               std::size_t fn_lo = sect_lo, fn_hi = sect_hi;
+               if (!case_anywhere) {
+                  auto nx = env.func_syms.upper_bound(vmaddr);
+                  if (nx != env.func_syms.end()) { fn_hi = std::min(fn_hi, *nx); }
+                  if (nx != env.func_syms.begin()) { fn_lo = std::max(fn_lo, *std::prev(nx)); }
+               }
                std::size_t i = 0;
                for (; ; ++i) {
                   const std::size_t slot = table_base + i * 4;
@@ -1238,6 +1253,7 @@ namespace MachO {
                   const int32_t raw = (int32_t)img.at<uint32_t>(sect.offset + (slot - sect.addr));
                   const std::size_t target = anchor + raw;
                   if (target < sect_lo || target >= sect_hi) { break; }
+                  if (target < fn_lo || target >= fn_hi) { break; }
                   if (target > table_base && target < min_target) {
                      min_target = target;
                   }
