@@ -107,8 +107,10 @@ translate() {
   chmod +x "$out" 2>/dev/null
 }
 
-translate build/99_pic_anchor_entry_save.on.x86_64  env
-translate build/99_pic_anchor_entry_save.off.x86_64 env M64_NO_PIC_ANCHOR_ENTRY_SAVE=1
+# Both arms disarm the back-edge join (M64_NO_PIC_BACK_EDGE): it ALSO recovers
+# this backward-reached anchor, and would make the OFF arm pass on its own.
+translate build/99_pic_anchor_entry_save.on.x86_64  env M64_NO_PIC_BACK_EDGE=1
+translate build/99_pic_anchor_entry_save.off.x86_64 env M64_NO_PIC_BACK_EDGE=1 M64_NO_PIC_ANCHOR_ENTRY_SAVE=1
 
 for arm in on off; do
   if [ ! -x "build/99_pic_anchor_entry_save.$arm.x86_64" ]; then

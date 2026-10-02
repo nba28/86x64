@@ -531,6 +531,20 @@ namespace MachO {
 
    static bool is_gpr32(xed_reg_enum_t r) { return r >= XED_REG_EAX && r <= XED_REG_EDI; }
 
+   /* A backward branch to `tgt` from `from` stays in its function: no function
+    * symbol in (tgt, from], and `tgt` is not itself an entry (a jump there is a
+    * tail call or a self-loop through the prologue). */
+   static bool pic_same_function(const std::set<std::size_t>& fs, std::size_t tgt, std::size_t from) {
+      auto f = fs.upper_bound(tgt);
+      return fs.count(tgt) == 0 && (f == fs.end() || *f > from);
+   }
+
+   template <typename Snaps>
+   static bool pic_any_nonempty(const Snaps& snaps) {
+      for (const auto& kv : snaps) { if (!kv.second.empty()) { return true; } }
+      return false;
+   }
+
    template <Bits bits>
    void Section<bits>::DetectPicAnchoredDisps(ParseEnv<bits>& env) {
       if constexpr (bits != Bits::M32) {
@@ -600,310 +614,347 @@ namespace MachO {
          if (r != XED_REG_INVALID) { pic_thunks.emplace(kv.first, r); }
       }
 
-      Instruction<bits> *prev_inst = nullptr;
-      /* category of the last non-nop instruction, and whether the linear
-       * fall-through is dead (after ret/jmp, sticky across a noreturn call) */
-      xed_category_enum_t last_flow_cat = XED_CATEGORY_INVALID;
-      bool ft_dead = false;
-
-      for (SectionBlob<bits> *blob : content) {
-         auto *inst = dynamic_cast<Instruction<bits> *>(blob);
-         if (!inst) {
-            /* An inline PIC jump table shares its function's anchor (several
-             * dispatches may follow each other); any other data ends tracking. */
-            if (dynamic_cast<JumpTableEntry<bits> *>(blob) == nullptr) {
-               clear_all();
-            }
-            prev_inst = nullptr;
-            continue;
+      /* Backward branches (a loop back-edge; a dispatch block placed BEFORE
+       * the code that reloads its anchor and branches back to it) snapshot
+       * too. The linear walk has already passed their targets, so a second
+       * walk joins them there exactly like forward snapshots; it runs only
+       * when one of them carries an anchor, and can only add rewrites. Portal
+       * 2 server CUtlBuffer::VaScanf (anchor reloaded from -0x64(%ebp), then
+       * `jbe` back to the table dispatch). Kill M64_NO_PIC_BACK_EDGE (also
+       * DetectJumpTables); guard 99_jt_back_edge_join. */
+      static const bool back_edge = std::getenv("M64_NO_PIC_BACK_EDGE") == nullptr;
+      std::map<std::size_t, AnchorMap> back_anchor_snap;
+      std::map<std::size_t, SlotMap> back_slot_snap;
+      int pass = 0;
+      auto record_back = [&](std::size_t tgt, std::size_t from) {
+         if (pass == 0 && back_edge && tgt >= sect.addr && from - tgt <= 0x10000 &&
+             pic_same_function(env.func_syms, tgt, from)) {
+            snapshot_for(back_anchor_snap, tgt, anchors);
+            snapshot_for(back_slot_snap, tgt, anchor_slots);
          }
+      };
+      for (; pass < 2; ++pass) {
+         if (pass == 1) {
+            if (!pic_any_nonempty(back_anchor_snap) && !pic_any_nonempty(back_slot_snap)) { break; }
+            clear_all();
+            pending_forward_targets.clear();
+            branch_anchor_snap.clear();
+            branch_slot_snap.clear();
+         }
+         Instruction<bits> *prev_inst = nullptr;
+         /* category of the last non-nop instruction, and whether the linear
+          * fall-through is dead (after ret/jmp, sticky across a noreturn call) */
+         xed_category_enum_t last_flow_cat = XED_CATEGORY_INVALID;
+         bool ft_dead = false;
 
-         const xed_decoded_inst_t& xedd = inst->xedd;
-         const xed_iform_enum_t iform = xed_decoded_inst_get_iform_enum(&xedd);
-         const xed_category_enum_t cat = xed_decoded_inst_get_category(&xedd);
+         for (SectionBlob<bits> *blob : content) {
+            auto *inst = dynamic_cast<Instruction<bits> *>(blob);
+            if (!inst) {
+               /* An inline PIC jump table shares its function's anchor (several
+                * dispatches may follow each other); any other data ends tracking. */
+               if (dynamic_cast<JumpTableEntry<bits> *>(blob) == nullptr) {
+                  clear_all();
+               }
+               prev_inst = nullptr;
+               continue;
+            }
 
-         /* Branch target: join the snapshots recorded by its sources. */
-         {
-            const bool no_fallthrough =
-               prev_inst != nullptr &&
-               (last_flow_cat == XED_CATEGORY_RET ||
-                last_flow_cat == XED_CATEGORY_UNCOND_BR || ft_dead);
-            auto snap = branch_anchor_snap.find(inst->loc.vmaddr);
-            if (snap != branch_anchor_snap.end()) {
-               if (no_fallthrough) { anchors = snap->second; }
-               else {
-                  intersect_into(anchors, snap->second);
-                  /* After a CALL the fall-through edge holds nothing in the
-                   * caller-saved eax/ecx/edx, so a caller-saved anchor the
-                   * target uses can only come from the branch: the call never
-                   * returns (Portal 2 client.dylib: EH landing pad ending in
-                   * `call _Unwind_Resume`, then a `je` target that stores via
-                   * the %eax anchor -> raw disp, a write into __text). */
-                  static const bool call_adopt =
-                     std::getenv("M64_NO_PIC_ANCHOR_CALL_ADOPT") == nullptr;
-                  if (call_adopt && prev_inst != nullptr && last_flow_cat == XED_CATEGORY_CALL) {
-                     for (xed_reg_enum_t r : {XED_REG_EAX, XED_REG_ECX, XED_REG_EDX}) {
-                        auto it = snap->second.find(r);
-                        if (it != snap->second.end()) { anchors[r] = it->second; }
+            const xed_decoded_inst_t& xedd = inst->xedd;
+            const xed_iform_enum_t iform = xed_decoded_inst_get_iform_enum(&xedd);
+            const xed_category_enum_t cat = xed_decoded_inst_get_category(&xedd);
+
+            /* Branch target: join the snapshots recorded by its sources. */
+            {
+               if (pass == 1) {
+                  auto b = back_anchor_snap.find(inst->loc.vmaddr);
+                  if (b != back_anchor_snap.end()) {
+                     snapshot_for(branch_anchor_snap, b->first, b->second);
+                     snapshot_for(branch_slot_snap, b->first, back_slot_snap[b->first]);
+                  }
+               }
+               const bool no_fallthrough =
+                  prev_inst != nullptr &&
+                  (last_flow_cat == XED_CATEGORY_RET ||
+                   last_flow_cat == XED_CATEGORY_UNCOND_BR || ft_dead);
+               auto snap = branch_anchor_snap.find(inst->loc.vmaddr);
+               if (snap != branch_anchor_snap.end()) {
+                  if (no_fallthrough) { anchors = snap->second; }
+                  else {
+                     intersect_into(anchors, snap->second);
+                     /* After a CALL the fall-through edge holds nothing in the
+                      * caller-saved eax/ecx/edx, so a caller-saved anchor the
+                      * target uses can only come from the branch: the call never
+                      * returns (Portal 2 client.dylib: EH landing pad ending in
+                      * `call _Unwind_Resume`, then a `je` target that stores via
+                      * the %eax anchor -> raw disp, a write into __text). */
+                     static const bool call_adopt =
+                        std::getenv("M64_NO_PIC_ANCHOR_CALL_ADOPT") == nullptr;
+                     if (call_adopt && prev_inst != nullptr && last_flow_cat == XED_CATEGORY_CALL) {
+                        for (xed_reg_enum_t r : {XED_REG_EAX, XED_REG_ECX, XED_REG_EDX}) {
+                           auto it = snap->second.find(r);
+                           if (it != snap->second.end()) { anchors[r] = it->second; }
+                        }
+                     }
+                  }
+                  branch_anchor_snap.erase(snap);
+               }
+               auto ssnap = branch_slot_snap.find(inst->loc.vmaddr);
+               if (ssnap != branch_slot_snap.end()) {
+                  if (no_fallthrough) { anchor_slots = ssnap->second; }
+                  else { intersect_into(anchor_slots, ssnap->second); }
+                  branch_slot_snap.erase(ssnap);
+               }
+            }
+
+            /* `call $+0; pop %reg` establishes an anchor. Slots spilled before it
+             * cannot hold it; they are the prologue's entry saves. */
+            bool is_anchor_pop = false;
+            if (iform == XED_IFORM_POP_GPRv_58 && prev_inst &&
+                prev_inst->instbuf == opcode_t{0xe8, 0x00, 0x00, 0x00, 0x00}) {
+               const xed_reg_enum_t reg = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+               if (is_gpr32(reg)) {
+                  anchor_slots.clear();
+                  entry_save_slots = pre_anchor_saves;
+                  pre_anchor_saves.clear();
+                  anchors[reg] = inst->loc.vmaddr;
+                  anchored_region = true;
+                  is_anchor_pop = true;
+               }
+            }
+
+            /* `call get_pc_thunk.<r>` leaves %r = the next instruction; applied
+             * after the call-clobber below so a caller-saved %r survives. */
+            xed_reg_enum_t thunk_anchor_reg = XED_REG_INVALID;
+            std::size_t thunk_anchor_vm = 0;
+            if (cat == XED_CATEGORY_CALL) {
+               const ssize_t brdisp = xed_decoded_inst_get_branch_displacement(&xedd);
+               if (brdisp != 0) {
+                  const std::size_t after = inst->loc.vmaddr + xed_decoded_inst_get_length(&xedd);
+                  auto t = pic_thunks.find(after + brdisp);
+                  if (t != pic_thunks.end()) {
+                     thunk_anchor_reg = t->second;
+                     thunk_anchor_vm = after;
+                  }
+               }
+            }
+
+            /* Resolve an anchored operand, before this instruction's own writes
+             * are applied (so `mov disp(%ebx),%ebx` still resolves). The anchor
+             * may be the SIB base, or — at scale 1, the fields being symmetric —
+             * the index (`lea 0xa4b0(%eax,%edi),%edx`; Portal 2 libsteam_api).
+             * An anchored target overrides the parser's absolute-table guess. */
+            if (!anchors.empty() && (inst->memdisp == nullptr || inst->memdisp_absolute)) {
+               const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
+               const unsigned nops = xed_decoded_inst_noperands(&xedd);
+               for (unsigned i = 0; i < nops; ++i) {
+                  const xed_reg_enum_t basereg = xed_decoded_inst_get_base_reg(ops, i);
+                  const xed_reg_enum_t indexreg = xed_decoded_inst_get_index_reg(ops, i);
+                  if (!is_gpr32(basereg)) continue;
+                  bool anchor_is_index = false;
+                  xed_reg_enum_t anchor_reg = basereg;
+                  if (anchors.find(basereg) == anchors.end()) {
+                     if (!is_gpr32(indexreg) || anchors.find(indexreg) == anchors.end()) continue;
+                     if (xed_decoded_inst_get_scale(ops, i) != 1) continue;
+                     if (basereg == XED_REG_ESP) continue;   /* can't become a SIB index */
+                     anchor_is_index = true;
+                     anchor_reg = indexreg;
+                  } else if (indexreg != XED_REG_INVALID) {
+                     /* a second anchor in the index is ambiguous */
+                     if (!is_gpr32(indexreg) || anchors.find(indexreg) != anchors.end()) continue;
+                  }
+                  if (xed_decoded_inst_get_memory_displacement_width(ops, i) != sizeof(uint32_t)) continue;
+
+                  const ssize_t disp = xed_decoded_inst_get_memory_displacement(ops, i);
+                  const std::size_t target = anchors[anchor_reg] + disp;
+                  if (trace) {
+                     fprintf(stderr, "[anchor] inst=0x%zx %s=%s anchor=0x%zx disp=0x%zx target=0x%zx iform=%s\n",
+                             (size_t)inst->loc.vmaddr, anchor_is_index ? "index" : "base",
+                             xed_reg_enum_t2str(anchor_reg), (size_t)anchors[anchor_reg],
+                             (size_t)disp, (size_t)target, xed_iform_enum_t2str(iform));
+                  }
+                  SectionBlob<bits> *target_blob = env.add_placeholder(target);
+                  if (target_blob == nullptr) continue;
+
+                  /* the parser's pending resolves of the raw disp would overwrite us */
+                  env.vmaddr_resolver.cancel((std::size_t)disp,
+                                             (const SectionBlob<bits> **)&inst->memdisp);
+                  env.vmaddr_resolver.cancel_containing((std::size_t)disp,
+                                                        (const SectionBlob<bits> **)&inst->memdisp);
+                  inst->memidx = i;
+                  inst->memdisp = target_blob;
+                  inst->pic_anchored = true;
+                  inst->pic_anchor_in_index = anchor_is_index;
+                  inst->memdisp_absolute = false;
+                  /* an interior byte of opaque data binds to blob + offset (guard
+                   * 97_pic_const_interior_field) */
+                  if (env.vmaddr_in_writable_data(target) ||
+                      env.vmaddr_in_readonly_opaque_data(target)) {
+                     env.vmaddr_resolver.resolve_containing(
+                        target, (const SectionBlob<bits> **)&inst->memdisp,
+                        &inst->memdisp_offset, /*override=*/true);
+                  }
+                  break;
+               }
+            }
+
+            /* PIC region: cancel the absolute-address heuristics (a pointer
+             * immediate, or a `disp32(%base)` table capture on a non-anchor base).
+             * Portal 2 `movl $0x1000,4(%esp)` (a size) aliased low __TEXT; guard
+             * 96_zerofill_common_interior. */
+            if (!anchors.empty() || anchored_region) {
+               if (inst->imm != nullptr && inst->imm->heuristic) {
+                  env.vmaddr_resolver.cancel((std::size_t)inst->imm->value,
+                                             (const SectionBlob<bits> **)&inst->imm->pointee);
+                  env.vmaddr_resolver.cancel_containing((std::size_t)inst->imm->value,
+                                                        (const SectionBlob<bits> **)&inst->imm->pointee);
+                  inst->imm->pointee = nullptr;
+               }
+               if (inst->memdisp_absolute && !inst->pic_anchored) {
+                  const xed_operand_values_t *mops = xed_decoded_inst_operands_const(&xedd);
+                  if (xed_decoded_inst_get_base_reg(mops, inst->memidx) != XED_REG_INVALID) {
+                     const ssize_t mdisp = xed_decoded_inst_get_memory_displacement(mops, inst->memidx);
+                     env.vmaddr_resolver.cancel((std::size_t)mdisp,
+                                                (const SectionBlob<bits> **)&inst->memdisp);
+                     env.vmaddr_resolver.cancel_containing((std::size_t)mdisp,
+                                                           (const SectionBlob<bits> **)&inst->memdisp);
+                     inst->memdisp = nullptr;
+                     inst->memdisp_offset = 0;
+                     inst->memdisp_absolute = false;
+                  }
+               }
+            }
+
+            /* Frame-slot spill/reload (`mov %reg,disp(%ebp|%esp)` and back). */
+            xed_reg_enum_t anchor_keep = XED_REG_INVALID;   /* (re)established here */
+            {
+               const xed_operand_values_t *ops2 = xed_decoded_inst_operands_const(&xedd);
+               const xed_reg_enum_t mbase = xed_decoded_inst_get_base_reg(ops2, 0);
+               if ((mbase == XED_REG_EBP || mbase == XED_REG_ESP) &&
+                   xed_decoded_inst_get_index_reg(ops2, 0) == XED_REG_INVALID &&
+                   xed_decoded_inst_number_of_memory_operands(&xedd) == 1) {
+                  const Slot slot{mbase, (ssize_t)xed_decoded_inst_get_memory_displacement(ops2, 0)};
+                  const xed_reg_enum_t reg = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+                  if (iform == XED_IFORM_MOV_MEMv_GPRv) {               /* spill */
+                     entry_save_slots.erase(slot);
+                     auto a = anchors.find(reg);
+                     if (a != anchors.end()) {
+                        anchor_slots[slot] = a->second;
+                        pre_anchor_saves.erase(slot);
+                     } else {
+                        anchor_slots.erase(slot);
+                        if (is_gpr32(reg)) { pre_anchor_saves[slot] = reg; }
+                        else { pre_anchor_saves.erase(slot); }
+                     }
+                  } else if (iform == XED_IFORM_MOV_GPRv_MEMv && is_gpr32(reg)) {   /* reload */
+                     auto s = anchor_slots.find(slot);
+                     auto es = entry_save_slots.find(slot);
+                     /* the epilogue restore of the callee-saved anchor register:
+                      * keep the anchor for blocks after the epilogue (Civ IV
+                      * Python 2.6 post-epilogue case body) */
+                     const bool entry_restore =
+                        entry_save_gate && es != entry_save_slots.end() && es->second == reg &&
+                        (reg == XED_REG_EBX || reg == XED_REG_ESI || reg == XED_REG_EDI);
+                     if (s != anchor_slots.end()) {
+                        anchors[reg] = s->second;
+                        anchor_keep = reg;
+                     } else if (entry_restore) {
+                        anchor_keep = reg;
+                     } else {
+                        anchors.erase(reg);
                      }
                   }
                }
-               branch_anchor_snap.erase(snap);
             }
-            auto ssnap = branch_slot_snap.find(inst->loc.vmaddr);
-            if (ssnap != branch_slot_snap.end()) {
-               if (no_fallthrough) { anchor_slots = ssnap->second; }
-               else { intersect_into(anchor_slots, ssnap->second); }
-               branch_slot_snap.erase(ssnap);
-            }
-         }
 
-         /* `call $+0; pop %reg` establishes an anchor. Slots spilled before it
-          * cannot hold it; they are the prologue's entry saves. */
-         bool is_anchor_pop = false;
-         if (iform == XED_IFORM_POP_GPRv_58 && prev_inst &&
-             prev_inst->instbuf == opcode_t{0xe8, 0x00, 0x00, 0x00, 0x00}) {
-            const xed_reg_enum_t reg = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
-            if (is_gpr32(reg)) {
-               anchor_slots.clear();
-               entry_save_slots = pre_anchor_saves;
-               pre_anchor_saves.clear();
-               anchors[reg] = inst->loc.vmaddr;
+            /* Any other definition of a register ends its anchor — including
+             * sub-register writes — except the pops described above. */
+            if (!is_anchor_pop && cat != XED_CATEGORY_POP && !anchors.empty()) {
+               const xed_inst_t *xi = xed_decoded_inst_inst(&xedd);
+               for (unsigned i = 0; i < xed_inst_noperands(xi); ++i) {
+                  const xed_operand_t *op = xed_inst_operand(xi, i);
+                  if (!xed_operand_written(op)) continue;
+                  const xed_operand_enum_t nm = xed_operand_name(op);
+                  if (!xed_operand_is_register(nm)) continue;
+                  const xed_reg_enum_t raw = xed_decoded_inst_get_reg(&xedd, nm);
+                  if (raw == XED_REG_INVALID) continue;
+                  const xed_reg_enum_t r = xed_get_largest_enclosing_register32(raw);
+                  if (is_gpr32(r) && r != anchor_keep) { anchors.erase(r); }
+               }
+            }
+
+            /* `mov %src,%dst` copies the anchor (the kill above already cleared %dst). */
+            if (iform == XED_IFORM_MOV_GPRv_GPRv_89 || iform == XED_IFORM_MOV_GPRv_GPRv_8B) {
+               const xed_reg_enum_t mdst = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+               const xed_reg_enum_t msrc = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1);
+               if (is_gpr32(mdst) && mdst != msrc) {
+                  auto a = anchors.find(msrc);
+                  if (a != anchors.end()) { anchors[mdst] = a->second; }
+                  else { anchors.erase(mdst); }
+               }
+            }
+
+            /* Forward targets at or behind us are reached (or were never real). */
+            pending_forward_targets.erase(pending_forward_targets.begin(),
+                                          pending_forward_targets.upper_bound(inst->loc.vmaddr));
+
+            /* Record intra-function forward branches: in-section, within 64 KB (a
+             * farther jmp is a tail call; tracking it leaked an anchor across all
+             * of iPhoto's __text). Calls leave the function and are not tracked. */
+            if (cat == XED_CATEGORY_COND_BR || cat == XED_CATEGORY_UNCOND_BR) {
+               const ssize_t brdisp = xed_decoded_inst_get_branch_displacement(&xedd);
+               const std::size_t tgt =
+                  inst->loc.vmaddr + xed_decoded_inst_get_length(&xedd) + brdisp;
+               if (brdisp > 0 && tgt < sect.addr + sect.size &&
+                   tgt - inst->loc.vmaddr <= 0x10000) {
+                  pending_forward_targets.insert(tgt);
+                  snapshot_for(branch_anchor_snap, tgt, anchors);
+                  snapshot_for(branch_slot_snap, tgt, anchor_slots);
+               } else if (brdisp < 0) {
+                  record_back(tgt, inst->loc.vmaddr);
+               }
+            }
+            /* The case bodies of a claimed PIC jump table are branch targets too. */
+            auto jt = env.pic_switch_targets.find(inst->loc.vmaddr);
+            if (jt != env.pic_switch_targets.end()) {
+               for (const std::size_t tgt : jt->second) {
+                  if (tgt <= inst->loc.vmaddr) { record_back(tgt, inst->loc.vmaddr); continue; }
+                  snapshot_for(branch_anchor_snap, tgt, anchors);
+                  snapshot_for(branch_slot_snap, tgt, anchor_slots);
+               }
+            }
+
+            /* Control transfers. int3 is transparent (its fall-through is dead
+             * code and an empty snapshot from it would poison the join). */
+            const bool is_pic_call_zero =
+               iform == XED_IFORM_CALL_NEAR_RELBRz &&
+               xed_decoded_inst_get_branch_displacement(&xedd) == 0;
+            if (cat == XED_CATEGORY_RET) {
+               if (pending_forward_targets.empty()) { clear_all(); }
+            } else if ((cat == XED_CATEGORY_INTERRUPT &&
+                        xed_decoded_inst_get_iclass(&xedd) != XED_ICLASS_INT3) ||
+                       cat == XED_CATEGORY_SYSCALL || cat == XED_CATEGORY_SYSRET) {
+               clear_all();
+            } else if (cat == XED_CATEGORY_CALL && !is_pic_call_zero) {
+               anchors.erase(XED_REG_EAX);
+               anchors.erase(XED_REG_ECX);
+               anchors.erase(XED_REG_EDX);
+            }
+
+            if (thunk_anchor_reg != XED_REG_INVALID) {
+               anchors[thunk_anchor_reg] = thunk_anchor_vm;
                anchored_region = true;
-               is_anchor_pop = true;
             }
-         }
 
-         /* `call get_pc_thunk.<r>` leaves %r = the next instruction; applied
-          * after the call-clobber below so a caller-saved %r survives. */
-         xed_reg_enum_t thunk_anchor_reg = XED_REG_INVALID;
-         std::size_t thunk_anchor_vm = 0;
-         if (cat == XED_CATEGORY_CALL) {
-            const ssize_t brdisp = xed_decoded_inst_get_branch_displacement(&xedd);
-            if (brdisp != 0) {
-               const std::size_t after = inst->loc.vmaddr + xed_decoded_inst_get_length(&xedd);
-               auto t = pic_thunks.find(after + brdisp);
-               if (t != pic_thunks.end()) {
-                  thunk_anchor_reg = t->second;
-                  thunk_anchor_vm = after;
+            if (cat != XED_CATEGORY_NOP && cat != XED_CATEGORY_WIDENOP) {
+               last_flow_cat = cat;
+               if (cat == XED_CATEGORY_RET || cat == XED_CATEGORY_UNCOND_BR) {
+                  ft_dead = true;
+               } else if (cat != XED_CATEGORY_CALL) {
+                  ft_dead = false;
                }
             }
+            prev_inst = inst;
          }
-
-         /* Resolve an anchored operand, before this instruction's own writes
-          * are applied (so `mov disp(%ebx),%ebx` still resolves). The anchor
-          * may be the SIB base, or — at scale 1, the fields being symmetric —
-          * the index (`lea 0xa4b0(%eax,%edi),%edx`; Portal 2 libsteam_api).
-          * An anchored target overrides the parser's absolute-table guess. */
-         if (!anchors.empty() && (inst->memdisp == nullptr || inst->memdisp_absolute)) {
-            const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
-            const unsigned nops = xed_decoded_inst_noperands(&xedd);
-            for (unsigned i = 0; i < nops; ++i) {
-               const xed_reg_enum_t basereg = xed_decoded_inst_get_base_reg(ops, i);
-               const xed_reg_enum_t indexreg = xed_decoded_inst_get_index_reg(ops, i);
-               if (!is_gpr32(basereg)) continue;
-               bool anchor_is_index = false;
-               xed_reg_enum_t anchor_reg = basereg;
-               if (anchors.find(basereg) == anchors.end()) {
-                  if (!is_gpr32(indexreg) || anchors.find(indexreg) == anchors.end()) continue;
-                  if (xed_decoded_inst_get_scale(ops, i) != 1) continue;
-                  if (basereg == XED_REG_ESP) continue;   /* can't become a SIB index */
-                  anchor_is_index = true;
-                  anchor_reg = indexreg;
-               } else if (indexreg != XED_REG_INVALID) {
-                  /* a second anchor in the index is ambiguous */
-                  if (!is_gpr32(indexreg) || anchors.find(indexreg) != anchors.end()) continue;
-               }
-               if (xed_decoded_inst_get_memory_displacement_width(ops, i) != sizeof(uint32_t)) continue;
-
-               const ssize_t disp = xed_decoded_inst_get_memory_displacement(ops, i);
-               const std::size_t target = anchors[anchor_reg] + disp;
-               if (trace) {
-                  fprintf(stderr, "[anchor] inst=0x%zx %s=%s anchor=0x%zx disp=0x%zx target=0x%zx iform=%s\n",
-                          (size_t)inst->loc.vmaddr, anchor_is_index ? "index" : "base",
-                          xed_reg_enum_t2str(anchor_reg), (size_t)anchors[anchor_reg],
-                          (size_t)disp, (size_t)target, xed_iform_enum_t2str(iform));
-               }
-               SectionBlob<bits> *target_blob = env.add_placeholder(target);
-               if (target_blob == nullptr) continue;
-
-               /* the parser's pending resolves of the raw disp would overwrite us */
-               env.vmaddr_resolver.cancel((std::size_t)disp,
-                                          (const SectionBlob<bits> **)&inst->memdisp);
-               env.vmaddr_resolver.cancel_containing((std::size_t)disp,
-                                                     (const SectionBlob<bits> **)&inst->memdisp);
-               inst->memidx = i;
-               inst->memdisp = target_blob;
-               inst->pic_anchored = true;
-               inst->pic_anchor_in_index = anchor_is_index;
-               inst->memdisp_absolute = false;
-               /* an interior byte of opaque data binds to blob + offset (guard
-                * 97_pic_const_interior_field) */
-               if (env.vmaddr_in_writable_data(target) ||
-                   env.vmaddr_in_readonly_opaque_data(target)) {
-                  env.vmaddr_resolver.resolve_containing(
-                     target, (const SectionBlob<bits> **)&inst->memdisp,
-                     &inst->memdisp_offset, /*override=*/true);
-               }
-               break;
-            }
-         }
-
-         /* PIC region: cancel the absolute-address heuristics (a pointer
-          * immediate, or a `disp32(%base)` table capture on a non-anchor base).
-          * Portal 2 `movl $0x1000,4(%esp)` (a size) aliased low __TEXT; guard
-          * 96_zerofill_common_interior. */
-         if (!anchors.empty() || anchored_region) {
-            if (inst->imm != nullptr && inst->imm->heuristic) {
-               env.vmaddr_resolver.cancel((std::size_t)inst->imm->value,
-                                          (const SectionBlob<bits> **)&inst->imm->pointee);
-               env.vmaddr_resolver.cancel_containing((std::size_t)inst->imm->value,
-                                                     (const SectionBlob<bits> **)&inst->imm->pointee);
-               inst->imm->pointee = nullptr;
-            }
-            if (inst->memdisp_absolute && !inst->pic_anchored) {
-               const xed_operand_values_t *mops = xed_decoded_inst_operands_const(&xedd);
-               if (xed_decoded_inst_get_base_reg(mops, inst->memidx) != XED_REG_INVALID) {
-                  const ssize_t mdisp = xed_decoded_inst_get_memory_displacement(mops, inst->memidx);
-                  env.vmaddr_resolver.cancel((std::size_t)mdisp,
-                                             (const SectionBlob<bits> **)&inst->memdisp);
-                  env.vmaddr_resolver.cancel_containing((std::size_t)mdisp,
-                                                        (const SectionBlob<bits> **)&inst->memdisp);
-                  inst->memdisp = nullptr;
-                  inst->memdisp_offset = 0;
-                  inst->memdisp_absolute = false;
-               }
-            }
-         }
-
-         /* Frame-slot spill/reload (`mov %reg,disp(%ebp|%esp)` and back). */
-         xed_reg_enum_t anchor_keep = XED_REG_INVALID;   /* (re)established here */
-         {
-            const xed_operand_values_t *ops2 = xed_decoded_inst_operands_const(&xedd);
-            const xed_reg_enum_t mbase = xed_decoded_inst_get_base_reg(ops2, 0);
-            if ((mbase == XED_REG_EBP || mbase == XED_REG_ESP) &&
-                xed_decoded_inst_get_index_reg(ops2, 0) == XED_REG_INVALID &&
-                xed_decoded_inst_number_of_memory_operands(&xedd) == 1) {
-               const Slot slot{mbase, (ssize_t)xed_decoded_inst_get_memory_displacement(ops2, 0)};
-               const xed_reg_enum_t reg = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
-               if (iform == XED_IFORM_MOV_MEMv_GPRv) {               /* spill */
-                  entry_save_slots.erase(slot);
-                  auto a = anchors.find(reg);
-                  if (a != anchors.end()) {
-                     anchor_slots[slot] = a->second;
-                     pre_anchor_saves.erase(slot);
-                  } else {
-                     anchor_slots.erase(slot);
-                     if (is_gpr32(reg)) { pre_anchor_saves[slot] = reg; }
-                     else { pre_anchor_saves.erase(slot); }
-                  }
-               } else if (iform == XED_IFORM_MOV_GPRv_MEMv && is_gpr32(reg)) {   /* reload */
-                  auto s = anchor_slots.find(slot);
-                  auto es = entry_save_slots.find(slot);
-                  /* the epilogue restore of the callee-saved anchor register:
-                   * keep the anchor for blocks after the epilogue (Civ IV
-                   * Python 2.6 post-epilogue case body) */
-                  const bool entry_restore =
-                     entry_save_gate && es != entry_save_slots.end() && es->second == reg &&
-                     (reg == XED_REG_EBX || reg == XED_REG_ESI || reg == XED_REG_EDI);
-                  if (s != anchor_slots.end()) {
-                     anchors[reg] = s->second;
-                     anchor_keep = reg;
-                  } else if (entry_restore) {
-                     anchor_keep = reg;
-                  } else {
-                     anchors.erase(reg);
-                  }
-               }
-            }
-         }
-
-         /* Any other definition of a register ends its anchor — including
-          * sub-register writes — except the pops described above. */
-         if (!is_anchor_pop && cat != XED_CATEGORY_POP && !anchors.empty()) {
-            const xed_inst_t *xi = xed_decoded_inst_inst(&xedd);
-            for (unsigned i = 0; i < xed_inst_noperands(xi); ++i) {
-               const xed_operand_t *op = xed_inst_operand(xi, i);
-               if (!xed_operand_written(op)) continue;
-               const xed_operand_enum_t nm = xed_operand_name(op);
-               if (!xed_operand_is_register(nm)) continue;
-               const xed_reg_enum_t raw = xed_decoded_inst_get_reg(&xedd, nm);
-               if (raw == XED_REG_INVALID) continue;
-               const xed_reg_enum_t r = xed_get_largest_enclosing_register32(raw);
-               if (is_gpr32(r) && r != anchor_keep) { anchors.erase(r); }
-            }
-         }
-
-         /* `mov %src,%dst` copies the anchor (the kill above already cleared %dst). */
-         if (iform == XED_IFORM_MOV_GPRv_GPRv_89 || iform == XED_IFORM_MOV_GPRv_GPRv_8B) {
-            const xed_reg_enum_t mdst = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
-            const xed_reg_enum_t msrc = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1);
-            if (is_gpr32(mdst) && mdst != msrc) {
-               auto a = anchors.find(msrc);
-               if (a != anchors.end()) { anchors[mdst] = a->second; }
-               else { anchors.erase(mdst); }
-            }
-         }
-
-         /* Forward targets at or behind us are reached (or were never real). */
-         pending_forward_targets.erase(pending_forward_targets.begin(),
-                                       pending_forward_targets.upper_bound(inst->loc.vmaddr));
-
-         /* Record intra-function forward branches: in-section, within 64 KB (a
-          * farther jmp is a tail call; tracking it leaked an anchor across all
-          * of iPhoto's __text). Calls leave the function and are not tracked. */
-         if (cat == XED_CATEGORY_COND_BR || cat == XED_CATEGORY_UNCOND_BR) {
-            const ssize_t brdisp = xed_decoded_inst_get_branch_displacement(&xedd);
-            const std::size_t tgt =
-               inst->loc.vmaddr + xed_decoded_inst_get_length(&xedd) + brdisp;
-            if (brdisp > 0 && tgt < sect.addr + sect.size &&
-                tgt - inst->loc.vmaddr <= 0x10000) {
-               pending_forward_targets.insert(tgt);
-               snapshot_for(branch_anchor_snap, tgt, anchors);
-               snapshot_for(branch_slot_snap, tgt, anchor_slots);
-            }
-         }
-         /* The case bodies of a claimed PIC jump table are branch targets too. */
-         auto jt = env.pic_switch_targets.find(inst->loc.vmaddr);
-         if (jt != env.pic_switch_targets.end()) {
-            for (const std::size_t tgt : jt->second) {
-               if (tgt <= inst->loc.vmaddr) { continue; }
-               snapshot_for(branch_anchor_snap, tgt, anchors);
-               snapshot_for(branch_slot_snap, tgt, anchor_slots);
-            }
-         }
-
-         /* Control transfers. int3 is transparent (its fall-through is dead
-          * code and an empty snapshot from it would poison the join). */
-         const bool is_pic_call_zero =
-            iform == XED_IFORM_CALL_NEAR_RELBRz &&
-            xed_decoded_inst_get_branch_displacement(&xedd) == 0;
-         if (cat == XED_CATEGORY_RET) {
-            if (pending_forward_targets.empty()) { clear_all(); }
-         } else if ((cat == XED_CATEGORY_INTERRUPT &&
-                     xed_decoded_inst_get_iclass(&xedd) != XED_ICLASS_INT3) ||
-                    cat == XED_CATEGORY_SYSCALL || cat == XED_CATEGORY_SYSRET) {
-            clear_all();
-         } else if (cat == XED_CATEGORY_CALL && !is_pic_call_zero) {
-            anchors.erase(XED_REG_EAX);
-            anchors.erase(XED_REG_ECX);
-            anchors.erase(XED_REG_EDX);
-         }
-
-         if (thunk_anchor_reg != XED_REG_INVALID) {
-            anchors[thunk_anchor_reg] = thunk_anchor_vm;
-            anchored_region = true;
-         }
-
-         if (cat != XED_CATEGORY_NOP && cat != XED_CATEGORY_WIDENOP) {
-            last_flow_cat = cat;
-            if (cat == XED_CATEGORY_RET || cat == XED_CATEGORY_UNCOND_BR) {
-               ft_dead = true;
-            } else if (cat != XED_CATEGORY_CALL) {
-               ft_dead = false;
-            }
-         }
-         prev_inst = inst;
       }
    }
 
@@ -1066,330 +1117,352 @@ namespace MachO {
          }
       }
 
-      std::size_t it = sect.offset;
-      std::size_t vmaddr = sect.addr;
-      const std::size_t end = sect.offset + sect.size;
-      while (it < end) {
-         xed_decoded_inst_t xedd;
-         const bool ok = decode_at(it, xedd);
-         if (!ok || straddles_symbol(vmaddr, xed_decoded_inst_get_length(&xedd))) {
-            tbl_addr.clear(); tbl_val.clear(); prev_call0 = false;
-            prev_cat = XED_CATEGORY_INVALID;
-            ++it; ++vmaddr;
-            continue;
-         }
-         const unsigned len = xed_decoded_inst_get_length(&xedd);
-         const xed_iform_enum_t iform = xed_decoded_inst_get_iform_enum(&xedd);
-         const xed_category_enum_t cat = xed_decoded_inst_get_category(&xedd);
-         const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
-         const xed_reg_enum_t reg0raw = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
-         const xed_reg_enum_t reg0 = jt_norm32(reg0raw);
-
-         /* A function symbol starts with no live anchor. */
-         if (env.func_syms.count(vmaddr) != 0) {
+      /* Backward branches are joined on a second walk (see DetectPicAnchoredDisps):
+       * Portal 2 server CUtlBuffer::VaScanf dispatches off an anchor that only
+       * a later block reloads, then `jbe`s back. Re-claiming a table is
+       * idempotent. Kill M64_NO_PIC_BACK_EDGE; guard 99_jt_back_edge_join. */
+      static const bool back_edge = std::getenv("M64_NO_PIC_BACK_EDGE") == nullptr;
+      std::map<std::size_t, RegMap> back_snap;
+      for (int pass = 0; pass < 2; ++pass) {
+         if (pass == 1) {
+            if (!pic_any_nonempty(back_snap)) { break; }
             anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
-            stack_tbl.clear(); stack_anchor.clear(); pending_targets.clear();
-            anchor_snap.clear();
-            prev_call0 = false;
+            stack_tbl.clear(); stack_anchor.clear(); esp_off = 0;
+            pending_targets.clear(); anchor_snap.clear();
+            prev_cat = XED_CATEGORY_INVALID; prev_call0 = false;
          }
-         if (!anchor_snap.empty()) {
-            auto sn = anchor_snap.find(vmaddr);
-            if (sn != anchor_snap.end()) {
-               if (prev_cat == XED_CATEGORY_RET || prev_cat == XED_CATEGORY_UNCOND_BR) {
-                  anchors = sn->second;
-               } else {
-                  intersect_into(anchors, sn->second);
-               }
+         std::size_t it = sect.offset;
+         std::size_t vmaddr = sect.addr;
+         const std::size_t end = sect.offset + sect.size;
+         while (it < end) {
+            xed_decoded_inst_t xedd;
+            const bool ok = decode_at(it, xedd);
+            if (!ok || straddles_symbol(vmaddr, xed_decoded_inst_get_length(&xedd))) {
+               tbl_addr.clear(); tbl_val.clear(); prev_call0 = false;
+               prev_cat = XED_CATEGORY_INVALID;
+               ++it; ++vmaddr;
+               continue;
             }
-            anchor_snap.erase(anchor_snap.begin(), anchor_snap.upper_bound(vmaddr));
-         }
+            const unsigned len = xed_decoded_inst_get_length(&xedd);
+            const xed_iform_enum_t iform = xed_decoded_inst_get_iform_enum(&xedd);
+            const xed_category_enum_t cat = xed_decoded_inst_get_category(&xedd);
+            const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
+            const xed_reg_enum_t reg0raw = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+            const xed_reg_enum_t reg0 = jt_norm32(reg0raw);
 
-         bool sets_state = false;
-         bool spill_write = false;
+            /* A function symbol starts with no live anchor. */
+            if (env.func_syms.count(vmaddr) != 0) {
+               anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
+               stack_tbl.clear(); stack_anchor.clear(); pending_targets.clear();
+               anchor_snap.clear();
+               prev_call0 = false;
+            }
+            if (pass == 1) {
+               auto b = back_snap.find(vmaddr);
+               if (b != back_snap.end()) { snapshot_for(anchor_snap, vmaddr, b->second); }
+            }
+            if (!anchor_snap.empty()) {
+               auto sn = anchor_snap.find(vmaddr);
+               if (sn != anchor_snap.end()) {
+                  if (prev_cat == XED_CATEGORY_RET || prev_cat == XED_CATEGORY_UNCOND_BR) {
+                     anchors = sn->second;
+                  } else {
+                     intersect_into(anchors, sn->second);
+                  }
+               }
+               anchor_snap.erase(anchor_snap.begin(), anchor_snap.upper_bound(vmaddr));
+            }
 
-         if (iform == XED_IFORM_POP_GPRv_58 && prev_call0 && is_gpr32(reg0)) {
-            /* i386 anchor: `call $+0; pop %reg` */
-            anchors[reg0] = vmaddr;
-            tbl_addr.erase(reg0); tbl_val.erase(reg0);
-            sets_state = true;
-         } else if (iform == XED_IFORM_MOV_GPRv_MEMv && pend_r11 != 0 && vmaddr == pend_r11 &&
-                    xed_decoded_inst_get_base_reg(ops, 0) == XED_REG_RSP &&
-                    xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID &&
-                    is_gpr32(reg0)) {
-            /* translated anchor: the `mov %reg,[rsp]` the translated
-             * `call $+0` returns to */
-            anchors[reg0] = pend_r11;
-            tbl_addr.erase(reg0); tbl_val.erase(reg0);
-            sets_state = true;
-         } else if ((iform == XED_IFORM_MOV_GPRv_GPRv_89 ||
-                     iform == XED_IFORM_MOV_GPRv_GPRv_8B) && is_gpr32(reg0)) {
-            /* the anchor follows a copy (an overwrite does not clear it here) */
-            const xed_reg_enum_t src = jt_norm32(xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1));
-            auto a = anchors.find(src);
-            if (src != reg0 && a != anchors.end()) { anchors[reg0] = a->second; }
-         } else if (iform == XED_IFORM_LEA_GPRv_AGEN &&
-                    (is_gpr32(reg0) || reg0raw == XED_REG_R11)) {
-            /* table base: `lea [rip+d]` (M64) or `lea [anchor+d]` landing in
-             * this section — an anchor-relative lea usually reaches a string
-             * or global, and recording that as a table poisons the load that
-             * follows (Portal 2 libtogl GLMDecode) */
-            const xed_reg_enum_t base = xed_decoded_inst_get_base_reg(ops, 0);
-            const ssize_t disp = xed_decoded_inst_get_memory_displacement(ops, 0);
-            if (xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID) {
-               if (base == XED_REG_RIP) {
-                  tbl_addr[reg0] = vmaddr + len + disp;
-                  tbl_val.erase(reg0);
-                  sets_state = true;
-               } else {
-                  auto a = anchors.find(jt_norm32(base));
-                  const std::size_t cand = a != anchors.end() ? (std::size_t)((ssize_t)a->second + disp) : 0;
-                  if (a != anchors.end() && cand >= sect_lo && cand < sect_hi) {
-                     tbl_addr[reg0] = cand;
+            bool sets_state = false;
+            bool spill_write = false;
+
+            if (iform == XED_IFORM_POP_GPRv_58 && prev_call0 && is_gpr32(reg0)) {
+               /* i386 anchor: `call $+0; pop %reg` */
+               anchors[reg0] = vmaddr;
+               tbl_addr.erase(reg0); tbl_val.erase(reg0);
+               sets_state = true;
+            } else if (iform == XED_IFORM_MOV_GPRv_MEMv && pend_r11 != 0 && vmaddr == pend_r11 &&
+                       xed_decoded_inst_get_base_reg(ops, 0) == XED_REG_RSP &&
+                       xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID &&
+                       is_gpr32(reg0)) {
+               /* translated anchor: the `mov %reg,[rsp]` the translated
+                * `call $+0` returns to */
+               anchors[reg0] = pend_r11;
+               tbl_addr.erase(reg0); tbl_val.erase(reg0);
+               sets_state = true;
+            } else if ((iform == XED_IFORM_MOV_GPRv_GPRv_89 ||
+                        iform == XED_IFORM_MOV_GPRv_GPRv_8B) && is_gpr32(reg0)) {
+               /* the anchor follows a copy (an overwrite does not clear it here) */
+               const xed_reg_enum_t src = jt_norm32(xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1));
+               auto a = anchors.find(src);
+               if (src != reg0 && a != anchors.end()) { anchors[reg0] = a->second; }
+            } else if (iform == XED_IFORM_LEA_GPRv_AGEN &&
+                       (is_gpr32(reg0) || reg0raw == XED_REG_R11)) {
+               /* table base: `lea [rip+d]` (M64) or `lea [anchor+d]` landing in
+                * this section — an anchor-relative lea usually reaches a string
+                * or global, and recording that as a table poisons the load that
+                * follows (Portal 2 libtogl GLMDecode) */
+               const xed_reg_enum_t base = xed_decoded_inst_get_base_reg(ops, 0);
+               const ssize_t disp = xed_decoded_inst_get_memory_displacement(ops, 0);
+               if (xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID) {
+                  if (base == XED_REG_RIP) {
+                     tbl_addr[reg0] = vmaddr + len + disp;
                      tbl_val.erase(reg0);
+                     sets_state = true;
+                  } else {
+                     auto a = anchors.find(jt_norm32(base));
+                     const std::size_t cand = a != anchors.end() ? (std::size_t)((ssize_t)a->second + disp) : 0;
+                     if (a != anchors.end() && cand >= sect_lo && cand < sect_hi) {
+                        tbl_addr[reg0] = cand;
+                        tbl_val.erase(reg0);
+                        sets_state = true;
+                     }
+                  }
+               }
+            } else if (jt_spill && iform == XED_IFORM_MOV_MEMv_GPRv && frame_operand(ops)) {
+               /* spill of a table base or anchor to a frame slot */
+               const SlotKey key = slot_key(ops);
+               auto tb = tbl_addr.find(reg0);
+               if (tb != tbl_addr.end()) { stack_tbl[key] = tb->second; }
+               else { stack_tbl.erase(key); }
+               auto an = anchors.find(reg0);
+               if (an != anchors.end()) { stack_anchor[key] = an->second; }
+               else { stack_anchor.erase(key); }
+               spill_write = true;
+            } else if (jt_spill && iform == XED_IFORM_MOV_GPRv_MEMv && is_gpr32(reg0) &&
+                       frame_operand(ops) &&
+                       (stack_tbl.count(slot_key(ops)) || stack_anchor.count(slot_key(ops)))) {
+               /* reload from such a slot */
+               const SlotKey key = slot_key(ops);
+               auto tb = stack_tbl.find(key);
+               if (tb != stack_tbl.end()) { tbl_addr[reg0] = tb->second; }
+               else { tbl_addr.erase(reg0); }
+               auto an = stack_anchor.find(key);
+               if (an != stack_anchor.end()) { anchors[reg0] = an->second; }
+               else { anchors.erase(reg0); }
+               tbl_val.erase(reg0);
+               sets_state = true;
+            } else if (iform == XED_IFORM_MOV_GPRv_MEMv && is_gpr32(reg0)) {
+               /* `mov %t,[%tbl + idx*s]`, or the folded `[anchor + idx*4 + d]` */
+               const xed_reg_enum_t base = jt_norm32(xed_decoded_inst_get_base_reg(ops, 0));
+               const xed_reg_enum_t index = jt_norm32(xed_decoded_inst_get_index_reg(ops, 0));
+               auto tb = tbl_addr.find(base);
+               if (tb == tbl_addr.end()) { tb = tbl_addr.find(index); }
+               if (tb != tbl_addr.end()) {
+                  tbl_val[reg0] = { tb->second, 0 };
+                  tbl_addr.erase(reg0);
+                  sets_state = true;
+               } else if (index != XED_REG_INVALID && xed_operand_values_get_scale(ops) == 4) {
+                  auto a = anchors.find(base);
+                  if (a != anchors.end()) {
+                     tbl_val[reg0] = { a->second + xed_decoded_inst_get_memory_displacement(ops, 0), 0 };
+                     tbl_addr.erase(reg0);
                      sets_state = true;
                   }
                }
-            }
-         } else if (jt_spill && iform == XED_IFORM_MOV_MEMv_GPRv && frame_operand(ops)) {
-            /* spill of a table base or anchor to a frame slot */
-            const SlotKey key = slot_key(ops);
-            auto tb = tbl_addr.find(reg0);
-            if (tb != tbl_addr.end()) { stack_tbl[key] = tb->second; }
-            else { stack_tbl.erase(key); }
-            auto an = anchors.find(reg0);
-            if (an != anchors.end()) { stack_anchor[key] = an->second; }
-            else { stack_anchor.erase(key); }
-            spill_write = true;
-         } else if (jt_spill && iform == XED_IFORM_MOV_GPRv_MEMv && is_gpr32(reg0) &&
-                    frame_operand(ops) &&
-                    (stack_tbl.count(slot_key(ops)) || stack_anchor.count(slot_key(ops)))) {
-            /* reload from such a slot */
-            const SlotKey key = slot_key(ops);
-            auto tb = stack_tbl.find(key);
-            if (tb != stack_tbl.end()) { tbl_addr[reg0] = tb->second; }
-            else { tbl_addr.erase(reg0); }
-            auto an = stack_anchor.find(key);
-            if (an != stack_anchor.end()) { anchors[reg0] = an->second; }
-            else { anchors.erase(reg0); }
-            tbl_val.erase(reg0);
-            sets_state = true;
-         } else if (iform == XED_IFORM_MOV_GPRv_MEMv && is_gpr32(reg0)) {
-            /* `mov %t,[%tbl + idx*s]`, or the folded `[anchor + idx*4 + d]` */
-            const xed_reg_enum_t base = jt_norm32(xed_decoded_inst_get_base_reg(ops, 0));
-            const xed_reg_enum_t index = jt_norm32(xed_decoded_inst_get_index_reg(ops, 0));
-            auto tb = tbl_addr.find(base);
-            if (tb == tbl_addr.end()) { tb = tbl_addr.find(index); }
-            if (tb != tbl_addr.end()) {
-               tbl_val[reg0] = { tb->second, 0 };
-               tbl_addr.erase(reg0);
-               sets_state = true;
-            } else if (index != XED_REG_INVALID && xed_operand_values_get_scale(ops) == 4) {
-               auto a = anchors.find(base);
-               if (a != anchors.end()) {
-                  tbl_val[reg0] = { a->second + xed_decoded_inst_get_memory_displacement(ops, 0), 0 };
-                  tbl_addr.erase(reg0);
-                  sets_state = true;
-               }
-            }
-         } else if (iform == XED_IFORM_ADD_GPRv_MEMv && is_gpr32(reg0)) {
-            /* fused load+add: `add %anchor,[%anchor + idx*4 + d]` (i386), or
-             * `add %anchor,[%tbl + idx*4]` (translated, table in r11) */
-            const xed_reg_enum_t mbase = jt_norm32(xed_decoded_inst_get_base_reg(ops, 0));
-            const xed_reg_enum_t midx = jt_norm32(xed_decoded_inst_get_index_reg(ops, 0));
-            auto a = anchors.find(reg0);
-            const bool shape = a != anchors.end() && midx != XED_REG_INVALID && midx != reg0 &&
-                               xed_operand_values_get_scale(ops) == 4;
-            if (shape && mbase == reg0) {
-               const std::size_t tbl =
-                  (std::size_t)((ssize_t)a->second + xed_decoded_inst_get_memory_displacement(ops, 0));
-               if (tbl >= sect_lo && tbl < sect_hi) {
-                  tbl_val[reg0] = { tbl, a->second };
-                  tbl_addr.erase(reg0);
-                  sets_state = true;
-               }
-            } else if (shape && xed_decoded_inst_get_memory_displacement(ops, 0) == 0) {
-               auto tb = tbl_addr.find(mbase);
-               if (tb != tbl_addr.end()) {
-                  tbl_val[reg0] = { tb->second, a->second };
-                  tbl_addr.erase(reg0);
-                  sets_state = true;
-               }
-            }
-         } else if (iform == XED_IFORM_ADD_GPRv_GPRv_01 || iform == XED_IFORM_ADD_GPRv_GPRv_03) {
-            /* `add %t,%anchor`: the entry becomes a case target */
-            auto tv = tbl_val.find(reg0);
-            auto a = anchors.find(jt_norm32(xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1)));
-            if (tv != tbl_val.end() && a != anchors.end()) {
-               tv->second.second = a->second;
-               sets_state = true;
-            }
-         } else if (iform == XED_IFORM_JMP_GPRv) {
-            auto tv = tbl_val.find(reg0);
-            if (tv != tbl_val.end() && tv->second.second != 0) {
-               const std::size_t table_base = tv->second.first;
-               const std::size_t anchor = tv->second.second;
-               std::size_t min_target = sect_hi;
-               auto ns = env.func_syms.upper_bound(table_base);
-               if (ns != env.func_syms.end() && *ns < min_target) { min_target = *ns; }
-               /* A case body lies inside the dispatching function. Without
-                * this, the padding after a table read as one more entry: Portal
-                * 2 server `cmpl $3 ; ja` table (dispatch 0x24aed5) gained a 5th
-                * "case" from its `nopl` alignment, 4 MB away, and that target's
-                * empty-anchor snapshot erased %esi mid-function at 0x64c800 ->
-                * raw PIC stores into __TEXT. Bounded by symbols; a stripped
-                * image keeps the section bounds. Kill M64_NO_JT_CASE_IN_FUNC;
-                * guard 99_jt_case_in_func. */
-               static const bool case_anywhere = std::getenv("M64_NO_JT_CASE_IN_FUNC") != nullptr;
-               std::size_t fn_lo = sect_lo, fn_hi = sect_hi;
-               if (!case_anywhere) {
-                  auto nx = env.func_syms.upper_bound(vmaddr);
-                  if (nx != env.func_syms.end()) { fn_hi = std::min(fn_hi, *nx); }
-                  if (nx != env.func_syms.begin()) { fn_lo = std::max(fn_lo, *std::prev(nx)); }
-               }
-               std::size_t i = 0;
-               for (; ; ++i) {
-                  const std::size_t slot = table_base + i * 4;
-                  if (slot + 4 > sect_hi || slot >= min_target) { break; }
-                  const int32_t raw = (int32_t)img.at<uint32_t>(sect.offset + (slot - sect.addr));
-                  const std::size_t target = anchor + raw;
-                  if (target < sect_lo || target >= sect_hi) { break; }
-                  if (target < fn_lo || target >= fn_hi) { break; }
-                  if (target > table_base && target < min_target) {
-                     min_target = target;
-                  }
-               }
-               if (i >= 2) {
-                  for (std::size_t k = 0; k < i; ++k) {
-                     env.jump_table_slots[table_base + k * 4] = anchor;
-                  }
-                  auto& tr = tables[table_base];
-                  if (i > tr.first) { tr = { i, anchor }; }
-                  table_dispatch[table_base] = vmaddr;
-                  if (trace) {
-                     fprintf(stderr, "[jumptable] dispatch@0x%zx anchor=0x%zx table=0x%zx count=%zu\n",
-                             (size_t)vmaddr, (size_t)anchor, (size_t)table_base, (size_t)i);
-                  }
-                  /* An inline table right after the jmp: step over it so the
-                   * walk stays aligned for the rest of the function. */
-                  const std::size_t table_end = table_base + i * 4;
-                  if (table_base >= vmaddr && table_base - vmaddr < 64 && table_end > vmaddr) {
-                     it = sect.offset + (table_end - sect.addr);
-                     vmaddr = table_end;
+            } else if (iform == XED_IFORM_ADD_GPRv_MEMv && is_gpr32(reg0)) {
+               /* fused load+add: `add %anchor,[%anchor + idx*4 + d]` (i386), or
+                * `add %anchor,[%tbl + idx*4]` (translated, table in r11) */
+               const xed_reg_enum_t mbase = jt_norm32(xed_decoded_inst_get_base_reg(ops, 0));
+               const xed_reg_enum_t midx = jt_norm32(xed_decoded_inst_get_index_reg(ops, 0));
+               auto a = anchors.find(reg0);
+               const bool shape = a != anchors.end() && midx != XED_REG_INVALID && midx != reg0 &&
+                                  xed_operand_values_get_scale(ops) == 4;
+               if (shape && mbase == reg0) {
+                  const std::size_t tbl =
+                     (std::size_t)((ssize_t)a->second + xed_decoded_inst_get_memory_displacement(ops, 0));
+                  if (tbl >= sect_lo && tbl < sect_hi) {
+                     tbl_val[reg0] = { tbl, a->second };
                      tbl_addr.erase(reg0);
-                     tbl_val.erase(reg0);
-                     prev_call0 = false;
-                     prev_cat = cat;
-                     continue;
+                     sets_state = true;
+                  }
+               } else if (shape && xed_decoded_inst_get_memory_displacement(ops, 0) == 0) {
+                  auto tb = tbl_addr.find(mbase);
+                  if (tb != tbl_addr.end()) {
+                     tbl_val[reg0] = { tb->second, a->second };
+                     tbl_addr.erase(reg0);
+                     sets_state = true;
+                  }
+               }
+            } else if (iform == XED_IFORM_ADD_GPRv_GPRv_01 || iform == XED_IFORM_ADD_GPRv_GPRv_03) {
+               /* `add %t,%anchor`: the entry becomes a case target */
+               auto tv = tbl_val.find(reg0);
+               auto a = anchors.find(jt_norm32(xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1)));
+               if (tv != tbl_val.end() && a != anchors.end()) {
+                  tv->second.second = a->second;
+                  sets_state = true;
+               }
+            } else if (iform == XED_IFORM_JMP_GPRv) {
+               auto tv = tbl_val.find(reg0);
+               if (tv != tbl_val.end() && tv->second.second != 0) {
+                  const std::size_t table_base = tv->second.first;
+                  const std::size_t anchor = tv->second.second;
+                  std::size_t min_target = sect_hi;
+                  auto ns = env.func_syms.upper_bound(table_base);
+                  if (ns != env.func_syms.end() && *ns < min_target) { min_target = *ns; }
+                  /* A case body lies inside the dispatching function. Without
+                   * this, the padding after a table read as one more entry: Portal
+                   * 2 server `cmpl $3 ; ja` table (dispatch 0x24aed5) gained a 5th
+                   * "case" from its `nopl` alignment, 4 MB away, and that target's
+                   * empty-anchor snapshot erased %esi mid-function at 0x64c800 ->
+                   * raw PIC stores into __TEXT. Bounded by symbols; a stripped
+                   * image keeps the section bounds. Kill M64_NO_JT_CASE_IN_FUNC;
+                   * guard 99_jt_case_in_func. */
+                  static const bool case_anywhere = std::getenv("M64_NO_JT_CASE_IN_FUNC") != nullptr;
+                  std::size_t fn_lo = sect_lo, fn_hi = sect_hi;
+                  if (!case_anywhere) {
+                     auto nx = env.func_syms.upper_bound(vmaddr);
+                     if (nx != env.func_syms.end()) { fn_hi = std::min(fn_hi, *nx); }
+                     if (nx != env.func_syms.begin()) { fn_lo = std::max(fn_lo, *std::prev(nx)); }
+                  }
+                  std::size_t i = 0;
+                  for (; ; ++i) {
+                     const std::size_t slot = table_base + i * 4;
+                     if (slot + 4 > sect_hi || slot >= min_target) { break; }
+                     const int32_t raw = (int32_t)img.at<uint32_t>(sect.offset + (slot - sect.addr));
+                     const std::size_t target = anchor + raw;
+                     if (target < sect_lo || target >= sect_hi) { break; }
+                     if (target < fn_lo || target >= fn_hi) { break; }
+                     if (target > table_base && target < min_target) {
+                        min_target = target;
+                     }
+                  }
+                  if (i >= 2) {
+                     for (std::size_t k = 0; k < i; ++k) {
+                        env.jump_table_slots[table_base + k * 4] = anchor;
+                     }
+                     auto& tr = tables[table_base];
+                     if (i > tr.first) { tr = { i, anchor }; }
+                     table_dispatch[table_base] = vmaddr;
+                     if (trace) {
+                        fprintf(stderr, "[jumptable] dispatch@0x%zx anchor=0x%zx table=0x%zx count=%zu\n",
+                                (size_t)vmaddr, (size_t)anchor, (size_t)table_base, (size_t)i);
+                     }
+                     /* An inline table right after the jmp: step over it so the
+                      * walk stays aligned for the rest of the function. */
+                     const std::size_t table_end = table_base + i * 4;
+                     if (table_base >= vmaddr && table_base - vmaddr < 64 && table_end > vmaddr) {
+                        it = sect.offset + (table_end - sect.addr);
+                        vmaddr = table_end;
+                        tbl_addr.erase(reg0);
+                        tbl_val.erase(reg0);
+                        prev_call0 = false;
+                        prev_cat = cat;
+                        continue;
+                     }
                   }
                }
             }
-         }
 
-         /* A write that did not (re)define table state clears it. */
-         if (!sets_state && is_gpr32(reg0) && (!jt_spill || jt_reg0_written(&xedd))) {
-            tbl_addr.erase(reg0);
-            tbl_val.erase(reg0);
-         }
+            /* A write that did not (re)define table state clears it. */
+            if (!sets_state && is_gpr32(reg0) && (!jt_spill || jt_reg0_written(&xedd))) {
+               tbl_addr.erase(reg0);
+               tbl_val.erase(reg0);
+            }
 
-         if (jt_spill && (!stack_tbl.empty() || !stack_anchor.empty())) {
-            /* a slot dies when something else writes it ... */
-            if (!spill_write && xed_decoded_inst_number_of_memory_operands(&xedd) > 0 &&
-                xed_decoded_inst_mem_written(&xedd, 0) && frame_operand(ops)) {
-               const SlotKey dead = slot_key(ops);
-               stack_tbl.erase(dead);
-               stack_anchor.erase(dead);
+            if (jt_spill && (!stack_tbl.empty() || !stack_anchor.empty())) {
+               /* a slot dies when something else writes it ... */
+               if (!spill_write && xed_decoded_inst_number_of_memory_operands(&xedd) > 0 &&
+                   xed_decoded_inst_mem_written(&xedd, 0) && frame_operand(ops)) {
+                  const SlotKey dead = slot_key(ops);
+                  stack_tbl.erase(dead);
+                  stack_anchor.erase(dead);
+               }
+               /* ... when the frame pointer is redefined ... */
+               if (iform == XED_IFORM_LEAVE || (reg0 == XED_REG_EBP && jt_reg0_written(&xedd))) {
+                  drop_slots_of(stack_tbl, XED_REG_EBP);
+                  drop_slots_of(stack_anchor, XED_REG_EBP);
+               }
+               /* ... and %esp slots shift with pushes/pops/`add|sub $imm,%esp`
+                * (a returning CALL is net-zero; only `call $+0` leaves a push). */
+               const xed_iclass_enum_t ic = xed_decoded_inst_get_iclass(&xedd);
+               const bool call0 = iform == XED_IFORM_CALL_NEAR_RELBRz &&
+                                  xed_decoded_inst_get_branch_displacement(&xedd) == 0;
+               const bool esp_written = reg0 == XED_REG_ESP && jt_reg0_written(&xedd);
+               bool esp_kill;
+               if (!jt_esp_track) {
+                  esp_kill = cat == XED_CATEGORY_PUSH || cat == XED_CATEGORY_POP ||
+                             cat == XED_CATEGORY_CALL || cat == XED_CATEGORY_RET ||
+                             iform == XED_IFORM_LEAVE || esp_written;
+               } else if (ic == XED_ICLASS_PUSH || call0) {
+                  esp_off -= 4; esp_kill = false;
+               } else if (ic == XED_ICLASS_POP) {
+                  esp_off += 4; esp_kill = false;
+               } else if (ic == XED_ICLASS_LEA && reg0 == XED_REG_ESP &&
+                          jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)) == XED_REG_ESP &&
+                          xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID) {
+                  /* translated push/pop: lea rsp,[rsp -/+ 4] */
+                  esp_off += xed_decoded_inst_get_memory_displacement(ops, 0);
+                  esp_kill = false;
+               } else if (bits == Bits::M64 && cat == XED_CATEGORY_UNCOND_BR &&
+                          xed_decoded_inst_get_branch_displacement(&xedd) != 0 &&
+                          pend_r11 == vmaddr + len) {
+                  /* translated call: the callee pops the return address */
+                  esp_off += 4;
+                  esp_kill = false;
+               } else if ((ic == XED_ICLASS_ADD || ic == XED_ICLASS_SUB) && reg0 == XED_REG_ESP &&
+                          xed_decoded_inst_get_immediate_width(&xedd) != 0) {
+                  const ssize_t imm = (ssize_t)xed_decoded_inst_get_signed_immediate(&xedd);
+                  esp_off += (ic == XED_ICLASS_ADD) ? imm : -imm;
+                  esp_kill = false;
+               } else {
+                  esp_kill = cat == XED_CATEGORY_PUSH || cat == XED_CATEGORY_POP ||
+                             cat == XED_CATEGORY_RET || iform == XED_IFORM_LEAVE || esp_written;
+               }
+               if (esp_kill) {
+                  esp_off = 0;
+                  drop_slots_of(stack_tbl, XED_REG_ESP);
+                  drop_slots_of(stack_anchor, XED_REG_ESP);
+               }
             }
-            /* ... when the frame pointer is redefined ... */
-            if (iform == XED_IFORM_LEAVE || (reg0 == XED_REG_EBP && jt_reg0_written(&xedd))) {
-               drop_slots_of(stack_tbl, XED_REG_EBP);
-               drop_slots_of(stack_anchor, XED_REG_EBP);
-            }
-            /* ... and %esp slots shift with pushes/pops/`add|sub $imm,%esp`
-             * (a returning CALL is net-zero; only `call $+0` leaves a push). */
-            const xed_iclass_enum_t ic = xed_decoded_inst_get_iclass(&xedd);
-            const bool call0 = iform == XED_IFORM_CALL_NEAR_RELBRz &&
-                               xed_decoded_inst_get_branch_displacement(&xedd) == 0;
-            const bool esp_written = reg0 == XED_REG_ESP && jt_reg0_written(&xedd);
-            bool esp_kill;
-            if (!jt_esp_track) {
-               esp_kill = cat == XED_CATEGORY_PUSH || cat == XED_CATEGORY_POP ||
-                          cat == XED_CATEGORY_CALL || cat == XED_CATEGORY_RET ||
-                          iform == XED_IFORM_LEAVE || esp_written;
-            } else if (ic == XED_ICLASS_PUSH || call0) {
-               esp_off -= 4; esp_kill = false;
-            } else if (ic == XED_ICLASS_POP) {
-               esp_off += 4; esp_kill = false;
-            } else if (ic == XED_ICLASS_LEA && reg0 == XED_REG_ESP &&
-                       jt_norm32(xed_decoded_inst_get_base_reg(ops, 0)) == XED_REG_ESP &&
-                       xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID) {
-               /* translated push/pop: lea rsp,[rsp -/+ 4] */
-               esp_off += xed_decoded_inst_get_memory_displacement(ops, 0);
-               esp_kill = false;
-            } else if (bits == Bits::M64 && cat == XED_CATEGORY_UNCOND_BR &&
-                       xed_decoded_inst_get_branch_displacement(&xedd) != 0 &&
-                       pend_r11 == vmaddr + len) {
-               /* translated call: the callee pops the return address */
-               esp_off += 4;
-               esp_kill = false;
-            } else if ((ic == XED_ICLASS_ADD || ic == XED_ICLASS_SUB) && reg0 == XED_REG_ESP &&
-                       xed_decoded_inst_get_immediate_width(&xedd) != 0) {
-               const ssize_t imm = (ssize_t)xed_decoded_inst_get_signed_immediate(&xedd);
-               esp_off += (ic == XED_ICLASS_ADD) ? imm : -imm;
-               esp_kill = false;
-            } else {
-               esp_kill = cat == XED_CATEGORY_PUSH || cat == XED_CATEGORY_POP ||
-                          cat == XED_CATEGORY_RET || iform == XED_IFORM_LEAVE || esp_written;
-            }
-            if (esp_kill) {
-               esp_off = 0;
-               drop_slots_of(stack_tbl, XED_REG_ESP);
-               drop_slots_of(stack_anchor, XED_REG_ESP);
-            }
-         }
 
-         /* Anchor lifetime (DetectPicAnchoredDisps' rules, int3 transparent). */
-         pending_targets.erase(pending_targets.begin(), pending_targets.upper_bound(vmaddr));
-         if (cat == XED_CATEGORY_COND_BR || cat == XED_CATEGORY_UNCOND_BR) {
+            /* Anchor lifetime (DetectPicAnchoredDisps' rules, int3 transparent). */
+            pending_targets.erase(pending_targets.begin(), pending_targets.upper_bound(vmaddr));
+            if (cat == XED_CATEGORY_COND_BR || cat == XED_CATEGORY_UNCOND_BR) {
+               const ssize_t bd = xed_decoded_inst_get_branch_displacement(&xedd);
+               const std::size_t tgt = vmaddr + len + bd;
+               if (bd > 0 && tgt < sect_hi && tgt - vmaddr <= 0x10000) {
+                  pending_targets.insert(tgt);
+                  snapshot_for(anchor_snap, tgt, anchors);
+               } else if (pass == 0 && back_edge && bd < 0 && tgt >= sect_lo &&
+                          vmaddr - tgt <= 0x10000 && pic_same_function(env.func_syms, tgt, vmaddr)) {
+                  snapshot_for(back_snap, tgt, anchors);
+               }
+            }
+            const bool is_pic_call0 =
+               iform == XED_IFORM_CALL_NEAR_RELBRz &&
+               xed_decoded_inst_get_branch_displacement(&xedd) == 0;
+            if ((cat == XED_CATEGORY_RET && pending_targets.empty()) ||
+                (cat == XED_CATEGORY_INTERRUPT &&
+                 xed_decoded_inst_get_iclass(&xedd) != XED_ICLASS_INT3) ||
+                cat == XED_CATEGORY_SYSCALL || cat == XED_CATEGORY_SYSRET) {
+               anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
+               stack_tbl.clear(); stack_anchor.clear();
+            } else if (cat == XED_CATEGORY_CALL && !is_pic_call0) {
+               anchors.erase(XED_REG_EAX);
+               anchors.erase(XED_REG_ECX);
+               anchors.erase(XED_REG_EDX);
+               tbl_addr.clear(); tbl_val.clear();
+            }
+
+            /* `call get_pc_thunk` (or its translated jmp) leaves %r = return address */
             const ssize_t bd = xed_decoded_inst_get_branch_displacement(&xedd);
-            const std::size_t tgt = vmaddr + len + bd;
-            if (bd > 0 && tgt < sect_hi && tgt - vmaddr <= 0x10000) {
-               pending_targets.insert(tgt);
-               snapshot_for(anchor_snap, tgt, anchors);
+            const bool is_call = cat == XED_CATEGORY_CALL ||
+               (bits == Bits::M64 && cat == XED_CATEGORY_UNCOND_BR && pend_r11 == vmaddr + len);
+            if (is_call && bd != 0) {
+               auto t = pic_thunks.find(vmaddr + len + bd);
+               if (t != pic_thunks.end()) { anchors[t->second] = vmaddr + len; }
             }
-         }
-         const bool is_pic_call0 =
-            iform == XED_IFORM_CALL_NEAR_RELBRz &&
-            xed_decoded_inst_get_branch_displacement(&xedd) == 0;
-         if ((cat == XED_CATEGORY_RET && pending_targets.empty()) ||
-             (cat == XED_CATEGORY_INTERRUPT &&
-              xed_decoded_inst_get_iclass(&xedd) != XED_ICLASS_INT3) ||
-             cat == XED_CATEGORY_SYSCALL || cat == XED_CATEGORY_SYSRET) {
-            anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
-            stack_tbl.clear(); stack_anchor.clear();
-         } else if (cat == XED_CATEGORY_CALL && !is_pic_call0) {
-            anchors.erase(XED_REG_EAX);
-            anchors.erase(XED_REG_ECX);
-            anchors.erase(XED_REG_EDX);
-            tbl_addr.clear(); tbl_val.clear();
-         }
 
-         /* `call get_pc_thunk` (or its translated jmp) leaves %r = return address */
-         const ssize_t bd = xed_decoded_inst_get_branch_displacement(&xedd);
-         const bool is_call = cat == XED_CATEGORY_CALL ||
-            (bits == Bits::M64 && cat == XED_CATEGORY_UNCOND_BR && pend_r11 == vmaddr + len);
-         if (is_call && bd != 0) {
-            auto t = pic_thunks.find(vmaddr + len + bd);
-            if (t != pic_thunks.end()) { anchors[t->second] = vmaddr + len; }
+            prev_call0 = iform == XED_IFORM_CALL_NEAR_RELBRz && len == 5 && bd == 0;
+            if (iform == XED_IFORM_LEA_GPRv_AGEN && reg0raw == XED_REG_R11 &&
+                xed_decoded_inst_get_base_reg(ops, 0) == XED_REG_RIP) {
+               pend_r11 = vmaddr + len + xed_decoded_inst_get_memory_displacement(ops, 0);
+            }
+            prev_cat = cat;
+            it += len;
+            vmaddr += len;
          }
-
-         prev_call0 = iform == XED_IFORM_CALL_NEAR_RELBRz && len == 5 && bd == 0;
-         if (iform == XED_IFORM_LEA_GPRv_AGEN && reg0raw == XED_REG_R11 &&
-             xed_decoded_inst_get_base_reg(ops, 0) == XED_REG_RIP) {
-            pend_r11 = vmaddr + len + xed_decoded_inst_get_memory_displacement(ops, 0);
-         }
-         prev_cat = cat;
-         it += len;
-         vmaddr += len;
       }
 
       /* Two tables sharing an anchor often sit back to back below every case
