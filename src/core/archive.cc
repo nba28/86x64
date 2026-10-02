@@ -1557,7 +1557,23 @@ namespace MachO {
                      }
                   } else {
                      /* Defined symbol referenced by a non-lazy pointer = an
-                      * internal sliding pointer. */
+                      * internal sliding pointer.
+                      *
+                      * A LAZY pointer to a symbol this image defines (a C++
+                      * weak template instantiation, e.g. std::allocator<
+                      * std::string>'s copy ctor in Portal 2 client.dylib, 534
+                      * such slots there and in server.dylib) holds its
+                      * stub_helper as the file value: classic dyld bound it on
+                      * first call through `dyld_stub_binding_helper` and the
+                      * __dyld section, which modern dyld never fills, so the
+                      * first call jumped to 0. Point it at the definition. */
+                     static const bool keep_helper =
+                        std::getenv("M64_NO_LAZY_SELF_DEF") != nullptr;
+                     auto *lz = dynamic_cast<LazySymbolPointer<b> *>(blob);
+                     if (lz != nullptr && !keep_helper &&
+                         nl->type() == Nlist<b>::Type::SECT && nl->value != nullptr) {
+                        lz->pointee = nl->value;
+                     }
                      add_rebase(blob);
                   }
                }
