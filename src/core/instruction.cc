@@ -239,18 +239,25 @@ namespace MachO {
       /* i386 computes every effective address mod 2^32. A scaled index that
        * relies on the wrap (a negative/sentinel index) needs the 0x67 prefix in
        * x86_64. Never for a stack-pointer base or index (the widened rsp/rbp
-       * must not be truncated; rbp as a BASE is an ordinary register in
-       * -fomit-frame-pointer code, guard 99_sib_ebp_base_neg_wrap) nor for a
+       * must not be truncated; rbp as a BASE or INDEX is an ordinary register
+       * in -fomit-frame-pointer code, guard 99_sib_ebp_base_neg_wrap) nor for a
        * base-only operand, which may hold a native >4GB pointer. */
       bool wants_addr32(xed_reg_enum_t base, xed_reg_enum_t index) {
          static const bool rbp_base_wide =
             std::getenv("M64_SIB_RBP_BASE_WIDE") != nullptr;
+         /* A frame pointer is never a SCALED INDEX: %ebp as the index is a
+          * data register (Portal 2 libbink, Intel-compiled, 223 sites such as
+          * `movl (%eax,%ebp,4)`); a negative one must wrap like any other.
+          * Guard 99_sib_ebp_index_neg_wrap. */
+         static const bool rbp_index_wide =
+            std::getenv("M64_SIB_RBP_INDEX_WIDE") != nullptr;
          auto stack = [](xed_reg_enum_t r) {
             return r == XED_REG_ESP || r == XED_REG_RSP || r == XED_REG_EBP ||
                    r == XED_REG_RBP || r == XED_REG_EIP || r == XED_REG_RIP;
          };
          auto frame = [](xed_reg_enum_t r) { return r == XED_REG_EBP || r == XED_REG_RBP; };
-         if (index == XED_REG_INVALID || stack(index)) { return false; }
+         if (index == XED_REG_INVALID) { return false; }
+         if (stack(index) && (rbp_index_wide || !frame(index))) { return false; }
          if (stack(base) && (rbp_base_wide || !frame(base))) { return false; }
          return true;
       }
