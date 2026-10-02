@@ -6,6 +6,8 @@
 #
 # ON  = ABICONV_STEAM_API=<fake>: exit 42.
 # OFF = ABICONV_STEAM_API=/nonexistent: no interfaces, exit 3.
+# OFF2 = M64_NO_STEAM_LOWSTR_HEAP=1: a returned string's "low" copy comes from
+#        the native heap again; the truncated pointer faults (not 42).
 set -u
 cd "$(dirname "$0")"
 BIN=build/99_steam_bridge.x86_64
@@ -15,5 +17,6 @@ clang -arch x86_64 -dynamiclib -O1 -o "$FAKE" src/steam_bridge_fake.c || { echo 
 
 ABICONV_STEAM_API="$PWD/$FAKE" "$BIN" >/dev/null 2>&1; on=$?
 ABICONV_STEAM_API=/nonexistent "$BIN" >/dev/null 2>&1; off=$?
-[ "$on" = 42 ] && [ "$off" = 3 ] && { echo "steam-bridge: PASS (on=$on off=$off)"; exit 0; }
-echo "steam-bridge: FAIL (on=$on off=$off)"; exit 1
+M64_NO_STEAM_LOWSTR_HEAP=1 ABICONV_STEAM_API="$PWD/$FAKE" "$BIN" >/dev/null 2>&1; off2=$?
+[ "$on" = 42 ] && [ "$off" = 3 ] && [ "$off2" != 42 ] && { echo "steam-bridge: PASS (on=$on off=$off off2=$off2)"; exit 0; }
+echo "steam-bridge: FAIL (on=$on off=$off off2=$off2)"; exit 1

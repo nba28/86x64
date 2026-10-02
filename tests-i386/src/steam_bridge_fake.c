@@ -3,6 +3,7 @@
  * Itanium vtable slots of the three methods the fixture calls. */
 #include <stdint.h>
 #include <string.h>
+#include <sys/mman.h>
 
 struct ip20 { uint32_t w[5]; };
 
@@ -14,15 +15,30 @@ static struct ip20 get_public_ip(void *self) {
    return r;
 }
 
-static void *user_vt[40], *music_vt[40], *gs_vt[40];
-static struct { void **vt; } user = {user_vt}, music = {music_vt}, gs = {gs_vt};
+/* steamclient's strings live above 4GB: so does this one */
+static const char *get_persona_name(void *self) {
+   (void)self;
+   static char *hi;
+   if (!hi) {
+      hi = mmap((void *)0x700000000000ULL, 4096, PROT_READ | PROT_WRITE,
+                MAP_PRIVATE | MAP_ANON, -1, 0);
+      strcpy(hi, "persona-42");
+   }
+   return hi;
+}
+
+static void *user_vt[40], *music_vt[40], *gs_vt[40], *friends_vt[80];
+static struct { void **vt; } user = {user_vt}, music = {music_vt}, gs = {gs_vt},
+                             friends = {friends_vt};
 
 void *SteamInternal_FindOrCreateUserInterface(int32_t h, const char *ver) {
    (void)h;
    user_vt[2] = (void *)get_steam_id;
    music_vt[8] = (void *)get_volume;
+   friends_vt[0] = (void *)get_persona_name;
    if (!strcmp(ver, "SteamUser021")) return &user;
    if (!strcmp(ver, "STEAMMUSIC_INTERFACE_VERSION001")) return &music;
+   if (!strcmp(ver, "SteamFriends017")) return &friends;
    return NULL;
 }
 

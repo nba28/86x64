@@ -187,7 +187,14 @@ static uint64_t sb_lowstr(const char *s) {
    pthread_mutex_lock(&g_lk);
    for (int i = 0; i < n; i++)
       if (strcmp(tab[i].low, s) == 0) { char *r = tab[i].low; pthread_mutex_unlock(&g_lk); return (uint64_t)(uintptr_t)r; }
-   char *low = strdup(s);                       /* libabiconv strdup: low heap */
+   /* NOT strdup: libSystem's strdup allocates from the NATIVE heap (above 4GB
+    * under Rosetta), and the truncated pointer is unmapped (Portal 2
+    * matchmaking strncpy of GetFriendPersonaName). libabiconv malloc is the
+    * low i386 heap. Kill M64_NO_STEAM_LOWSTR_HEAP; guard steam-bridge. */
+   const bool old_strdup = KNOB("M64_NO_STEAM_LOWSTR_HEAP") != NULL;
+   size_t len = strlen(s) + 1;
+   char *low = old_strdup ? strdup(s) : malloc(len);
+   if (!old_strdup) memcpy(low, s, len);
    if (n < 4096) tab[n++].low = low;
    pthread_mutex_unlock(&g_lk);
    return (uint64_t)(uintptr_t)low;
