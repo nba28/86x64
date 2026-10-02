@@ -101,13 +101,13 @@ struct snd_ch {
    float                       gain;      /* 0..1 (ampCmd/volumeCmd) */
    double                      rate_mult; /* rateCmd/rateMultiplierCmd (1.0 = normal) */
    int                         inflight;  /* buffers enqueued & not yet completed */
-   /* a callBackCmd queued behind unfinished buffers: fired when the channel
-    * next drains (inflight -> 0), classic-faithfully (the callback signals the
-    * app that the preceding sound finished). */
-   int                         cb_pending;
-   uint16_t                    cb_cmd;
-   int16_t                     cb_p1;
-   uint32_t                    cb_p2;
+   /* callBackCmds queued behind unfinished buffers, in order. Each fires once
+    * the buffers queued BEFORE it have played (done >= target), which is the
+    * classic contract: the callback says "everything ahead of me finished".
+    * See snd_cb_fifo_disabled. */
+   uint64_t                    enq_total, done_total;
+   struct { uint64_t target; uint16_t cmd; int16_t p1; uint32_t p2; } cbs[128];
+   int                         ncb;
    /* serial context the app's callback is delivered on — see snd_cb_defer() */
    dispatch_queue_t            cbq;
    pthread_mutex_t             lk;
@@ -211,17 +211,66 @@ static int snd_lock_fix_disabled(void) {
    return t;
 }
 
+/* ★ ONE callBackCmd PER QUEUED BUFFER, FIRED WHEN ITS OWN BUFFER IS DONE.
+ *
+ * A streaming app double-buffers with `bufferCmd(chunk k) ; callBackCmd(k)`
+ * pairs and refills chunk k from callback k. Portal 2's Bink queues one pair per
+ * ~39 ms chunk, each callBackCmd naming its chunk in param2. The old shim kept a
+ * SINGLE pending callback (each new one overwrote the last) and fired it only
+ * when the whole queue drained, so Bink lost every per-chunk completion, refilled
+ * in bursts after the queue had run dry, and the audio crackled.
+ *
+ * Kill switch M64_NO_SND_CB_FIFO=1 restores that single slot fired at drain (the
+ * guard's OFF arm, 99_snd_cb_fifo: the earlier callbacks are lost). */
+static int snd_cb_fifo_disabled(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("M64_NO_SND_CB_FIFO") ? 1 : 0; }
+   return t;
+}
+#define CB_AT_DRAIN UINT64_MAX   /* kill-switch target: fire when the queue empties */
+
+/* Pop every pending callback whose buffers have played (caller holds c->lk);
+ * returns how many it moved into `out`. */
+static int cb_take_due(struct snd_ch *c, int all, uint16_t *cmd, int16_t *p1, uint32_t *p2) {
+   int n = 0;
+   while (n < c->ncb) {
+      uint64_t t = c->cbs[n].target;
+      int due = all || (t == CB_AT_DRAIN ? c->done_total >= c->enq_total : c->done_total >= t);
+      if (!due) break;
+      cmd[n] = c->cbs[n].cmd; p1[n] = c->cbs[n].p1; p2[n] = c->cbs[n].p2;
+      n++;
+   }
+   memmove(c->cbs, c->cbs + n, (size_t)(c->ncb - n) * sizeof c->cbs[0]);
+   c->ncb -= n;
+   return n;
+}
+
 static void aq_output_cb(void *ud, AudioQueueRef aq, AudioQueueBufferRef buf) {
    struct snd_ch *c = (struct snd_ch *)ud;
-   uint16_t cmd = 0; int16_t p1 = 0; uint32_t p2 = 0; int fire = 0;
+   uint16_t cmd[128]; int16_t p1[128]; uint32_t p2[128];
    pthread_mutex_lock(&c->lk);
    if (c->inflight > 0) c->inflight--;
-   if (c->inflight == 0 && c->cb_pending) {   /* channel drained: fire the pending callBack */
-      cmd = c->cb_cmd; p1 = c->cb_p1; p2 = c->cb_p2; c->cb_pending = 0; fire = 1;
-   }
+   /* a late completion from a queue ensure_queue already disposed was counted there */
+   if (aq == c->aq && c->done_total < c->enq_total) c->done_total++;
+   int n = cb_take_due(c, 0, cmd, p1, p2);
    pthread_mutex_unlock(&c->lk);
    AudioQueueFreeBuffer(aq, buf);
-   if (fire) fire_callback(c->chan, cmd, p1, p2);
+   for (int i = 0; i < n; i++) {
+      TR("buffer done: firing callBack p2=0x%x\n", p2[i]);
+      fire_callback(c->chan, cmd[i], p1[i], p2[i]);
+   }
+}
+
+/* quietCmd / flushCmd drop the queued buffers: the callbacks queued behind
+ * them still fire (in order, off the caller's stack), as a classic channel
+ * runs on to them; dropping one would stall the app's refill chain forever. */
+static void cb_release_all(struct snd_ch *c, uint32_t chan) {
+   uint16_t cmd[128]; int16_t p1[128]; uint32_t p2[128];
+   pthread_mutex_lock(&c->lk);
+   c->done_total = c->enq_total;
+   int n = cb_take_due(c, 1, cmd, p1, p2);
+   pthread_mutex_unlock(&c->lk);
+   for (int i = 0; i < n; i++) { snd_cb_defer(c, chan, cmd[i], p1[i], p2[i]); }
 }
 
 /* (Re)create the channel's AudioQueue for `fmt`. Returns 0 on success, -1 if no
@@ -235,7 +284,10 @@ static int ensure_queue(struct snd_ch *c, const AudioStreamBasicDescription *fmt
     * in do_command. Async dispose does not wait, so it cannot deadlock. A late
     * callback from the old queue is harmless: it still targets this same live
     * channel and its inflight decrement is guarded by `> 0`. */
-   if (c->aq) { AudioQueueDispose(c->aq, false); c->aq = NULL; c->fmt_valid = 0; c->running = 0; c->inflight = 0; }
+   if (c->aq) {
+      AudioQueueDispose(c->aq, false); c->aq = NULL; c->fmt_valid = 0; c->running = 0; c->inflight = 0;
+      c->done_total = c->enq_total;   /* its buffers are dropped: their callbacks are due */
+   }
    AudioQueueRef q = NULL;
    OSStatus st = AudioQueueNewOutput(fmt, aq_output_cb, c, NULL, NULL, 0, &q);
    if (st != noErr || !q) { TR("AudioQueueNewOutput failed st=%d (no device?)\n", (int)st); return -1; }
@@ -316,6 +368,7 @@ static void enqueue_sound(struct snd_ch *c, uint32_t hdr32) {
    buf->mUserData = NULL;
    if (AudioQueueEnqueueBuffer(c->aq, buf, 0, NULL) != noErr) { AudioQueueFreeBuffer(c->aq, buf); pthread_mutex_unlock(&c->lk); return; }
    c->inflight++;
+   c->enq_total++;
    if (!c->running) { AudioQueueStart(c->aq, NULL); c->running = 1; c->paused = 0; }
    pthread_mutex_unlock(&c->lk);
 }
@@ -398,6 +451,7 @@ static uint32_t do_command(uint32_t chan, uint32_t cmd32) {
          pthread_mutex_unlock(&c->lk);
          if (q) AudioQueueStop(q, true);
       }
+      if (!snd_cb_fifo_disabled()) cb_release_all(c, chan);
       break;
    }
    case snd_flushCmd: {                     /* drop queued (not-yet-played) buffers */
@@ -411,6 +465,7 @@ static uint32_t do_command(uint32_t chan, uint32_t cmd32) {
          pthread_mutex_unlock(&c->lk);
          if (q) AudioQueueReset(q);
       }
+      if (!snd_cb_fifo_disabled()) cb_release_all(c, chan);
       break;
    }
    case snd_pauseCmd:
@@ -425,8 +480,20 @@ static uint32_t do_command(uint32_t chan, uint32_t cmd32) {
       break;
    case snd_callBackCmd: {                  /* SndCallBackUPP(chan,&cmd) when sound done */
       pthread_mutex_lock(&c->lk);
-      int fire_now = (c->inflight == 0);     /* channel idle: fire immediately */
-      if (!fire_now) { c->cb_pending = 1; c->cb_cmd = cmd; c->cb_p1 = p1; c->cb_p2 = p2; }
+      int fire_now = c->done_total >= c->enq_total && c->ncb == 0;   /* idle */
+      if (!fire_now) {
+         if (snd_cb_fifo_disabled()) { c->ncb = 0; }             /* old: one slot */
+         if (c->ncb == 128) {                                    /* classic queue is 128 */
+            pthread_mutex_unlock(&c->lk);
+            return (uint32_t)(int32_t)-203;                      /* queueFull */
+         }
+         c->cbs[c->ncb].target = snd_cb_fifo_disabled() ? CB_AT_DRAIN : c->enq_total;
+         c->cbs[c->ncb].cmd = cmd; c->cbs[c->ncb].p1 = p1; c->cbs[c->ncb].p2 = p2;
+         c->ncb++;
+      }
+      TR("callBackCmd p2=0x%x after buffer %llu (done %llu) -> %s\n", p2,
+         (unsigned long long)c->enq_total, (unsigned long long)c->done_total,
+         fire_now ? "fire now" : "queued");
       pthread_mutex_unlock(&c->lk);
       if (fire_now) snd_cb_defer(c, chan, cmd, p1, p2);
       break;
