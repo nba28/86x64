@@ -418,16 +418,16 @@ static void fr_print_region(const char *label, uint64_t v) {
 /* Raw bytes at the faulting instruction. With no image to name it, the bytes
  * themselves are the identity: they can be matched against a translated dylib
  * on disk to prove which image a stray mapping is a copy of. */
-static void fr_print_code(uint64_t rip) {
+static void fr_print_code(const char *label, uint64_t rip) {
    unsigned char b[32];
    /* Start a little BEFORE rip: the preceding bytes distinguish a translated
     * call/anchor sequence from ordinary code (see the anchor-vs-frame rule). */
    uint64_t lo = rip >= 16 ? rip - 16 : rip;
    if (!fr_read(lo, b, sizeof b)) {
-      fprintf(stderr, "[fault] code at rip: unreadable\n");
+      fprintf(stderr, "[fault] code at %s: unreadable\n", label);
       return;
    }
-   fprintf(stderr, "[fault] code 0x%llx (rip-16 .. rip+15):", (unsigned long long)lo);
+   fprintf(stderr, "[fault] code 0x%llx (%s-16 .. %s+15):", (unsigned long long)lo, label, label);
    for (size_t i = 0; i < sizeof b; i++)
       fprintf(stderr, "%s%02x", i == 16 ? " |" : " ", b[i]);
    fprintf(stderr, "\n");
@@ -642,7 +642,7 @@ static void fr_handler(int sig, siginfo_t *info, void *uctx) {
        * identify it. Printed for rip and for the faulting address, which are
        * usually in different regions (executing here, writing there). */
       fr_print_region("rip   ", ss->__rip);
-      fr_print_code(ss->__rip);
+      fr_print_code("rip", ss->__rip);
       if (fault)
          fr_print_region("fault ", (uint64_t)(uintptr_t)fault);
 
@@ -652,9 +652,19 @@ static void fr_handler(int sig, siginfo_t *info, void *uctx) {
        * dump 4-byte slots and resolve EVERY one that lands inside a loaded image —
        * the real return address is then obvious by inspection, and no assumption
        * about which ABI pushed it has to be baked in. */
-      if (ss->__rip == 0)
+      if (ss->__rip == 0) {
          fprintf(stderr, "[fault] ★ rip == 0: CALL THROUGH A NULL POINTER. "
                          "[rsp] is the call site.\n");
+         /* A native call site in NO image (a runtime-made stub) gets the same
+          * treatment as rip: what mapping it is, and the bytes before it, which
+          * end in the call that jumped to 0 (Portal 2 client static init). */
+         uint64_t ra = 0; char img[256];
+         if (fr_read(ss->__rsp, &ra, sizeof ra) && ra > 0xfff &&
+             !fr_image_for(ra, img, sizeof img)) {
+            fr_print_region("[rsp] ", ra);
+            fr_print_code("[rsp]", ra);
+         }
+      }
       fprintf(stderr, "[fault] stack from rsp (4-byte slots, low->high):\n");
       volatile uint32_t *sp = (volatile uint32_t *)(uintptr_t)ss->__rsp;
       for (int i = 0; i < g_words; i++) {
