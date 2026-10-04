@@ -766,7 +766,7 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
         long il = ce - x, ih = oe;
 
         char bs[64] = ""; CRect r = { 0, 0, 0, 0 }; if (nibx_str(x, il, ih, "bounds", bs, sizeof bs)) nibx_rect_parse(bs, (nibx_rect *)&r);
-        char title[512] = ""; if (nibx_str(x, il, ih, "title", title, sizeof title)) nibx_unescape(title);
+        char title[512]; title[0] = 0; if (nibx_str(x, il, ih, "title", title, sizeof title)) nibx_unescape(title);
         ControlRef c = NULL;
 
         if (!strcmp(cls, "IBCarbonRootControl")) {           // recurse into root's kids
@@ -804,7 +804,7 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
             // Use the group's OWN title (after its subviews array) — nibx_str would
             // return the first *child's* title ("Lens Flare:") instead of the frame
             // label ("Rendering Pipeline").
-            char gt[512] = "";
+            char gt[512]; gt[0] = 0;   /* not = "": a 512-byte zero-fill lowers to ___bzero */
             if (nibx_own_title(x, il, ih, gt, sizeof gt)) nibx_unescape(gt);
             make_group_frame(win, &r, gt[0] ? gt : NULL, parent);
             build_children(x, il, ih, parent, win);   // children flat on root

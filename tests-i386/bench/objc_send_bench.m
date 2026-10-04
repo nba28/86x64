@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <time.h>
+#include <pthread.h>
 #include <string.h>
 
 /* A LEGACY (translated) class: native Foundation calls its -compare: through
@@ -50,6 +51,39 @@ int main(void) {
    NSAutoreleasePool *p2 = [[NSAutoreleasePool alloc] init];
    BENCH("[NSNumber numberWithDouble:]", sink += (unsigned long)[NSNumber numberWithDouble:i * 0.5]);
    [p2 release];
+   /* plain C calls through the abigen bridge (a togl GL call is this shape) */
+   long (*volatile p_labs)(long) = labs;
+   BENCH("C labs()",                   sink += p_labs(i));
+   BENCH("C CFArrayGetCount()",        sink += CFArrayGetCount((CFArrayRef)a));
+   {
+      /* heap buffers, the common case (a static buffer lies inside an image
+       * and still takes the CFSTR probe in the void* unwrap) */
+      char *src = malloc(64), *dst = malloc(64);
+      memset(src, 1, 64);
+      void *(*volatile p_memcpy)(void *, const void *, size_t) = memcpy;
+      BENCH("C memcpy 64B",           p_memcpy(dst, src, 64));
+      free(src); free(dst);
+   }
+   {
+      /* pthread shims: i386 mutex/key layouts differ from native */
+      static pthread_mutex_t mu = PTHREAD_MUTEX_INITIALIZER;
+      static pthread_key_t key;
+      pthread_key_create(&key, NULL);
+      pthread_setspecific(key, &key);
+      BENCH("pthread_mutex lock+unlock",  { pthread_mutex_lock(&mu); pthread_mutex_unlock(&mu); });
+      BENCH("pthread_getspecific",        sink += (unsigned long)pthread_getspecific(key));
+      BENCH("pthread_self",               sink += (unsigned long)pthread_self());
+   }
+   /* the low-4GB heap shim: a fresh heap, then after a mixed-size free list */
+   BENCH("malloc+free 32B",            { void *volatile q = malloc(32); free(q); });
+   {
+      enum { K = 4096 };
+      static void *keep[K];
+      for (int j = 0; j < K; ++j) { keep[j] = malloc(16 + (j * 37) % 4000); }
+      for (int j = 0; j < K; j += 2) { free(keep[j]); }   /* holes of every size */
+      BENCH("malloc+free 3000B (holes)", { void *volatile q = malloc(3000); free(q); });
+      for (int j = 1; j < K; j += 2) { free(keep[j]); }
+   }
    if (!only || strstr("reverse compare:", only)) {
       /* native -> app: count the compares a sort makes, time per compare */
       NSAutoreleasePool *p3 = [[NSAutoreleasePool alloc] init];

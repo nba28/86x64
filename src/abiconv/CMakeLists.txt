@@ -871,6 +871,24 @@ add_library(abiconv SHARED
   dyld_stub_binder.asm
   dyld_func_lookup.asm
   )
+# The runtime ships optimized whatever CMAKE_BUILD_TYPE says: under Debug every
+# bridge and shim ran at -O0 (each C-bridge void* argument, every ObjC send).
+# -fno-strict-aliasing: shims read foreign (i386) layouts by type punning.
+# -DABICONV_O0=ON restores -O0 to bisect a bug the optimizer exposes.
+option(ABICONV_O0 "build libabiconv at -O0" OFF)
+if(NOT ABICONV_O0)
+  target_compile_options(abiconv PRIVATE
+    $<$<COMPILE_LANGUAGE:C,CXX,OBJC>:-O2 -fno-strict-aliasing -fno-omit-frame-pointer -fno-builtin -D_FORTIFY_SOURCE=0>)
+endif()
+# libabiconv defines ___bzero: the i386 bzero BRIDGE (stack arguments). Clang
+# lowers a large or variable-size zero-fill to a call to ___bzero (macOS >= 10.6
+# targets), which links to that bridge and faults: calloc's memset, a
+# `char buf[512] = ""`, libc++ fill_n. -fno-builtin -D_FORTIFY_SOURCE=0 above
+# keep memset a real call; this check fails the build on any reference left.
+add_custom_command(TARGET abiconv POST_BUILD
+  COMMAND sh -c "bad=$(for o in CMakeFiles/abiconv.dir/*.o; do nm -uj \"$o\" 2>/dev/null | grep -qx ___bzero && echo \"$o\"; done); [ -z \"$bad\" ] || { echo \"error: compiler-emitted ___bzero binds to the i386 bzero bridge in: $bad\"; exit 1; }"
+  WORKING_DIRECTORY ${CMAKE_CURRENT_BINARY_DIR}
+  VERBATIM)
 # -undefined dynamic_lookup lets file_shim.c reference symbols defined by
 # the wrapper executable (_86x64_stderr_shim, _86x64_alloc_low_4gb) that
 # only exist once the wrapper is in the process.

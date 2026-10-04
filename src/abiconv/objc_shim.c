@@ -5681,7 +5681,7 @@ static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
       plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
       plan->ret_is_obj = 0;
       if (BRIDGE_TRACE()) {
-         fprintf(stderr, "[bp] mutableBytes -> low shadow 0x%08x\n", plan->reg[0]);
+         fprintf(stderr, "[bp] mutableBytes -> low shadow 0x%08llx\n", (unsigned long long)plan->reg[0]);
       }
       return 1;
    }
@@ -5742,7 +5742,7 @@ static int bp_nsdata_bytes(struct objc_call_plan *plan, id real_self, SEL sel) {
    plan->target     = (uint64_t)(uintptr_t)&x64_blk_ret_identity;
    plan->ret_is_obj = 0;                     /* scalar passthrough: eax = low ptr */
    if (BRIDGE_TRACE()) {
-      fprintf(stderr, "[bp] %s -> low 0x%08x\n", s, plan->reg[0]);
+      fprintf(stderr, "[bp] %s -> low 0x%08llx\n", s, (unsigned long long)plan->reg[0]);
       fflush(stderr);
    }
    return 1;
@@ -8943,35 +8943,99 @@ static int image_index_for_addr(uintptr_t addr) {
 
 /* Is `addr` inside some loaded image's __cfstring section? Such a record is
  * immutable static data for the life of the image, so its classification can
- * be memoized (unlike a heap object, whose address can be reused). */
-static int addr_in_cfstring_section(uintptr_t addr) {
-   uint32_t nimg = x64_img_count();
-   for (uint32_t i = 0; i < nimg; ++i) {
-      const struct mach_header_64 *mh =
-         (const struct mach_header_64 *)x64_img_header(i);
-      if (!mh || mh->magic != MH_MAGIC_64) { continue; }
-      intptr_t slide = x64_img_slide((const struct mach_header *)mh);
-      const struct load_command *lc =
-         (const struct load_command *)((const uint8_t *)mh + sizeof *mh);
-      for (uint32_t c = 0; c < mh->ncmds; ++c) {
-         if (lc->cmd == LC_SEGMENT_64) {
-            const struct segment_command_64 *sg =
-               (const struct segment_command_64 *)lc;
+ * be memoized (unlike a heap object, whose address can be reused).
+ *
+ * Is `p` inside a segment of some image mapped below 4GB? Every CFSTR record
+ * (translated 32-byte or i386 16-byte, whatever section holds it) is static
+ * data of a loaded image, so i386_cfstr_to_real rejects anything else up
+ * front: every C bridge `void *` argument comes through it
+ * (x64_objc_unwrap), and memcpy/free/glDrawElements on heap pointers or
+ * buffer offsets paid a page-probe walk per call (free: 64% of a malloc+free
+ * loop). It also stops a FALSE match: a heap buffer whose bytes read as a
+ * CFString record (flags 0x7c8, a valid cstr, the exact length) was swapped
+ * for an NSString on its way into memcpy/fwrite/GL. Kill
+ * ABICONV_NO_CFSTR_IMAGE_GATE (the gate only); guard cfstr-image-gate.
+ *
+ * Both sorted range tables are rebuilt in one pass when the image count
+ * changes; an old table is never freed (a reader may still hold it). */
+struct cfsect_tab { uint32_t gen, n, nlow; uint64_t (*low)[2]; uint64_t r[][2]; };
+static struct cfsect_tab *_Atomic g_cfsect;
+static int cfsect_cmp(const void *a, const void *b) {
+   const uint64_t x = ((const uint64_t *)a)[0], y = ((const uint64_t *)b)[0];
+   return x < y ? -1 : x > y;
+}
+static const struct cfsect_tab *cfsect_table(void) {
+   static os_unfair_lock lk = OS_UNFAIR_LOCK_INIT;
+   const uint32_t gen = x64_img_count();
+   struct cfsect_tab *t = __c11_atomic_load(&g_cfsect, __ATOMIC_ACQUIRE);
+   if (t && t->gen == gen) { return t; }
+   os_unfair_lock_lock(&lk);
+   t = __c11_atomic_load(&g_cfsect, __ATOMIC_ACQUIRE);
+   if (!t || t->gen != gen) {
+      uint32_t cap = 256, n = 0, lcap = 64, nlow = 0;
+      malloc_zone_t *z = malloc_default_zone();
+      struct cfsect_tab *nt = malloc_zone_malloc(z, sizeof *nt + cap * sizeof nt->r[0]);
+      uint64_t (*low)[2] = malloc_zone_malloc(z, lcap * sizeof *low);
+      for (uint32_t i = 0; nt && i < gen; ++i) {
+         const struct mach_header_64 *mh = (const struct mach_header_64 *)x64_img_header(i);
+         if (!mh || mh->magic != MH_MAGIC_64) { continue; }
+         const intptr_t slide = x64_img_slide((const struct mach_header *)mh);
+         const struct load_command *lc = (const struct load_command *)(mh + 1);
+         for (uint32_t c = 0; nt && c < mh->ncmds; ++c, lc = (const void *)((const uint8_t *)lc + lc->cmdsize)) {
+            if (lc->cmd != LC_SEGMENT_64) { continue; }
+            const struct segment_command_64 *sg = (const void *)lc;
+            const uint64_t slo = sg->vmaddr + (uint64_t)slide, shi = slo + sg->vmsize;
+            if (low && sg->initprot != 0 && sg->vmsize != 0 && shi <= 0x100000000ULL) {
+               if (nlow == lcap) { lcap *= 2; low = malloc_zone_realloc(z, low, lcap * sizeof *low); }
+               if (low) { low[nlow][0] = slo; low[nlow][1] = shi; ++nlow; }
+            }
             const struct section_64 *sc = (const struct section_64 *)(sg + 1);
             for (uint32_t k = 0; k < sg->nsects; ++k, ++sc) {
-               uintptr_t lo = (uintptr_t)((int64_t)sc->addr + (int64_t)slide);
-               if (addr >= lo && addr < lo + (uintptr_t)sc->size) {
-                  return strncmp(sc->sectname, "__cfstring", 16) == 0;
+               if (sc->size == 0 || strncmp(sc->sectname, "__cfstring", 16) != 0) { continue; }
+               if (n == cap) {
+                  cap *= 2;
+                  nt = malloc_zone_realloc(z, nt, sizeof *nt + cap * sizeof nt->r[0]);
+                  if (!nt) { break; }
                }
+               nt->r[n][0] = sc->addr + (uint64_t)slide;
+               nt->r[n][1] = nt->r[n][0] + sc->size;
+               ++n;
             }
          }
-         lc = (const struct load_command *)((const uint8_t *)lc + lc->cmdsize);
+      }
+      if (nt && low) {
+         qsort(nt->r, n, sizeof nt->r[0], cfsect_cmp);
+         qsort(low, nlow, sizeof *low, cfsect_cmp);
+         nt->gen = gen; nt->n = n; nt->low = low; nt->nlow = nlow;
+         __c11_atomic_store(&g_cfsect, nt, __ATOMIC_RELEASE);
+         t = nt;
       }
    }
-   return 0;
+   os_unfair_lock_unlock(&lk);
+   return t;
+}
+static int in_ranges(const uint64_t (*r)[2], uint32_t n, uint64_t addr) {
+   uint32_t lo = 0, hi = n;                    /* last range starting <= addr */
+   while (lo < hi) {
+      const uint32_t mid = (lo + hi) / 2;
+      if (r[mid][0] <= addr) { lo = mid + 1; } else { hi = mid; }
+   }
+   return lo > 0 && addr < r[lo - 1][1];
+}
+static int addr_in_cfstring_section(uintptr_t addr) {
+   const struct cfsect_tab *t = cfsect_table();
+   return !t || in_ranges(t->r, t->n, addr);   /* no table: assume it may be */
+}
+static int addr_in_low_image(uint32_t p) {
+   const struct cfsect_tab *t = cfsect_table();
+   return !t || in_ranges(t->low, t->nlow, p);
 }
 
+
 static id i386_cfstr_to_real(uint32_t p) {
+   if (p && !KNOB("ABICONV_NO_CFSTR_IMAGE_GATE") && !addr_in_low_image(p)) {
+      return (id)0;
+   }
    { id hit = p ? cfstr_memo_get(p) : (id)0; if (hit) { return hit; } }
    if (!ptr_ok(p, 16)) { return (id)0; }
    uint32_t cstr, length;
