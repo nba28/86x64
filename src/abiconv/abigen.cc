@@ -174,6 +174,23 @@ struct ABIConversion {
       return tmp;
    }
 
+   /* Scalar kinds whose whole conversion is a single register/slot move (no
+    * pointee, no layout): the by-value arg write-back for these is dead. */
+   static bool is_plain_scalar_kind(CXTypeKind k) {
+      switch (k) {
+      case CXType_Bool:
+      case CXType_UChar: case CXType_Char_U: case CXType_SChar: case CXType_Char_S:
+      case CXType_UShort: case CXType_Short:
+      case CXType_UInt: case CXType_Int: case CXType_Enum:
+      case CXType_ULong: case CXType_Long:
+      case CXType_ULongLong: case CXType_LongLong:
+      case CXType_Float: case CXType_Double:
+         return true;
+      default:
+         return false;
+      }
+   }
+
    static CXTypeKind get_arg_kind(CXTypeKind kind) {
       switch (kind) {
       case CXType_ConstantArray: return CXType_Pointer;
@@ -1419,6 +1436,15 @@ struct ABIConversion {
              * the conditional re-wrap would mint arena handles from that
              * garbage on every call. A bare void* arg is the same case
              * (convert_pointer wraps it coming back, for out-params). */
+            /* Scalar by-value args (ints/enums/bool/float/double): same rule.
+             * The only thing convert() emitted here was `mov [i386 slot], <arg
+             * reg>` -- storing a register the native callee is free to have
+             * clobbered, into a slot the i386 caller owns again after return
+             * (cdecl: callee-scratch). Nothing reads it back: the sret reads
+             * ([rbp+12]) are hidden-pointer slots, never declared-arg slots. */
+            if (is_plain_scalar_kind(type.kind)) {
+               /* no copy-back */
+            } else
             if (!cf_opaque_ptr_type(type) &&
                 !(type.kind == CXType_Pointer &&
                   clang_getCanonicalType(clang_getPointeeType(type)).kind
