@@ -2086,7 +2086,7 @@ namespace MachO {
                        placeholder_it->first,
                        std::string(sect.sectname,
                                    strnlen(sect.sectname, sizeof(sect.sectname))).c_str(),
-                       sect.addr + sect.size);
+                       (size_t)(sect.addr + sect.size));
                placeholder_it->second->segment = env.current_segment;
                placeholder_it->second->section = this;
                content.insert(content.end(), placeholder_it->second);

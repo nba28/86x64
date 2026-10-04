@@ -110,12 +110,12 @@ namespace MachO {
          const std::size_t n = instbuf.size() < 24 ? instbuf.size() : 24;
          char *p = hex;
          for (std::size_t i = 0; i < n; ++i) {
-            p += sprintf(p, "%02x ", instbuf.at(i));
+            p += snprintf(p, sizeof hex - (p - hex), "%02x ", instbuf.at(i));
          }
          char widths[128] = {0};
          p = widths;
          for (unsigned i = 0; i < std::max(nsrc, ndst); ++i) {
-            p += sprintf(p, "%s mem%u: %u->%u", i ? "," : "", i,
+            p += snprintf(p, sizeof widths - (p - widths), "%s mem%u: %u->%u", i ? "," : "", i,
                          i < nsrc ? xed_decoded_inst_get_memory_operand_length(
                                        &src_xedd, i) : 0,
                          i < ndst ? xed_decoded_inst_get_memory_operand_length(
@@ -1216,7 +1216,7 @@ namespace MachO {
                   size_t n = instbuf.size() < 24 ? instbuf.size() : 24;
                   char *p = hex;
                   for (size_t i = 0; i < n; ++i)
-                     p += sprintf(p, "%02x ", instbuf.at(i));
+                     p += snprintf(p, sizeof hex - (p - hex), "%02x ", instbuf.at(i));
                   fprintf(stderr,
                           "warning: M%d->M%d Transform default-rule: "
                           "instbuf doesn't decode in x86_64, substituting "
@@ -1887,7 +1887,7 @@ namespace MachO {
          char hex[3 * 24 + 8] = {0};
          size_t n = instbuf.size() < 24 ? instbuf.size() : 24;
          char *p = hex;
-         for (size_t i = 0; i < n; ++i) p += sprintf(p, "%02x ", instbuf.at(i));
+         for (size_t i = 0; i < n; ++i) p += snprintf(p, sizeof hex - (p - hex), "%02x ", instbuf.at(i));
 
          /*
           * The i386 bytes don't decode in x86_64 — almost always because
@@ -2050,7 +2050,7 @@ namespace MachO {
          char hex[3 * 24 + 8] = {0};
          size_t n = instbuf.size() < 24 ? instbuf.size() : 24;
          char *p = hex;
-         for (size_t i = 0; i < n; ++i) p += sprintf(p, "%02x ", instbuf.at(i));
+         for (size_t i = 0; i < n; ++i) p += snprintf(p, sizeof hex - (p - hex), "%02x ", instbuf.at(i));
          /* one-shot backtrace to stderr so we can identify the call site
           * before the throw unwinds. */
          void *frames[32];
