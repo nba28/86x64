@@ -43,6 +43,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <dlfcn.h>
+#include <math.h>
 #include <unistd.h>
 #include <objc/runtime.h>
 
@@ -339,6 +341,43 @@ uint32_t shim_CGWarpMouseCursorPosition(uint32_t *a)
       g_warped = 0;
       g_wvx = vx; g_wvy = vy; g_wpx = p.x; g_wpy = p.y;
       g_warped = 1;
+   }
+   static int trace = -1, n;
+   if (trace < 0) trace = getenv("ABICONV_INPUT_TRACE") != NULL;
+   if (trace && n < 40) {
+      n++;
+      fprintf(stderr, "[input] CGWarpMouseCursorPosition(%.1f,%.1f) -> (%.1f,%.1f)%s\n",
+              fx, fy, p.x, p.y, (!off && g_active) ? " mapped" : "");
+      if (!isfinite(fx) || !isfinite(fy) || fabsf(fx) > 1e8f || fabsf(fy) > 1e8f) {
+         /* who asked: walk the i386 frames. MTSHIM pushed the translated
+          * caller's %ebp at [rbp], and a = rbp + 12 (rbp+8 = i386 return). */
+         uintptr_t ebp = *(const uint64_t *)((const char *)a - 12) & 0xffffffffu;
+         {
+            const uint32_t r0 = a[-1];
+            Dl_info d0;
+            if (dladdr((void *)(uintptr_t)r0, &d0) && d0.dli_fname) {
+               const char *b0 = strrchr(d0.dli_fname, '/');
+               fprintf(stderr, "[input]   #0 %s+0x%lx\n", b0 ? b0 + 1 : d0.dli_fname,
+                       (unsigned long)(r0 - (uintptr_t)d0.dli_fbase));
+            }
+         }
+         /* translated code runs on this same stack: stay inside it */
+         const uintptr_t lo = (uintptr_t)__builtin_frame_address(0), hi = lo + (16u << 20);
+         for (int i = 1; i < 16 && ebp >= lo && ebp + 8 <= hi; i++) {
+            const uint32_t ret = *(const uint32_t *)(ebp + 4);
+            Dl_info di;
+            if (dladdr((void *)(uintptr_t)ret, &di) && di.dli_fname) {
+               const char *b = strrchr(di.dli_fname, '/');
+               fprintf(stderr, "[input]   #%d %s+0x%lx\n", i, b ? b + 1 : di.dli_fname,
+                       (unsigned long)(ret - (uintptr_t)di.dli_fbase));
+            } else {
+               fprintf(stderr, "[input]   #%d 0x%x\n", i, ret);
+            }
+            const uintptr_t next = *(const uint32_t *)ebp;
+            if (next <= ebp) break;
+            ebp = next;
+         }
+      }
    }
    return (uint32_t)CGWarpMouseCursorPosition(p);
 }

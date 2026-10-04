@@ -28,6 +28,10 @@ _asprintf
 _dprintf
 
 _vsnprintf
+_vswprintf
+_swprintf
+_swscanf
+_vsscanf
 _vsprintf
 _vfprintf
 _vprintf
@@ -125,6 +129,7 @@ _pthread_once
 # Hand-shimmed to hand the i386 side the thread's MACH PORT as a 32-bit token.
 # Guards 99_pthread_create_handle / 99_pthread_create_arg.
 _pthread_create
+_pthread_create_suspended_np
 _pthread_self
 _pthread_join
 _pthread_detach
@@ -922,3 +927,43 @@ _SteamGameServer_GetHSteamUser
 _SteamGameServer_GetIPCCallCount
 _SteamGameServer_RunCallbacks
 _SteamGameServer_Shutdown
+# atsu_shim.c / atsu_tramp.asm — libabiconv's own ATSUI/ATS font subset on
+# CoreText. Native ATSUI is blocked at run time on macOS 14+ ("Update Required"
+# dialog), so no abigen bridge to it may exist for any symbol listed here.
+_ATSUSetAttributes
+_ATSUSetLayoutControls
+_ATSUCreateTextLayoutWithTextPtr
+_ATSUDirectGetLayoutDataArrayPtrFromTextLayout
+_ATSUDirectReleaseLayoutDataArrayPtr
+_ATSUGlyphGetIdealMetrics
+_ATSUGlyphGetScreenMetrics
+_ATSUCreateStyle
+_ATSUDrawText
+_ATSUDisposeTextLayout
+_ATSUSetTransientFontMatching
+_ATSFontFindFromName
+_ATSFontFindFromPostScriptName
+_ATSFontGetName
+_ATSFontGetHorizontalMetrics
+_ATSFontActivateFromMemory
+# dir_shim.c / dir_tramp.asm — opendir/readdir/closedir: a low DIR wrapper and
+# the classic i386 struct dirent (the $INODE64 variants keep their bridges).
+_opendir
+_readdir
+_closedir
+_scandir
+_alphasort
+# aq_shim.c / aq_tramp.asm — the AudioQueue output API for i386 callers (low
+# queue handles, i386-layout buffer mirrors, bridged output/property callbacks).
+_AudioQueueNewOutput
+_AudioQueueAllocateBuffer
+_AudioQueueEnqueueBuffer
+_AudioQueueFreeBuffer
+_AudioQueueDispose
+_AudioQueueStart
+_AudioQueueStop
+_AudioQueuePrime
+_AudioQueueSetParameter
+_AudioQueueGetProperty
+_AudioQueueAddPropertyListener
+_AudioQueueRemovePropertyListener

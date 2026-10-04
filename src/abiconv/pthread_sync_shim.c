@@ -709,8 +709,12 @@ static const psx_cb_sig psx_start_sig = { 1, 2, { 2 } };
 
 #define I386_ATTR_OPAQUE 36            /* i386 pthread_attr_t = 4 + 36 */
 
-/* int pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *) */
-int32_t shim_pthread_create(uint32_t *a) {
+/* int pthread_create(pthread_t *, const pthread_attr_t *, void *(*)(void *), void *)
+ * and pthread_create_suspended_np (same signature; the thread waits for
+ * thread_resume on its Mach port, which IS the token). The generated bridge for
+ * the suspended variant deep-converted *pthread_t as a struct and wrote 8 KB
+ * past its frame (Portal 2 libmilesx86 sound init, SIGSEGV past the stack top). */
+static int32_t psx_create(uint32_t *a, int suspended) {
    uint32_t *slot   = (uint32_t *)(uintptr_t)a[0];
    void     *i386at = a[1] ? (void *)(uintptr_t)a[1] : NULL;
    uint32_t  fn32   = a[2];
@@ -730,8 +734,8 @@ int32_t shim_pthread_create(uint32_t *a) {
    }
 
    pthread_t nat = NULL;
-   int r = pthread_create(&nat, pat, (void *(*)(void *))(uintptr_t)tramp,
-                          (void *)(uintptr_t)arg32);
+   int r = (suspended ? pthread_create_suspended_np : pthread_create)(
+      &nat, pat, (void *(*)(void *))(uintptr_t)tramp, (void *)(uintptr_t)arg32);
    if (r != 0) { return (int32_t)r; }
 
    /* ★THE WRITE-BACK. This is the whole point of the shim: without it the
@@ -745,6 +749,8 @@ int32_t shim_pthread_create(uint32_t *a) {
    if (slot && !no_token) { *slot = tok; }
    return 0;
 }
+int32_t shim_pthread_create(uint32_t *a) { return psx_create(a, 0); }
+int32_t shim_pthread_create_suspended_np(uint32_t *a) { return psx_create(a, 1); }
 
 /* pthread_t pthread_self(void) — returns the TOKEN, so it compares equal to
  * whatever pthread_create handed the creator. */

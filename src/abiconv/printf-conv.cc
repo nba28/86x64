@@ -22,6 +22,7 @@ typedef uint64_t ptr64_t;
  * 64-bit value and passes anything else through unchanged, so a low raw FILE*
  * (and NULL) still works. */
 extern "C" uint64_t x64_objc_unwrap(uint32_t h);
+extern "C" void x64_gap_hit(const char *kind, const char *sym, const char *who, uint32_t caller);
 static inline FILE *stream_from_i386(uint32_t h) {
    return (FILE *)(uintptr_t)x64_objc_unwrap(h);
 }
@@ -79,11 +80,25 @@ namespace {
       return (reg_width_t) i;
    }
 
+   /* Every args64/argtypes buffer holds at least this many slots
+    * (vararg-conv-t.asm ARGS64_COUNT; the v* shims' VA_SLOTS_MAX is larger).
+    * Past it, a slot is dropped loudly rather than written out of bounds. */
+   constexpr unsigned VARARG_SLOTS = 64;
+   bool slot_full(unsigned arg_count) {
+      if (arg_count < VARARG_SLOTS) { return false; }
+      static int hit;
+      if (!__atomic_exchange_n(&hit, 1, __ATOMIC_RELAXED)) {
+         x64_gap_hit("vararg-slots", "over-64-args", "printf-conv.cc", 0);
+      }
+      return true;
+   }
+
    /* convert_arg<ptr32_t,ptr64_t> for a FILE* slot: resolve the handle instead
     * of widening it. Advances the cursors identically. */
    uint64_t convert_stream_arg(const void *& args32, void *& args64,
                                reg_width_t *& argtypes, unsigned& arg_count) {
       const uint64_t real = x64_objc_unwrap(*(const ptr32_t *)args32);
+      if (slot_full(arg_count)) { args32 = (const char *) args32 + 4; return real; }
       *(ptr64_t *)args64 = real;
       args32 = (const char *) args32 + align_up<size_t>(sizeof(ptr32_t), 4);
       args64 = (char *) args64 + align_up<size_t>(sizeof(ptr64_t), 8);
@@ -95,6 +110,11 @@ namespace {
    template <typename T32, typename T64>
    T64 convert_arg(const void *& args32, void *& args64, reg_width_t *& argtypes,
                           unsigned& arg_count) {
+      if (slot_full(arg_count)) {
+         const T64 v = * (T32 *) args32;
+         args32 = (const char *) args32 + align_up<size_t>(sizeof(T32), 4);
+         return v;
+      }
       const T64 result = * (T64 *) args64 = * (T32 *) args32;
       args32 = (const char *) args32 + align_up<size_t>(sizeof(T32), 4);
       args64 = (char *) args64 + align_up<size_t>(sizeof(T64), 8);
@@ -129,9 +149,9 @@ namespace {
          {{"di", printf_type::SIGNED},
           {"ouxX", printf_type::UNSIGNED},
           {"eEfFgGaA", printf_type::FLOAT},
-          {"c", printf_type::CHAR},
+          {"cC", printf_type::CHAR},          /* C = %lc (wint_t) */
           {"s", printf_type::STRING},
-          {"p", printf_type::POINTER},
+          {"pnS", printf_type::POINTER},      /* n = int *, S = %ls (wchar_t *) */
           {"%", printf_type::ESCAPE},
          };
       for (auto pair : conv) {
@@ -141,20 +161,40 @@ namespace {
          }
       }
 
-      throw std::invalid_argument("invalid conversion specifier");
+      /* Unknown (e.g. %Lf: a 16-byte i386 long double is not converted).
+       * Never throw: an exception out of this C-ABI bridge aborts the app
+       * (Portal 2 single-player load). Speak once per character, consume no
+       * argument. */
+      static unsigned char seen[256];
+      const unsigned char u = (unsigned char)*format;
+      if (!__atomic_exchange_n(&seen[u], 1, __ATOMIC_RELAXED)) {
+         const char sym[] = {'%', (char)(u ? u : '0'), '\0'};
+         x64_gap_hit("printf-conversion", sym, "printf-conv.cc", 0);
+      }
+      if (u) { ++format; }
+      return printf_type::ESCAPE;
    }
 
    enum class printf_modifier {H, HH, L, LL, J, T, Z};
    std::optional<printf_modifier> printf_parse_modifier(const char *& format) {
       const std::list<std::pair<const char *, printf_modifier>> conv =
-         {{"h", printf_modifier::H},
-          {"hh", printf_modifier::HH},
-          {"l", printf_modifier::L},
+         {{"hh", printf_modifier::HH},       /* longest match first: "l" used */
+          {"h", printf_modifier::H},         /* to win over "ll", so %lld threw */
           {"ll", printf_modifier::LL},
+          {"q", printf_modifier::LL},        /* BSD spelling of ll */
+          {"l", printf_modifier::L},
           {"j", printf_modifier::J},
           {"t", printf_modifier::T},
           {"z", printf_modifier::Z},
          };
+      /* Kill switch M64_NO_PRINTF_LONGEST_MOD: the old order ("h"/"l" first);
+       * guard printf-length-mods. */
+      static const bool old_order = getenv("M64_NO_PRINTF_LONGEST_MOD") != nullptr;
+      if (old_order) {
+         for (const char *m : {"h", "l"}) {
+            if (*format == *m) { ++format; return *m == 'h' ? printf_modifier::H : printf_modifier::L; }
+         }
+      }
       for (auto pair : conv) {
          auto len = strlen(pair.first);
          if (strncmp(pair.first, format, len) == 0) {
@@ -266,7 +306,7 @@ namespace {
                                  {printf_modifier::LL, convert_arg_s<ll32_t, ll64_t>},
                                  {printf_modifier::J, convert_arg_s<j32_t, j64_t>},
                                  {printf_modifier::T, convert_arg_s<t32_t, t64_t>},
-                                 {printf_modifier::Z, convert_arg_s<int8_t, int8_t>}
+                                 {printf_modifier::Z, convert_arg_s<i32_t, i64_t>}
                }
            },
           {printf_type::UNSIGNED, {{std::nullopt, convert_arg_s<i32_t, i64_t>},
@@ -279,18 +319,30 @@ namespace {
                                    {printf_modifier::Z, convert_arg_s<uint32_t, uint64_t>}
              }
           },
-          {printf_type::STRING, {{std::nullopt, convert_arg_s<uint32_t, uint64_t>}}},
+          {printf_type::STRING, {{std::nullopt, convert_arg_s<uint32_t, uint64_t>},
+                                 {printf_modifier::L, convert_arg_s<uint32_t, uint64_t>}}},
           {printf_type::FLOAT, {{std::nullopt, convert_arg_s<double, double>},
                                 {printf_modifier::L, convert_arg_s<double, double>}
              }
           },
-          {printf_type::CHAR, {{std::nullopt, convert_arg_s<int32_t, int32_t>}}},
+          {printf_type::CHAR, {{std::nullopt, convert_arg_s<int32_t, int32_t>},
+                               {printf_modifier::L, convert_arg_s<int32_t, int32_t>}}},
           {printf_type::POINTER, {{std::nullopt, convert_arg_s<uint32_t, uint64_t>}}},
           {printf_type::ESCAPE, {{std::nullopt, nullptr}}}
          };
 
-      auto fn = converter.at(type).at(modifier);
-      if (fn) { fn(args32, args64, argtypes, arg_count); }
+      /* A modifier this type has no entry for (%hs, %jc, ...): convert as the
+       * bare type, loudly, rather than throw out of the bridge. */
+      const auto& by_mod = converter.at(type);
+      auto it = by_mod.find(modifier);
+      if (it == by_mod.end()) {
+         static int hit;
+         if (!__atomic_exchange_n(&hit, 1, __ATOMIC_RELAXED)) {
+            x64_gap_hit("printf-conversion", "modifier", "printf-conv.cc", 0);
+         }
+         it = by_mod.find(std::nullopt);
+      }
+      if (it->second) { it->second(args32, args64, argtypes, arg_count); }
    }
 
    /* scanf-family directive. Unlike printf, EVERY consumed scanf argument is a
@@ -517,6 +569,7 @@ extern "C" unsigned fscanf_conversion_f(const void *args32, void *args64, reg_wi
 
 #include <cstdio>
 #include <cstdarg>
+#include <wchar.h>
 
 /* Not always exposed by <cstdio> depending on feature macros. */
 extern "C" int vasprintf(char **, const char *, va_list);
@@ -596,6 +649,34 @@ namespace {
       /* GP regs (6*8=48 bytes) and XMM regs (8*16, fp window ends at 176) are
        * both marked exhausted, so every va_arg falls through to the overflow
        * area we built. reg_save_area is never consulted but must be non-null. */
+      va->gp_offset       = 48;
+      va->fp_offset       = 176;
+      va->overflow_arg_area = args64;
+      va->reg_save_area     = args64;
+   }
+
+   /* Wide formats: every directive is ASCII and wchar_t is 4 bytes in both
+    * ABIs, so parse an ASCII copy (non-ASCII -> 'x') and hand the native call
+    * the ORIGINAL wide format. %s and %c in a wide format take char pointers and ints, exactly
+    * the narrow conversions. Directives past the buffer are ignored (their
+    * args are then not converted -- formats that long do not exist). */
+   void narrow_fmt(const wchar_t *w, char *out, size_t n) {
+      size_t i = 0;
+      for (; w && w[i] && i + 1 < n; ++i) {
+         out[i] = (w[i] > 0 && w[i] < 0x80) ? (char)w[i] : 'x';
+      }
+      out[i] = 0;
+   }
+
+   /* scanf family: every consumed argument is a pointer (scanf_parse_directive). */
+   void build_native_scanf_va_list(const char *format, const uint32_t *ap,
+                                   sysv_va_list_tag *va,
+                                   uint64_t *args64, reg_width_t *argtypes) {
+      unsigned arg_count = 0;
+      const void *a32 = (const void *) ap;
+      void *a64 = (void *) args64;
+      reg_width_t *at = argtypes;
+      scanf_convert_format(a32, a64, at, format, arg_count);
       va->gp_offset       = 48;
       va->fp_offset       = 176;
       va->overflow_arg_area = args64;
@@ -769,6 +850,46 @@ int dprintf_vshim(const uint32_t *a) {
    int fd = (int)a[0];
    VA_BUILD((const char *)(uintptr_t)a[1], &a[2]);
    return vdprintf(fd, fmt, va);
+}
+
+/* Wide family (Portal 2 tier1 V_snwprintf -> vswprintf: a raw i386 va_list
+ * reached native vswprintf -> SIGSEGV opening Options > Video). Guard
+ * wide-printf. */
+#define WVA_BUILD(wfmt_, ap_, builder_)                                     \
+   const wchar_t *wfmt = (wfmt_);                                           \
+   char nfmt[2048];                                                         \
+   narrow_fmt(wfmt, nfmt, sizeof nfmt);                                     \
+   alignas(16) uint64_t args64[VA_SLOTS_MAX];                               \
+   reg_width_t argtypes[VA_SLOTS_MAX];                                      \
+   va_list va;                                                              \
+   builder_(nfmt, (ap_), (sysv_va_list_tag *)(void *)va, args64, argtypes)
+
+/* int vswprintf(wchar_t *s, size_t n, const wchar_t *fmt, va_list ap) */
+int vswprintf_vshim(const uint32_t *a) {
+   WVA_BUILD((const wchar_t *)(uintptr_t)a[2], (const uint32_t *)(uintptr_t)a[3],
+             build_native_va_list);
+   return vswprintf((wchar_t *)(uintptr_t)a[0], (size_t)a[1], wfmt, va);
+}
+/* int swprintf(wchar_t *s, size_t n, const wchar_t *fmt, ...) */
+int swprintf_vshim(const uint32_t *a) {
+   WVA_BUILD((const wchar_t *)(uintptr_t)a[2], &a[3], build_native_va_list);
+   return vswprintf((wchar_t *)(uintptr_t)a[0], (size_t)a[1], wfmt, va);
+}
+/* int vsscanf(const char *s, const char *fmt, va_list ap) — the i386 va_list
+ * is a plain pointer to 4-byte pointer slots. */
+int vsscanf_vshim(const uint32_t *a) {
+   const char *fmt = (const char *)(uintptr_t)a[1];
+   alignas(16) uint64_t args64[VA_SLOTS_MAX];
+   reg_width_t argtypes[VA_SLOTS_MAX];
+   va_list va;
+   build_native_scanf_va_list(fmt, (const uint32_t *)(uintptr_t)a[2],
+                              (sysv_va_list_tag *)(void *)va, args64, argtypes);
+   return vsscanf((const char *)(uintptr_t)a[0], fmt, va);
+}
+/* int swscanf(const wchar_t *s, const wchar_t *fmt, ...) */
+int swscanf_vshim(const uint32_t *a) {
+   WVA_BUILD((const wchar_t *)(uintptr_t)a[1], &a[2], build_native_scanf_va_list);
+   return vswscanf((const wchar_t *)(uintptr_t)a[0], wfmt, va);
 }
 
 } /* extern "C" */

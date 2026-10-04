@@ -4,8 +4,13 @@
    extern _%+SYMBOL
    extern __dyld_stub_binder_flag
 
-%define ARGS64_COUNT 16
-%define  ARGS64_SIZE 128
+;; Slot capacity, shared with printf-conv.cc VARARG_SLOTS. It was 16: an
+;; 18-argument sscanf (Portal 2 materialsystem CMaterialSubRect::ParseMaterialVars,
+;; a 16-float matrix) wrote args 17/18 past args64 into argtypes and their type
+;; tags (Q = 3) past argtypes onto the saved rsi below -> the caller's %esi came
+;; back as 3 (KeyValues* = 3 -> SIGSEGV at 0x15). Guard sscanf-many-args.
+%define ARGS64_COUNT 64
+%define  ARGS64_SIZE (ARGS64_COUNT * 8)
 
 ___%+SYMBOL:
    cmp qword [rel __dyld_stub_binder_flag], 0

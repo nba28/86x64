@@ -480,7 +480,8 @@ create_custom_conv_template(exec.asm execvp)
 # its symbol; the C shims live in printf-conv.cc.
 create_custom_conv_template(vva-conv-t.asm
   vsnprintf vsprintf vfprintf vprintf vasprintf __vsnprintf_chk __snprintf_chk
-  __vsprintf_chk printf sprintf fprintf snprintf asprintf dprintf)
+  __vsprintf_chk printf sprintf fprintf snprintf asprintf dprintf
+  vswprintf swprintf swscanf vsscanf)
 
 add_library(abiconv SHARED
   abiconv.asm
@@ -507,6 +508,10 @@ add_library(abiconv SHARED
   $<TARGET_OBJECTS:custom_conv_snprintf>
   $<TARGET_OBJECTS:custom_conv_asprintf>
   $<TARGET_OBJECTS:custom_conv_dprintf>
+  $<TARGET_OBJECTS:custom_conv_vswprintf>
+  $<TARGET_OBJECTS:custom_conv_swprintf>
+  $<TARGET_OBJECTS:custom_conv_swscanf>
+  $<TARGET_OBJECTS:custom_conv_vsscanf>
   printf-conv.cc
   prefs_shim.c
   openssl_shim.c
@@ -759,6 +764,18 @@ add_library(abiconv SHARED
   # src/86x64/steamgen.py (vtable slots read from the native binary).
   steam_bridge.c
   steam_tramp.asm
+  # ATSUI calls whose array arguments change shape (abigen cannot widen arrays).
+  atsu_shim.c
+  # sigaction: the i386 handler reaches _sigtramp through a callback trampoline
+  # (the asm entry is custom_conv_sigaction above).
+  sigaction_shim.c
+  # opendir/readdir/closedir: low DIR wrapper + classic i386 dirent.
+  dir_shim.c
+  dir_tramp.asm
+  # AudioQueue output API: low queue handles, i386 buffer mirrors, bridged callbacks.
+  aq_shim.c
+  aq_tramp.asm
+  atsu_tramp.asm
   fontmgr_shim.c
   mlte_shim.c
   fmgr_shim.c

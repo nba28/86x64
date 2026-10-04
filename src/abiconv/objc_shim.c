@@ -3952,6 +3952,73 @@ static void legacy_lockfocus_1x_install(void) {
    done = 1;
 }
 
+/* ABICONV_INPUT_TRACE=1: log every mouse down/up the APPLICATION is sent (any
+ * window, or none), where it landed and where the real cursor is, so a run
+ * says where a click went instead of leaving it to inference (Portal 2's lost
+ * clicks were found this way: a stale super hint, see super-hint-native). */
+static IMP g_app_send_event;
+static void app_send_event_trace(id self, SEL cmd, id ev) {
+   const unsigned long t = ((unsigned long (*)(id, SEL))objc_msgSend)(ev, sel_registerName("type"));
+   if (t == 1 || t == 2 || t == 3 || t == 4 || t == 25 || t == 26) {
+      const CGPoint p = ((CGPoint (*)(id, SEL))objc_msgSend)(ev, sel_registerName("locationInWindow"));
+      const long wn = ((long (*)(id, SEL))objc_msgSend)(ev, sel_registerName("windowNumber"));
+      const CGPoint g = ((CGPoint (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSEvent"),
+                                                             sel_registerName("mouseLocation"));
+      id w = ((id (*)(id, SEL))objc_msgSend)(ev, sel_registerName("window"));
+      CGRect f = CGRectZero;
+      if (w) { ((void (*)(CGRect *, id, SEL))objc_msgSend_stret)(&f, w, sel_registerName("frame")); }
+      const unsigned long pmb = ((unsigned long (*)(id, SEL))objc_msgSend)(
+         (id)objc_getClass("NSEvent"), sel_registerName("pressedMouseButtons"));
+      fprintf(stderr, "[input] app sendEvent type=%lu winNum=%ld win=%s frame=(%.0f,%.0f %.0fx%.0f) "
+              "inWin=(%.0f,%.0f) cursor=(%.0f,%.0f) pressed=%lu\n",
+              t, wn, w ? object_getClassName(w) : "nil", f.origin.x, f.origin.y,
+              f.size.width, f.size.height, p.x, p.y, g.x, g.y, pmb);
+   }
+   ((void (*)(id, SEL, id))g_app_send_event)(self, cmd, ev);
+}
+/* ...and every event the app DEQUEUES (with the mask it asked for), to tell
+ * "never dequeued" from "dequeued but never sent". */
+static IMP g_app_next_event;
+static id app_next_event_trace(id self, SEL cmd, unsigned long mask, id until, id mode, signed char deq) {
+   id ev = ((id (*)(id, SEL, unsigned long, id, id, signed char))g_app_next_event)(self, cmd, mask, until, mode, deq);
+   static int n;
+   if (ev) {
+      const unsigned long t = ((unsigned long (*)(id, SEL))objc_msgSend)(ev, sel_registerName("type"));
+      if (n < 60 || (t <= 4 || t == 25 || t == 26 || t == 34)) {
+         n++;
+         const unsigned long mf = ((unsigned long (*)(id, SEL))objc_msgSend)(ev, sel_registerName("modifierFlags"));
+         id kw = ((id (*)(id, SEL))objc_msgSend)(self, sel_registerName("keyWindow"));
+         id md = mode ? ((id (*)(id, SEL))objc_msgSend)(mode, sel_registerName("description")) : nil;
+         const char *ms = md ? ((const char *(*)(id, SEL))objc_msgSend)(md, sel_registerName("UTF8String")) : "nil";
+         const double ti = until ? ((double (*)(id, SEL))objc_msgSend)(until, sel_registerName("timeIntervalSinceNow")) : 0;
+         const int mainth = ((signed char (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSThread"), sel_registerName("isMainThread"));
+         fprintf(stderr, "[input] dequeued type=%lu mask=0x%lx deq=%d modifierFlags=0x%lx keyWindow=%s mode=%s until=%.0fs main=%d\n",
+                 t, mask, deq, mf, kw ? object_getClassName(kw) : "nil", ms, ti, mainth);
+      }
+   }
+   return ev;
+}
+static void input_trace_install(void) {
+   static int done = 0;
+   if (done) { return; }
+   if (!KNOB("ABICONV_INPUT_TRACE")) { done = 1; return; }
+   Class a = objc_getClass("NSApplication");
+   if (!a) { return; }
+   Method m = class_getInstanceMethod(a, sel_registerName("sendEvent:"));
+   if (m) {
+      g_app_send_event = method_getImplementation(m);
+      method_setImplementation(m, (IMP)app_send_event_trace);
+   }
+   Method mn = class_getInstanceMethod(a, sel_registerName("nextEventMatchingMask:untilDate:inMode:dequeue:"));
+   if (mn) {
+      g_app_next_event = method_getImplementation(mn);
+      method_setImplementation(mn, (IMP)app_next_event_trace);
+   }
+   fprintf(stderr, "[input] trace armed: -[NSApplication sendEvent:] %s, nextEventMatchingMask %s\n",
+           m ? "hooked" : "MISSING", mn ? "hooked" : "MISSING");
+   done = 1;
+}
+
 /* ---- legacy -[NSView cacheDisplay] 1x-rep compat ---------------------------
  * The VIEW-side sibling of legacy_lockfocus_1x. The offscreen view-capture
  * idiom -[NSView bitmapImageRepForCachingDisplayInRect:] (vend a rep) +
@@ -5000,6 +5067,7 @@ static void appkit_compat_install(void) {
    legacy_glview_1x_install();
    legacy_snapshot_compat_install();
    legacy_lockfocus_1x_install();
+   input_trace_install();
    legacy_cachedisplay_1x_install();
    legacy_invocation_widen_install();
    legacy_displayrect_comark_install();
@@ -5983,6 +6051,48 @@ static int bp_deprecated_removefile(struct objc_call_plan *plan,
    return 1;
 }
 
+/* ABICONV_INPUT_TRACE: follow every mouse-BUTTON event across the bridge in
+ * one run — which i386 site sends it where, who reads its type/flags, whether
+ * a super call reaches AppKit and whether the app's own mouseDown: runs. */
+static int click_is_btn_event(id ev, unsigned long *t) {
+   if (!ev || ((uintptr_t)ev & 0xfff) == 0) { return 0; }
+   Class ne = objc_getClass("NSEvent");
+   Class c = object_getClass(ev);
+   while (c && c != ne) { c = class_getSuperclass(c); }
+   if (!c) { return 0; }
+   *t = ((unsigned long (*)(id, SEL))objc_msgSend)(ev, sel_registerName("type"));
+   return *t == 1 || *t == 2 || *t == 3 || *t == 4 || *t == 25 || *t == 26;
+}
+static void click_site(uint32_t ret, char *out, size_t n) {
+   Dl_info di;
+   if (ret && dladdr((void *)(uintptr_t)ret, &di) && di.dli_fname) {
+      const char *b = strrchr(di.dli_fname, '/');
+      snprintf(out, n, "%s+0x%lx", b ? b + 1 : di.dli_fname, (unsigned long)(ret - (uintptr_t)di.dli_fbase));
+   } else {
+      snprintf(out, n, "0x%x", ret);
+   }
+}
+static void click_trace(const char *dir, id recv, SEL sel, uint64_t arg_raw, int arg_is_i386, uint32_t ret32) {
+   if (!KNOB("ABICONV_INPUT_TRACE") || !sel) { return; }
+   const char *sn = sel_getName(sel);
+   id ev = NULL;
+   if (!strcmp(sn, "sendEvent:") || !strcmp(sn, "mouseDown:") || !strcmp(sn, "mouseUp:") ||
+       !strcmp(sn, "rightMouseDown:") || !strcmp(sn, "rightMouseUp:") || !strcmp(sn, "postEvent:atStart:")) {
+      ev = arg_is_i386 ? resolve_self((uint32_t)arg_raw) : (id)arg_raw;
+   } else if (!strcmp(sn, "type") || !strcmp(sn, "modifierFlags") || !strcmp(sn, "clickCount") ||
+              !strcmp(sn, "locationInWindow") || !strcmp(sn, "window") || !strcmp(sn, "buttonNumber")) {
+      ev = recv;
+   } else {
+      return;
+   }
+   unsigned long t = 0;
+   if (!click_is_btn_event(ev, &t)) { return; }
+   char site[160];
+   click_site(ret32, site, sizeof site);
+   fprintf(stderr, "[click] %s ev=%p type=%lu %s -[%s %s] from %s\n", dir, (void *)ev, t,
+           dir, recv ? object_getClassName(recv) : "nil", sn, site);
+}
+
 void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
    arena_init();
    appkit_compat_install();
@@ -5999,6 +6109,9 @@ void objc_bridge_prep(struct objc_call_plan *plan, const uint32_t *args32) {
 
    id real_self = resolve_self(args32[0]);
    SEL sel = resolve_sel(args32[1]);
+   if (__builtin_expect(KNOB("ABICONV_INPUT_TRACE") != NULL, 0)) {
+      click_trace("fwd", real_self, sel, args32[2], 1, args32[-1]);
+   }
    if (g_mb_n && sel) {   /* pending mutableBytes shadow: write it back first */
       mb_flush(real_self, !mb_sel_keeps_pointer(sel_getName(sel)));
    }
@@ -6381,6 +6494,23 @@ void objc_bridge_prep_stret(struct objc_call_plan *plan, const uint32_t *args32)
  * tell reverse_prep to dispatch the SUPER's legacy method rather than the
  * receiver's derived override (prevents +initialize-style recursion). */
 static void reverse_note_super(id recv, SEL sel, Class super_lookup);
+/* The hint is consumed by the NEXT reverse_prep for (recv,sel) on this thread,
+ * so it may only be left when the super method IS legacy (that send re-enters
+ * reverse_prep at once). A NATIVE super never consumes it: the stale hint then
+ * hijacked the next native dispatch of the same (recv,sel) — Portal 2
+ * -[NSValveApplication sendEvent:] calls [super sendEvent:] (native
+ * NSApplication) for every event, so the following AppKit -> NSApp sendEvent:
+ * looked the selector up from NSApplication upward, found no legacy method and
+ * returned nil: the event was silently DROPPED (every other event; trackpad
+ * clicks never reached the game). Kill M64_NO_SUPER_HINT_GATE; guard
+ * super-hint-native. */
+static void reverse_note_super_if_legacy(id recv, SEL sel, Class super_lookup) {
+   if (!KNOB("M64_NO_SUPER_HINT_GATE") && super_lookup && sel &&
+       !method_is_legacy(class_getInstanceMethod(super_lookup, sel))) {
+      return;
+   }
+   reverse_note_super(recv, sel, super_lookup);
+}
 
 /*
  * objc_msgSendSuper: args32[0] points at a struct objc_super_i386 in the
@@ -6403,6 +6533,9 @@ void objc_bridge_prep_super(struct objc_call_plan *plan, const uint32_t *args32)
     * handles both. */
    id super_class_id = resolve_self(super_i386->super_class);
    SEL sel = resolve_sel(args32[1]);
+   if (__builtin_expect(KNOB("ABICONV_INPUT_TRACE") != NULL, 0)) {
+      click_trace("super", real_receiver, sel, args32[2], 1, args32[-1]);
+   }
 
    /*
     * Class-method super-calls (`[super foo]` inside a `+method`). When the
@@ -6427,7 +6560,7 @@ void objc_bridge_prep_super(struct objc_call_plan *plan, const uint32_t *args32)
 
    /* Tell reverse_prep to look this sel up on the SUPER class, so a legacy
     * [super sel] runs the super's method, not the receiver's override. */
-   reverse_note_super(real_receiver, sel, (Class)super_class_id);
+   reverse_note_super_if_legacy(real_receiver, sel, (Class)super_class_id);
 
    if (BRIDGE_TRACE()) {
       const char *cls_name = "(nil)";
@@ -6480,7 +6613,7 @@ void objc_bridge_prep_super_stret(struct objc_call_plan *plan,
    plan->super.receiver    = real_receiver;
    plan->super.super_class = (Class)super_class_id;
 
-   reverse_note_super(real_receiver, sel, (Class)super_class_id);
+   reverse_note_super_if_legacy(real_receiver, sel, (Class)super_class_id);
 
    if (BRIDGE_TRACE()) {
       const char *cls_name = "(nil)";
@@ -9577,6 +9710,9 @@ void _86x64_reverse_prep(struct reverse_plan *plan, const uint64_t *regs,
 
    /* follow NSColor classes registered since install (cheap unless polling) */
    appkit_color_compat_reassert();
+   if (__builtin_expect(KNOB("ABICONV_INPUT_TRACE") != NULL, 0)) {
+      click_trace("rev", self_, sel, regs[gp0 + 1], 0, 0);
+   }
 
    plan->ret_kind = 2;          /* default void */
    plan->lowstack_base = (uint64_t)(uintptr_t)rev_stack_alloc();     /* low-4GB pool */

@@ -255,6 +255,7 @@
 	;; the thread itself ran fine. The shims hand out the thread's MACH PORT as
 	;; a stable 32-bit token. Guard 99_pthread_create_handle (ON=42, OFF=9).
 	MTSHIM	___pthread_create,            _shim_pthread_create
+	MTSHIM	___pthread_create_suspended_np, _shim_pthread_create_suspended_np
 	MTSHIM	___pthread_self,              _shim_pthread_self
 	MTSHIM	___pthread_join,              _shim_pthread_join
 	MTSHIM	___pthread_detach,            _shim_pthread_detach
