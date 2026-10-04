@@ -633,6 +633,27 @@ namespace MachO {
             snapshot_for(back_slot_snap, tgt, anchor_slots);
          }
       };
+      /* Targets of backward relative branches: the only places an ORPHAN block
+       * may open (see `orphan` below). A block no edge reaches at all is an EH
+       * landing pad (entered by the unwinder with the callee-saved anchors of
+       * the throw site) or code reached indirectly: the state before it is the
+       * function's own and stays right. Treating pads as orphan dropped their
+       * anchors and their jmps' snapshots: Angry Birds 0x28bd, a pad's
+       * `cmpl 0x30480e(%edi)` behind `call <noreturn>` lowered as
+       * edi+translated(0x30480e) (corpus: 4442 such hunks; Civ IV 811).
+       * Kill M64_NO_PIC_ORPHAN_BACK_ONLY; guard 99_pic_anchor_unreached_pad. */
+      static const bool orphan_back_only = std::getenv("M64_NO_PIC_ORPHAN_BACK_ONLY") == nullptr;
+      std::unordered_set<std::size_t> back_targets;
+      for (SectionBlob<bits> *blob : content) {
+         const auto *bi = dynamic_cast<Instruction<bits> *>(blob);
+         if (!bi) { continue; }
+         const xed_category_enum_t bc = xed_decoded_inst_get_category(&bi->xedd);
+         if (bc != XED_CATEGORY_COND_BR && bc != XED_CATEGORY_UNCOND_BR) { continue; }
+         const ssize_t bd = xed_decoded_inst_get_branch_displacement(&bi->xedd);
+         if (bd < 0) {
+            back_targets.insert(bi->loc.vmaddr + xed_decoded_inst_get_length(&bi->xedd) + bd);
+         }
+      }
       for (; pass < 2; ++pass) {
          if (pass == 1) {
             if (!pic_any_nonempty(back_anchor_snap) && !pic_any_nonempty(back_slot_snap)) { break; }
@@ -646,6 +667,30 @@ namespace MachO {
           * fall-through is dead (after ret/jmp, sticky across a noreturn call) */
          xed_category_enum_t last_flow_cat = XED_CATEGORY_INVALID;
          bool ft_dead = false;
+         /* After a call that never returns (env.noreturn_stubs) the code is
+          * reached only by branches: its state is unknown, so the next branch
+          * target ADOPTS its snapshot. Portal 2 server CServerGameDLL::DLLInit: an
+          * EH pad (`mov %eax,%esi ... call _Unwind_Resume`) falls into a loop head
+          * whose only real entry is a forward jmp carrying the %esi anchor; the
+          * dead fall-through's intersection dropped it and every later PIC store
+          * kept its raw disp (SIGBUS writing __TEXT). Needs function symbols, so a
+          * function entry after the call is never taken for such a join. Kill
+          * M64_NO_PIC_NORETURN; guard 99_pic_anchor_noreturn_join. */
+         static const bool noreturn_gate = std::getenv("M64_NO_PIC_NORETURN") == nullptr;
+         bool unreached = false;
+         /* ORPHAN: code past a dead fall-through that no recorded edge reaches
+          * (yet) and that a backward branch targets (joined on the second
+          * walk; see back_targets for why "not at all" is excluded). Its state
+          * is unknown, so its branches record nothing
+          * and the next join ADOPTS its snapshot. It used to run on the stale
+          * state left before the jmp and constrain joins with it. Portal 2 engine
+          * Mod_LoadNodes: `jmp L1; L0: <calls>; jmp L2` (L0 only by a backward
+          * jae) intersected L2 with the stale state, dropping the %ebx anchor
+          * copy; the loop head's back-edge snapshot inherited the loss on both
+          * walks -> raw `0x30aaa3(%ecx)` -> NULL deref. Kill
+          * M64_NO_PIC_ORPHAN_TOP; guard 99_pic_anchor_orphan_block. */
+         static const bool orphan_gate = std::getenv("M64_NO_PIC_ORPHAN_TOP") == nullptr;
+         bool orphan = false;
 
          for (SectionBlob<bits> *blob : content) {
             auto *inst = dynamic_cast<Instruction<bits> *>(blob);
@@ -672,12 +717,36 @@ namespace MachO {
                      snapshot_for(branch_slot_snap, b->first, back_slot_snap[b->first]);
                   }
                }
-               const bool no_fallthrough =
-                  prev_inst != nullptr &&
+               if (env.func_syms.count(inst->loc.vmaddr) != 0) { unreached = false; }
+               /* the linear predecessor cannot fall through here */
+               const bool dead_edge = prev_inst != nullptr &&
                   (last_flow_cat == XED_CATEGORY_RET ||
                    last_flow_cat == XED_CATEGORY_UNCOND_BR || ft_dead);
+               const bool no_fallthrough = unreached || orphan || dead_edge;
+               /* `unreached` is the dead edge from the noreturn call into the
+                * first real instruction after it, nothing more: kept sticky, it
+                * leaked through a stripped image's next function (no symbol to
+                * reset it) and made every join there adopt instead of
+                * intersect (Angry Birds 0x1a9f0..). Kill
+                * M64_NO_PIC_UNREACHED_ONCE; guard 99_pic_anchor_unreached_pad. */
+               static const bool unreached_once = std::getenv("M64_NO_PIC_UNREACHED_ONCE") == nullptr;
+               if (unreached_once && cat != XED_CATEGORY_NOP && cat != XED_CATEGORY_WIDENOP) {
+                  unreached = false;
+               }
                auto snap = branch_anchor_snap.find(inst->loc.vmaddr);
+               if (orphan_gate && !env.func_syms.empty()) {
+                  orphan = no_fallthrough && snap == branch_anchor_snap.end() &&
+                           prev_inst != nullptr && env.func_syms.count(inst->loc.vmaddr) == 0 &&
+                           (orphan || !orphan_back_only || back_targets.count(inst->loc.vmaddr) != 0);
+               }
                if (snap != branch_anchor_snap.end()) {
+                  unreached = false;
+                  /* a recorded edge reaches here: the code is live, so a CALL
+                   * opening this block must not leave ft_dead sticky (that made
+                   * its fall-through ORPHAN: Portal 2 engine
+                   * CClientState::SetSignonState, a switch case opening with a
+                   * call lost the `je` edge carrying the %edi anchor). */
+                  ft_dead = false;
                   if (no_fallthrough) { anchors = snap->second; }
                   else {
                      intersect_into(anchors, snap->second);
@@ -719,6 +788,7 @@ namespace MachO {
                   anchors[reg] = inst->loc.vmaddr;
                   anchored_region = true;
                   is_anchor_pop = true;
+                  orphan = false;   /* a fresh anchor: the state is known again */
                }
             }
 
@@ -904,7 +974,9 @@ namespace MachO {
                const ssize_t brdisp = xed_decoded_inst_get_branch_displacement(&xedd);
                const std::size_t tgt =
                   inst->loc.vmaddr + xed_decoded_inst_get_length(&xedd) + brdisp;
-               if (brdisp > 0 && tgt < sect.addr + sect.size &&
+               if (orphan) {
+                  /* unknown state: constrains no join */
+               } else if (brdisp > 0 && tgt < sect.addr + sect.size &&
                    tgt - inst->loc.vmaddr <= 0x10000) {
                   pending_forward_targets.insert(tgt);
                   snapshot_for(branch_anchor_snap, tgt, anchors);
@@ -915,7 +987,7 @@ namespace MachO {
             }
             /* The case bodies of a claimed PIC jump table are branch targets too. */
             auto jt = env.pic_switch_targets.find(inst->loc.vmaddr);
-            if (jt != env.pic_switch_targets.end()) {
+            if (jt != env.pic_switch_targets.end() && !orphan) {
                for (const std::size_t tgt : jt->second) {
                   if (tgt <= inst->loc.vmaddr) { record_back(tgt, inst->loc.vmaddr); continue; }
                   snapshot_for(branch_anchor_snap, tgt, anchors);
@@ -943,6 +1015,12 @@ namespace MachO {
             if (thunk_anchor_reg != XED_REG_INVALID) {
                anchors[thunk_anchor_reg] = thunk_anchor_vm;
                anchored_region = true;
+               orphan = false;
+            }
+            if (noreturn_gate && cat == XED_CATEGORY_CALL && !env.func_syms.empty() &&
+                env.noreturn_stubs.count(inst->loc.vmaddr + xed_decoded_inst_get_length(&xedd) +
+                                         xed_decoded_inst_get_branch_displacement(&xedd)) != 0) {
+               unreached = true;
             }
 
             if (cat != XED_CATEGORY_NOP && cat != XED_CATEGORY_WIDENOP) {

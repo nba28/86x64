@@ -1,3 +1,4 @@
+#include <unordered_set>
 #include <set>
 #include <cstring>
 #include <mach-o/stab.h>
@@ -121,6 +122,13 @@ namespace MachO {
                            static_cast<uint8_t>(enc);
                      }
                   }
+               }
+               /* clang emits a private copy of this noreturn helper in every
+                * image (EH pads `call ___clang_call_terminate`), so it is
+                * DEFINED, never a stub. Portal 2 engine S_StartSound_Immediate:
+                * such a pad fell into a join and wiped the %ebx/%esi anchors. */
+               if (std::strcmp(nm, "___clang_call_terminate") == 0) {
+                  env.noreturn_stubs.insert(static_cast<std::size_t>(nl.n_value));
                }
             }
          }
@@ -413,6 +421,35 @@ namespace MachO {
        * trampolines, not stub vmaddrs). */
       const bool already_synthesized =
          env.archive.section("__jt_tramp") != nullptr;
+
+      /* Stubs of imports that never return, in every stub section (the classic
+       * self-modifying __jump_table and the modern __symbol_stub alike). The
+       * names are the C/C++ runtime's noreturn ABI, never an app's. */
+      {
+         static const std::unordered_set<std::string> noreturn = {
+            "__Unwind_Resume", "_abort", "_exit", "__exit", "___cxa_throw",
+            "___cxa_rethrow", "___stack_chk_fail", "___assert_rtn", "_longjmp",
+            "_siglongjmp", "_pthread_exit", "___cxa_bad_cast", "___cxa_bad_typeid",
+            "___cxa_call_unexpected", "_err", "_errx", "__ZSt9terminatev",
+         };
+         for (Segment<bits> *seg : env.archive.segments()) {
+            for (Section<bits> *section : seg->sections) {
+               const auto& sect = section->sect;
+               if ((sect.flags & SECTION_TYPE) != S_SYMBOL_STUBS || sect.reserved2 == 0) { continue; }
+               for (std::size_t k = 0; k < sect.size / sect.reserved2; ++k) {
+                  if (sect.reserved1 + k >= indirectsyms.size()) { break; }
+                  const uint32_t symidx = indirectsyms[sect.reserved1 + k];
+                  if ((symidx & (INDIRECT_SYMBOL_LOCAL | INDIRECT_SYMBOL_ABS)) || symidx >= nsyms) { continue; }
+                  const auto& nl = img.at<nlist_t<bits>>(symoff + symidx * Nlist<bits>::size());
+                  if ((nl.n_type & N_STAB) || (nl.n_type & N_TYPE) != N_UNDF ||
+                      stroff == 0 || nl.n_un.n_strx >= strsize) { continue; }
+                  if (noreturn.count(&img.at<char>(stroff + nl.n_un.n_strx))) {
+                     env.noreturn_stubs.insert(sect.addr + k * sect.reserved2);
+                  }
+               }
+            }
+         }
+      }
 
       /* Collected undefined stubs (vmaddr/offset + the symbol they import). */
       struct UndefStub { std::size_t vmaddr; std::size_t offset; uint32_t symidx;

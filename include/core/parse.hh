@@ -99,6 +99,14 @@ namespace MachO {
        * vmaddr lives in the still-present __jump_table section). */
       std::map<std::size_t, const SectionBlob<bits> *> jump_table_undef_tramps;
 
+      /* i386 vmaddrs of import stubs (any S_SYMBOL_STUBS section) for an
+       * UNDEFINED symbol that never returns (_Unwind_Resume, abort, exit,
+       * __cxa_throw, __stack_chk_fail, ...). Populated by
+       * Dysymtab::lift_jump_table_targets; consumed by DetectPicAnchoredDisps,
+       * where the code after such a call is reached only by branches. Also the
+       * entry of a DEFINED ___clang_call_terminate (Symtab ctor). */
+      std::set<std::size_t> noreturn_stubs;
+
       /* Function-symbol vmaddrs, populated from the LC_SYMTAB nlist table
        * (all N_SECT, non-stab entries with n_value != 0).  Used by the linear
        * code sweep (Section::Parse1) to detect when a decoded instruction would
