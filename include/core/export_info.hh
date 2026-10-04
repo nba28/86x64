@@ -148,6 +148,7 @@ namespace MachO {
    public:
       using Trie = ExportTrie<bits>;
       Trie trie;
+      std::size_t base = 0;   /*!< image base (archive vmaddr), set at Build_LINKEDIT */
 
       static ExportInfo<bits> *Parse(const Image& img, std::size_t offset, std::size_t size,
                                      ParseEnv<bits>& env) {

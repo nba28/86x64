@@ -258,6 +258,7 @@ namespace MachO {
 
    template <Bits bits>
    void DyldInfo<bits>::Build_LINKEDIT(BuildEnv<bits>& env) {
+      if (env.archive) { export_info->base = env.archive->vmaddr; }
       dyld_info.rebase_size = rebase->size();
       dyld_info.rebase_off = env.allocate(dyld_info.rebase_size);
 

@@ -15,6 +15,10 @@ namespace MachO {
       }
    }
 
+   /* Image base of the archive being emitted (ExportInfo::base, set at
+    * Build_LINKEDIT); export values are vmaddr - base. Emission is serial. */
+   static std::size_t g_export_emit_base = 0;
+
    template <Bits bits>
    RegularExportNode<bits>::RegularExportNode(const Image& img, std::size_t offset,
                                               std::size_t flags, ParseEnv<bits>& env):
@@ -30,7 +34,27 @@ namespace MachO {
           * outside any parsed section. The export still emits — its leb128 value
           * just stays 0 instead of tracking a moved blob. Affects exports that
           * reference __LINKEDIT data (rare; seen in iLife framework dylibs). */
-         auto maybe_vmaddr = env.archive.try_offset_to_vmaddr(value_offset);
+         /* ★An export value is an ADDRESS offset from the image base (the
+          * mach header = first non-__PAGEZERO segment), not a file offset. The
+          * two only coincide where a segment's fileoff equals its vmaddr
+          * delta, and NEVER for zero-fill (__common/__bss: no file bytes).
+          * Portal 2 libtier0: all 12 __common exports (g_VProfCurrentProfile,
+          * g_ClockSpeed, ...) were emitted as the section start, so every
+          * importer aliased one zero page -> server VProf m_pCurNode NULL.
+          * Kill M64_NO_EXPORT_VMADDR (both directions); guard export-zerofill. */
+         static const bool by_vmaddr = std::getenv("M64_NO_EXPORT_VMADDR") == nullptr;
+         std::optional<std::size_t> maybe_vmaddr;
+         if (by_vmaddr) {
+            for (Segment<bits> *seg : env.archive.segments()) {
+               if (std::strcmp(seg->segment_command.segname, SEG_PAGEZERO) == 0) { continue; }
+               const std::size_t va = seg->segment_command.vmaddr + value_offset;
+               for (Segment<bits> *s2 : env.archive.segments()) {
+                  if (s2->contains_vmaddr(va)) { maybe_vmaddr = va; break; }
+               }
+               break;
+            }
+         }
+         if (!maybe_vmaddr) { maybe_vmaddr = env.archive.try_offset_to_vmaddr(value_offset); }
          if (maybe_vmaddr) {
             value = env.add_placeholder(*maybe_vmaddr);
          }
@@ -253,6 +277,7 @@ namespace MachO {
 
    template <Bits bits>
    void ExportInfo<bits>::Emit(Image& img, std::size_t offset) const {
+      g_export_emit_base = base;   /* read by RegularExportNode::Emit_derived */
       return trie.Emit(img, offset);
    }
 
@@ -264,7 +289,11 @@ namespace MachO {
    template <Bits bits>
    std::size_t RegularExportNode<bits>::Emit_derived(Image& img, std::size_t offset) const {
       const std::size_t start = offset;
-      offset += leb128_encode(img, offset, value ? value->loc.offset : 0);
+      static const bool by_vmaddr = std::getenv("M64_NO_EXPORT_VMADDR") == nullptr;
+      offset += leb128_encode(img, offset,
+                              value ? (by_vmaddr ? value->loc.vmaddr - g_export_emit_base
+                                                 : value->loc.offset)
+                                    : 0);
       return offset - start;
    }
    
