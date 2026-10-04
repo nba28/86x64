@@ -76,7 +76,7 @@ S_SRCS   := $(wildcard $(SRC_DIR)/[0-9][0-9]_*.s)
 OBJC_SRCS := $(wildcard $(SRC_DIR)/[0-9][0-9]_*.m)
 CPP_SRCS  := $(wildcard $(SRC_DIR)/[0-9][0-9]_*.cc)
 TESTS    := $(notdir $(basename $(ASM_SRCS) $(C_SRCS) $(S_SRCS)))
-OBJC_TESTS := $(notdir $(basename $(OBJC_SRCS)))
+OBJC_TESTS := $(filter-out 99_super_hint_native,$(notdir $(basename $(OBJC_SRCS))))
 CPP_TESTS  := $(filter-out 99_libstdcxx_redirect,$(notdir $(basename $(CPP_SRCS))))
 # 99_libstdcxx_redirect.cc is excluded from the generic `cpp:` loop: it only
 # passes with (a) the GNU libstdc++ 4.2.1 headers (this SDK's <sstream> etc.
@@ -91,7 +91,7 @@ CPP_TESTS  := $(filter-out 99_libstdcxx_redirect,$(notdir $(basename $(CPP_SRCS)
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept disp-reloc-accept imm-reloc-accept call-abs-pagezero pic-anchor-call-adopt entry-pad-fallthrough export-trie-deep jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap sib-rbp-index-wrap abs-base-neg-wrap ebp-gpr-narrow jt-case-in-func jt-back-edge-join steam-bridge lazy-self-def standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-cb-fifo snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn libstdcxx-redirect uidl-resolves agl-oversize-window
+.PHONY: check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept disp-reloc-accept imm-reloc-accept call-abs-pagezero pic-anchor-call-adopt entry-pad-fallthrough export-trie-deep export-zerofill jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap sib-rbp-index-wrap abs-base-neg-wrap ebp-gpr-narrow jt-case-in-func jt-back-edge-join pic-anchor-noreturn-join pic-anchor-local-noreturn pic-anchor-orphan-block pic-anchor-unreached-pad atsu-arrays sigaction-wrap printf-length-mods cfstr-image-gate sscanf-many-args wide-printf jt-slot-snap-epilogue text-rebase-disp dir-handle scandir-sort super-hint-native pthread-create-suspended aq-mirror jt-scaled-index-not-base steam-bridge lazy-self-def standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-cb-fifo snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn libstdcxx-redirect uidl-resolves agl-oversize-window
 all: run-only
 
 # check: every suite + every guard target, each under a deadline; exit 1 on any failure.
@@ -646,6 +646,165 @@ jt-back-edge-join: $(BUILD_DIR)/99_jt_back_edge_join.i386
 # (ABICONV_STEAM_API=/nonexistent at run time) gets no interfaces and exits 3.
 steam-bridge: $(BUILD_DIR)/99_steam_bridge.x86_64
 	@bash steam_bridge_test.sh
+# pic-anchor-noreturn-join: A/B guard that code after a NORETURN call (reached
+# only by branches) does not dilute the next join's PIC anchor (Portal 2 server
+# CServerGameDLL::DLLInit EH pad + _Unwind_Resume). ON exits 42; OFF
+# (M64_NO_PIC_NORETURN=1 at translate time) does not.
+pic-anchor-noreturn-join: $(BUILD_DIR)/99_pic_anchor_noreturn_join.i386
+	@for arm in on off; do \
+	  e=""; [ $$arm = off ] && e="M64_NO_PIC_NORETURN=1"; \
+	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_pic_anchor_noreturn_join.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_pic_anchor_noreturn_join.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "pic-anchor-noreturn-join: PASS (on=$$r_on off=$$r_off)" || { echo "pic-anchor-noreturn-join: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
+# pic-anchor-local-noreturn: same as pic-anchor-noreturn-join, but the pad calls
+# a DEFINED noreturn helper (clang's private ___clang_call_terminate; Portal 2
+# engine S_StartSound_Immediate). ON exits 42; OFF (M64_NO_PIC_NORETURN=1) does not.
+pic-anchor-local-noreturn: $(BUILD_DIR)/99_pic_anchor_local_noreturn.i386
+	@for arm in on off; do \
+	  e=""; [ $$arm = off ] && e="M64_NO_PIC_NORETURN=1"; \
+	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_pic_anchor_local_noreturn.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_pic_anchor_local_noreturn.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "pic-anchor-local-noreturn: PASS (on=$$r_on off=$$r_off)" || { echo "pic-anchor-local-noreturn: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
+# pic-anchor-orphan-block: A/B guard that a block reached only by a backward
+# branch (after a dead fall-through) does not constrain the join its forward
+# jmp reaches (Portal 2 engine Mod_LoadNodes). ON exits 42; OFF
+# (M64_NO_PIC_ORPHAN_TOP=1 at translate time) does not.
+pic-anchor-orphan-block: $(BUILD_DIR)/99_pic_anchor_orphan_block.i386
+	@for arm in on off; do \
+	  e=""; [ $$arm = off ] && e="M64_NO_PIC_ORPHAN_TOP=1"; \
+	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_pic_anchor_orphan_block.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_pic_anchor_orphan_block.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "pic-anchor-orphan-block: PASS (on=$$r_on off=$$r_off)" || { echo "pic-anchor-orphan-block: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
+# pic-anchor-unreached-pad: two ways the noreturn/orphan rules dropped a live
+# anchor (section.cc back_targets + unreached-once; Angry Birds / Civ IV corpus
+# hunks). ON exits 42; each OFF arm (M64_NO_PIC_ORPHAN_BACK_ONLY=1,
+# M64_NO_PIC_UNREACHED_ONCE=1 at translate time) must not.
+pic-anchor-unreached-pad: $(BUILD_DIR)/99_pic_anchor_unreached_pad.i386
+	@for arm in on M64_NO_PIC_ORPHAN_BACK_ONLY M64_NO_PIC_UNREACHED_ONCE; do \
+	  e=""; [ $$arm != on ] && e="$$arm=1"; \
+	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_pic_anchor_unreached_pad.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_pic_anchor_unreached_pad.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_M64_NO_PIC_ORPHAN_BACK_ONLY != 42 ] && [ $$r_M64_NO_PIC_UNREACHED_ONCE != 42 ] && \
+	  echo "pic-anchor-unreached-pad: PASS (on=$$r_on back_only_off=$$r_M64_NO_PIC_ORPHAN_BACK_ONLY once_off=$$r_M64_NO_PIC_UNREACHED_ONCE)" || \
+	  { echo "pic-anchor-unreached-pad: FAIL (on=$$r_on back_only_off=$$r_M64_NO_PIC_ORPHAN_BACK_ONLY once_off=$$r_M64_NO_PIC_UNREACHED_ONCE)"; exit 1; }
+# atsu-arrays: guard for libabiconv's own ATSUI subset on CoreText (atsu_shim.c;
+# Portal 2 vgui fonts). ON: the fixture styles, lays out, measures and DRAWS
+# text, exit 42. There is no run-time OFF arm: the old behaviour is native
+# ATSUI, which macOS 14+ blocks with an "Update Required" DIALOG on the real
+# screen. The second check is the precondition that removing the shim breaks:
+# every ATSU import of the translated fixture binds to libabiconv.
+atsu-arrays: $(BUILD_DIR)/99_atsu_arrays.x86_64
+	@$(BUILD_DIR)/99_atsu_arrays.x86_64 >/dev/null 2>&1; on=$$?; \
+	nat=$$(dyld_info -fixups $(BUILD_DIR)/99_atsu_arrays.x86_64.dylib | grep ATSU | grep -vc libabiconv/); \
+	[ $$on = 42 ] && [ $$nat = 0 ] && echo "atsu-arrays: PASS (on=$$on, native ATSU binds=$$nat)" || { echo "atsu-arrays: FAIL (on=$$on, native ATSU binds=$$nat)"; exit 1; }
+# sigaction-wrap: A/B guard that a sigaction() handler (plain and SA_SIGINFO)
+# reaches i386 code through a callback trampoline (Portal 2 SIGCHLD after popen).
+# ON exits 42; OFF (M64_NO_SIGACTION_WRAP=1 at run time) does not.
+sigaction-wrap: $(BUILD_DIR)/99_sigaction_wrap.x86_64
+	@$(BUILD_DIR)/99_sigaction_wrap.x86_64 >/dev/null 2>&1; on=$$?; \
+	M64_NO_SIGACTION_WRAP=1 $(BUILD_DIR)/99_sigaction_wrap.x86_64 >/dev/null 2>&1; off=$$?; \
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "sigaction-wrap: PASS (on=$$on off=$$off)" || { echo "sigaction-wrap: FAIL (on=$$on off=$$off)"; exit 1; }
+# printf-length-mods: A/B guard for the i386 printf bridge's length modifiers
+# (printf-conv.cc; Portal 2 single-player load aborted on %llu). ON exits 42;
+# OFF (M64_NO_PRINTF_LONGEST_MOD=1 at run time) does not.
+printf-length-mods: $(BUILD_DIR)/99_printf_length_mods.x86_64
+	@$(BUILD_DIR)/99_printf_length_mods.x86_64 >/dev/null 2>&1; on=$$?; \
+	M64_NO_PRINTF_LONGEST_MOD=1 $(BUILD_DIR)/99_printf_length_mods.x86_64 >/dev/null 2>&1; off=$$?; \
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "printf-length-mods: PASS (on=$$on off=$$off)" || { echo "printf-length-mods: FAIL (on=$$on off=$$off)"; exit 1; }
+# cfstr-image-gate: a C-bridge void* is a CFSTR constant only inside a loaded
+# image (objc_shim.c i386_cfstr_to_real): a heap buffer that reads like a
+# CFString record must reach memcpy as itself. ON exits 42; OFF
+# (ABICONV_NO_CFSTR_IMAGE_GATE=1) copies an NSString instead.
+cfstr-image-gate: $(BUILD_DIR)/99_cfstr_image_gate.x86_64
+	@$(BUILD_DIR)/99_cfstr_image_gate.x86_64 >/dev/null 2>&1; on=$$?; \
+	ABICONV_NO_CFSTR_IMAGE_GATE=1 $(BUILD_DIR)/99_cfstr_image_gate.x86_64 >/dev/null 2>&1; off=$$?; \
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "cfstr-image-gate: PASS (on=$$on off=$$off)" || { echo "cfstr-image-gate: FAIL (on=$$on off=$$off)"; exit 1; }
+# sscanf-many-args: guard that the scanf/sscanf vararg bridge (vararg-conv-t.asm)
+# handles >16 args and preserves %esi (Portal 2 materialsystem matrix sscanf).
+# No kill switch (a buffer size); exits 42.
+sscanf-many-args: $(BUILD_DIR)/99_sscanf_many_args.x86_64
+	@$(RUN_FIXTURE) $(BUILD_DIR)/99_sscanf_many_args.x86_64 >/dev/null 2>&1; on=$$?; \
+	[ $$on = 42 ] && echo "sscanf-many-args: PASS (on=$$on)" || { echo "sscanf-many-args: FAIL (on=$$on)"; exit 1; }
+# wide-printf: guard for the wide printf/scanf shims (printf-conv.cc
+# vswprintf/swprintf/swscanf; Portal 2 Options > Video). Exits 42.
+wide-printf: $(BUILD_DIR)/99_wide_printf.x86_64
+	@$(RUN_FIXTURE) $(BUILD_DIR)/99_wide_printf.x86_64 >/dev/null 2>&1; on=$$?; \
+	[ $$on = 42 ] && echo "wide-printf: PASS (on=$$on)" || { echo "wide-printf: FAIL (on=$$on)"; exit 1; }
+# jt-slot-snap-epilogue: A/B guard that a PIC switch whose anchor sits in an
+# %ebp slot, dispatched past an early epilogue (Portal 2 client
+# vgui::Panel::OnMessage), is claimed. ON exits 42; OFF (M64_NO_JT_SLOT_SNAP=1
+# at translate time) does not.
+jt-slot-snap-epilogue: $(BUILD_DIR)/99_jt_slot_snap_epilogue.i386
+	@for arm in on off; do \
+	  e=""; [ $$arm = off ] && e="M64_NO_JT_SLOT_SNAP=1"; \
+	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_jt_slot_snap_epilogue.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_jt_slot_snap_epilogue.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "jt-slot-snap-epilogue: PASS (on=$$r_on off=$$r_off)" || { echo "jt-slot-snap-epilogue: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
+# text-rebase-disp: A/B guard that a __text slot the LC_DYLD_INFO rebase stream
+# rebases (a text relocation) is relocated as an address (Portal 2 libmilesx86).
+# ON exits 42; OFF (M64_NO_TEXT_REBASE_ATTEST=1 at translate time) does not.
+text-rebase-disp: $(BUILD_DIR)/99_text_rebase_disp.i386
+	@for arm in on off; do \
+	  e=""; [ $$arm = off ] && e="M64_NO_TEXT_REBASE_ATTEST=1"; \
+	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_text_rebase_disp.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_text_rebase_disp.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "text-rebase-disp: PASS (on=$$r_on off=$$r_off)" || { echo "text-rebase-disp: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
+# dir-handle: A/B guard that opendir hands an i386 caller a low DIR and readdir
+# the classic i386 dirent (Portal 2 libmilesx86). ON exits 42; OFF
+# (M64_NO_DIR_SHIM=1 at run time) does not.
+dir-handle: $(BUILD_DIR)/99_dir_handle.x86_64
+	@$(BUILD_DIR)/99_dir_handle.x86_64 >/dev/null 2>&1; on=$$?; \
+	M64_NO_DIR_SHIM=1 $(BUILD_DIR)/99_dir_handle.x86_64 >/dev/null 2>&1; off=$$?; \
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "dir-handle: PASS (on=$$on off=$$off)" || { echo "dir-handle: FAIL (on=$$on off=$$off)"; exit 1; }
+# scandir-sort: A/B guard for classic scandir + alphasort (dir_shim.c; Portal 2
+# filesystem_stdio FS_FindNextFile). ON exits 42; OFF (M64_NO_DIR_SHIM=1) does not.
+scandir-sort: $(BUILD_DIR)/99_scandir_sort.x86_64
+	@$(BUILD_DIR)/99_scandir_sort.x86_64 >/dev/null 2>&1; on=$$?; \
+	M64_NO_DIR_SHIM=1 $(BUILD_DIR)/99_scandir_sort.x86_64 >/dev/null 2>&1; off=$$?; \
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "scandir-sort: PASS (on=$$on off=$$off)" || { echo "scandir-sort: FAIL (on=$$on off=$$off)"; exit 1; }
+# super-hint-native: A/B guard that a legacy [super sel] into a NATIVE super
+# leaves no stale super hint (objc_shim.c reverse_note_super_if_legacy; Portal 2
+# trackpad clicks). Links the 10.6 SDK AppKit stub. ON exits 42; OFF
+# (M64_NO_SUPER_HINT_GATE=1 at run time) does not.
+SDK106 := $(HOME)/projects/Library/SDKs/MacOSX10.6.sdk
+$(BUILD_DIR)/99_super_hint_native.i386: $(SRC_DIR)/99_super_hint_native.m
+	@clang -arch i386 -isysroot $(SDK106) -mmacosx-version-min=10.6 -fobjc-runtime=macosx-fragile -c $< -o $(BUILD_DIR)/99_super_hint_native.o
+	@$(LD) $(LDFLAGS_I386) -F$(SDK106)/System/Library/Frameworks -lobjc -framework AppKit -framework Foundation -framework CoreFoundation -undefined dynamic_lookup -e _main -o $@ $(BUILD_DIR)/99_super_hint_native.o
+super-hint-native: $(BUILD_DIR)/99_super_hint_native.x86_64
+	@$(RUN_FIXTURE) $(BUILD_DIR)/99_super_hint_native.x86_64 >/dev/null 2>&1; on=$$?; \
+	M64_NO_SUPER_HINT_GATE=1 $(RUN_FIXTURE) $(BUILD_DIR)/99_super_hint_native.x86_64 >/dev/null 2>&1; off=$$?; \
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "super-hint-native: PASS (on=$$on off=$$off)" || { echo "super-hint-native: FAIL (on=$$on off=$$off)"; exit 1; }
+# pthread-create-suspended: A/B guard that pthread_create_suspended_np goes
+# through pthread_create's hand shim (Portal 2 libmilesx86 sound init). ON exits
+# 42; OFF (M64_NO_PTHREAD_TOKEN=1 at run time: no handle write-back) does not.
+pthread-create-suspended: $(BUILD_DIR)/99_pthread_create_suspended.x86_64
+	@$(BUILD_DIR)/99_pthread_create_suspended.x86_64 >/dev/null 2>&1; on=$$?; \
+	M64_NO_PTHREAD_TOKEN=1 $(BUILD_DIR)/99_pthread_create_suspended.x86_64 >/dev/null 2>&1; off=$$?; \
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "pthread-create-suspended: PASS (on=$$on off=$$off)" || { echo "pthread-create-suspended: FAIL (on=$$on off=$$off)"; exit 1; }
+# aq-mirror: A/B guard for the AudioQueue output API bridge (aq_shim.c; Portal 2
+# CAudioDeviceAudioQueue). Plays silence. ON exits 42; OFF (M64_NO_AQ_MIRROR=1
+# at run time) does not; exit 2 = no output device (SKIP).
+aq-mirror: $(BUILD_DIR)/99_aq_mirror.x86_64
+	@$(BUILD_DIR)/99_aq_mirror.x86_64 >/dev/null 2>&1; on=$$?; \
+	if [ $$on = 2 ]; then echo "aq-mirror: SKIP (no audio output device)"; exit 0; fi; \
+	M64_NO_AQ_MIRROR=1 $(BUILD_DIR)/99_aq_mirror.x86_64 >/dev/null 2>&1; off=$$?; \
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "aq-mirror: PASS (on=$$on off=$$off)" || { echo "aq-mirror: FAIL (on=$$on off=$$off)"; exit 1; }
+# jt-scaled-index-not-base: A/B guard that a register scaled by 4 is never taken
+# as a PIC switch's table base (Portal 2 engine MXR_LoadAllSoundMixers). ON exits
+# 42; OFF (M64_NO_JT_SCALED_INDEX_GUARD=1 at translate time) does not.
+jt-scaled-index-not-base: $(BUILD_DIR)/99_jt_scaled_index_not_base.i386
+	@for arm in on off; do \
+	  e=""; [ $$arm = off ] && e="M64_NO_JT_SCALED_INDEX_GUARD=1"; \
+	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_jt_scaled_index_not_base.$$arm $< >/dev/null 2>&1; \
+	  $(RUN_FIXTURE) $(BUILD_DIR)/99_jt_scaled_index_not_base.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "jt-scaled-index-not-base: PASS (on=$$r_on off=$$r_off)" || { echo "jt-scaled-index-not-base: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
 # pic-push-mem: A/B guard that a PIC-anchored `push disp(%ebx[,idx,s])` reads
 # the translated slot (libbass pthread key). ON exits 42; OFF
 # (M64_NO_PIC_OPERAND_LOWERING=1 at translate time) does not.
@@ -731,6 +890,19 @@ export-trie-deep: $(BUILD_DIR)/99_export_trie_deep.i386 $(BUILD_DIR)/libabiconv.
 	    -o $(BUILD_DIR)/99_export_trie_deep.$$arm $< >/dev/null 2>&1; \
 	  $(BUILD_DIR)/99_export_trie_deep.$$arm 2>/dev/null; eval r_$$arm=$$?; done; \
 	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "export-trie-deep: PASS" || { echo "export-trie-deep: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
+# export-zerofill: an exported __common global is exported at ITS address, not
+# the section start (export_info.cc; Portal 2 libtier0 g_VProfCurrentProfile).
+# OFF arm M64_NO_EXPORT_VMADDR=1 at TRANSLATE time.
+$(BUILD_DIR)/99_export_zerofill.i386: $(SRC_DIR)/99_export_zerofill.c
+	@clang -arch i386 -isysroot $(I386_SYSROOT) -mmacosx-version-min=10.6 -fcommon -c $< -o $(BUILD_DIR)/99_export_zerofill.o
+	@$(LD) $(LDFLAGS_I386) -e _main -o $@ $(BUILD_DIR)/99_export_zerofill.o
+export-zerofill: $(BUILD_DIR)/99_export_zerofill.i386 $(BUILD_DIR)/libabiconv.dylib
+	@for arm in on off; do E=""; [ $$arm = off ] && E="M64_NO_EXPORT_VMADDR=1"; \
+	  rm -f $(BUILD_DIR)/99_export_zerofill.$$arm; \
+	  env $$E bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_export_zerofill.$$arm $< >/dev/null 2>&1; \
+	  $(RUN_FIXTURE) $(BUILD_DIR)/99_export_zerofill.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "export-zerofill: PASS (on=$$r_on off=$$r_off)" || { echo "export-zerofill: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
 # entry-pad-fallthrough: the even-address pad before a function entry must be
 # executable (a NOP): code may fall through into the label (Portal 2 libbink
 # RADCB). OFF arm is M64_ZERO_ENTRY_PAD=1 at TRANSLATE time (the old 0x00 pad).
@@ -1780,6 +1952,34 @@ $(BUILD_DIR)/steam_api_stub.dylib: | $(BUILD_DIR)
 	  -install_name @loader_path/libsteam_api.dylib -o $@ $(BUILD_DIR)/steam_api_stub.o
 $(BUILD_DIR)/99_steam_bridge.i386: $(BUILD_DIR)/99_steam_bridge.o $(BUILD_DIR)/steam_api_stub.dylib
 	$(LD) $(LDFLAGS_I386) -e _main -o $@ $< -weak_library $(BUILD_DIR)/steam_api_stub.dylib
+
+# 99_atsu_arrays imports ATSUI, whose framework binary the sysroot lacks: link a
+# symbols-only stub carrying ApplicationServices' install name; translation
+# rebinds every call to libabiconv.
+$(BUILD_DIR)/appservices_stub.dylib: | $(BUILD_DIR)
+	@printf 'void ATSUCreateStyle(){}\nvoid ATSUSetAttributes(){}\nvoid ATSUCreateTextLayoutWithTextPtr(){}\nvoid ATSUDirectGetLayoutDataArrayPtrFromTextLayout(){}\nvoid ATSUDirectReleaseLayoutDataArrayPtr(){}\nvoid ATSUGlyphGetIdealMetrics(){}\nvoid ATSUDisposeTextLayout(){}\nvoid ATSUSetLayoutControls(){}\nvoid ATSUDrawText(){}\nvoid CGColorSpaceCreateDeviceRGB(){}\nvoid CGBitmapContextCreate(){}\n' > $(BUILD_DIR)/appservices_stub.c
+	@$(CC_I386) -c $(BUILD_DIR)/appservices_stub.c -o $(BUILD_DIR)/appservices_stub.o
+	@$(LD) -arch i386 -macos_version_min 10.6 -syslibroot $(I386_SYSROOT) -lSystem -dylib \
+	  -install_name /System/Library/Frameworks/ApplicationServices.framework/Versions/A/ApplicationServices \
+	  -o $@ $(BUILD_DIR)/appservices_stub.o
+$(BUILD_DIR)/99_atsu_arrays.i386: $(BUILD_DIR)/99_atsu_arrays.o $(BUILD_DIR)/appservices_stub.dylib
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $< $(BUILD_DIR)/appservices_stub.dylib
+
+# 99_text_rebase_disp: PIE + text relocations, so the rebase stream is the
+# only evidence that its disp32 is an address.
+$(BUILD_DIR)/99_text_rebase_disp.i386: $(BUILD_DIR)/99_text_rebase_disp.o
+	$(LD) $(filter-out -no_pie,$(LDFLAGS_I386)) -pie -read_only_relocs suppress -e _main -o $@ $<
+
+# 99_aq_mirror imports AudioToolbox, whose binary the sysroot lacks: a
+# symbols-only stub with its install name (translation rebinds to libabiconv).
+$(BUILD_DIR)/audiotoolbox_stub.dylib: | $(BUILD_DIR)
+	@printf 'void AudioQueueNewOutput(){}\nvoid AudioQueueAllocateBuffer(){}\nvoid AudioQueueEnqueueBuffer(){}\nvoid AudioQueueStart(){}\nvoid AudioQueueStop(){}\nvoid AudioQueueDispose(){}\n' > $(BUILD_DIR)/audiotoolbox_stub.c
+	@$(CC_I386) -c $(BUILD_DIR)/audiotoolbox_stub.c -o $(BUILD_DIR)/audiotoolbox_stub.o
+	@$(LD) -arch i386 -macos_version_min 10.6 -syslibroot $(I386_SYSROOT) -lSystem -dylib \
+	  -install_name /System/Library/Frameworks/AudioToolbox.framework/Versions/A/AudioToolbox \
+	  -o $@ $(BUILD_DIR)/audiotoolbox_stub.o
+$(BUILD_DIR)/99_aq_mirror.i386: $(BUILD_DIR)/99_aq_mirror.o $(BUILD_DIR)/audiotoolbox_stub.dylib
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $< $(BUILD_DIR)/audiotoolbox_stub.dylib
 
 # 99_cfnumber_i386_width links CoreFoundation the same way (see above).
 $(BUILD_DIR)/99_cfnumber_i386_width.i386: $(BUILD_DIR)/99_cfnumber_i386_width.o

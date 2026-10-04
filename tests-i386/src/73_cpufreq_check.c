@@ -34,8 +34,7 @@ extern int  sysctlbyname(const char *name, void *oldp, unsigned long *oldlenp,
                          void *newp, unsigned long newlen);
 
 int main(void) {
-   /* (1) isolate ___udivdi3 on a known value. (Narrowed for printf: our i386
-    * printf bridge rejects %llu; the DIVISION stays 64-bit.) */
+   /* (1) isolate ___udivdi3 on a known value (the DIVISION is 64-bit). */
    volatile unsigned long long a = 2400000000ULL, b = 1000000ULL;
    unsigned long long q = a / b;
    printf("udivdi3_2400: %d\n", (int)q);

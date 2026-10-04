@@ -43,8 +43,7 @@ int main(void) {
    int64_t  cq = cd / cn;        /* 142857142857 = 0x21_43C7A574 */
    int64_t  cr = cd % cn;        /* 1 */
 
-   /* The i386 printf bridge rejects %lld/%llu (see 73_cpufreq_check); the
-    * DIVISIONS above stay 64-bit, we just narrow the results for printing. The
+   /* The DIVISIONS above are 64-bit; the results are narrowed for printing. The
     * control quotient is checked against its exact 64-bit value in `ok`; here we
     * print its low 32 bits only. */
    int all_zero = (sdiv == 0) && (smod == 0) && (udiv == 0) && (umod == 0);
