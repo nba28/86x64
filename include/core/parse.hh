@@ -158,6 +158,15 @@ namespace MachO {
       std::set<std::size_t> local_reloc_addrs;
       bool have_classic_local_relocs = false;
 
+      /* i386 vmaddr of every slot the LC_DYLD_INFO rebase stream rebases
+       * (RebaseInfo::do_rebase). A slot inside __text is a TEXT relocation: the
+       * operand field there holds an in-image address, whatever the shape. Used
+       * ONLY to attest code operand fields (Instruction disp/imm), never data
+       * classification. Portal 2 libmilesx86 `movzbl 0x602d4(%eax),%edx` (a
+       * __data byte, rebased in __text) stayed raw -> SIGSEGV. Kill
+       * M64_NO_TEXT_REBASE_ATTEST; guard 99_text_rebase_disp. */
+      std::set<std::size_t> rebase_slot_addrs;
+
       /* M32 CONSTANT-CLASSIFICATION PROVENANCE (M64 re-parses only): the vmaddr
        * of every 4-byte data slot that the M32 pass classified as a CONSTANT and
        * whose value could alias the translated image. Lifted STRAIGHT FROM THE

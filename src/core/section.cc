@@ -1131,6 +1131,22 @@ namespace MachO {
 
       std::set<std::size_t> pending_targets;
       std::map<std::size_t, RegMap> anchor_snap;
+      /* %ebp-keyed frame slots per forward-branch target, joined like the
+       * registers: an early epilogue's `pop %ebp` drops every slot on the
+       * linear walk, but a block entered by a branch from before it still has
+       * them (Portal 2 client vgui::Panel::OnMessage: anchor spilled to
+       * -0x10(%ebp), `je` past a mid-function ret to a dispatch that reloads
+       * it). %esp-keyed slots depend on the path's esp_off: not snapshotted.
+       * Kill M64_NO_JT_SLOT_SNAP; guard 99_jt_slot_snap_epilogue. */
+      static const bool slot_snap_on = std::getenv("M64_NO_JT_SLOT_SNAP") == nullptr;
+      using SlotMap = std::map<SlotKey, std::size_t>;
+      struct SlotSnap { SlotMap tbl, anchor; };
+      std::map<std::size_t, SlotSnap> slot_snap;
+      const auto ebp_only = [](const SlotMap& m) {
+         SlotMap r;
+         for (const auto& kv : m) { if (kv.first.first == (int)XED_REG_EBP) { r.insert(kv); } }
+         return r;
+      };
       /* table base -> (entry count, anchor), and -> its dispatch vmaddr */
       std::map<std::size_t, std::pair<std::size_t, std::size_t>> tables;
       std::map<std::size_t, std::size_t> table_dispatch;
@@ -1206,7 +1222,7 @@ namespace MachO {
             if (!pic_any_nonempty(back_snap)) { break; }
             anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
             stack_tbl.clear(); stack_anchor.clear(); esp_off = 0;
-            pending_targets.clear(); anchor_snap.clear();
+            pending_targets.clear(); anchor_snap.clear(); slot_snap.clear();
             prev_cat = XED_CATEGORY_INVALID; prev_call0 = false;
          }
          std::size_t it = sect.offset;
@@ -1232,7 +1248,7 @@ namespace MachO {
             if (env.func_syms.count(vmaddr) != 0) {
                anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
                stack_tbl.clear(); stack_anchor.clear(); pending_targets.clear();
-               anchor_snap.clear();
+               anchor_snap.clear(); slot_snap.clear();
                prev_call0 = false;
             }
             if (pass == 1) {
@@ -1249,6 +1265,29 @@ namespace MachO {
                   }
                }
                anchor_snap.erase(anchor_snap.begin(), anchor_snap.upper_bound(vmaddr));
+            }
+            if (!slot_snap.empty()) {
+               auto sn = slot_snap.find(vmaddr);
+               if (sn != slot_snap.end()) {
+                  if (prev_cat == XED_CATEGORY_RET || prev_cat == XED_CATEGORY_UNCOND_BR) {
+                     drop_slots_of(stack_tbl, XED_REG_EBP);
+                     drop_slots_of(stack_anchor, XED_REG_EBP);
+                     stack_tbl.insert(sn->second.tbl.begin(), sn->second.tbl.end());
+                     stack_anchor.insert(sn->second.anchor.begin(), sn->second.anchor.end());
+                  } else {
+                     /* the fall-through keeps an %ebp slot only if the branch agrees */
+                     for (SlotMap *m : {&stack_anchor, &stack_tbl}) {
+                        const SlotMap& b = (m == &stack_anchor) ? sn->second.anchor : sn->second.tbl;
+                        for (auto i = m->begin(); i != m->end(); ) {
+                           auto f = b.find(i->first);
+                           const bool keep = i->first.first != (int)XED_REG_EBP ||
+                                             (f != b.end() && f->second == i->second);
+                           i = keep ? std::next(i) : m->erase(i);
+                        }
+                     }
+                  }
+               }
+               slot_snap.erase(slot_snap.begin(), slot_snap.upper_bound(vmaddr));
             }
 
             bool sets_state = false;
@@ -1324,8 +1363,21 @@ namespace MachO {
                /* `mov %t,[%tbl + idx*s]`, or the folded `[anchor + idx*4 + d]` */
                const xed_reg_enum_t base = jt_norm32(xed_decoded_inst_get_base_reg(ops, 0));
                const xed_reg_enum_t index = jt_norm32(xed_decoded_inst_get_index_reg(ops, 0));
+               /* The table base may sit in the index field only at scale 1 (the
+                * fields are then symmetric); a register scaled by 4 is the case
+                * index. Portal 2 engine MXR_LoadAllSoundMixers: a stale anchor
+                * copy in %esi (the loop counter) made `lea -1(%esi),%eax` look
+                * like a table base, so `mov 0x82b(%ebx,%eax,4)` took %eax as the
+                * table and the real dispatch was never claimed (SIGILL
+                * mid-instruction). Kill M64_NO_JT_SCALED_INDEX_GUARD; guard
+                * 99_jt_scaled_index_not_base. */
+               static const bool scaled_index_any =
+                  std::getenv("M64_NO_JT_SCALED_INDEX_GUARD") != nullptr;
                auto tb = tbl_addr.find(base);
-               if (tb == tbl_addr.end()) { tb = tbl_addr.find(index); }
+               if (tb == tbl_addr.end() &&
+                   (scaled_index_any || xed_operand_values_get_scale(ops) == 1)) {
+                  tb = tbl_addr.find(index);
+               }
                if (tb != tbl_addr.end()) {
                   tbl_val[reg0] = { tb->second, 0 };
                   tbl_addr.erase(reg0);
@@ -1502,6 +1554,15 @@ namespace MachO {
                if (bd > 0 && tgt < sect_hi && tgt - vmaddr <= 0x10000) {
                   pending_targets.insert(tgt);
                   snapshot_for(anchor_snap, tgt, anchors);
+                  if (slot_snap_on && jt_spill) {
+                     SlotSnap cur{ ebp_only(stack_tbl), ebp_only(stack_anchor) };
+                     auto ex = slot_snap.find(tgt);
+                     if (ex == slot_snap.end()) { slot_snap.emplace(tgt, std::move(cur)); }
+                     else {
+                        intersect_into(ex->second.tbl, cur.tbl);
+                        intersect_into(ex->second.anchor, cur.anchor);
+                     }
+                  }
                } else if (pass == 0 && back_edge && bd < 0 && tgt >= sect_lo &&
                           vmaddr - tgt <= 0x10000 && pic_same_function(env.func_syms, tgt, vmaddr)) {
                   snapshot_for(back_snap, tgt, anchors);

@@ -83,6 +83,9 @@ namespace MachO {
    std::size_t RebaseInfo<bits>::do_rebase(std::size_t vmaddr, ParseEnv<bits>& env, uint8_t type) {
       // std::cerr << "[PARSE] REBASE @ 0x" << std::hex << vmaddr << std::endl;
       rebasees.push_back(RebaseNode<bits>::Parse(vmaddr, env, type));
+      /* every rebased slot -- TEXT relocations included -- is the linker's
+       * statement that it holds an in-image address (ParseEnv::rebase_slot_addrs) */
+      if constexpr (bits == Bits::M32) { env.rebase_slot_addrs.insert(vmaddr); }
       return vmaddr + sizeof(ptr_t);
    }
 

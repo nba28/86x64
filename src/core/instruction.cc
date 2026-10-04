@@ -556,13 +556,19 @@ namespace MachO {
        * non-PIC classic dylib names its globals by literal address: Portal 2
        * libbink `leal 0x30e60(%edx),%eax` into __bss stayed raw -> SIGSEGV).
        * Same authority DataParser gives a relocated data slot. */
+      /* ...and so is an LC_DYLD_INFO rebase of a __text slot (a text
+       * relocation; ParseEnv::rebase_slot_addrs). */
+      auto field_relocated = [&](std::size_t field) {
+         static const bool text_rebase_off = std::getenv("M64_NO_TEXT_REBASE_ATTEST") != nullptr;
+         return (env.have_classic_local_relocs && env.local_reloc_addrs.count(field) != 0) ||
+                (!text_rebase_off && env.rebase_slot_addrs.count(field) != 0);
+      };
       auto disp_reloc_attested = [&]() {
          static const bool off = std::getenv("M64_NO_DISP_RELOC_ACCEPT") != nullptr;
-         if (bits != Bits::M32 || off || !env.have_classic_local_relocs) { return false; }
+         if (bits != Bits::M32 || off) { return false; }
          const std::size_t immw = xed_operand_values_has_immediate(operands)
             ? xed_decoded_inst_get_immediate_width(&xedd) : 0;
-         const std::size_t field = loc.vmaddr + instbuf.size() - immw - sizeof(uint32_t);
-         return env.local_reloc_addrs.count(field) != 0;
+         return field_relocated(loc.vmaddr + instbuf.size() - immw - sizeof(uint32_t));
       };
       auto parse_imm = [&](std::size_t off, bool is_ptr) {
          imm = Immediate<bits>::Parse(img, loc + off, env, is_ptr);
@@ -748,12 +754,12 @@ namespace MachO {
        * whatever the instruction shape: the imm sibling of disp_reloc_attested
        * (Portal 2 libbink `pushl $0x30aa`, a callback passed by literal address
        * to its IO setup, stayed raw -> the IO thread called 0x30aa). */
-      if (bits == Bits::M32 && env.have_classic_local_relocs &&
+      if (bits == Bits::M32 &&
           xed_operand_values_has_immediate(operands) &&
           xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
          static const bool off = std::getenv("M64_NO_IMM_RELOC_ACCEPT") != nullptr;
          const std::size_t imm_off = instbuf.size() - sizeof(uint32_t);
-         if (!off && env.local_reloc_addrs.count(loc.vmaddr + imm_off) != 0) {
+         if (!off && field_relocated(loc.vmaddr + imm_off)) {
             parse_imm(imm_off, true);
          }
       }
