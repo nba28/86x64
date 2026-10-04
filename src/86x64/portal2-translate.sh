@@ -131,8 +131,7 @@ else
   while IFS= read -r n; do
     [ "$(basename "$n")" = "libcef.dylib" ] && [ "$INCLUDE_CEF" -eq 0 ] && continue
     # Only Mach-O i386 inputs are translatable. The mss*.asi/.mix Miles plugins
-    # are Windows PE32 DLLs that the engine loads as opaque data — copy, never
-    # translate.
+    # are Windows PE32 DLLs — never translated (nor copied, see below).
     case "$(file -b "$n")" in *i386*) targets+=("$n");; esac
   done < <(ls -1d "$SRC32"/* "$GAME32"/*)
 fi
@@ -200,7 +199,9 @@ results="$STAGE/.results"
 # --- copy the non-Mach-O engine payloads through -------------------------
 if [ ${#ONLY[@]} -eq 0 ]; then
   for n in $(ls -1 "$SRC32"); do
-    case "$(file -b "$SRC32/$n")" in *i386*) ;; *) cp -p "$SRC32/$n" "$STAGE/$n";; esac
+    # PE32 = the Miles .asi/.mix plugins: raw i386 Windows code that an x86_64
+    # process cannot run, so they stay out of bin/osx64 (todo_gaps).
+    case "$(file -b "$SRC32/$n")" in *i386*|*PE32*) ;; *) cp -p "$SRC32/$n" "$STAGE/$n";; esac
   done
 fi
 
