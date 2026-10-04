@@ -21,6 +21,14 @@ enable_language(ASM_NASM)
 # offset matches its code), so the emitted object is correct; downgrade the
 # non-convergence back to a warning so the build completes.
 set(CMAKE_ASM_NASM_FLAGS "${CMAKE_ASM_NASM_FLAGS} -w-error=label-redef-late")
+# NASM's macho64 writer cannot emit LC_BUILD_VERSION, so ld warns "no platform
+# load command found in '<obj>', assuming: macOS" once per asm object at the final
+# link. Re-link each object with `ld -r -platform_version` to stamp the platform
+# (-w: that relink step would otherwise print the same warning about its input).
+set(CMAKE_ASM_NASM_COMPILE_OBJECT
+  "<CMAKE_ASM_NASM_COMPILER> <DEFINES> <INCLUDES> -f macho64 <FLAGS> -o <OBJECT> <SOURCE>"
+  "ld -r -w -arch x86_64 -platform_version macos 11.0 11.0 <OBJECT> -o <OBJECT>.stamped"
+  "mv <OBJECT>.stamped <OBJECT>")
 set(CMAKE_ASM_NASM_LINK_EXECUTABLE "ld <FLAGS> <CMAKE_ASM_NASM_LINK_FLAGS> <LINK_FLAGS> <OBJECTS>  -o <TARGET> <LINK_LIBRARIES>")
 set(CMAKE_ASM_NASM_CREATE_SHARED_LIBRARY "ld -dylib <CMAKE_ASM_NASM_LINK_FLAGS> <LINK_FLAGS> <OBJECTS> -o <TARGET> <LINK_LIBRARIES>")
 

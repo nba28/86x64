@@ -904,6 +904,10 @@ add_custom_command(TARGET abiconv POST_BUILD
 # the wrapper executable (_86x64_stderr_shim, _86x64_alloc_low_4gb) that
 # only exist once the wrapper is in the process.
 target_link_options(abiconv PRIVATE -Wl,-undefined,dynamic_lookup)
+# `System` below is deliberate and must stay FIRST in the load order (flat dynamic_lookup
+# resolves in load order; dropping it moves libobjc ahead of libSystem and changes the
+# bind ordinals). The c++ driver appends its own -lSystem, hence the duplicate warning.
+target_link_options(abiconv PRIVATE -Wl,-no_warn_duplicate_libraries)
 # objc_shim.c bridges into the live ObjC runtime; Foundation must be loaded
 # so objc_getClass("NSString") etc. resolve. The C-function shims call the
 # real x86_64 framework entry points (_Gestalt, _CFRetain, _LSCopy..., etc.),
