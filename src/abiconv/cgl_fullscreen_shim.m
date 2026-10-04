@@ -36,6 +36,9 @@
  * pre-fix 10012).
  * ABI: MTSHIM (rdi -> &i386 args[0]); symbols in custom.syms.
  */
+/* this shim presents classic full-screen CGL contexts through the deprecated NSOpenGL/CGL API; no replacement exists */
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
 #import <AppKit/AppKit.h>
 #import <OpenGL/OpenGL.h>
 #import <Carbon/Carbon.h>

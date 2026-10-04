@@ -84,6 +84,9 @@
  * custom.syms so neither abigen pass emits a second definition.
  */
 
+/* this shim bridges the classic (deprecated) CGDisplay mode-switch API; no replacement exists */
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

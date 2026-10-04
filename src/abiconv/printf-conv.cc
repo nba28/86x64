@@ -706,7 +706,11 @@ int vsprintf_vshim(const uint32_t *a) {
    reg_width_t argtypes[VA_SLOTS_MAX];
    va_list va;
    build_native_va_list(fmt, ap, (sysv_va_list_tag *)(void *)va, args64, argtypes);
+/* this bridge implements the unbounded sprintf contract of the i386 caller */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
    return vsprintf(str, fmt, va);
+#pragma clang diagnostic pop
 }
 
 int vfprintf_vshim(const uint32_t *a) {
@@ -833,7 +837,11 @@ int fprintf_vshim(const uint32_t *a) {
 int sprintf_vshim(const uint32_t *a) {
    char *str = (char *)(uintptr_t)a[0];
    VA_BUILD((const char *)(uintptr_t)a[1], &a[2]);
+/* this bridge implements the unbounded sprintf contract of the i386 caller */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
    return vsprintf(str, fmt, va);
+#pragma clang diagnostic pop
 }
 int snprintf_vshim(const uint32_t *a) {
    char *str = (char *)(uintptr_t)a[0];

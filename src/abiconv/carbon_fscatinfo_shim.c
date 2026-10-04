@@ -83,6 +83,9 @@
  * low-4GB address, directly dereferenceable from here.
  */
 
+/* this shim marshals the classic (deprecated) FSCatalog/FSCreate* API onto its native twin; no replacement exists */
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
 #include <stdint.h>
 #include <stddef.h>
 #include <string.h>

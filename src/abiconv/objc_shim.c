@@ -11550,7 +11550,11 @@ uint32_t shim_sel_isEqual(uint32_t *a) {
 
 uint32_t shim_objc_flush_caches(uint32_t *a) {
    id cls = resolve_self(a[0]);
+/* _objc_flush_caches has no public replacement; the classic caller asked for exactly this */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
    if (cls) { _objc_flush_caches((Class)cls); }
+#pragma clang diagnostic pop
    return 0;
 }
 

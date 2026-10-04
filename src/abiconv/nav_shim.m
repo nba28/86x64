@@ -198,7 +198,11 @@ static int fill_selection(uint8_t *rb, NSArray *urls) {
    }
    for (NSURL *u in urls) {
       FSRef ref;
+/* the classic Navigation Services reply is FSRef-based; CFURLGetFSRef is the only URL->FSRef path */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
       if (u && CFURLGetFSRef((CFURLRef)u, &ref)) {
+#pragma clang diagnostic pop
          if (AEPutPtr(&list, 0, typeFSRef, &ref, sizeof(FSRef)) == noErr) n++;
       }
    }

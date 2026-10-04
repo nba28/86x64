@@ -154,7 +154,11 @@ static qt_movie *qt_open_url(CFURLRef url) {
 
       /* natural size + duration from the first video track (synchronous read —
        * acceptable for a shim; the file is local). */
+/* loadTracksWithMediaType: is async; the Movie Toolbox call being bridged is synchronous */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
       NSArray *vtracks = [asset tracksWithMediaType:AVMediaTypeVideo];
+#pragma clang diagnostic pop
       if (vtracks.count) {
          CGSize sz = [(AVAssetTrack *)vtracks[0] naturalSize];
          m->natW = (int32_t)(sz.width  + 0.5);
@@ -383,7 +387,11 @@ static CGImageRef qt_frame_cgimage(qt_movie *m, double sec) {
    g.requestedTimeToleranceBefore = kCMTimeZero;
    g.requestedTimeToleranceAfter  = kCMTimePositiveInfinity;   /* nearest at/after */
    CMTime t = CMTimeMakeWithSeconds(sec < 0 ? 0 : sec, m->timeScale);
+/* generateCGImageAsynchronously* is async; the Movie Toolbox call being bridged is synchronous */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
    return [g copyCGImageAtTime:t actualTime:NULL error:NULL];   /* caller releases */
+#pragma clang diagnostic pop
 }
 
 /* Encode a CGImage to PNG bytes (retained CFData), or NULL. */

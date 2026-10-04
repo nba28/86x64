@@ -54,6 +54,9 @@
  * (4 bytes) — a low-4GB CF handle.
  */
 
+/* this shim re-exports the deprecated CFXMLNode API for classic apps; no replacement exists */
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>

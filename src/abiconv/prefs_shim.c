@@ -358,8 +358,12 @@ __attribute__((section("__DATA,__interpose"))) = {
 	  (const void *) CFPreferencesCopyKeyList },
 	{ (const void *) x64_CFPreferencesCopyMultiple,
 	  (const void *) CFPreferencesCopyMultiple },
+/* deprecated but still exported; this table binds the classic import to it */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
 	{ (const void *) x64_CFPreferencesCopyApplicationList,
 	  (const void *) CFPreferencesCopyApplicationList },
+#pragma clang diagnostic pop
 	{ (const void *) x64_CFPreferencesAppSynchronize,
 	  (const void *) CFPreferencesAppSynchronize },
 	{ (const void *) x64_CFPreferencesSynchronize,

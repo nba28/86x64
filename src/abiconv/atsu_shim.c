@@ -135,7 +135,11 @@ uint32_t shim_ATSFontActivateFromMemory(uint32_t *a) {
    CFDataRef d = CFDataCreate(NULL, P(a[0]), (CFIndex)a[1]);
    CGDataProviderRef dp = d ? CGDataProviderCreateWithCFData(d) : NULL;
    CGFontRef cg = dp ? CGFontCreateWithDataProvider(dp) : NULL;
+/* no sync in-process replacement for registering a CGFont (the *FromData APIs are async descriptors) */
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
    int ok = cg && CTFontManagerRegisterGraphicsFont(cg, NULL);
+#pragma clang diagnostic pop
    if (cg) CFRelease(cg);
    if (dp) CFRelease(dp);
    if (d) CFRelease(d);
