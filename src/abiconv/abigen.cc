@@ -2183,6 +2183,7 @@ struct ABIGenerator {
             << std::endl;
          ++idx;
       }
+      os << "\talign 8" << std::endl;   /* after odd-length names */
       os << "\tglobal _x64_data_shadows" << std::endl;
       os << "_x64_data_shadows:" << std::endl;
       idx = 0;
