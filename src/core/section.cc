@@ -412,6 +412,17 @@ namespace MachO {
       std::size_t it = sect.offset;
       std::size_t vmaddr = sect.addr;
       bool prev_no_fallthrough = false;   /* last blob was ret/jmp (or padding) */
+      /* A stripped image has no symbol for most entries, so func_entry (the
+       * even-alignment the Itanium pmf low bit needs) also marks the first
+       * real instruction at an even i386 address after ret/jmp + alignment
+       * padding: nothing falls into it, so a pad there is never executed
+       * (Portal 2 libcef: half its entries odd, a non-virtual RunnableMethod
+       * pmf dispatched as virtual -> call 0 at quit). i386 source only: a
+       * re-parse of our own x86_64 output decodes claimed tables as code, and
+       * the transform already carries func_entry over. Kill
+       * M64_NO_DEAD_ENTRY_EVEN; guard stripped-pmf-even. */
+      static const bool dead_entry_even = std::getenv("M64_NO_DEAD_ENTRY_EVEN") == nullptr;
+      bool dead_run = true;   /* section start, or ret/jmp then only nop/padding */
 
       /* An instruction that would straddle a function symbol swallowed the
        * inter-function padding before it (Portal 2 libtogl: `a1 00 00 00 55`).
@@ -447,8 +458,18 @@ namespace MachO {
             elem = parser(img, Location(it, vmaddr), env);
          }
 
-         if (text && env.func_syms.count(vmaddr)) {
+         const auto *elem_in = text ? dynamic_cast<Instruction<bits> *>(elem) : nullptr;
+         const xed_category_enum_t elem_cat =
+            elem_in ? xed_decoded_inst_get_category(&elem_in->xedd) : XED_CATEGORY_INVALID;
+         const bool elem_nop = elem_cat == XED_CATEGORY_NOP || elem_cat == XED_CATEGORY_WIDENOP;
+         if (text && (env.func_syms.count(vmaddr) ||
+                      (bits == Bits::M32 && dead_entry_even && dead_run && elem_in && !elem_nop &&
+                       (vmaddr & 1) == 0))) {
             elem->func_entry = true;   /* even-aligned at Build (pmf low bit) */
+         }
+         if (elem_in) {   /* data (padding, claimed table slots) keeps the state */
+            dead_run = elem_cat == XED_CATEGORY_RET || elem_cat == XED_CATEGORY_UNCOND_BR ||
+                       (dead_run && elem_nop);
          }
          elem->iter = content.insert(content.end(), elem);
          /* the i386 address, before Build re-lays out: keys the EH PC map */
@@ -1284,6 +1305,7 @@ namespace MachO {
       std::map<std::size_t, std::pair<std::size_t, std::size_t>> tables;
       std::map<std::size_t, std::size_t> table_dispatch;
       xed_category_enum_t prev_cat = XED_CATEGORY_INVALID;
+      static const bool nop_keeps_dead = std::getenv("M64_NO_DEAD_ENTRY_EVEN") == nullptr;
       bool prev_call0 = false;     /* previous insn was `call $+0` */
       std::size_t pend_r11 = 0;    /* target of the last `lea r11,[rip+d]` (M64 call dance) */
 
@@ -1731,7 +1753,12 @@ namespace MachO {
                 xed_decoded_inst_get_base_reg(ops, 0) == XED_REG_RIP) {
                pend_r11 = vmaddr + len + xed_decoded_inst_get_memory_displacement(ops, 0);
             }
-            prev_cat = cat;
+            /* alignment nops keep a ret/jmp's dead fall-through, so a branch
+             * target behind them still ADOPTS its snapshot (a func_entry pad
+             * before a block after an early epilogue; M64_NO_DEAD_ENTRY_EVEN) */
+            if (!nop_keeps_dead || (cat != XED_CATEGORY_NOP && cat != XED_CATEGORY_WIDENOP)) {
+               prev_cat = cat;
+            }
             it += len;
             vmaddr += len;
          }
@@ -1900,10 +1927,14 @@ namespace MachO {
       env.resolve(other.segment, &segment);
 
       /* transform content */
+      static const bool no_entry_carry = std::getenv("M64_NO_DEAD_ENTRY_EVEN") != nullptr;
       for (const auto elem : other.content) {
          auto new_blobs = elem->Transform(env);
          if (!new_blobs.empty()) {
             env.add(elem, new_blobs.front());
+            /* an expansion (push %ebp -> lea+mov) is built fresh: keep the
+             * entry's even-alignment on its first blob */
+            if (elem->func_entry && !no_entry_carry) { new_blobs.front()->func_entry = true; }
          }
          content.splice(content.end(), new_blobs);
       }
