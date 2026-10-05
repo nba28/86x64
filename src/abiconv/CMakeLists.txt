@@ -845,6 +845,8 @@ add_library(abiconv SHARED
   carbon_scrap_shim.c
   # netdb_pwd_shim.c: hostent/servent/protoent/passwd/group returns in the i386 layout.
   netdb_pwd_shim.c
+  # tm_shim.c: struct tm (localtime/gmtime/mktime/strftime/ctime) in the i386 layout.
+  tm_shim.c
   # carbon_window_removed_shim.c: Window Manager calls 64-bit HIToolbox dropped.
   carbon_window_removed_shim.c
   # (halo_shim.c / halo_tramp.asm RETIRED: mach_timebase_info / mach_absolute_time

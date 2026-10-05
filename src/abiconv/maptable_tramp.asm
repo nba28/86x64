@@ -1692,3 +1692,15 @@ ____ZTVN10__cxxabiv121__vmi_class_type_infoE:	times 16 db 0
 	MTSHIM	___getgrgid,                          _shim_getgrgid
 	MTSHIM	___getgrnam,                          _shim_getgrnam
 	MTSHIM	___getgrent,                          _shim_getgrent
+
+	;; --- struct tm in the i386 layout (tm_shim.c) ---
+	MTSHIM	___localtime,                         _shim_localtime
+	MTSHIM	___gmtime,                            _shim_gmtime
+	MTSHIM	___localtime_r,                       _shim_localtime_r
+	MTSHIM	___gmtime_r,                          _shim_gmtime_r
+	MTSHIM	___mktime,                            _shim_mktime
+	MTSHIM	___strftime,                          _shim_strftime
+	;; the conformance variants abigen also exports (client.dylib binds these)
+	MTSHIM	___mktime$UNIX2003,                   _shim_mktime
+	MTSHIM	___strftime$UNIX2003,                 _shim_strftime
+	MTSHIM	___ctime,                             _shim_ctime
