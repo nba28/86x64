@@ -124,6 +124,7 @@ namespace MachO {
       env.add(&other, this);
       env.resolve(other.segment, &segment);
       func_entry = other.func_entry; /* preserve even-alignment intent i386->x86_64 */
+      align_even = other.align_even;
       /* Carry forward the source instruction's DISK-FAITHFUL i386 address that
        * Section::Parse1 recorded during the initial sweep (section base + sum of
        * raw decoded lengths).  We must NOT use other.loc.vmaddr here: by the time

@@ -28,6 +28,10 @@ namespace MachO {
        * vtable slot (f09_member_func_ptr).  Set in Section::Parse1; propagated
        * across the i386->x86_64 transform by the SectionBlob copy ctor. */
       bool func_entry = false;
+      /*!< Even-align at Build only (pmf low bit), WITHOUT func_entry's other
+       * meaning (archive.cc snaps EH FDEs to func_entry): a structural entry
+       * guess after ret/jmp/noreturn call may be a block or a landing pad. */
+      bool align_even = false;
       /*!< Original i386 vmaddr this blob was translated from (0 if synthetic /
        * unknown).  loc.vmaddr is reused for parse-time AND post-build addresses,
        * so it cannot retain the original once Build assigns the final x86_64

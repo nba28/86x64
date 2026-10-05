@@ -412,17 +412,21 @@ namespace MachO {
       std::size_t it = sect.offset;
       std::size_t vmaddr = sect.addr;
       bool prev_no_fallthrough = false;   /* last blob was ret/jmp (or padding) */
-      /* A stripped image has no symbol for most entries, so func_entry (the
-       * even-alignment the Itanium pmf low bit needs) also marks the first
-       * real instruction at an even i386 address after ret/jmp + alignment
-       * padding: nothing falls into it, so a pad there is never executed
+      /* A stripped image has no symbol for most entries, so align_even (the
+       * even-alignment the Itanium pmf low bit needs) marks the first
+       * real instruction at an even i386 address after ret/jmp/noreturn call +
+       * alignment padding: nothing falls into it, so a pad there is never executed
        * (Portal 2 libcef: half its entries odd, a non-virtual RunnableMethod
        * pmf dispatched as virtual -> call 0 at quit). i386 source only: a
        * re-parse of our own x86_64 output decodes claimed tables as code, and
-       * the transform already carries func_entry over. Kill
+       * the transform already carries the flags over. Kill
        * M64_NO_DEAD_ENTRY_EVEN; guard stripped-pmf-even. */
       static const bool dead_entry_even = std::getenv("M64_NO_DEAD_ENTRY_EVEN") == nullptr;
       bool dead_run = true;   /* section start, or ret/jmp then only nop/padding */
+      /* After a noreturn call the next instruction is still the call's return
+       * address, which the EH unwinder looks up (51_eh_throw_int: a pad after
+       * `call ___cxa_throw` hid its call site): mark only past alignment padding. */
+      bool dead_needs_gap = false;
 
       /* An instruction that would straddle a function symbol swallowed the
        * inter-function padding before it (Portal 2 libtogl: `a1 00 00 00 55`).
@@ -462,14 +466,25 @@ namespace MachO {
          const xed_category_enum_t elem_cat =
             elem_in ? xed_decoded_inst_get_category(&elem_in->xedd) : XED_CATEGORY_INVALID;
          const bool elem_nop = elem_cat == XED_CATEGORY_NOP || elem_cat == XED_CATEGORY_WIDENOP;
-         if (text && (env.func_syms.count(vmaddr) ||
-                      (bits == Bits::M32 && dead_entry_even && dead_run && elem_in && !elem_nop &&
-                       (vmaddr & 1) == 0))) {
+         if (text && env.func_syms.count(vmaddr)) {
             elem->func_entry = true;   /* even-aligned at Build (pmf low bit) */
+         } else if (text && bits == Bits::M32 && dead_entry_even && dead_run && !dead_needs_gap && elem_in &&
+                    !elem_nop && (vmaddr & 1) == 0) {
+            elem->align_even = true;
          }
-         if (elem_in) {   /* data (padding, claimed table slots) keeps the state */
+         if (!elem_in && !emitted_padding && !dynamic_cast<JumpTableEntry<bits> *>(elem)) {
+            dead_run = false;   /* undecodable bytes: a pad there would re-decode them */
+         } else if (elem_in) {   /* padding and claimed table slots keep the state */
+            const bool noreturn_call =   /* call ___stack_chk_fail etc. */
+               elem_cat == XED_CATEGORY_CALL &&
+               xed_decoded_inst_get_iform_enum(&elem_in->xedd) == XED_IFORM_CALL_NEAR_RELBRz &&
+               env.noreturn_stubs.count(vmaddr + elem->size() +
+                                        xed_decoded_inst_get_branch_displacement(&elem_in->xedd)) != 0;
             dead_run = elem_cat == XED_CATEGORY_RET || elem_cat == XED_CATEGORY_UNCOND_BR ||
-                       (dead_run && elem_nop);
+                       noreturn_call || (dead_run && elem_nop);
+            dead_needs_gap = noreturn_call;
+         } else if (emitted_padding) {
+            dead_needs_gap = false;
          }
          elem->iter = content.insert(content.end(), elem);
          /* the i386 address, before Build re-lays out: keys the EH PC map */
@@ -1754,7 +1769,7 @@ namespace MachO {
                pend_r11 = vmaddr + len + xed_decoded_inst_get_memory_displacement(ops, 0);
             }
             /* alignment nops keep a ret/jmp's dead fall-through, so a branch
-             * target behind them still ADOPTS its snapshot (a func_entry pad
+             * target behind them still ADOPTS its snapshot (an align_even pad
              * before a block after an early epilogue; M64_NO_DEAD_ENTRY_EVEN) */
             if (!nop_keeps_dead || (cat != XED_CATEGORY_NOP && cat != XED_CATEGORY_WIDENOP)) {
                prev_cat = cat;
@@ -1865,7 +1880,7 @@ namespace MachO {
             for (auto pk = it; pk != content.end(); ++pk) {
                SectionBlob<bits> *b = *pk;
                if (!b->active) { continue; }
-               if (b->func_entry) { starts_func_entry = true; break; }
+               if (b->func_entry || b->align_even) { starts_func_entry = true; break; }
                if (b->size() != 0) { break; } /* real blob -> vmaddr advances */
             }
             if (starts_func_entry) {
@@ -1934,7 +1949,10 @@ namespace MachO {
             env.add(elem, new_blobs.front());
             /* an expansion (push %ebp -> lea+mov) is built fresh: keep the
              * entry's even-alignment on its first blob */
-            if (elem->func_entry && !no_entry_carry) { new_blobs.front()->func_entry = true; }
+            if (!no_entry_carry) {
+               new_blobs.front()->func_entry |= elem->func_entry;
+               new_blobs.front()->align_even |= elem->align_even;
+            }
          }
          content.splice(content.end(), new_blobs);
       }

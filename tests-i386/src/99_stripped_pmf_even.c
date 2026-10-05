@@ -31,6 +31,7 @@ H(8, return o->v - 0x100;)
 H(9, int a = o->v, b = a * a; return a + b + 9;)
 H(10, return (o->v & 0xff) | 0x1000;)
 H(11, return -o->v;)
+static int h12(struct obj *o);   /* defined after main (clang may reorder) */
 
 static __attribute__((noinline)) int invoke(struct obj *o, struct pmf f) {
    char *t = (char *)o + f.adj;
@@ -45,6 +46,7 @@ int main(void) {
    static const void *const vtable[1] = { 0 };
    struct obj o = { vtable, 5 };
    int ok = 0;
-   T(0) T(1) T(2) T(3) T(4) T(5) T(6) T(7) T(8) T(9) T(10) T(11)
-   exit(ok == 12 ? 42 : 1);
+   T(0) T(1) T(2) T(3) T(4) T(5) T(6) T(7) T(8) T(9) T(10) T(11) T(12)
+   exit(ok == 13 ? 42 : 1);
 }
+H(12, return o->v * 7 + 0x77;)
