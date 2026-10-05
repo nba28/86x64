@@ -14,6 +14,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <dlfcn.h>
+#include <malloc/malloc.h>
 #include <CoreGraphics/CoreGraphics.h>
 
 #define PTR(n) ((void *)(uintptr_t)args[(n)])
@@ -40,7 +41,12 @@ extern int sd_ctrl_get_value(void *ctrl, int32_t *out);
 // ---- Window Manager update / port / refcon (no classic window): no-op or noErr ----
 void     shim_BeginUpdate(uint32_t *args)       { (void)args; }
 void     shim_EndUpdate(uint32_t *args)         { (void)args; }
-void     shim_SetPortWindowPort(uint32_t *args) { GAP_STUB(args); }
+// void SetPortWindowPort(WindowRef) == SetPort(GetWindowPort(w)).
+void     shim_SetPortWindowPort(uint32_t *args) {
+    extern void shim_SetPort(uint32_t *a);               // qd_gworld.c
+    uint32_t port = qd_port_for_window((void *)(uintptr_t)x64_objc_unwrap(args[0]));
+    shim_SetPort(&port);
+}
 
 // SetWRefCon / GetWRefCon. 64-bit HIToolbox dropped SetWRefCon but kept
 // GetWRefCon, so the refCon was stuck at 0: an app's SetWRefCon (the classic
@@ -88,15 +94,64 @@ uint32_t shim_GetWindowFromPort(uint32_t *args)
 }
 uint32_t shim_InvalWindowRect(uint32_t *args)   { GAP_STUB(args); return UI_NO_ERR; }
 uint32_t shim_ValidWindowRect(uint32_t *args)   { GAP_STUB(args); return UI_NO_ERR; }
-uint32_t shim_SetWindowContentColor(uint32_t *args)        { GAP_STUB(args); return UI_NO_ERR; }
+// OSStatus SetWindowContentColor(WindowRef, const RGBColor *): the window's
+// content view paints that color instead of the theme background (removed from
+// 64-bit HIToolbox). Call of Duty 4 sets its game window's backdrop this way
+// before the GL view covers it. One record per window, kept as a window property
+// so a second call just recolors.
+#define WCC_TAG 0x77636320u   /* 'wcc ' */
+struct wcc { void *view; double r, g, b; };
+static int32_t wcc_draw(void *call, void *ev, void *ud) {
+    UIDL(GetEventParameter, int32_t, (void *, uint32_t, uint32_t, uint32_t *, unsigned long, unsigned long *, void *));
+    UIDL(HIViewGetBounds, int32_t, (void *, CGRect *));
+    struct wcc *c = (struct wcc *)ud;
+    CGContextRef cg = NULL;
+    CGRect b = CGRectZero;
+    (void)call;
+    if (!GetEventParameter || !HIViewGetBounds ||
+        GetEventParameter(ev, 'cntx', 'cntx', NULL, sizeof cg, NULL, &cg) != 0 || !cg)
+        return -9874;                                   /* eventNotHandledErr */
+    HIViewGetBounds(c->view, &b);
+    CGContextSetRGBFillColor(cg, c->r, c->g, c->b, 1.0);
+    CGContextFillRect(cg, b);
+    return UI_NO_ERR;
+}
+uint32_t shim_SetWindowContentColor(uint32_t *args) {
+    UIDL(GetWindowProperty, int32_t, (void *, uint32_t, uint32_t, uint64_t, uint64_t *, void *));
+    UIDL(SetWindowProperty, int32_t, (void *, uint32_t, uint32_t, uint64_t, const void *));
+    UIDL(HIViewGetRoot, void *, (void *));
+    UIDL(HIViewFindByID, int32_t, (void *, uint64_t, void **));
+    UIDL(GetControlEventTarget, void *, (void *));
+    UIDL(InstallEventHandler, int32_t, (void *, void *, uint32_t, const void *, void *, void *));
+    UIDL(HIViewSetNeedsDisplay, int32_t, (void *, uint8_t));
+    void *win = (void *)(uintptr_t)x64_objc_unwrap(args[0]);
+    const uint16_t *rgb = (const uint16_t *)(uintptr_t)args[1];
+    struct wcc *c = NULL;
+    if (!win || !rgb || !GetWindowProperty || !SetWindowProperty) return (uint32_t)-50;
+    if (GetWindowProperty(win, REFCON_CREATOR, WCC_TAG, sizeof c, NULL, &c) != 0 || !c) {
+        void *root = HIViewGetRoot ? HIViewGetRoot(win) : NULL, *content = NULL;
+        /* kHIViewWindowContentID = {'wind', 1}: an HIViewID by value (8 bytes). */
+        uint64_t cid = (uint64_t)'wind' | ((uint64_t)1 << 32);
+        if (!root || !HIViewFindByID || HIViewFindByID(root, cid, &content) != 0 || !content ||
+            !GetControlEventTarget || !InstallEventHandler)
+            return (uint32_t)-50;
+        c = (struct wcc *)malloc_zone_malloc(malloc_default_zone(), sizeof *c);   /* native memory */
+        if (!c) return (uint32_t)-108;
+        c->view = content;
+        struct { uint32_t cls, kind; } draw = { 'cntl', 4 /*kEventControlDraw*/ };
+        InstallEventHandler(GetControlEventTarget(content), (void *)wcc_draw, 1, &draw, c, NULL);
+        SetWindowProperty(win, REFCON_CREATOR, WCC_TAG, sizeof c, &c);
+    }
+    c->r = rgb[0] / 65535.0; c->g = rgb[1] / 65535.0; c->b = rgb[2] / 65535.0;
+    if (HIViewSetNeedsDisplay) HIViewSetNeedsDisplay(c->view, 1);
+    return UI_NO_ERR;
+}
 uint32_t shim_SetWindowProxyCreatorAndType(uint32_t *args) { GAP_STUB(args); return UI_NO_ERR; }
 // GetWindowRegion(window, code, RgnHandle ioWinRgn): leaves the caller's region as-is.
 uint32_t shim_GetWindowRegion(uint32_t *args)   { GAP_STUB(args); return UI_NO_ERR; }
 
 // ---- Control Manager (classic 16/32-bit value controls) ----
 void     shim_Draw1Control(uint32_t *args)           { GAP_STUB(args); }
-void     shim_SetControl32BitMaximum(uint32_t *args) { GAP_STUB(args); }
-void     shim_SetControlMaximum(uint32_t *args)      { GAP_STUB(args); }
 uint32_t shim_GetControlPopupMenuHandle(uint32_t *a) { GAP_STUB(a); return 0; }  // MenuRef NULL
 
 // SetControl32BitValue(ControlRef, SInt32 value): for a self-drawn popup this

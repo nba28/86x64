@@ -355,7 +355,7 @@ uint32_t shim_UpdateMovie(uint32_t *a) {
    return cmNoErr;
 }
 /* OSErr PrerollMovie(Movie, TimeValue, Fixed); — AVFoundation buffers itself. */
-uint32_t shim_PrerollMovie(uint32_t *a) { GAP_STUB(a); return cmNoErr; }
+uint32_t shim_PrerollMovie(uint32_t *a) { (void)a; return cmNoErr; }   /* AVPlayer prerolls itself */
 /* void SetMovieActive(Movie, Boolean); / void SetMovieVolume(Movie, short); */
 uint32_t shim_SetMovieActive(uint32_t *a) { GAP_STUB(a); return cmNoErr; }
 uint32_t shim_SetMovieVolume(uint32_t *a) {

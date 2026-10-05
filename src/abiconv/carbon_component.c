@@ -29,6 +29,7 @@
  */
 
 #include "carbon_shim.h"
+#include "gap.h"
 #include <string.h>
 #include <os/lock.h>
 
@@ -36,6 +37,7 @@
 extern int au_find_next(uint32_t prev, const uint32_t *cd, uint32_t *out);
 extern int au_open(uint32_t comp, uint32_t *inst);
 extern int au_close(uint32_t inst, uint32_t *result);
+extern int au_version(uint32_t inst, uint32_t *version);
 static uint32_t au_open_default(uint32_t type, uint32_t sub, int *handled)
 {
    const uint32_t cd[5] = { type, sub, 0, 0, 0 };
@@ -233,6 +235,17 @@ uint32_t shim_CloseComponent(uint32_t *a)
    uint32_t r;
    if (au_close(a[0], &r)) { return r; }
    return close_instance(a[0]);
+}
+
+/* ComponentResult GetComponentVersion(ComponentInstance ci): 0xMMMMmmbb. An AU
+ * reports its AudioComponent version (Call of Duty 4 picks its 3D-mixer path by
+ * it); our registry components carry none. */
+uint32_t shim_GetComponentVersion(uint32_t *a)
+{
+   uint32_t v;
+   if (au_version(a[0], &v)) { return v; }
+   GAP_STUB(a);
+   return 0;
 }
 
 /* Component FindNextComponent(Component prev, ComponentDescription *looking);

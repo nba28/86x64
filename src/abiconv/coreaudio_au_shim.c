@@ -94,6 +94,17 @@ int au_close(uint32_t inst, uint32_t *result)
    return 1;
 }
 
+/* GetComponentVersion on an AU instance: 1 = handled (*version set). */
+int au_version(uint32_t inst, uint32_t *version)
+{
+   AudioUnit u = au_in(inst);
+   if ((uintptr_t)u == inst) { return 0; }   /* not one of our wrapped handles */
+   UInt32 v = 0;
+   AudioComponentGetVersion(AudioComponentInstanceGetComponent(u), &v);
+   *version = v;
+   return 1;
+}
+
 /* ---- render / notify callbacks ----------------------------------------- */
 
 typedef struct {

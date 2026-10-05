@@ -1,21 +1,16 @@
-// fmgr_shim.c — graceful shims for the dead classic (FSSpec/refNum) File Manager API.
+// fmgr_shim.c — the classic (FSSpec/refNum) File Manager on POSIX.
 //
 // The classic File Manager generation (FSpOpenDF/FSRead/FSWrite/GetEOF/SetFPos and the
 // FSSpec {vRefNum,dirID,name} + parameter-block calls) was removed from 64-bit/modern macOS;
 // only the FSRef generation survives (and abigen already shims those from the live header).
-// The FSSpec volume model has no meaning on a modern volume, so these cannot be made to open
-// real files.
+// Data-fork I/O is REAL: FSpOpenDF resolves the FSSpec through carbon_fsspec_shim.c and
+// mints a refNum over a POSIX fd (see the refNum table below).
 //
-// ★These carry real DATA semantics, so — per the project's no-silent-corruption rule
-// (the BlockMoveData lesson) — they return a graceful File Manager ERROR and zero any
-// byte-count, NEVER a fake noErr with an unfilled buffer (which would feed the caller
-// garbage). Callers take their normal "file not found / I/O failed" fallback.
+// ★Calls that still cannot be honoured carry real DATA semantics, so — per the project's
+// no-silent-corruption rule (the BlockMoveData lesson) — they return a graceful File Manager
+// ERROR and zero any byte-count, NEVER a fake noErr with an unfilled buffer.
 // HGetVol/HSetVol report a benign default volume (they are commonly called early just to
 // learn the working volume; an error there can derail path setup before the game even runs).
-//
-// ⚠FOLLOW-UP: if Civ IV turns out to load assets through this classic path (vs POSIX/Python),
-// FSpOpenDF/FSRead/FSWrite would need real POSIX-backed implementations keyed on a synthetic
-// refNum->fd table. Deferred until a runtime wall proves it is exercised.
 //
 // MTSHIM convention: rdi -> &i386 args[0]; OSErr result in eax.
 
@@ -32,6 +27,7 @@
 #include <fcntl.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <errno.h>
 
 #define PTR(n) ((void *)(uintptr_t)args[(n)])
 
@@ -50,16 +46,12 @@
 // pb.ioResult after sync calls).
 #define PB_IORESULT(pb)  (*(int16_t *)((uint8_t *)(pb) + 16))
 
-// ---- open / delete / lock / info (FSSpec-addressed): no such file/volume ----
-uint32_t shim_FSpOpenDF(uint32_t *args) {
-    int16_t *refNum = (int16_t *)PTR(2); if (refNum) *refNum = 0;
-    return (uint32_t)FM_FNF_ERR;
-}
+// ---- FSSpec-addressed info/lock: no such file ----
 // shim_FSpDelete has MOVED to carbon_fsspec_shim.c, which grew a real FSSpec->POSIX
 // resolver and can therefore actually delete the file. That file now owns the whole
 // classic write path (create/delete/rename/move/exchange/set-Finder-info); the graceful
-// errors left here are the ones that still cannot be honoured — see the FOLLOW-UP above.
-// ★Same output-buffer invariant as shim_FSpOpenDF above (and carbon_fsspec_shim.c): a
+// errors left here are the ones that still cannot be honoured.
+// ★Same output-buffer invariant as shim_FSpOpenDF below (and carbon_fsspec_shim.c): a
 // classic caller that skips the OSErr check would otherwise read its own uninitialised
 // stack back as an FInfo — a garbage fdType/fdCreator is exactly the class of defect that
 // produced the Halo nil-CFStringRef SIGSEGV. FInfo is 16 bytes: OSType fdType, OSType
@@ -71,38 +63,163 @@ uint32_t shim_FSpGetFInfo(uint32_t *args) {
 uint32_t shim_FSpRstFLock(uint32_t *args) { (void)args; return (uint32_t)FM_FNF_ERR; }
 uint32_t shim_FSpSetFLock(uint32_t *args) { (void)args; return (uint32_t)FM_FNF_ERR; }
 
-// ---- read / write / position (refNum-addressed): there is no valid open refNum ----
+// ---- open / read / write / position: REAL, on a synthetic refNum -> fd table ----
+// Call of Duty 4's Bink (libBinkMachOx86) opens every cinematic with
+// FSMakeFSSpec + FSpOpenDF and streams it with SetFPos/GetFPos/FSRead/PBReadAsync;
+// the old graceful fnfErr meant no video could ever play. carbon_fsspec_shim.c
+// already resolves an FSSpec to its POSIX path, so these are a thin fd table.
+// Our refNums live at FM_REF_BASE.. so they can never collide with the native
+// FSOpenResFile refNums FSClose still hands to CloseResFile. Kill
+// M64_NO_CLASSIC_FILEIO (the old fnfErr/rfNumErr answers); guard classic-fileio.
+#define FM_POS_ERR   (-40)   // posErr — position before start of file
+#define FM_REF_BASE  0x4000
+#define FM_REF_MAX   256
+static int g_fm_fd[FM_REF_MAX];          // fd + 1 (0 = free slot)
+static int fm_disabled(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("M64_NO_CLASSIC_FILEIO") != NULL;
+    return v;
+}
+static int fm_fd(int16_t ref) {
+    int i = ref - FM_REF_BASE;
+    return (i >= 0 && i < FM_REF_MAX) ? g_fm_fd[i] - 1 : -1;
+}
+static int16_t fm_alloc(int fd) {
+    for (int i = 0; i < FM_REF_MAX; i++)
+        if (__sync_bool_compare_and_swap(&g_fm_fd[i], 0, fd + 1)) return (int16_t)(FM_REF_BASE + i);
+    return 0;
+}
 
-// FSClose — REAL bridge, not a no-op. In this runtime the ONLY producer of
-// classic file refNums is the still-native FSOpenResFile (the FSSpec openers
-// above never hand one out), so an incoming refNum is a resource-file refNum
-// and the faithful modern close is CloseResFile (classic FSClose on a resource
-// refNum closed the resource file — same file-refnum space). Halo: EULA.rsrc
-// is FSOpenResFile'd for the license window and FSClose'd on dismissal; the
-// old no-op stacked the file on the resource chain forever, where it kept
-// SHADOWING later Get1Resource lookups. CloseResFile on an unknown refNum just
-// sets ResError (-193) and is harmless.
+// OSErr FSpOpenDF(const FSSpec *spec, SInt8 permission, SInt16 *refNum)
+uint32_t shim_FSpOpenDF(uint32_t *args) {
+    int16_t *refNum = (int16_t *)PTR(2); if (refNum) *refNum = 0;
+    if (fm_disabled() || !PTR(0)) return (uint32_t)FM_FNF_ERR;
+    char path[1024]; int exists = 0;
+    if (!cfs_fsspec_to_path((const uint8_t *)PTR(0), path, sizeof path, &exists) || !exists)
+        return (uint32_t)FM_FNF_ERR;
+    int8_t perm = (int8_t)args[1];       // fsCurPerm 0, fsRdPerm 1, else read/write
+    int fd = open(path, perm == 1 ? O_RDONLY : O_RDWR);
+    if (fd < 0 && perm == 0) fd = open(path, O_RDONLY);   // fsCurPerm: best available
+    if (fd < 0) return (uint32_t)(errno == EACCES ? -54 /*permErr*/ : FM_IO_ERR);
+    int16_t r = fm_alloc(fd);
+    if (!r) { close(fd); return (uint32_t)-42; /* tmfoErr: too many files open */ }
+    if (refNum) *refNum = r;
+    return FM_NO_ERR;
+}
+
+// FSClose — our refNums close their fd. Every OTHER incoming refNum is a
+// resource-file refNum: the only other producer of classic file refNums in this
+// runtime is the still-native FSOpenResFile, and classic FSClose on a resource
+// refNum closed the resource file (same refNum space). Halo: EULA.rsrc is
+// FSOpenResFile'd for the license window and FSClose'd on dismissal; a no-op
+// stacked it on the resource chain forever, SHADOWING later Get1Resource lookups.
+// CloseResFile on an unknown refNum just sets ResError (-193) and is harmless.
 uint32_t shim_FSClose(uint32_t *args) {
+    int16_t ref = (int16_t)args[0];
+    int fd = fm_fd(ref);
+    if (fd >= 0) { close(fd); g_fm_fd[ref - FM_REF_BASE] = 0; return FM_NO_ERR; }
     static void (*CloseResFile)(int16_t);
     if (!CloseResFile)
         CloseResFile = (void (*)(int16_t))dlsym(RTLD_DEFAULT, "CloseResFile");
-    if (CloseResFile) CloseResFile((int16_t)args[0]);
+    if (CloseResFile) CloseResFile(ref);
     return FM_NO_ERR;
 }
+
+// Shared transfer: FSRead/FSWrite/PBRead*. A short read is eofErr (classic).
+static int16_t fm_xfer(int16_t ref, void *buf, int32_t req, int32_t *act, int wr) {
+    *act = 0;
+    int fd = fm_fd(ref);
+    if (fd < 0) return FM_RFNUM_ERR;
+    if (req < 0) return FM_PARAM_ERR;
+    ssize_t n = wr ? write(fd, buf, (size_t)req) : read(fd, buf, (size_t)req);
+    if (n < 0) return FM_IO_ERR;
+    *act = (int32_t)n;
+    return (n < req) ? (wr ? -34 /*dskFulErr*/ : FM_EOF_ERR) : FM_NO_ERR;
+}
+// OSErr FSRead / FSWrite(SInt16 refNum, SInt32 *count, void *buffPtr)
 uint32_t shim_FSRead(uint32_t *args) {
-    int32_t *count = (int32_t *)PTR(1); if (count) *count = 0;   // 0 bytes transferred
-    return (uint32_t)FM_EOF_ERR;
+    int32_t *count = (int32_t *)PTR(1); int32_t act = 0;
+    int16_t e = count ? fm_xfer((int16_t)args[0], PTR(2), *count, &act, 0) : FM_PARAM_ERR;
+    if (count) *count = act;
+    return (uint32_t)e;
 }
 uint32_t shim_FSWrite(uint32_t *args) {
-    int32_t *count = (int32_t *)PTR(1); if (count) *count = 0;
-    return (uint32_t)FM_IO_ERR;
+    int32_t *count = (int32_t *)PTR(1); int32_t act = 0;
+    int16_t e = count ? fm_xfer((int16_t)args[0], PTR(2), *count, &act, 1) : FM_PARAM_ERR;
+    if (count) *count = act;
+    return (uint32_t)e;
 }
+// OSErr GetEOF(SInt16 refNum, SInt32 *logEOF) / SetEOF(SInt16, SInt32)
 uint32_t shim_GetEOF(uint32_t *args) {
     int32_t *logEOF = (int32_t *)PTR(1); if (logEOF) *logEOF = 0;
-    return (uint32_t)FM_RFNUM_ERR;
+    struct stat st; int fd = fm_fd((int16_t)args[0]);
+    if (fd < 0 || fstat(fd, &st) != 0) return (uint32_t)FM_RFNUM_ERR;
+    if (logEOF) *logEOF = (int32_t)st.st_size;
+    return FM_NO_ERR;
 }
-uint32_t shim_SetEOF(uint32_t *args)  { (void)args; return (uint32_t)FM_RFNUM_ERR; }
-uint32_t shim_SetFPos(uint32_t *args) { (void)args; return (uint32_t)FM_RFNUM_ERR; }
+uint32_t shim_SetEOF(uint32_t *args) {
+    int fd = fm_fd((int16_t)args[0]);
+    if (fd < 0) return (uint32_t)FM_RFNUM_ERR;
+    return ftruncate(fd, (off_t)(int32_t)args[1]) == 0 ? FM_NO_ERR : (uint32_t)FM_IO_ERR;
+}
+// Classic positioning: posMode low 2 bits = fsAtMark 0 / fsFromStart 1 /
+// fsFromLEOF 2 / fsFromMark 3. Before the start is posErr; past the logical
+// EOF the mark stops AT the EOF and the call reports eofErr.
+static int16_t fm_seek(int fd, int16_t mode, int32_t off) {
+    off_t cur = lseek(fd, 0, SEEK_CUR), end = lseek(fd, 0, SEEK_END), to;
+    switch (mode & 3) {
+    case 0:  to = cur; break;
+    case 1:  to = off; break;
+    case 2:  to = end + off; break;
+    default: to = cur + off; break;
+    }
+    if (to < 0) { lseek(fd, cur, SEEK_SET); return FM_POS_ERR; }
+    if (to > end) { lseek(fd, end, SEEK_SET); return FM_EOF_ERR; }
+    lseek(fd, to, SEEK_SET);
+    return FM_NO_ERR;
+}
+// OSErr SetFPos(SInt16 refNum, SInt16 posMode, SInt32 posOff)
+uint32_t shim_SetFPos(uint32_t *args) {
+    int fd = fm_fd((int16_t)args[0]);
+    if (fd < 0) return (uint32_t)FM_RFNUM_ERR;
+    return (uint32_t)fm_seek(fd, (int16_t)args[1], (int32_t)args[2]);
+}
+// OSErr GetFPos(SInt16 refNum, SInt32 *filePos)
+uint32_t shim_GetFPos(uint32_t *args) {
+    int32_t *pos = (int32_t *)PTR(1); if (pos) *pos = 0;
+    int fd = fm_fd((int16_t)args[0]);
+    if (fd < 0) return (uint32_t)FM_RFNUM_ERR;
+    if (pos) *pos = (int32_t)lseek(fd, 0, SEEK_CUR);
+    return FM_NO_ERR;
+}
+
+// OSErr PBReadAsync(ParmBlkPtr) — IOParam (i386, pack(2)): ioCompletion @12,
+// ioResult @16, ioRefNum @24, ioBuffer @32, ioReqCount @36, ioActCount @40,
+// ioPosMode @44, ioPosOffset @46. Served synchronously: the request is done
+// (ioResult final) before we return, which every async poller accepts; the
+// completion routine, if any, still runs once, as the Device Manager would.
+#include "cb_bridge.h"
+uint32_t shim_PBReadAsync(uint32_t *args) {
+    uint8_t *pb = (uint8_t *)PTR(0);
+    if (!pb) return (uint32_t)FM_PARAM_ERR;
+    int16_t ref = *(int16_t *)(pb + 24);
+    int32_t act = 0;
+    int fd = fm_fd(ref);
+    int16_t e = fd < 0 ? FM_RFNUM_ERR
+                       : fm_seek(fd, *(int16_t *)(pb + 44), *(int32_t *)(pb + 46));
+    if (e == FM_NO_ERR)
+        e = fm_xfer(ref, (void *)(uintptr_t)*(uint32_t *)(pb + 32), *(int32_t *)(pb + 36), &act, 0);
+    *(int32_t *)(pb + 40) = act;
+    if (fd >= 0) *(int32_t *)(pb + 46) = (int32_t)lseek(fd, 0, SEEK_CUR);
+    PB_IORESULT(pb) = e;
+    uint32_t done = *(uint32_t *)(pb + 12);
+    if (done) {   // void (*IOCompletionProcPtr)(ParmBlkPtr)
+        static const x64_cb_sig sig = { 1, CBR_VOID, { CBA_PTR }, { 0 } };
+        void (*fn)(void *) = (void (*)(void *))(uintptr_t)x64_cb_wrap(done, &sig);
+        if (fn) fn(pb);
+    }
+    return (uint32_t)e;
+}
 
 // ---- parameter-block calls ----
 

@@ -1647,3 +1647,35 @@ ____ZTVN10__cxxabiv117__class_type_infoE:	times 16 db 0
 ____ZTVN10__cxxabiv120__si_class_type_infoE:	times 16 db 0
 ____ZTVN10__cxxabiv121__vmi_class_type_infoE:	times 16 db 0
 
+
+	segment .text
+	;; --- Call of Duty 4 batch (2026-10-05): key-code dialog, Bink file I/O,
+	;; keyboard layout, QD/theme drawing, CFM, MLTE console, menus -----------
+	MTSHIM	___GetControl32BitMinimum,            _shim_GetControl32BitMinimum
+	MTSHIM	___GetControl32BitMaximum,            _shim_GetControl32BitMaximum
+	MTSHIM	___GetControlDataSize,                _shim_GetControlDataSize
+	MTSHIM	___HandleControlKey,                  _shim_HandleControlKey
+	MTSHIM	___GetControlKind,                    _shim_GetControlKind
+	MTSHIM	___NewControlKeyFilterUPP,            _shim_NewControlKeyFilterUPP
+	MTSHIM	___NewControlEditTextValidationUPP,   _shim_NewControlEditTextValidationUPP
+	MTSHIM	___GetFPos,                           _shim_GetFPos
+	MTSHIM	___PBReadAsync,                       _shim_PBReadAsync
+	MTSHIM	___GetSharedLibrary,                  _shim_GetSharedLibrary
+	MTSHIM	___FindSymbol,                        _shim_FindSymbol
+	MTSHIM	___KLGetCurrentKeyboardLayout,        _shim_KLGetCurrentKeyboardLayout
+	MTSHIM	___KLGetKeyboardLayoutProperty,       _shim_KLGetKeyboardLayoutProperty
+	MTSHIM	___NewMenu,                           _shim_NewMenu
+	MTSHIM	___PlotIconRef,                       _shim_PlotIconRef
+	MTSHIM	___GetComponentVersion,               _shim_GetComponentVersion
+	MTSHIM	___DrawThemeMenuBarBackground,        _shim_DrawThemeMenuBarBackground
+	MTSHIM	___GetAvailableWindowPositioningBounds, _shim_GetAvailableWindowPositioningBounds
+	MTSHIM	___QDGlobalToLocalPoint,              _shim_QDGlobalToLocalPoint
+	MTSHIM	___QDLocalToGlobalPoint,              _shim_QDLocalToGlobalPoint
+	MTSHIM	___QDLocalToGlobalRect,               _shim_QDLocalToGlobalRect
+	MTSHIM	___OpenRgn,                           _shim_OpenRgn
+	MTSHIM	___CloseRgn,                          _shim_CloseRgn
+	MTSHIM	___TXNClear,                          _shim_TXNClear
+	MTSHIM	___TXNSetData,                        _shim_TXNSetData
+	MTSHIM	___TXNSetSelection,                   _shim_TXNSetSelection
+	MTSHIM	___TXNShowSelection,                  _shim_TXNShowSelection
+	MTSHIM	___TXNSetTypeAttributes,              _shim_TXNSetTypeAttributes

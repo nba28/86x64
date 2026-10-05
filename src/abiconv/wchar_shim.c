@@ -102,3 +102,16 @@ uint32_t shim_wcsftime(uint32_t *args) {
    }
    return (uint32_t)wcsftime(WP(0), (size_t)args[1], CWP(2), it ? &nt : NULL);
 }
+
+/* mbrtowc / wcrtomb: the translated libstdc++'s codecvt calls them, and the raw
+ * bind handed libSystem i386 stack words. wchar_t (4) and mbstate_t (128) have
+ * the same layout on both ABIs; only size_t narrows (a (size_t)-1/-2 status
+ * still reads back as the classic 32-bit -1/-2). */
+uint32_t shim_mbrtowc(uint32_t *args) {
+    return (uint32_t)mbrtowc(WP(0), (const char *)(uintptr_t)args[1], (size_t)args[2],
+                             (mbstate_t *)(uintptr_t)args[3]);
+}
+uint32_t shim_wcrtomb(uint32_t *args) {
+    return (uint32_t)wcrtomb((char *)(uintptr_t)args[0], (wchar_t)args[1],
+                             (mbstate_t *)(uintptr_t)args[2]);
+}

@@ -131,6 +131,7 @@ static void qd_set_err(int16_t e) { g_qd_err = e; }
 typedef void   *(*qn_p_v)(void);
 typedef void    (*qn_v_p)(void *);
 typedef void    (*qn_v_pp)(void *, void *);
+typedef void    (*qn_v_ppp)(void *, void *, void *);
 typedef void    (*qn_v_pssss)(void *, int16_t, int16_t, int16_t, int16_t);
 typedef void   *(*qn_hishape_from_rgn)(void *);
 typedef int32_t (*qn_hishape_path)(void *, CGContextRef);
@@ -173,6 +174,7 @@ typedef struct qd_port {
    int          pen_hidden;
    int16_t      txFont, txFace, txSize, txMode;
    void        *clip_nat;         /* native RgnHandle clip (owned), or NULL  */
+   void        *rec_rgn;          /* native region OpenRgn is recording into */
    void        *win;              /* real 64-bit WindowRef when this port IS
                                    * a window's GrafPort, else NULL — see the
                                    * window-backed-port block below.         */
@@ -805,9 +807,48 @@ void shim_FillRect(uint32_t *a)
    const QDPattern *pat=(const QDPattern*)i386_ptr(a[1]);
    if (p&&r) fill_rect_color(p,r,&p->fore,pat);
 }
+/* ---- region recording: OpenRgn ... CloseRgn ------------------------------
+ * Between OpenRgn and CloseRgn the pen draws nothing and every framed shape's
+ * outline becomes part of the region; CloseRgn hands it to the caller's
+ * RgnHandle. Call of Duty 4 frames a rect this way to build a clip. Both were
+ * removed from 64-bit QD; NewRgn/RectRgn/UnionRgn/CopyRgn survive.
+ * ponytail: only FrameRect records (all any app here frames); add Line/Frame*
+ * shapes when one is reached. */
+void shim_OpenRgn(uint32_t *a)
+{
+   (void)a; qd_port *p=cur_port(); if (!p) return;
+   QD_NATIVE(newr, qn_p_v, "NewRgn");
+   QD_NATIVE(dr, qn_v_p, "DisposeRgn");
+   if (p->rec_rgn && dr) dr(p->rec_rgn);
+   p->rec_rgn = newr ? newr() : NULL;
+}
+void shim_CloseRgn(uint32_t *a)
+{
+   qd_port *p=cur_port();
+   void *dst = (void *)(uintptr_t)x64_objc_unwrap(a[0]);
+   QD_NATIVE(copy, qn_v_pp, "CopyRgn");
+   QD_NATIVE(dr, qn_v_p, "DisposeRgn");
+   if (!p || !p->rec_rgn) return;
+   if (dst && copy) copy(p->rec_rgn, dst);
+   if (dr) dr(p->rec_rgn);
+   p->rec_rgn = NULL;
+}
+static int rgn_record_rect(qd_port *p, const QDRect *r)
+{
+   if (!p->rec_rgn) return 0;
+   QD_NATIVE(newr, qn_p_v, "NewRgn");
+   QD_NATIVE(setr, qn_v_pssss, "SetRectRgn");
+   QD_NATIVE(uni, qn_v_ppp, "UnionRgn");
+   QD_NATIVE(dr, qn_v_p, "DisposeRgn");
+   void *t = newr ? newr() : NULL;
+   if (t && setr && uni) { setr(t, r->left, r->top, r->right, r->bottom); uni(p->rec_rgn, t, p->rec_rgn); }
+   if (t && dr) dr(t);
+   return 1;
+}
 void shim_FrameRect(uint32_t *a)
 {
    qd_port *p=cur_port(); const QDRect *r=(const QDRect*)i386_ptr(a[0]);
+   if (p && r && rgn_record_rect(p, r)) return;
    if (!p||!r||!p->ctx||p->pen_hidden) return;
    port_begin(p);
    set_cg_stroke_qd(p->ctx, &p->fore);
@@ -1267,16 +1308,37 @@ uint32_t shim_QDPictRelease(uint32_t *a)
 /* Cursor — GetCursor/SetCursor (the removed classic 16x16 b/w cursor API)  */
 /* ======================================================================== */
 /* These are ABIGEN-faulting (their generated shim calls a REMOVED native and
- * would crash). Cursor shape is cosmetic on our offscreen substrate: hand back
- * a VALID (never-NULL) CursHandle so callers that do SetCursor(*GetCursor(id))
- * don't deref garbage, and make SetCursor a safe no-op (the live system cursor
- * is unchanged). A full NSCursor bridge is possible later but AppKit-heavy and
- * purely cosmetic. InitCursor/HideCursor/ShowCursor survive natively (abigen). */
+ * would crash). GetCursor hands back a VALID (never-NULL) CursHandle so callers
+ * that do SetCursor(*GetCursor(id)) never deref garbage; SetCursor shows the
+ * matching theme cursor. InitCursor/HideCursor/ShowCursor survive natively. */
 /* CursHandle GetCursor(short cursorID) — Cursor = {Bits16 data; Bits16 mask;
  * Point hotSpot} = 16+16+4 = 68 bytes. */
-uint32_t shim_GetCursor(uint32_t *a) { (void)a; return cm_new_handle(68, 1); }
-/* void SetCursor(const Cursor *crsr) */
-uint32_t shim_SetCursor(uint32_t *a) { GAP_STUB(a); return 0; }
+/* The four system cursors (iBeam 1, cross 2, plus 3, watch 4) are shared
+ * resources, one handle each as classic GetCursor returned; their theme twins
+ * let SetCursor show the real thing. */
+static const uint32_t g_sys_theme[5] = { 0, 4 /*IBeam*/, 5 /*Cross*/, 6 /*Plus*/, 7 /*Watch*/ };
+static uint32_t g_sys_curs[5];
+uint32_t shim_GetCursor(uint32_t *a)
+{
+   int16_t id = (int16_t)a[0];
+   if (id < 1 || id > 4) return cm_new_handle(68, 1);
+   if (!g_sys_curs[id]) g_sys_curs[id] = cm_new_handle(68, 1);
+   return g_sys_curs[id];
+}
+/* void SetCursor(const Cursor *crsr): a system cursor -> its theme cursor
+ * (Call of Duty 4 shows the watch while it loads); anything else -> the arrow
+ * (SetCursor(&arrow), or a custom shape: the arrow is the honest fallback until
+ * an app is seen depending on a custom bitmap). */
+uint32_t shim_SetCursor(uint32_t *a)
+{
+   uint32_t theme = 0;                            /* kThemeArrowCursor */
+   for (int id = 1; id <= 4; id++)
+      if (g_sys_curs[id] && a[0] == to_i386(cm_handle_block(g_sys_curs[id]))) theme = g_sys_theme[id];
+   static int32_t (*set_theme)(uint32_t);
+   if (!set_theme) set_theme = (int32_t (*)(uint32_t))dlsym(RTLD_DEFAULT, "SetThemeCursor");
+   if (set_theme) set_theme(theme);
+   return 0;
+}
 /* void SetCCursor(CCrsrHandle) / void SetCursorComponent — cosmetic no-ops. */
 uint32_t shim_SetCCursor(uint32_t *a) { GAP_STUB(a); return 0; }
 
@@ -1432,3 +1494,91 @@ uint32_t shim_GetCTable(uint32_t *a)
    return h;
 }
 /* DisposeCTable is hand-shimmed in qd_shim.c (frees the cm handle). */
+
+/* ======================================================================== */
+/* Appearance Manager drawing into the current port                         */
+/* ======================================================================== */
+/* The DrawTheme* calls drew into the current QD port; their HITheme twins take
+ * a CGContext, which our ports carry (y-down, like QD). */
+typedef struct { double x, y, w, h; } qd_hirect;
+static int theme_port(qd_port **pp, const QDRect *r, qd_hirect *hr)
+{
+   qd_port *p = cur_port();
+   if (!p || !p->ctx || !r) return 0;
+   *pp = p;
+   hr->x = r->left; hr->y = r->top; hr->w = r->right - r->left; hr->h = r->bottom - r->top;
+   return 1;
+}
+/* OSStatus DrawThemeFocusRect(const Rect *, Boolean hasFocus) */
+uint32_t shim_DrawThemeFocusRect(uint32_t *a)
+{
+   qd_port *p; qd_hirect hr;
+   static int32_t (*draw)(const qd_hirect *, uint8_t, CGContextRef, uint32_t);
+   if (!draw) draw = (int32_t (*)(const qd_hirect *, uint8_t, CGContextRef, uint32_t))dlsym(RTLD_DEFAULT, "HIThemeDrawFocusRect");
+   if (!draw || !theme_port(&p, (const QDRect *)i386_ptr(a[0]), &hr)) return 0;
+   port_begin(p);
+   int32_t st = draw(&hr, (uint8_t)a[1], p->ctx, 0 /*kHIThemeOrientationNormal: y-down*/);
+   port_end(p);
+   return (uint32_t)st;
+}
+/* OSStatus DrawThemeMenuBarBackground(const Rect *, ThemeMenuBarState, UInt32 flags) */
+uint32_t shim_DrawThemeMenuBarBackground(uint32_t *a)
+{
+   qd_port *p; qd_hirect hr;
+   struct { uint32_t version; uint16_t state; uint32_t attributes; } info = { 0, (uint16_t)a[1], a[2] };
+   static int32_t (*draw)(const qd_hirect *, const void *, CGContextRef, uint32_t);
+   if (!draw) draw = (int32_t (*)(const qd_hirect *, const void *, CGContextRef, uint32_t))dlsym(RTLD_DEFAULT, "HIThemeDrawMenuBarBackground");
+   if (!draw || !theme_port(&p, (const QDRect *)i386_ptr(a[0]), &hr)) return 0;
+   port_begin(p);
+   int32_t st = draw(&hr, &info, p->ctx, 0 /*kHIThemeOrientationNormal*/);
+   port_end(p);
+   return (uint32_t)st;
+}
+/* OSStatus NormalizeThemeDrawingState(void): the classic "normal" pen and
+ * colors — black on white, 1x1 copy pen, solid patterns. */
+uint32_t shim_NormalizeThemeDrawingState(uint32_t *a)
+{
+   qd_port *p = cur_port();
+   shim_PenNormal(a);
+   if (p) {
+      p->fore.red = p->fore.green = p->fore.blue = 0;
+      p->back.red = p->back.green = p->back.blue = 0xFFFF;
+      memset(p->back_pat.pat, 0, 8);
+   }
+   return 0;
+}
+/* OSErr PlotIconRef(const Rect *, IconAlignmentType, IconTransformType,
+ *                   IconServicesUsageFlags, IconRef) -> PlotIconRefInContext.
+ * Icon Services draws y-up, so flip the port's y-down space around the rect. */
+uint32_t shim_PlotIconRef(uint32_t *a)
+{
+   qd_port *p; qd_hirect hr;
+   static int32_t (*plot)(CGContextRef, const CGRect *, int16_t, int16_t, const void *, uint32_t, void *);
+   if (!plot) plot = (int32_t (*)(CGContextRef, const CGRect *, int16_t, int16_t, const void *, uint32_t, void *))dlsym(RTLD_DEFAULT, "PlotIconRefInContext");
+   void *icon = (void *)(uintptr_t)x64_objc_unwrap(a[4]);
+   if (!plot || !icon || !theme_port(&p, (const QDRect *)i386_ptr(a[0]), &hr)) return (uint32_t)-50;
+   port_begin(p);
+   CGContextTranslateCTM(p->ctx, hr.x, hr.y + hr.h);
+   CGContextScaleCTM(p->ctx, 1, -1);
+   CGRect r = CGRectMake(0, 0, hr.w, hr.h);
+   int32_t st = plot(p->ctx, &r, (int16_t)a[1], (int16_t)a[2], NULL, a[3], icon);
+   port_end(p);
+   return (uint32_t)st;
+}
+
+/* OSStatus GetAvailableWindowPositioningBounds(GDHandle, Rect *): the screen
+ * minus menu bar and Dock, from HIWindowGetAvailablePositioningBounds in 72-dpi
+ * global points. One screen in this model, so every GDHandle is the main one. */
+uint32_t shim_GetAvailableWindowPositioningBounds(uint32_t *a)
+{
+   QDRect *out = (QDRect *)i386_ptr(a[1]);
+   if (!out) return (uint32_t)-50;
+   memset(out, 0, sizeof *out);
+   static int32_t (*avail)(uint32_t, uint32_t, CGRect *);
+   if (!avail) avail = (int32_t (*)(uint32_t, uint32_t, CGRect *))dlsym(RTLD_DEFAULT, "HIWindowGetAvailablePositioningBounds");
+   CGRect r = CGDisplayBounds(CGMainDisplayID());
+   if (avail) avail(CGMainDisplayID(), 1 /*kHICoordSpace72DPIGlobal*/, &r);
+   out->top = (int16_t)r.origin.y; out->left = (int16_t)r.origin.x;
+   out->bottom = (int16_t)(r.origin.y + r.size.height); out->right = (int16_t)(r.origin.x + r.size.width);
+   return 0;
+}

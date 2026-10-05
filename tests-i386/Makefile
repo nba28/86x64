@@ -93,7 +93,7 @@ CPP_TESTS  := $(filter-out 99_libstdcxx_redirect,$(notdir $(basename $(CPP_SRCS)
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry prologue-sched-decode cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept disp-reloc-accept imm-reloc-accept call-abs-pagezero pic-anchor-call-adopt entry-pad-fallthrough export-trie-deep export-zerofill jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap sib-rbp-index-wrap abs-base-neg-wrap ebp-gpr-narrow jt-case-in-func jt-back-edge-join pic-anchor-noreturn-join pic-anchor-local-noreturn pic-anchor-orphan-block pic-anchor-unreached-pad pic-anchor-orphan-revert atsu-arrays sigaction-wrap printf-length-mods cfstr-image-gate sscanf-many-args wide-printf jt-slot-snap-epilogue text-rebase-disp dir-handle scandir-sort super-hint-native pthread-create-suspended aq-mirror jt-scaled-index-not-base steam-bridge lazy-self-def standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk classic-dirid-chain nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-cb-fifo snd-status-layout snd-compression-info getsegbyname-absent get-window-resize-limits ir-dead-bridge cb-userdata-roundtrip jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn libstdcxx-redirect uidl-resolves agl-oversize-window rebase-exact-const miles-mp3
+.PHONY: check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry prologue-sched-decode cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept disp-reloc-accept imm-reloc-accept call-abs-pagezero pic-anchor-call-adopt entry-pad-fallthrough export-trie-deep export-zerofill jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap sib-rbp-index-wrap abs-base-neg-wrap ebp-gpr-narrow jt-case-in-func jt-back-edge-join pic-anchor-noreturn-join pic-anchor-local-noreturn pic-anchor-orphan-block pic-anchor-unreached-pad pic-anchor-orphan-revert atsu-arrays sigaction-wrap printf-length-mods cfstr-image-gate sscanf-many-args wide-printf jt-slot-snap-epilogue text-rebase-disp dir-handle scandir-sort super-hint-native pthread-create-suspended aq-mirror jt-scaled-index-not-base steam-bridge lazy-self-def standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk classic-dirid-chain nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-cb-fifo snd-status-layout snd-compression-info getsegbyname-absent get-window-resize-limits ir-dead-bridge cb-userdata-roundtrip jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn libstdcxx-redirect uidl-resolves agl-oversize-window rebase-exact-const miles-mp3 classic-fileio ctrl-range-refcon cod4-dead-imports nib-edit-field
 all: run-only
 
 # check: every suite + every guard target, each under a deadline; exit 1 on any failure.
@@ -1191,6 +1191,46 @@ ir-dead-bridge: $(BUILD_DIR)/99_ir_dead_bridge.x86_64
 	@$(RUN_FIXTURE) $< >/dev/null 2>&1; on=$$?; \
 	M64_NO_IR_DEAD_BRIDGE=1 $(RUN_FIXTURE) $< >/dev/null 2>&1; off=$$?; \
 	[ $$on = 42 ] && [ $$off != 42 ] && echo "ir-dead-bridge: PASS (on=$$on off=$$off)" || { echo "ir-dead-bridge: FAIL (on=$$on off=$$off)"; exit 1; }
+# classic-fileio: A/B guard for the classic refNum File Manager on real files
+# (fmgr_shim.c refNum -> fd table + carbon_fscatinfo_shim.c fsci_real_spec; Call
+# of Duty 4's Bink opens every cinematic via FSGetCatalogInfo's FSSpec ->
+# FSpOpenDF and streams with SetFPos/GetFPos/FSRead/PBReadAsync). ON exits 42;
+# OFF = M64_NO_CLASSIC_FILEIO=1 or M64_NO_FSCAT_REAL_DIRID=1 at run time.
+classic-fileio: $(BUILD_DIR)/99_classic_fileio.x86_64
+	@$(RUN_FIXTURE) $< >/dev/null 2>&1; on=$$?; \
+	M64_NO_CLASSIC_FILEIO=1 $(RUN_FIXTURE) $< >/dev/null 2>&1; o1=$$?; \
+	M64_NO_FSCAT_REAL_DIRID=1 $(RUN_FIXTURE) $< >/dev/null 2>&1; o2=$$?; \
+	[ $$on = 42 ] && [ $$o1 != 42 ] && [ $$o2 != 42 ] && echo "classic-fileio: PASS (on=$$on fileio_off=$$o1 realspec_off=$$o2)" || { echo "classic-fileio: FAIL (on=$$on fileio_off=$$o1 realspec_off=$$o2)"; exit 1; }
+# ctrl-range-refcon: A/B guard for Get/SetControl[32Bit]Minimum/Maximum on HIView's
+# range and Get/SetControlReference as a control property (carbon_control_shim.c;
+# Call of Duty 4's key-code boxes keep their limit and validator there). ON exits
+# 42; OFF = M64_NO_CTRL_RANGE=1 (the old max-1 / dropped-write constants).
+ctrl-range-refcon: $(BUILD_DIR)/99_ctrl_range_refcon.x86_64
+	@$(RUN_FIXTURE) $< >/dev/null 2>&1; on=$$?; \
+	M64_NO_CTRL_RANGE=1 $(RUN_FIXTURE) $< >/dev/null 2>&1; off=$$?; \
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "ctrl-range-refcon: PASS (on=$$on off=$$off)" || { echo "ctrl-range-refcon: FAIL (on=$$on off=$$off)"; exit 1; }
+# cod4-dead-imports: guard for Call of Duty 4's removed imports (MaxBlock/Temp*,
+# GetSharedLibrary/FindSymbol, KLGet*, mbrtowc/wcrtomb, scrap out-params,
+# GetComponentVersion, NewMenu, positioning bounds, OpenRgn/CloseRgn). ON exits
+# 42; the defect was the bind (NULL bridge / raw native), so the other arm
+# asserts all 18 names bind the ___<name> shim and none binds the bare native.
+COD4_DEAD := MaxBlock TempNewHandle TempHLock TempHUnlock TempDisposeHandle GetSharedLibrary \
+	FindSymbol KLGetCurrentKeyboardLayout KLGetKeyboardLayoutProperty mbrtowc wcrtomb \
+	GetCurrentScrap GetScrapFlavorSize GetComponentVersion NewMenu \
+	GetAvailableWindowPositioningBounds OpenRgn CloseRgn
+cod4-dead-imports: $(BUILD_DIR)/99_cod4_dead_imports.x86_64
+	@$(RUN_FIXTURE) $< >/dev/null 2>&1; on=$$?; \
+	fx=$$(dyld_info -fixups $<.dylib); b=0; r=0; \
+	for s in $(COD4_DEAD); do \
+	  grep -q "/___$$s\$$" <<<"$$fx" && b=$$((b+1)); \
+	  grep -q "/_$$s\$$" <<<"$$fx" && r=$$((r+1)); \
+	done; \
+	[ $$on = 42 ] && [ $$b = 18 ] && [ $$r = 0 ] && echo "cod4-dead-imports: PASS (rc=$$on shim_binds=$$b raw_binds=$$r)" || { echo "cod4-dead-imports: FAIL (rc=$$on shim_binds=$$b raw_binds=$$r)"; exit 1; }
+# nib-edit-field: A/B guard for the native-nib IBCarbonEditText swap + key-filter
+# bridge (carbon_nib_shim.c; Call of Duty 4's key-code dialog). GUI (a real,
+# unshown HIToolbox window): check-gui only. See nib_edit_field_test.sh.
+nib-edit-field: $(BUILD_DIR)/99_nib_edit_field.x86_64
+	@bash nib_edit_field_test.sh
 # cb-userdata-roundtrip: A/B guard that a callback's opaque pointer comes back as
 # the i386 value the app registered (cb_bridge.c CBA_PTR re-wrap; Call of Duty 4's
 # modal dialog quit a truncated WindowRef). ON exits 42; OFF = M64_NO_CB_PTR_WRAP=1.
@@ -2570,6 +2610,22 @@ $(BUILD_DIR)/99_ir_dead_bridge.i386: $(BUILD_DIR)/99_ir_dead_bridge.o
 
 # 99_get_window_resize_limits: Carbon is not in the i386 sysroot.
 $(BUILD_DIR)/99_get_window_resize_limits.i386: $(BUILD_DIR)/99_get_window_resize_limits.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_classic_fileio: Carbon/CoreServices are not in the i386 sysroot.
+$(BUILD_DIR)/99_classic_fileio.i386: $(BUILD_DIR)/99_classic_fileio.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_ctrl_range_refcon: Carbon/CoreServices are not in the i386 sysroot.
+$(BUILD_DIR)/99_ctrl_range_refcon.i386: $(BUILD_DIR)/99_ctrl_range_refcon.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_cod4_dead_imports: Carbon/CoreServices are not in the i386 sysroot.
+$(BUILD_DIR)/99_cod4_dead_imports.i386: $(BUILD_DIR)/99_cod4_dead_imports.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_nib_edit_field: Carbon/CoreServices are not in the i386 sysroot.
+$(BUILD_DIR)/99_nib_edit_field.i386: $(BUILD_DIR)/99_nib_edit_field.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 99_snd_compression_info: CarbonSound is not in the i386 sysroot.

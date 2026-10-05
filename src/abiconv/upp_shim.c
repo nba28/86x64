@@ -19,6 +19,8 @@ uint32_t shim_NewEventHandlerUPP(uint32_t *args)            { return args[0]; }
 uint32_t shim_NewEventLoopTimerUPP(uint32_t *args)          { return args[0]; }
 uint32_t shim_NewSndCallBackUPP(uint32_t *args)             { return args[0]; }
 uint32_t shim_NewControlActionUPP(uint32_t *args)          { return args[0]; }
+uint32_t shim_NewControlKeyFilterUPP(uint32_t *args)       { return args[0]; }
+uint32_t shim_NewControlEditTextValidationUPP(uint32_t *args) { return args[0]; }
 
 // Dispose<Kind>UPP(upp) -> nothing to free
 void shim_DisposeControlUserPaneDrawUPP(uint32_t *args)     { (void)args; }

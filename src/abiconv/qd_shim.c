@@ -38,6 +38,7 @@ typedef struct { int16_t ascent, descent, widMax, leading; } QDFontInfo;
 // See classic_input_coords.c.
 typedef struct { int16_t v, h; } QDPointCC;
 extern int ci_content_origin(int16_t *ox, int16_t *oy);   // classic_input_coords.c
+extern int ci_port_content_origin(uint32_t port, int16_t *ox, int16_t *oy);
 
 void shim_GlobalToLocal(uint32_t *args) {
     QDPointCC *pt = (QDPointCC *)PTR(0);
@@ -56,6 +57,23 @@ void shim_LocalToGlobal(uint32_t *args) {
     pt->h = (int16_t)(pt->h + ox);
     pt->v = (int16_t)(pt->v + oy);
 }
+
+// Point *QDGlobalToLocalPoint / QDLocalToGlobalPoint(CGrafPtr port, Point *pt)
+// and Rect *QDLocalToGlobalRect(CGrafPtr, Rect *): the Carbon forms that name
+// the port instead of using the current one. Removed from 64-bit QD.
+static uint32_t qd_shift(uint32_t port, uint32_t ptr, int npts, int sign) {
+    QDPointCC *pt = (QDPointCC *)(uintptr_t)ptr;
+    int16_t ox = 0, oy = 0;
+    if (pt && ci_port_content_origin(port, &ox, &oy))
+        for (int i = 0; i < npts; i++) {
+            pt[i].h = (int16_t)(pt[i].h + sign * ox);
+            pt[i].v = (int16_t)(pt[i].v + sign * oy);
+        }
+    return ptr;
+}
+uint32_t shim_QDGlobalToLocalPoint(uint32_t *args) { return qd_shift(args[0], args[1], 1, -1); }
+uint32_t shim_QDLocalToGlobalPoint(uint32_t *args) { return qd_shift(args[0], args[1], 1, +1); }
+uint32_t shim_QDLocalToGlobalRect(uint32_t *args)  { return qd_shift(args[0], args[1], 2, +1); }
 
 // ---- Random-seed setter: no live QDGlobals to mutate.
 void shim_SetQDGlobalsRandomSeed(uint32_t *a) { GAP_STUB(a); }

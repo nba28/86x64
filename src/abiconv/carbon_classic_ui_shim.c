@@ -89,9 +89,6 @@ uint32_t shim_GetFlavorDataSize(uint32_t *a) {        // (DragRef, ItemRef, Flav
 uint32_t shim_GetFlavorData(uint32_t *a) {            // (DragRef, ItemRef, FlavorType, void*, Size*, off)
     int32_t *sz = (int32_t *)PTR(4); if (sz) *sz = 0; return (uint32_t)-1856; // badDragFlavorErr
 }
-uint32_t shim_GetScrapFlavorFlags(uint32_t *a) {      // (ScrapRef, ScrapFlavorType, ScrapFlavorFlags*)
-    uint32_t *o = (uint32_t *)PTR(2); if (o) *o = 0; return 0;
-}
 uint32_t shim_AddDragItemFlavor(uint32_t *a)    { GAP_STUB(a); return 0; }
 uint32_t shim_SetDragItemFlavorData(uint32_t *a){ GAP_STUB(a); return 0; }
 uint32_t shim_SetDropLocation(uint32_t *a)      { GAP_STUB(a); return 0; }

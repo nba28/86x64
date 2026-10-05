@@ -108,3 +108,10 @@
 	MTSHIM	___BlockZeroData,	_shim_BlockZeroData
 	MTSHIM	___BlockMoveUncached,	_shim_BlockMoveUncached
 	MTSHIM	___BlockMoveDataUncached,	_shim_BlockMoveDataUncached
+
+	;; --- MaxBlock + temporary memory (Bink's Mac allocator) ---------------
+	MTSHIM	___MaxBlock,		_shim_MaxBlock
+	MTSHIM	___TempNewHandle,	_shim_TempNewHandle
+	MTSHIM	___TempHLock,		_shim_TempHLock
+	MTSHIM	___TempHUnlock,		_shim_TempHUnlock
+	MTSHIM	___TempDisposeHandle,	_shim_TempDisposeHandle

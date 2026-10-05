@@ -36,6 +36,8 @@ DisposeEventHandlerUPP                       # UPPs are plain proc pointers on M
 DisposeEventLoopTimerUPP                     # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
 DisposeSndCallBackUPP                        # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
 NewControlActionUPP                          # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+NewControlKeyFilterUPP                       # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
+NewControlEditTextValidationUPP              # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
 NewControlUserPaneDrawUPP                    # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
 NewControlUserPaneHitTestUPP                 # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
 NewControlUserPaneTrackingUPP                # UPPs are plain proc pointers on Mach-O: New = identity, Dispose = nothing to free
@@ -81,3 +83,17 @@ LDispose                                     # dispose-only: at worst a leak, ne
 ReleaseQDContextForCollapsedWindowDockTile   # dispose-only: at worst a leak, never wrong output (the creator is real or itself a loud stub)
 TEDispose                                    # dispose-only: at worst a leak, never wrong output (the creator is real or itself a loud stub)
 TXNDeleteObject                              # dispose-only: at worst a leak, never wrong output (the creator is real or itself a loud stub)
+
+# no TXNObject can ever exist (HITextViewGetTXNObject is the loud gap): nothing to clear/show
+TXNClear                                     # no TXNObject can ever exist (HITextViewGetTXNObject is the loud gap): nothing to clear/show
+TXNShowSelection                             # no TXNObject can ever exist (HITextViewGetTXNObject is the loud gap): nothing to clear/show
+
+# OS X's application heap is unbounded: the largest round-trippable classic Size is the answer
+MaxBlock                                     # OS X's application heap is unbounded: the largest round-trippable classic Size is the answer
+
+# an Intel process has no PowerPC fragment to connect to: cfragNoLibraryErr/NoSymbolErr is the Intel answer
+GetSharedLibrary                             # an Intel process has no PowerPC fragment to connect to: cfragNoLibraryErr/NoSymbolErr is the Intel answer
+FindSymbol                                   # an Intel process has no PowerPC fragment to connect to: cfragNoLibraryErr/NoSymbolErr is the Intel answer
+
+# AVPlayer prerolls on its own: noErr is what QuickTime reported for a ready movie
+PrerollMovie                                 # AVPlayer prerolls on its own: noErr is what QuickTime reported for a ready movie

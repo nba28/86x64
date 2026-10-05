@@ -839,6 +839,10 @@ add_library(abiconv SHARED
   vdsp_legacy_shim.c
   # uckey_shim.c: UCKeyTranslate (incomplete-array param, UniCharCount width).
   uckey_shim.c
+  # keyboard_layout_shim.c: KLGet* Keyboard Layout Services on TIS.
+  keyboard_layout_shim.c
+  # carbon_scrap_shim.c: the Scrap Manager on the Pasteboard (TEXT <-> plain text).
+  carbon_scrap_shim.c
   # carbon_window_removed_shim.c: Window Manager calls 64-bit HIToolbox dropped.
   carbon_window_removed_shim.c
   # (halo_shim.c / halo_tramp.asm RETIRED: mach_timebase_info / mach_absolute_time

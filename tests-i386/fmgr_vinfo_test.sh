@@ -34,6 +34,9 @@ cat > "$TMP/t.c" <<'EOF'
 #include <sys/mount.h>
 
 uint32_t shim_PBHGetVInfoSync(uint32_t *args);
+/* fmgr_shim.c's PBReadAsync calls an i386 completion through cb_bridge.c, which
+ * this harness does not link (it never issues an async read). */
+uint64_t x64_cb_wrap(uint32_t fn32, const void *sig) { (void)fn32; (void)sig; return 0; }
 
 int main(void) {
     /* low-4GB block: the shim reads pb (and ioNamePtr) from 32-bit slots */

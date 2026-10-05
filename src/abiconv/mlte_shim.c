@@ -30,6 +30,14 @@ uint32_t shim_TXNGetHIRect(uint32_t *args)           { (void)args; return (uint3
 uint32_t shim_TXNSetDataFromCFURLRef(uint32_t *args) { (void)args; return (uint32_t)MLTE_PARAM_ERR; }
 uint32_t shim_TXNSetDataFromFile(uint32_t *args)     { (void)args; return (uint32_t)MLTE_PARAM_ERR; }
 void     shim_TXNSetHIRectBounds(uint32_t *args)     { GAP_STUB(args); }
+// No TXNObject can exist (HITextViewGetTXNObject is the loud gap), so these
+// editing calls on one answer like their siblings: paramErr / nothing to do.
+// (Call of Duty 4 Multiplayer's console view.)
+void     shim_TXNClear(uint32_t *args)               { (void)args; }
+uint32_t shim_TXNSetData(uint32_t *args)             { (void)args; return (uint32_t)MLTE_PARAM_ERR; }
+uint32_t shim_TXNSetSelection(uint32_t *args)        { (void)args; return (uint32_t)MLTE_PARAM_ERR; }
+void     shim_TXNShowSelection(uint32_t *args)       { (void)args; }
+uint32_t shim_TXNSetTypeAttributes(uint32_t *args)   { (void)args; return (uint32_t)MLTE_PARAM_ERR; }
 
 // ---- Carbon HIView text/image ----
 uint32_t shim_HITextViewCreate(uint32_t *args)       { (void)args; return (uint32_t)MLTE_PARAM_ERR; }

@@ -16,6 +16,8 @@ _wcstoll
 _wcstod
 _wcstof
 _wcsftime
+_mbrtowc
+_wcrtomb
 
 _xmlMemSetup
 _xmlMemGet
@@ -799,6 +801,11 @@ _BlockZero
 _BlockZeroData
 _BlockMoveUncached
 _BlockMoveDataUncached
+_MaxBlock
+_TempNewHandle
+_TempHLock
+_TempHUnlock
+_TempDisposeHandle
 
 # The classic File Manager WRITE path (carbon_fsspec_shim.c). Listing them here is
 # LOAD-BEARING: it stops the legacy shim pass emitting a competing pass-through bridge to a

@@ -175,6 +175,11 @@ typedef struct ccw_edit {
     CCWViewRef   view;
     CCWWindowRef win;
     void        *owner;             /* opaque back-pointer for the shim          */
+    /* The app's key filter (classic kControlEditTextKeyFilterTag), run before
+     * every editing key: 0 = block the key, 1 = pass it (it may rewrite *ch).
+     * NULL = none.  filter_ctx is the shim's own state for it. */
+    int        (*filter)(struct ccw_edit *e, unsigned char *ch, uint32_t *modifiers);
+    void        *filter_ctx;
 } ccw_edit;
 
 CCWViewRef ccw_edit_install(ccw_edit *e, CCWViewRef parent);

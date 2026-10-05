@@ -56,6 +56,7 @@
 #include "carbon_nib_parse.h"   // pure, headless-testable nib XML reader
 #include "carbon_classic_widgets.h" // THE shared classic-Carbon widget substrate
 #include "gap.h"
+#include "cb_bridge.h"          // the app's i386 key filter
 
 // arena bridge (objc_shim.c): i386 handle / i386 CFSTR constant <-> real 64-bit ptr.
 extern uint64_t x64_objc_unwrap(uint32_t h);
@@ -651,6 +652,22 @@ static ControlRef make_edit_field(const char *x, long lo, long hi, const CRect *
     return c;
 }
 
+// ---- the app's key filter (SetControlData kControlEditTextKeyFilterTag) ----
+// Classic HandleControlKey ran a field's ControlKeyFilterUPP before every key.
+// Call of Duty 4's limits each key-code box to its SetControlMaximum, jumps to
+// the next box when one fills and rejects invalid characters. A UPP is the i386
+// proc itself (upp_shim.c), so call it through the callback bridge; its three
+// in/out words live in low memory where a 4-byte pointer reaches them.
+typedef int32_t (*key_filter_fn)(void *ctrl, int16_t *key, int16_t *ch, uint16_t *mods);
+static int nib_key_filter(ccw_edit *e, unsigned char *ch, uint32_t *mods) {
+    static int16_t *io;            /* keyCode, charCode, modifiers (main thread) */
+    if (!io && !(io = (int16_t *)malloc(3 * sizeof *io))) return 1;   /* low heap */
+    io[0] = 0; io[1] = *ch; io[2] = (int16_t)*mods;
+    int32_t r = ((key_filter_fn)e->filter_ctx)(e->view, &io[0], &io[1], (uint16_t *)&io[2]);
+    *ch = (unsigned char)io[1]; *mods = (uint16_t)io[2];
+    return (int16_t)r != 0;        /* kControlKeyFilterBlockKey 0 / PassKey 1 */
+}
+
 // ==================== self-drawn Control Manager bridge ====================
 // Called from the Control-Manager MTSHIM shims (carbon_ui_shim.c /
 // carbon_control_shim.c).  Each returns 1 if `ctrl` is one of our self-drawn
@@ -751,6 +768,62 @@ int sd_ctrl_set_enabled(void *ctrl, int enabled) {
     if (e->kind == SD_POPUP) { ((struct popup *)e->rec)->enabled = enabled; sd_redraw(((struct popup *)e->rec)->view); }
     else if (e->kind == SD_EDIT) { ((ccw_edit *)e->rec)->enabled = enabled; sd_redraw(((ccw_edit *)e->rec)->view); }
     return 1;
+}
+
+// SetControlData(ctrl, kControlEditTextKeyFilterTag, &upp): install the app's
+// filter (upp = its i386 proc; 0 removes it).
+int sd_ctrl_set_keyfilter(void *ctrl, uint32_t proc32) {
+    struct sd_entry *s = sd_find(ctrl);
+    if (!s || s->kind != SD_EDIT) return 0;
+    ccw_edit *e = (ccw_edit *)s->rec;
+    static const x64_cb_sig sig = { 4, CBR_I32SX, { CBA_OBJ, CBA_PTR, CBA_PTR, CBA_PTR }, { 0 } };
+    e->filter_ctx = proc32 ? (void *)(uintptr_t)x64_cb_wrap(proc32, &sig) : NULL;
+    e->filter = e->filter_ctx ? nib_key_filter : NULL;
+    return 1;
+}
+
+// kControlEditTextSelectionTag: ControlEditTextSelectionRec { SInt16 selStart, selEnd }.
+int sd_ctrl_get_sel(void *ctrl, int16_t *start, int16_t *end) {
+    struct sd_entry *s = sd_find(ctrl);
+    if (!s || s->kind != SD_EDIT) return 0;
+    ccw_edit *e = (ccw_edit *)s->rec;
+    *start = (int16_t)(e->caret < e->selAnchor ? e->caret : e->selAnchor);
+    *end   = (int16_t)(e->caret < e->selAnchor ? e->selAnchor : e->caret);
+    return 1;
+}
+int sd_ctrl_set_sel(void *ctrl, int16_t start, int16_t end) {
+    struct sd_entry *s = sd_find(ctrl);
+    if (!s || s->kind != SD_EDIT) return 0;
+    ccw_edit *e = (ccw_edit *)s->rec;
+    int n = (int)strlen(e->text);
+    if (start < 0 || start > n) start = (int16_t)n;     /* classic: clamp to the end */
+    if (end < start || end > n) end = (int16_t)n;
+    e->selAnchor = start; e->caret = end;
+    sd_redraw(e->view);
+    return 1;
+}
+
+// GetControlKind: what the classic control would have reported (the app checks
+// for an edit-text kind before focusing a field) — 0 if not ours.
+uint32_t sd_ctrl_kind(void *ctrl) {
+    struct sd_entry *s = sd_find(ctrl);
+    if (!s) return 0;
+    return s->kind == SD_EDIT ? 'eutx' /*kControlKindEditUnicodeText*/ : 'popb' /*kControlKindPopupButton*/;
+}
+
+// GetControlMaximum on a popup: its menu (1..nitems). 0 = not a popup of ours.
+int sd_ctrl_get_max(void *ctrl, int32_t *out) {
+    struct sd_entry *s = sd_find(ctrl);
+    if (!s || s->kind != SD_POPUP) return 0;
+    *out = ((struct popup *)s->rec)->nitems;
+    return 1;
+}
+
+// HandleControlKey on one of our fields: 1 if consumed, 0 if not, -1 not ours.
+int sd_ctrl_key(void *ctrl, unsigned char ch, uint32_t mods) {
+    struct sd_entry *s = sd_find(ctrl);
+    if (!s || s->kind != SD_EDIT) return -1;
+    return ccw_edit_key((ccw_edit *)s->rec, ch, mods);
 }
 
 // Build every control directly under [lo,hi) and embed into `parent`.
@@ -1050,6 +1123,61 @@ static WindowRef build_window(const char *xibpath, CFStringRef wname) {
     return win;
 }
 
+// ---- native nib window: real edit fields in place of the UserPane stand-ins ----
+// A compositing nib window materializes natively, but IBCarbonRuntime maps every
+// IBCarbonEditText to an inert UserPane ("Using a UserPane for unregistered class:
+// IBCarbonEditText"): boxes nobody can type in (Call of Duty 4's key-code dialog).
+// Keep the native window and swap each stand-in, found by the ControlID the nib
+// gives the field, for THE classic edit field at the stand-in's own frame and
+// parent. A field without a ControlID stays native: the app cannot address it
+// either. Kill M64_NO_NIB_EDIT_SWAP.
+// ponytail: click mapping assumes the field sits on the content view (true for
+// every nib seen); a field nested in a pane would need its frame converted.
+static int nib_edit_swap_off(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("M64_NO_NIB_EDIT_SWAP") != NULL;
+    return v;
+}
+static void swap_native_edit_fields(const char *xibpath, CFStringRef wname, WindowRef win) {
+    static OSStatus (*findByID)(HIViewRef, CtrlID, HIViewRef *);
+    static HIViewRef (*superview)(HIViewRef);
+    static OSStatus (*getFrame)(HIViewRef, HIRectD *);
+    static OSStatus (*unparent)(HIViewRef);
+    if (!findByID) {
+        findByID  = (OSStatus (*)(HIViewRef, CtrlID, HIViewRef *))dlsym(RTLD_DEFAULT, "HIViewFindByID");
+        superview = (HIViewRef (*)(HIViewRef))dlsym(RTLD_DEFAULT, "HIViewGetSuperview");
+        getFrame  = (OSStatus (*)(HIViewRef, HIRectD *))dlsym(RTLD_DEFAULT, "HIViewGetFrame");
+        unparent  = (OSStatus (*)(HIViewRef))dlsym(RTLD_DEFAULT, "HIViewRemoveFromSuperview");
+    }
+    ControlRef root = n_HIViewGetRoot ? n_HIViewGetRoot(win) : NULL;
+    char wc[256];
+    if (!findByID || !superview || !getFrame || !unparent || !root ||
+        !CFStringGetCString(wname, wc, sizeof wc, kCFStringEncodingUTF8)) return;
+    long len; char *x = nibx_slurp(xibpath, &len); if (!x) return;
+    int id = nibx_nametable_id(x, wc);
+    long ws = id >= 0 ? nibx_window_offset(x, id) : -1;
+    long we = ws >= 0 ? nibx_match_end(x, ws) : -1; if (we < 0) we = len;
+    const char *k = "class=\"IBCarbonEditText\"";
+    for (const char *o = ws >= 0 ? strstr(x + ws, k) : NULL; o && o - x < we; o = strstr(o + 1, k)) {
+        long os = o - x; while (os > ws && strncmp(x + os, "<object ", 8)) os--;
+        long oe = nibx_match_end(x, os); if (oe < 0 || oe > we) oe = we;
+        uint32_t sig = 0; int cid = 0;
+        int have_sig = nibx_ostype(x, os, oe, "controlSignature", &sig);
+        if (!nibx_int(x, os, oe, "controlID", &cid) && !have_sig) continue;
+        HIViewRef old = NULL, parent;
+        CtrlID want = { sig, cid };
+        if (findByID(root, want, &old) != 0 || !old || !(parent = superview(old))) continue;
+        HIRectD fr = { 0, 0, 0, 0 };
+        getFrame(old, &fr);
+        CRect r = { (int16_t)fr.y, (int16_t)fr.x, (int16_t)(fr.y + fr.h), (int16_t)(fr.x + fr.w) };
+        ControlRef ec = make_edit_field(x, os, oe, &r, parent, win);
+        if (!ec) continue;
+        unparent(old);              // GetControlByID must now resolve to ours
+        wire_ids(x, os, oe, ec);
+    }
+    free(x);
+}
+
 // ============================ MTSHIM entry points ============================
 
 // OSStatus CreateNibReference(CFStringRef inNibName, IBNibRef *outNibRef)
@@ -1105,6 +1233,9 @@ uint32_t shim_CreateWindowFromNib(uint32_t *a) {
             WindowRef bw = build_window(xib, wn);
             if (bw) { w = bw; st = 0; }
         }
+    } else if (wn && !nib_edit_swap_off()) {
+        const char *xib = nib_lookup(ref);
+        if (xib) swap_native_edit_fields(xib, wn, w);
     }
     if (out) *out = w ? x64_objc_wrap((uint64_t)(uintptr_t)w) : 0;
     return (uint32_t)st;

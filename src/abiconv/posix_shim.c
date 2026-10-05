@@ -984,3 +984,28 @@ uint32_t shim_ioctl(uint32_t *a) {
    /* the arg is an int or a pointer into low-4GB i386 memory: both fit */
    return (uint32_t)ioctl((int)a[0], (unsigned long)a[1], (void *)(uintptr_t)a[2]);
 }
+
+/* ---- Code Fragment Manager: GetSharedLibrary / FindSymbol -------------------
+ * CFM loaded PowerPC fragments; an Intel process never had one to load, so the
+ * Intel answer to "connect to InterfaceLib for kPowerPCCFragArch" is
+ * cfragNoLibraryErr, and that is what callers here are written for: Bink's Mac
+ * allocator only reaches for InterfaceLib's NewPtrSys when NewPtr/TempNewHandle
+ * failed, and takes the error as "no system heap". Both were removed from 64-bit
+ * CarbonCore (a NULL jump); every out-param is defined. */
+#define CFRAG_NO_LIBRARY_ERR (-2804)
+#define CFRAG_NO_SYMBOL_ERR  (-2805)
+/* OSErr GetSharedLibrary(ConstStr63Param, CFragArchitecture, CFragLoadOptions,
+ *                        CFragConnectionID *, Ptr *mainAddr, Str255 errMessage) */
+int32_t shim_GetSharedLibrary(uint32_t *a) {
+   if (a[3]) { *(uint32_t *)(uintptr_t)a[3] = 0; }
+   if (a[4]) { *(uint32_t *)(uintptr_t)a[4] = 0; }
+   if (a[5]) { *(uint8_t *)(uintptr_t)a[5] = 0; }
+   return CFRAG_NO_LIBRARY_ERR;
+}
+/* OSErr FindSymbol(CFragConnectionID, ConstStr255Param, Ptr *symAddr,
+ *                  CFragSymbolClass *symClass) */
+int32_t shim_FindSymbol(uint32_t *a) {
+   if (a[2]) { *(uint32_t *)(uintptr_t)a[2] = 0; }
+   if (a[3]) { *(uint8_t *)(uintptr_t)a[3] = 0; }
+   return CFRAG_NO_SYMBOL_ERR;
+}

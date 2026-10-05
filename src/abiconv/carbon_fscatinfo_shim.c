@@ -169,6 +169,19 @@ static void fsci_real_dirids(FSCatalogInfo *ci, const FSRef *ref, FSCatalogInfoB
    }
 }
 
+/* The FSSpec out-param carries the same token parID as parentDirID above, which
+ * no FSSpec consumer can resolve: Call of Duty 4 hands FSGetCatalogInfo's spec to
+ * BinkMacOpen -> FSpOpenDF. Rebuild it from the path so it round-trips through
+ * cfs_fsspec_to_path. Same switch as the dirIDs (one concept: real catalog ids). */
+static void fsci_real_spec(const FSRef *ref, uint32_t spec32)
+{
+   char path[1024];
+   if (!spec32 || !fscat_real_dirid_enabled()) return;
+   if (FSRefMakePath(ref, (UInt8 *)path, sizeof path) != noErr) return;
+   uint8_t spec[CFS_FSSPEC_SIZE];
+   if (cfs_path_to_fsspec(path, spec)) memcpy(i386_ptr(spec32), spec, sizeof spec);
+}
+
 /* ── conversion ───────────────────────────────────────────────────────────── */
 
 /* i386 image -> x86_64 image (arguments going IN) */
@@ -370,6 +383,7 @@ uint32_t shim_FSGetCatalogInfo(uint32_t *a)
                                 a[4] ? (FSSpec *)i386_ptr(a[4]) : NULL,
                                 a[5] ? (FSRef *)i386_ptr(a[5]) : NULL);
    if (ci32 && err == noErr) fsci_real_dirids(&ci, (const FSRef *)i386_ptr(a[0]), (FSCatalogInfoBitmap)a[1]);
+   if (err == noErr) fsci_real_spec((const FSRef *)i386_ptr(a[0]), a[4]);
    if (ci32) fsci_out(i386_ptr(ci32), &ci);
    return (uint32_t)(int32_t)err;
 }

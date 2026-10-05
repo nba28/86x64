@@ -506,3 +506,27 @@ uint32_t shim_BlockMoveUncached(uint32_t *a)     { cm_block_move(a[0], a[1], (in
 uint32_t shim_BlockMoveDataUncached(uint32_t *a) { cm_block_move(a[0], a[1], (int32_t)a[2]); return 0; }
 uint32_t shim_BlockZero(uint32_t *a)             { cm_block_zero(a[0], (int32_t)a[1]); return 0; }
 uint32_t shim_BlockZeroData(uint32_t *a)         { cm_block_zero(a[0], (int32_t)a[1]); return 0; }
+
+/* ---- Temp* (MultiFinder temporary memory) + MaxBlock --------------------
+ * Bink's Mac allocator (libBinkMachOx86, Call of Duty 4 / Portal 2) asks
+ * MaxBlock() whether a NewPtr of the request fits, else takes a TempNewHandle
+ * and TempHLocks it. MaxBlock/TempH* were removed from 64-bit CarbonCore (a
+ * NULL jump), and the surviving native TempNewHandle hands back a >4GB Handle
+ * the i386 caller truncates. On OS X temporary memory IS the application heap,
+ * so these are the ordinary Handle calls with the OSErr out-param defined. */
+/* Size MaxBlock(void): the heap is unbounded; report the largest classic Size
+ * a caller can round-trip without overflow, as OS X itself did. */
+uint32_t shim_MaxBlock(uint32_t *a) { (void)a; return 0x7FFFFFF0u; }
+/* Handle TempNewHandle(Size, OSErr *resultCode); */
+uint32_t shim_TempNewHandle(uint32_t *a)
+{
+   uint32_t h = me_ptr(cm_new_handle(a[0], 0));
+   if (a[1]) *(int16_t *)i386_ptr(a[1]) = (int16_t)g_memerr;
+   return h;
+}
+/* void TempHLock / TempHUnlock / TempDisposeHandle(Handle, OSErr *resultCode);
+ * our handles never move, so the locks only report success. */
+static uint32_t temp_ok(uint32_t err) { if (err) *(int16_t *)i386_ptr(err) = 0; return me(0); }
+uint32_t shim_TempHLock(uint32_t *a)         { return temp_ok(a[1]); }
+uint32_t shim_TempHUnlock(uint32_t *a)       { return temp_ok(a[1]); }
+uint32_t shim_TempDisposeHandle(uint32_t *a) { cm_dispose_handle(a[0]); return temp_ok(a[1]); }

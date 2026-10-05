@@ -773,12 +773,41 @@ static CCWStatus edit_ctrl_key(void *call, CCWEventRef ev, void *ud) {
     return ccw_edit_key(e, ch, mods) ? 0 : ccwEventNotHandled;
 }
 
-/* kEventControlSetFocusPart: accept keyboard focus (echo the part back). */
+/* kEventTextInputUnicodeForKeyEvent: the classic Unicode edit text took its
+ * typing from the text-input event, AFTER the app's own handlers on the field
+ * had their turn — Call of Duty 4 upper-cases its key-code boxes by rewriting
+ * kEventParamTextInputSendText there and passing the event on.  Printable
+ * ASCII is ours; anything else is left to arrive as kEventControlKeyDown. */
+static CCWStatus edit_text_input(void *call, CCWEventRef ev, void *ud) {
+    (void)call;
+    ccw_edit *e = (ccw_edit *)ud;
+    char buf[64];
+    unsigned long n = 0;
+    uint32_t mods = 0;
+    void *raw = NULL;
+    if (!e || !ccw_GetEventParameter) return ccwEventNotHandled;
+    if (ccw_GetEventParameter(ev, 'tstx', 'utf8', NULL, sizeof buf, &n, buf) != 0 ||
+        n == 0 || n > sizeof buf)
+        return ccwEventNotHandled;
+    for (unsigned long i = 0; i < n; i++)
+        if ((unsigned char)buf[i] < 0x20 || (unsigned char)buf[i] >= 0x7f) return ccwEventNotHandled;
+    if (ccw_GetEventParameter(ev, 'tske', 'evrf', NULL, sizeof raw, NULL, &raw) == 0 && raw)
+        ccw_GetEventParameter(raw, 'kmod', 'magn', NULL, sizeof mods, NULL, &mods);
+    if (mods & 0x0100) return ccwEventNotHandled;       /* Cmd: a menu key */
+    for (unsigned long i = 0; i < n; i++) ccw_edit_key(e, (unsigned char)buf[i], mods);
+    return 0;
+}
+
+/* kEventControlSetFocusPart: accept keyboard focus.  A field has one part, so
+ * a focus-advance (kControlFocusNextPart -1 / PrevPart -2) while it already
+ * holds focus moves focus OFF it — that is how AdvanceKeyboardFocus walks on to
+ * the next field. */
 static CCWStatus edit_focus_ev(void *call, CCWEventRef ev, void *ud) {
     (void)call;
     ccw_edit *e = (ccw_edit *)ud;
     int16_t part = 0;
     if (ccw_GetEventParameter) ccw_GetEventParameter(ev, 'cprt', 'cprt', NULL, sizeof part, NULL, &part);
+    if (part < 0 && e && e->focused) part = 0;
     if (e) ccw_edit_set_focus(e, part != 0);
     if (ccw_SetEventParameter) ccw_SetEventParameter(ev, 'cprt', 'cprt', sizeof part, &part);
     return 0;
@@ -814,6 +843,12 @@ int ccw_edit_key(ccw_edit *e, unsigned char ch, uint32_t modifiers) {
     int cap = e->maxLen > 0 && e->maxLen < (int)sizeof e->text - 1
                   ? e->maxLen : (int)sizeof e->text - 1;
 
+    /* The app's key filter sees every editing key first, as HandleControlKey
+     * ran it; Return/Enter/Tab/Esc belong to the dialog, never to the field. */
+    if (e->filter && ch != 13 && ch != 3 && ch != 9 && ch != 27) {
+        if (!e->filter(e, &ch, &modifiers)) return 1;   /* blocked: swallowed */
+        n = elen(e); esel(e, &lo, &hi);                  /* the filter may edit */
+    }
     if (modifiers & cmdKeyMask) {                  /* Cmd-A = Select All (classic) */
         if (ch == 'a' || ch == 'A') { ccw_edit_select_all(e); return 1; }
         return 0;                                  /* other Cmd keys: not ours     */
@@ -870,8 +905,10 @@ CCWViewRef ccw_edit_install(ccw_edit *e, CCWViewRef parent) {
         void *tgt = ccw_GetControlEventTarget(e->view);
         struct { uint32_t cls, kind; } kd = { 'cntl', 11   };  /* KeyDown      */
         struct { uint32_t cls, kind; } fp = { 'cntl', 4013 };  /* SetFocusPart */
+        struct { uint32_t cls, kind; } ti = { 'tnpt', 2 };     /* UnicodeForKeyEvent */
         ccw_InstallEventHandler(tgt, (void *)edit_ctrl_key,  1, &kd, e, NULL);
         ccw_InstallEventHandler(tgt, (void *)edit_focus_ev,  1, &fp, e, NULL);
+        ccw_InstallEventHandler(tgt, (void *)edit_text_input, 1, &ti, e, NULL);
     }
     /* A bare hiview advertises no features, so HIToolbox will not route keyboard
      * focus to it.  Advertise kHIViewFeatureGetsFocusOnClick (1<<8). */

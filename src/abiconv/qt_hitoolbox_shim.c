@@ -45,7 +45,6 @@ uint32_t shim_InitHLTB(uint32_t *args) { GAP_STUB(args); return 0; }
 // ---- Appearance / Theme (15) ----
 uint32_t shim_DrawThemeButton(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_DrawThemeEditTextFrame(uint32_t *args) { GAP_STUB(args); return 0; }
-uint32_t shim_DrawThemeFocusRect(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_DrawThemeListBoxFrame(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_DrawThemePrimaryGroup(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_DrawThemeSeparator(uint32_t *args) { GAP_STUB(args); return 0; }
@@ -55,7 +54,6 @@ uint32_t shim_DrawThemeTrack(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_GetThemeDrawingState(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_GetThemeFont(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_GetThemeTrackThumbRgn(uint32_t *args) { GAP_STUB(args); return 0; }
-uint32_t shim_NormalizeThemeDrawingState(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_SetThemeBackground(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_SetThemeDrawingState(uint32_t *args) { GAP_STUB(args); return 0; }
 
@@ -66,7 +64,6 @@ uint32_t shim_CreateUserPaneControl(uint32_t *args) { GAP_STUB(args); return 0; 
 uint32_t shim_FindControl(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_GetControlAction(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_GetControlDataHandle(uint32_t *args) { GAP_STUB(args); return 0; }
-uint32_t shim_GetControlReference(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_GetControlTitle(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_IdleControls(uint32_t *args) { (void)args; return 0; }
 uint32_t shim_NewControl(uint32_t *args) { GAP_STUB(args); return 0; }
@@ -74,7 +71,6 @@ uint32_t shim_RegisterSystemControlDefinition(uint32_t *args) { GAP_STUB(args); 
 uint32_t shim_SetControlBounds(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_SetControlDataHandle(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_SetControlPopupMenuHandle(uint32_t *args) { GAP_STUB(args); return 0; }
-uint32_t shim_SetControlReference(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_SetControlSupervisor(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_SetControlTitle(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_SetUpControlBackground(uint32_t *args) { GAP_STUB(args); return 0; }
@@ -160,13 +156,7 @@ uint32_t shim_GetMenuItemText(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_MenuKey(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_SetMenuItemText(uint32_t *args) { GAP_STUB(args); return 0; }
 
-// ---- Scrap Manager (6) ----
-uint32_t shim_ClearCurrentScrap(uint32_t *args) { GAP_STUB(args); return 0; }
-uint32_t shim_GetCurrentScrap(uint32_t *args) { GAP_STUB(args); return 0; }
-uint32_t shim_GetScrapFlavorCount(uint32_t *args) { GAP_STUB(args); return 0; }
-uint32_t shim_GetScrapFlavorData(uint32_t *args) { GAP_STUB(args); return 0; }
-uint32_t shim_GetScrapFlavorSize(uint32_t *args) { GAP_STUB(args); return 0; }
-uint32_t shim_PutScrapFlavor(uint32_t *args) { GAP_STUB(args); return 0; }
+// ---- Scrap Manager: real, carbon_scrap_shim.c ----
 
 // ---- TextEdit (9) ----
 uint32_t shim_TECalText(uint32_t *args) { GAP_STUB(args); return 0; }

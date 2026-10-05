@@ -85,7 +85,13 @@ int ci_input_fix_disabled(void) {
 // must not become the coordinate reference. Both are resolved lazily because
 // neither is guaranteed present, and a missing Window Manager must degrade,
 // never crash.
+int ci_port_content_origin(uint32_t port, int16_t *ox, int16_t *oy);
 int ci_content_origin(int16_t *ox, int16_t *oy) {
+   return ci_port_content_origin(qd_current_port(), ox, oy);
+}
+
+// The same, against an explicit port (QDGlobalToLocalPoint & co. name theirs).
+int ci_port_content_origin(uint32_t port, int16_t *ox, int16_t *oy) {
    if (ci_input_fix_disabled()) { return 0; }
 
    static int resolved = 0;
@@ -106,7 +112,7 @@ int ci_content_origin(int16_t *ox, int16_t *oy) {
     * (PvZ keeps its fullscreen-era one; ActiveNonFloatingWindow read NULL or
     * another window in probes/appdownspy.m runs). Active/front window only when the port
     * is not a window (an offscreen GWorld, or none set on this thread). */
-   CIWindowRef w = (CIWindowRef)qd_port_window(qd_current_port());
+   CIWindowRef w = (CIWindowRef)qd_port_window(port);
    if (!w && active_win) { w = active_win(); }
    if (!w && front_win) { w = front_win(); }
    if (!w) { return 0; }

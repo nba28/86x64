@@ -17,9 +17,8 @@
 //   GetControlCommandID -> HIViewGetCommandID
 //   DisposeMenu      -> CFRelease (menus are CFTypeRef)
 //   NewCWindow       -> CreateNewWindow (compositing) + title/refcon/show
-// Control min/max and the HIImageView setters have no surviving getter/setter and
-// sit on inert placeholder controls (see carbon_nib_shim.c), so they degrade
-// gracefully.
+//   Get/SetControl[32Bit]Minimum/Maximum -> HIViewGet/SetMinimum/Maximum
+// The HIImageView setters have no surviving equivalent and degrade gracefully.
 //
 // MTSHIM convention (maptable_tramp.asm): rdi -> &i386 args[0] (4-byte cdecl
 // slots), uint32_t result in eax. Object-ref args arrive as arena handles (a
@@ -34,6 +33,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <dlfcn.h>
+#include <CoreFoundation/CoreFoundation.h>
 #include "carbon_shim.h"
 #include "gap.h"
 
@@ -56,6 +56,12 @@ extern int sd_ctrl_set_text(void *ctrl, const char *buf, int len);
 extern int sd_ctrl_get_text(void *ctrl, char *buf, int bufsz);
 extern int sd_ctrl_get_cfstring(void *ctrl, const void **out);
 extern int sd_ctrl_set_enabled(void *ctrl, int enabled);
+extern int sd_ctrl_set_keyfilter(void *ctrl, uint32_t proc32);
+extern int sd_ctrl_get_sel(void *ctrl, int16_t *start, int16_t *end);
+extern int sd_ctrl_set_sel(void *ctrl, int16_t start, int16_t end);
+extern uint32_t sd_ctrl_kind(void *ctrl);
+extern int sd_ctrl_get_max(void *ctrl, int32_t *out);
+extern int sd_ctrl_key(void *ctrl, unsigned char ch, uint32_t mods);
 
 typedef int32_t OSStatus;
 typedef struct { int16_t top, left, bottom, right; } CRect;
@@ -150,13 +156,111 @@ uint32_t shim_GetControlCommandID(uint32_t *a) {
     return 0;
 }
 
-// Classic value/min/max: no surviving getter/setter. GetControlValue survives and
-// is the meaningful one; min/max sit on inert placeholder controls -> benign.
-// SInt16 GetControlMinimum(ControlRef) -> 0 ; GetControlMaximum -> 1 (non-degenerate)
-uint32_t shim_GetControlMinimum(uint32_t *a) { GAP_STUB(a); return 0; }
-uint32_t shim_GetControlMaximum(uint32_t *a) { GAP_STUB(a); return 1; }
-void     shim_SetControlMinimum(uint32_t *a) { GAP_STUB(a); }
-void     shim_SetControl32BitMinimum(uint32_t *a) { GAP_STUB(a); }
+// ---- Control range: HIView's own minimum/maximum --------------------------
+// The classic Get/SetControl[32Bit]Minimum/Maximum wrappers were dropped, but the
+// range they read and wrote survives as HIViewGet/SetMinimum/Maximum, so these
+// are exact. Call of Duty 4's key-code boxes store their 4-character limit with
+// SetControlMaximum and its key filter reads it back; the old constants (max 1,
+// writes dropped) made every box "full" after one key. A self-drawn popup's
+// range is its menu, 1..nitems. Kill M64_NO_CTRL_RANGE (the old constants).
+static int ctrl_range_off(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("M64_NO_CTRL_RANGE") != NULL;
+    return v;
+}
+static int32_t ctrl_get_range(uint32_t *a, int max) {
+    DL(HIViewGetMinimum, int32_t, (void *));
+    DL(HIViewGetMaximum, int32_t, (void *));
+    void *c = UNWRAP(0);
+    int32_t v = 0;
+    if (ctrl_range_off()) return max;
+    if (max && sd_ctrl_get_max(c, &v)) return v;
+    if (!c) return 0;
+    if (max) return HIViewGetMaximum ? HIViewGetMaximum(c) : 0;
+    return HIViewGetMinimum ? HIViewGetMinimum(c) : 0;
+}
+static void ctrl_set_range(uint32_t *a, int max, int32_t v) {
+    DL(HIViewSetMinimum, OSStatus, (void *, int32_t));
+    DL(HIViewSetMaximum, OSStatus, (void *, int32_t));
+    void *c = UNWRAP(0);
+    if (ctrl_range_off() || !c) return;
+    if (max && HIViewSetMaximum) HIViewSetMaximum(c, v);
+    if (!max && HIViewSetMinimum) HIViewSetMinimum(c, v);
+}
+// SInt16 Get/SetControlMinimum/Maximum; the 32Bit twins carry the full SInt32.
+uint32_t shim_GetControlMinimum(uint32_t *a) { return (uint32_t)(int32_t)(int16_t)ctrl_get_range(a, 0); }
+uint32_t shim_GetControlMaximum(uint32_t *a) { return (uint32_t)(int32_t)(int16_t)ctrl_get_range(a, 1); }
+uint32_t shim_GetControl32BitMinimum(uint32_t *a) { return (uint32_t)ctrl_get_range(a, 0); }
+uint32_t shim_GetControl32BitMaximum(uint32_t *a) { return (uint32_t)ctrl_get_range(a, 1); }
+void shim_SetControlMinimum(uint32_t *a)      { ctrl_set_range(a, 0, (int16_t)a[1]); }
+void shim_SetControlMaximum(uint32_t *a)      { ctrl_set_range(a, 1, (int16_t)a[1]); }
+void shim_SetControl32BitMinimum(uint32_t *a) { ctrl_set_range(a, 0, (int32_t)a[1]); }
+void shim_SetControl32BitMaximum(uint32_t *a) { ctrl_set_range(a, 1, (int32_t)a[1]); }
+
+// ---- refCon: Get/SetControlReference ---------------------------------------
+// HIView has no refCon and the wrappers are gone; the app's word rides as a
+// control property instead (the window refCon does the same, carbon_ui_shim.c).
+// Call of Duty 4 keeps each key box's character validator there.
+#define CTRL_REFCON_CREATOR 'x64r'
+#define CTRL_REFCON_TAG     'rcon'
+uint32_t shim_SetControlReference(uint32_t *a) {
+    DL(SetControlProperty, OSStatus, (void *, uint32_t, uint32_t, uint64_t, const void *));
+    void *c = UNWRAP(0);
+    uint32_t v = a[1];
+    if (SetControlProperty && c) SetControlProperty(c, CTRL_REFCON_CREATOR, CTRL_REFCON_TAG, sizeof v, &v);
+    return 0;
+}
+uint32_t shim_GetControlReference(uint32_t *a) {
+    DL(GetControlProperty, OSStatus, (void *, uint32_t, uint32_t, uint64_t, uint64_t *, void *));
+    void *c = UNWRAP(0);
+    uint32_t v = 0;
+    if (GetControlProperty && c) GetControlProperty(c, CTRL_REFCON_CREATOR, CTRL_REFCON_TAG, sizeof v, NULL, &v);
+    return v;
+}
+
+// ---- edit-text plumbing the classic key-filter idiom needs -----------------
+// OSErr GetControlDataSize(ControlRef, ControlPartCode, ResType, Size *outMaxSize).
+// Native has none, but GetControlData with no buffer reports the size.
+uint32_t shim_GetControlDataSize(uint32_t *a) {
+    void *c = UNWRAP(0);
+    uint32_t tag = a[2];
+    uint32_t *out = (uint32_t *)(uintptr_t)a[3];
+    if (out) *out = 0;
+    int n = sd_ctrl_get_text(c, NULL, 0);
+    if (n >= 0) {                                        // our edit field
+        if (tag == 'text') { if (out) *out = (uint32_t)n; return 0; }
+        if (ctrl_tag_is_objptr(tag) || tag == 'sele') { if (out) *out = 4; return 0; }
+        return (uint32_t)-30583;                         // errDataNotSupported
+    }
+    DL(GetControlData, OSStatus, (void *, int16_t, uint32_t, long, void *, long *));
+    if (!GetControlData || !c) return (uint32_t)-50;
+    long act = 0;
+    OSStatus st = GetControlData(c, (int16_t)a[1], tag, 0, NULL, &act);
+    if (out) *out = ctrl_tag_is_objptr(tag) ? 4 : (uint32_t)act;   // i386 sizes
+    return (uint32_t)st;
+}
+// ControlPartCode HandleControlKey(ControlRef, SInt16 keyCode, SInt16 charCode,
+// EventModifiers). Our fields take the key (running the app's key filter); a
+// native control's key is a loud gap until an app is seen sending one.
+uint32_t shim_HandleControlKey(uint32_t *a) {
+    void *c = UNWRAP(0);
+    int r = sd_ctrl_key(c, (unsigned char)a[2], (uint16_t)a[3]);
+    if (r >= 0) return r ? 1 : 0;
+    GAP_STUB(a);
+    return 0;
+}
+// OSStatus GetControlKind(ControlRef, ControlKind *) — {signature, kind}, 8 bytes
+// on both ABIs. Our self-drawn controls answer as the classic control they are.
+uint32_t shim_GetControlKind(uint32_t *a) {
+    void *c = UNWRAP(0);
+    uint32_t *out = (uint32_t *)(uintptr_t)a[1];
+    uint32_t k = sd_ctrl_kind(c);
+    if (k) { if (out) { out[0] = 'appl'; out[1] = k; } return 0; }
+    DL(GetControlKind, OSStatus, (void *, uint32_t *));
+    if (out) out[0] = out[1] = 0;
+    return (GetControlKind && c) ? (uint32_t)GetControlKind(c, out) : (uint32_t)-50;
+}
+
 void     shim_SetControlViewSize(uint32_t *a) { GAP_STUB(a); }
 void     shim_SetControlColorProc(uint32_t *a) { GAP_STUB(a); }
 // OSStatus GetControlRegion(ControlRef, ControlPartCode, RgnHandle) -> leave rgn as-is
@@ -207,6 +311,10 @@ uint32_t shim_SetControlData(uint32_t *a) {
             sd_ctrl_set_cfstring(c, cf);
         } else if (tag == 'text' && data) {
             sd_ctrl_set_text(c, (const char *)data, (int)size);
+        } else if (tag == 'fltr' && data) {             // kControlEditTextKeyFilterTag
+            sd_ctrl_set_keyfilter(c, *(uint32_t *)data);
+        } else if (tag == 'sele' && data) {             // kControlEditTextSelectionTag
+            sd_ctrl_set_sel(c, ((int16_t *)data)[0], ((int16_t *)data)[1]);
         }
         return 0;   /* noErr — handled by the self-drawn edit field */
     }
@@ -247,6 +355,9 @@ uint32_t shim_GetControlData(uint32_t *a) {
         } else if (tag == 'text' && data) {
             int n = sd_ctrl_get_text(c, (char *)data, (int)maxsz);
             if (actual) *actual = (uint32_t)(n < 0 ? 0 : n);
+        } else if (tag == 'sele' && data && maxsz >= 4) {
+            sd_ctrl_get_sel(c, &((int16_t *)data)[0], &((int16_t *)data)[1]);
+            if (actual) *actual = 4;
         } else if (actual) *actual = 0;
         return 0;
     }
@@ -302,9 +413,18 @@ uint32_t shim_HIComboBoxCreate(uint32_t *a)              { (void)a; return (uint
 // (HIImageViewSetImage is already shimmed in mlte_shim.c — not duplicated here.)
 uint32_t shim_HIImageViewSetOpaque(uint32_t *a)     { GAP_STUB(a); return 0; }
 uint32_t shim_HIImageViewSetScaleToFit(uint32_t *a) { GAP_STUB(a); return 0; }
-// Keyboard focus advance/reverse: no classic control chain to walk -> noErr.
-uint32_t shim_AdvanceKeyboardFocus(uint32_t *a) { GAP_STUB(a); return 0; }
-uint32_t shim_ReverseKeyboardFocus(uint32_t *a) { GAP_STUB(a); return 0; }
+// OSErr Advance/ReverseKeyboardFocus(WindowRef): HIViewAdvanceFocus over the
+// window's root walks the same chain (Shift = backwards). Call of Duty 4's key
+// filter advances to the next key-code box when one fills.
+static uint32_t kbd_focus(uint32_t *a, uint32_t mods) {
+    DL(HIViewGetRoot, void *, (void *));
+    DL(HIViewAdvanceFocus, OSStatus, (void *, uint32_t));
+    void *w = UNWRAP(0);
+    void *root = (w && HIViewGetRoot) ? HIViewGetRoot(w) : NULL;
+    return (root && HIViewAdvanceFocus) ? (uint32_t)HIViewAdvanceFocus(root, mods) : (uint32_t)-50;
+}
+uint32_t shim_AdvanceKeyboardFocus(uint32_t *a) { return kbd_focus(a, 0); }
+uint32_t shim_ReverseKeyboardFocus(uint32_t *a) { return kbd_focus(a, 0x0200 /*shiftKey*/); }
 void     shim_DrawGrowIcon(uint32_t *a)         { (void)a; }
 
 // ---------------- Window Manager ----------------
@@ -394,6 +514,21 @@ uint32_t shim_DisposeMenu(uint32_t *a) {
     void *m = UNWRAP(0);
     if (CFRelease && m) CFRelease(m);
     return 0;
+}
+// MenuRef NewMenu(MenuID, ConstStr255Param title) -> CreateNewMenu + the MacRoman
+// title (the classic creator is gone; Call of Duty 4 builds its Window menu so).
+uint32_t shim_NewMenu(uint32_t *a) {
+    DL(CreateNewMenu, OSStatus, (int16_t, uint32_t, void **));
+    DL(SetMenuTitleWithCFString, OSStatus, (void *, const void *));
+    DL(CFRelease, void, (const void *));
+    const uint8_t *t = (const uint8_t *)(uintptr_t)a[1];
+    void *m = NULL;
+    if (!CreateNewMenu || CreateNewMenu((int16_t)a[0], 0, &m) != 0 || !m) return 0;
+    if (t && t[0] && SetMenuTitleWithCFString) {
+        CFStringRef s = CFStringCreateWithBytes(NULL, t + 1, t[0], kCFStringEncodingMacRoman, false);
+        if (s) { SetMenuTitleWithCFString(m, s); if (CFRelease) CFRelease(s); }
+    }
+    return WRAP(m);
 }
 // OSStatus EnableMenuCommand(MenuRef, MenuCommand) -> noErr (menu items enabled by default)
 uint32_t shim_EnableMenuCommand(uint32_t *a) { GAP_STUB(a); return 0; }

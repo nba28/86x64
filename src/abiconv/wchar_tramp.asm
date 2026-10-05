@@ -112,6 +112,8 @@
    WCHAR_MTSHIM    ___wcstok,   _shim_wcstok
    WCHAR_MTSHIM    ___wcstol,   _shim_wcstol
    WCHAR_MTSHIM    ___wcsftime, _shim_wcsftime
+   WCHAR_MTSHIM    ___mbrtowc,  _shim_mbrtowc
+   WCHAR_MTSHIM    ___wcrtomb,  _shim_wcrtomb
    WCHAR_MTSHIM64  ___wcstoll,  _shim_wcstoll
    WCHAR_MTSHIM_FP ___wcstod,   _shim_wcstod
    WCHAR_MTSHIM_FP ___wcstof,   _shim_wcstof
