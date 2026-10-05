@@ -166,6 +166,12 @@ namespace MachO {
        * __data byte, rebased in __text) stayed raw -> SIGSEGV. Kill
        * M64_NO_TEXT_REBASE_ATTEST; guard 99_text_rebase_disp. */
       std::set<std::size_t> rebase_slot_addrs;
+      /* Armed (M32) when the image can slide (dylib, bundle, PIE exec) and
+       * carries a rebase stream: dyld cannot slide a pointer it holds no rebase
+       * for, so rebase_slot_addrs is then the EXACT set of internal pointers
+       * (the LC_DYLD_INFO counterpart of local_reloc_addrs) and DataParser
+       * trusts it for data words too. Set by DyldInfo's ctor. */
+      bool have_rebase_stream = false;
 
       /* M32 CONSTANT-CLASSIFICATION PROVENANCE (M64 re-parses only): the vmaddr
        * of every 4-byte data slot that the M32 pass classified as a CONSTANT and

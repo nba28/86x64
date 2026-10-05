@@ -20,7 +20,14 @@ namespace MachO {
       lazy_bind(BindInfo<bits, true>::Parse(img, dyld_info.lazy_bind_off, dyld_info.lazy_bind_size,
                                             env)),
       export_info(ExportInfo<bits>::Parse(img, dyld_info.export_off, dyld_info.export_size, env))
-   {}
+   {
+      if constexpr (bits == Bits::M32) {
+         const auto& hdr = img.at<mach_header_t<bits>>(0);
+         env.have_rebase_stream = dyld_info.rebase_size != 0 &&
+            (hdr.filetype == MH_DYLIB || hdr.filetype == MH_BUNDLE ||
+             (hdr.filetype == MH_EXECUTE && (hdr.flags & MH_PIE) != 0));
+      }
+   }
 
 
    template <Bits bits, bool lazy>

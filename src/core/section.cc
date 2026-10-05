@@ -277,6 +277,16 @@ namespace MachO {
           env.local_reloc_addrs.count(loc.vmaddr) != 0) {
          return true;
       }
+      /* ... and so does a slot the LC_DYLD_INFO rebase stream rebases; in a
+       * slidable image every other word is a constant, however well its value
+       * aliases the image (ParseEnv::have_rebase_stream). minimp3's
+       * g_hz {44100, 48000, 32000} in a small dylib: 44100 = 0xac44 landed in
+       * __DATA and was "rebased", so every MP3 frame failed to sync (the Miles
+       * MP3 provider). Kill M64_NO_REBASE_EXACT; guard rebase-exact-const. */
+      static const bool rebase_exact_off = std::getenv("M64_NO_REBASE_EXACT") != nullptr;
+      if (m32 && env.have_rebase_stream && !rebase_exact_off) {
+         return env.rebase_slot_addrs.count(loc.vmaddr) != 0;
+      }
 
       /* A misaligned pointer into data is plausible only as a writable
        * pointer FIELD aimed at file-backed data (a byte-record table: Halo
