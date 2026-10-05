@@ -843,6 +843,8 @@ add_library(abiconv SHARED
   keyboard_layout_shim.c
   # carbon_scrap_shim.c: the Scrap Manager on the Pasteboard (TEXT <-> plain text).
   carbon_scrap_shim.c
+  # netdb_pwd_shim.c: hostent/servent/protoent/passwd/group returns in the i386 layout.
+  netdb_pwd_shim.c
   # carbon_window_removed_shim.c: Window Manager calls 64-bit HIToolbox dropped.
   carbon_window_removed_shim.c
   # (halo_shim.c / halo_tramp.asm RETIRED: mach_timebase_info / mach_absolute_time

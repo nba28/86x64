@@ -1679,3 +1679,16 @@ ____ZTVN10__cxxabiv121__vmi_class_type_infoE:	times 16 db 0
 	MTSHIM	___TXNSetSelection,                   _shim_TXNSetSelection
 	MTSHIM	___TXNShowSelection,                  _shim_TXNShowSelection
 	MTSHIM	___TXNSetTypeAttributes,              _shim_TXNSetTypeAttributes
+
+	;; --- libc static-struct returns in the i386 layout (netdb_pwd_shim.c) ---
+	MTSHIM	___gethostbyname,                     _shim_gethostbyname
+	MTSHIM	___gethostbyaddr,                     _shim_gethostbyaddr
+	MTSHIM	___getservbyname,                     _shim_getservbyname
+	MTSHIM	___getservbyport,                     _shim_getservbyport
+	MTSHIM	___getprotobyname,                    _shim_getprotobyname
+	MTSHIM	___getpwuid,                          _shim_getpwuid
+	MTSHIM	___getpwnam,                          _shim_getpwnam
+	MTSHIM	___getpwent,                          _shim_getpwent
+	MTSHIM	___getgrgid,                          _shim_getgrgid
+	MTSHIM	___getgrnam,                          _shim_getgrnam
+	MTSHIM	___getgrent,                          _shim_getgrent
