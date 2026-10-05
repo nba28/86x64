@@ -143,6 +143,15 @@ def redirect(consumer, base, golden_src, dry):
     # system path, and dyld matches loaded images by install name.
     shutil.copy2(golden_src, dst)
     subprocess.run([INT, "-id", new_dep, str(dst)], capture_output=True, text=True)
+    # The copy sits beside its consumer, so it must reach the runtime the way the
+    # consumer does: a bundle keeps libabiconv in Contents/Frameworks
+    # (@loader_path/../Frameworks/...), not beside MacOS/ like Portal 2's flat tree
+    # (Call of Duty 4: "Library not loaded: @loader_path/libabiconv.dylib").
+    theirs = {os.path.basename(d): d for d in deps_of(consumer)}
+    for d in deps_of(dst):
+        want = theirs.get(os.path.basename(d))
+        if d.startswith("@loader_path/") and want and want != d:
+            subprocess.run([INT, "-change", d, want, str(dst)], capture_output=True, text=True)
     subprocess.run(["codesign", "--force", "--sign", "-", str(dst)],
                    capture_output=True)
     stale = consumer.parent / base    # an older redirect's system-named copy
@@ -150,7 +159,7 @@ def redirect(consumer, base, golden_src, dry):
         stale.unlink()
     old_dep = next((d for d in deps_of(consumer) if os.path.basename(d) == base
                     and (not d.startswith("@") or d == f"@loader_path/{base}")), None)
-    if old_dep is None:
+    if old_dep is None or old_dep == new_dep:
         return
     subprocess.run([INT, "-change", old_dep, new_dep, str(consumer)],
                    capture_output=True, text=True)
@@ -170,17 +179,24 @@ def main(argv):
                  f"`m64 translate <i386-original> -o {g}` first")
     n_redirected = 0
     n_consumers = 0
+    ours = {local_leaf(b): b for b in GOLDEN}
     for root in roots:
         for m in iter_machos(root):
             if not links_our_runtime(m):
                 continue          # native sibling: leave bound to the real system lib
+            if m.name in ours:
+                continue          # a vendored copy: otool lists its own id as a dep
             for dep in deps_of(m):
                 base = os.path.basename(dep)
-                if dep.startswith("@") and dep != f"@loader_path/{base}":
+                base = ours.get(base, base)   # our own earlier redirect: redo it
+                if dep.startswith("@") and dep not in (f"@loader_path/{base}",
+                                                       f"@loader_path/{local_leaf(base)}"):
                     continue      # bundle-relative and not an old redirect
                 golden = GOLDEN.get(base)
                 if golden is None or not golden.is_file():
                     continue
+                if list_only and dep == f"@loader_path/{local_leaf(base)}":
+                    continue      # already redirected
                 n_consumers += 1
                 if list_only:
                     print(f"  {m}  binds {dep}")

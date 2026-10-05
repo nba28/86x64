@@ -318,7 +318,8 @@ def framework_binary(fwdir):
 
 def vendor(app, sources, dry, native=DEFAULT_NATIVE):
     bfw = app / "Contents/Frameworks"
-    bfw.mkdir(parents=True, exist_ok=True)
+    if not dry:
+        bfw.mkdir(parents=True, exist_ok=True)
 
     # Which ABI world is the CONSUMER in? Decides whether a native-only donor is
     # acceptable. Probed once from the bundle's own binaries — see

@@ -456,7 +456,8 @@ def translate_bundle(bundle, args):
     # iWork '09 shared frameworks) so it gets translated alongside everything
     # else. Skippable with --no-vendor; extra source roots via --source.
     if not getattr(args, "no_vendor", False):
-        _vendor(bundle, getattr(args, "source", None) or [], args.dry_run)
+        # --list must not write: without -o, `bundle` is the SOURCE.
+        _vendor(bundle, getattr(args, "source", None) or [], args.dry_run or args.list)
 
     info(f"scanning {Path(bundle).name} for translatable binaries…")
     fresh, retrans, plan_native = [], [], []

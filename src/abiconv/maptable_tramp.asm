@@ -173,6 +173,7 @@
 	;; start-up; with no shim it reached native dladdr, which read rdi/rsi
 	;; garbage (rsi=8 as the Dl_info*) and faulted at 0x56.
 	MTSHIM	___dladdr,                    _shim_dladdr
+	MTSHIM	___getsegbyname,              _shim_getsegbyname
 
 	;; classic NeXT dyld NSSymbol lookup API — the pre-dlopen dynamic loader
 	;; old Mac ports use as their dlsym ("_"+name probe/bind/address idiom).
@@ -1180,6 +1181,7 @@ _x64_exc_longjmp:
 	;     creation entry that still exists on 64-bit, so this one line covers the
 	;     whole family. MTSHIM presence removes it from the abigen legacy pass.
 	MTSHIM	___CreateNewWindow,                   _shim_CreateNewWindow
+	MTSHIM	___GetWindowResizeLimits,     _shim_GetWindowResizeLimits
 	; ==== Reclassified abigen-DANGLING classic Carbon (removed on 64-bit) ====
 	; abigen forwarded these to now-removed natives (call _X -> dangling abort). Real
 	; bridges where a modern equivalent survives, else signature-correct graceful.
@@ -1480,6 +1482,7 @@ _x64_exc_longjmp:
 	; --- Sound Manager (sndmgr_shim.c) ---
 	MTSHIM	___SndChannelStatus,                  _shim_SndChannelStatus
 	MTSHIM	___SndDisposeChannel,                 _shim_SndDisposeChannel
+	MTSHIM	___GetCompressionInfo,                _shim_GetCompressionInfo
 	MTSHIM	___SndNewChannel,                     _shim_SndNewChannel
 	MTSHIM	___SndDoCommand,                      _shim_SndDoCommand
 	MTSHIM	___SndDoImmediate,                    _shim_SndDoImmediate

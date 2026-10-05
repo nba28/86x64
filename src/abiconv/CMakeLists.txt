@@ -228,8 +228,11 @@ endforeach()
 
 # Every Apps32 bundle's main executable joins automatically — a new target
 # (Plants vs. Zombies) was missing from the hand list above, so its imports
-# (CoreAudio AudioGetCurrentHostTime/...) got no bridge and bound raw.
-file(GLOB ABICONV_APPS32_BUNDLES "$ENV{HOME}/projects/translations/Apps32/*.app")
+# (CoreAudio AudioGetCurrentHostTime/...) got no bridge and bound raw. One level
+# deeper too: a game folder holding several apps beside its data (Call of Duty 4
+# campaign + multiplayer; EventAvail bound raw and spun the main thread).
+file(GLOB ABICONV_APPS32_BUNDLES "$ENV{HOME}/projects/translations/Apps32/*.app"
+                                 "$ENV{HOME}/projects/translations/Apps32/*/*.app")
 foreach(app IN LISTS ABICONV_APPS32_BUNDLES)
   execute_process(COMMAND /usr/libexec/PlistBuddy -c "Print CFBundleExecutable"
                           "${app}/Contents/Info.plist"

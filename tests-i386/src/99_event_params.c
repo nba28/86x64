@@ -9,7 +9,12 @@ extern void exit(int);
 typedef const void *EventRef; typedef unsigned int u32;
 typedef struct { short v, h; } QDPoint;
 typedef struct { float x, y; } HIPoint32;
+/* Carbon headers are #pragma pack(2): the real i386 HICommand is 14 bytes (no
+ * tail padding). Declared unpacked (16) this fixture once agreed with a shim that
+ * rejected every real sizeof(HICommand) == 14 caller (Call of Duty 4, Halo). */
+#pragma pack(push, 2)
 typedef struct { u32 attributes, commandID; u32 menuRef; unsigned short index; } HICommand32;
+#pragma pack(pop)
 extern int CreateEvent(const void *alloc, u32 cls, u32 kind, double when, u32 attrs, EventRef *out);
 extern int SetEventParameter(EventRef, u32 name, u32 type, u32 size, const void *data);
 extern int GetEventParameter(EventRef, u32 name, u32 type, u32 *outType, u32 size, u32 *outSize, void *out);
@@ -31,9 +36,12 @@ int main(void)
    SetEventParameter(e, 'dobj', 'cfst', 4, &s);
    GetEventParameter(e, 'dobj', 'cfst', 0, 4, 0, &s2);
    printf("cfref_roundtrip=%d\n", s2 && CFStringGetLength(s2) == 2);
-   HICommand32 c = { 0, 'quit', 0, 0 }, c2 = { 0, 0, 0, 0 };
+   struct { HICommand32 c; unsigned short canary; } __attribute__((packed)) c2 = { { 0, 0, 0, 0 }, 0xC0DE };
+   HICommand32 c = { 0, 'quit', 0, 0 };
+   printf("hicommand_size14=%d\n", (int)(sizeof c == 14));
    SetEventParameter(e, '----', 'hcmd', sizeof c, &c);
-   r = GetEventParameter(e, '----', 'hcmd', 0, sizeof c2, 0, &c2);
-   printf("hicommand_roundtrip=%d\n", r == 0 && c2.commandID == 'quit');
+   r = GetEventParameter(e, '----', 'hcmd', 0, sizeof c2.c, 0, &c2.c);
+   printf("hicommand_roundtrip=%d\n", r == 0 && c2.c.commandID == 'quit');
+   printf("hicommand_no_overrun=%d\n", c2.canary == 0xC0DE);
    exit(0);
 }

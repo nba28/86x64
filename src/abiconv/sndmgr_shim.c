@@ -27,6 +27,7 @@
 // (___SndNewChannel/... -> _shim_Snd*) already exist in maptable_tramp.asm.
 
 #include <stdint.h>
+#include "gap.h"
 #include <string.h>
 #include <stdlib.h>     /* malloc/free/getenv == libabiconv low-4GB heap */
 #include <stdio.h>
@@ -512,6 +513,42 @@ static uint32_t do_command(uint32_t chan, uint32_t cmd32) {
 }
 
 /* ---- exported MTSHIM entry points ----------------------------------------- */
+
+// GetCompressionInfo(short compressionID, OSType format, short numChannels,
+//                    short sampleSize, CompressionInfoPtr cp)
+// The Sound Manager one (not QuickTime's ImageCompression namesake): gone from
+// 64-bit, so the abigen bridge called NULL. Call of Duty 4 asks it about 'NONE'
+// 16-bit stereo at startup. Uncompressed PCM is pure arithmetic; any real codec
+// is a loud gap until a target reaches it. CompressionInfo (i386, 20 bytes):
+// recordSize 0, format 4, compressionID 8, samplesPerPacket 10, bytesPerPacket 12,
+// bytesPerFrame 14, bytesPerSample 16, futureUse1 18.
+// Kill M64_NO_SND_COMPINFO (paramErr); guard snd-compression-info.
+uint32_t shim_GetCompressionInfo(uint32_t *args) {
+   const int16_t  id       = (int16_t)args[0];
+   const uint32_t format   = args[1];
+   const int16_t  channels = (int16_t)args[2];
+   const int16_t  bits     = (int16_t)args[3];
+   uint8_t *cp = (uint8_t *)PTR(4);
+   static int enabled = -1;
+   if (enabled < 0) { const char *e = getenv("M64_NO_SND_COMPINFO"); enabled = !(e && *e && *e != '0'); }
+   if (!cp) return (uint32_t)(int32_t)-50;                  /* paramErr */
+   memset(cp + 4, 0, 16);                                   /* RULE A; keep recordSize */
+   memcpy(cp + 4, &format, 4);
+   memcpy(cp + 8, &id, 2);
+   if (!enabled) return (uint32_t)(int32_t)-50;
+   const int pcm = format == 0x4E4F4E45u /*'NONE'*/ || format == 0x72617720u /*'raw '*/ ||
+                   format == 0x74776F73u /*'twos'*/ || format == 0x736F7774u /*'sowt'*/ ||
+                   (format == 0 && (id == 0 /*notCompressed*/ || id == -1 /*fixedCompression*/));
+   if (!pcm || channels <= 0 || bits <= 0) {
+      GAP_STUB(args);
+      return (uint32_t)(int32_t)-223;                       /* siInvalidCompression */
+   }
+   const uint16_t spp = 1, bps = (uint16_t)((bits + 7) / 8);
+   const uint16_t bpp = bps, bpf = (uint16_t)(bps * channels);
+   memcpy(cp + 10, &spp, 2); memcpy(cp + 12, &bpp, 2);
+   memcpy(cp + 14, &bpf, 2); memcpy(cp + 16, &bps, 2);
+   return SND_NO_ERR;
+}
 
 // SndNewChannel(SndChannelPtr *chan, short synth, SInt32 init, SndCallBackUPP cb)
 uint32_t shim_SndNewChannel(uint32_t *args) {

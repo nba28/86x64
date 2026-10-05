@@ -104,6 +104,55 @@ static void *ir_self_handle(void) {
    return h;
 }
 
+/* Does libabiconv itself import `name` (nlist spelling)? An abigen bridge does:
+ * it marshals and then calls the native. A hand shim implementing a removed API
+ * does not. Linear scan of libabiconv's undefined symbols; only reached for the
+ * few names whose native is already gone (ir_dead_bridge checks that first). */
+static int ir_self_imports(const char *name) {
+   Dl_info di;
+   if (!dladdr((void *)(uintptr_t)&ir_self_imports, &di) || di.dli_fbase == NULL) { return 0; }
+   const struct mach_header_64 *mh = (const struct mach_header_64 *)di.dli_fbase;
+   const struct segment_command_64 *text = NULL, *le = NULL;
+   const struct symtab_command *st = NULL;
+   const struct dysymtab_command *dst = NULL;
+   const uint8_t *p = (const uint8_t *)(mh + 1);
+   for (uint32_t i = 0; i < mh->ncmds; i++) {
+      const struct load_command *lc = (const struct load_command *)p;
+      if (lc->cmd == LC_SEGMENT_64) {
+         const struct segment_command_64 *seg = (const struct segment_command_64 *)p;
+         if (strcmp(seg->segname, "__TEXT") == 0) { text = seg; }
+         else if (strcmp(seg->segname, "__LINKEDIT") == 0) { le = seg; }
+      } else if (lc->cmd == LC_SYMTAB) { st = (const struct symtab_command *)p; }
+      else if (lc->cmd == LC_DYSYMTAB) { dst = (const struct dysymtab_command *)p; }
+      p += lc->cmdsize;
+   }
+   if (!text || !le || !st || !dst) { return 0; }
+   const intptr_t slide = (intptr_t)(uintptr_t)mh - (intptr_t)text->vmaddr;
+   const uint8_t *lebase = (const uint8_t *)(uintptr_t)(le->vmaddr + slide - le->fileoff);
+   const struct nlist_64 *syms = (const struct nlist_64 *)(lebase + st->symoff);
+   const char *strs = (const char *)(lebase + st->stroff);
+   for (uint32_t i = dst->iundefsym; i < dst->iundefsym + dst->nundefsym && i < st->nsyms; i++) {
+      const uint32_t x = syms[i].n_un.n_strx;
+      if (x != 0 && x < st->strsize && strcmp(strs + x, name) == 0) { return 1; }
+   }
+   return 0;
+}
+
+/* A libabiconv `__`+name that can only jump to NULL: an abigen bridge (libabiconv
+ * imports the native) whose native no longer resolves -- the runtime twin of the
+ * build-time libabiconv.nulljump list static-interpose honors (the sidecar is
+ * never shipped in a bundle). Wiring a weak-NULL slot to one replaced the loud
+ * `missing` gap with a crash: Call of Duty 4 NewControlKeyFilterUPP, rip=0.
+ * Kill M64_NO_IR_DEAD_BRIDGE; guard ir-dead-bridge. */
+static int ir_dead_bridge(const char *name) {
+   static int enabled = -1;
+   if (enabled < 0) { const char *e = getenv("M64_NO_IR_DEAD_BRIDGE"); enabled = !(e && *e && *e != '0'); }
+   if (!enabled) { return 0; }
+   const char *dl = (name[0] == '_') ? name + 1 : name;
+   if (dlsym(RTLD_DEFAULT, dl) != NULL) { return 0; }
+   return ir_self_imports(name);
+}
+
 /* Resolve an undefined import `name` (nlist spelling, leading '_') to the
  * address static-interpose would have bound: the libabiconv `__`+name
  * marshalling shim / data shadow first, else the native symbol. 0 = none. */
@@ -119,7 +168,7 @@ static uint64_t ir_resolve(const char *name) {
       void *self = ir_self_handle();
       if (self != NULL) {
          void *s = dlsym(self, buf);
-         if (s != NULL) { return (uint64_t)(uintptr_t)s; }
+         if (s != NULL && !ir_dead_bridge(name)) { return (uint64_t)(uintptr_t)s; }
       }
    }
    /* native fallback — the pipeline's own semantics for shimless imports */
@@ -143,6 +192,7 @@ static uint64_t ir_resolve_shim_only(const char *name) {
    void *self = ir_self_handle();
    if (self == NULL) { return 0; }
    void *s = dlsym(self, buf);
+   if (s != NULL && ir_dead_bridge(name)) { return 0; }
    return (uint64_t)(uintptr_t)s;
 }
 

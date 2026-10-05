@@ -91,6 +91,7 @@
  * 246/246 images.
  */
 #include "dyld_image_list.h"
+#include "gap.h"
 
 #include <string.h>
 #include <mach/mach.h>
@@ -253,6 +254,36 @@ int x64_img_is_translated(const void *base) {
          }
       }
       lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
+   }
+   return 0;
+}
+
+/* const struct segment_command *getsegbyname(const char *segname);
+ * Looks the name up in the main executable's segments. i386 callers bound it raw
+ * (no prototype in the modern SDK), so the native 8-byte `ret` popped the i386
+ * return address into garbage. Call of Duty 4 probes `__BOOKKEEPING`, a segment
+ * it does not have: the original answer is NULL and its optional hook stays off.
+ * The i386 executable's segments survive by name in its translated image, so
+ * "absent" is exact. A PRESENT segment would need a synthesized 32-bit
+ * segment_command (unslid i386 vmaddr): loud gap until a target reaches it.
+ * No kill switch: the defect was the raw translate-time bind itself, so the guard
+ * (getsegbyname-absent) asserts the bind and the NULL answer. */
+uint32_t shim_getsegbyname(uint32_t *args) {
+   const char *name = (const char *)(uintptr_t)args[0];
+   if (!name) return 0;
+   const uint32_t n = x64_img_count();
+   for (uint32_t i = 0; i < n; ++i) {
+      const struct mach_header_64 *mh = (const struct mach_header_64 *)x64_img_header(i);
+      if (!x64_img_is_translated(mh)) continue;
+      const struct load_command *lc = (const struct load_command *)(mh + 1);
+      for (uint32_t c = 0; c < mh->ncmds; c++) {
+         if (lc->cmd == LC_SEGMENT_64 &&
+             strncmp(((const struct segment_command_64 *)lc)->segname, name, 16) == 0) {
+            GAP_STUB(args);
+            return 0;
+         }
+         lc = (const struct load_command *)((const char *)lc + lc->cmdsize);
+      }
    }
    return 0;
 }

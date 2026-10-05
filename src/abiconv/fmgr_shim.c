@@ -27,6 +27,11 @@
 #include <sys/stat.h>
 #include <unistd.h>
 #include "gap.h"
+#include "carbon_fsspec.h"   /* cfs_fsspec_to_path, cfs_dirid_for_path */
+#include <dirent.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <stdlib.h>
 
 #define PTR(n) ((void *)(uintptr_t)args[(n)])
 
@@ -341,18 +346,94 @@ uint32_t shim_PBHGetVolParmsSync(uint32_t *args) {
 }
 
 // PBGetCatInfoSync — the classic catalog-info workhorse (CInfoPBRec: union of
-// HFileInfo/DirInfo, addressed by vRefNum/dirID/name). A REAL implementation
-// needs the classic volume model (vRefNum/dirID -> path registry) that this
-// runtime does not maintain (the FSSpec shims above return fnfErr for the same
-// reason). Per the no-silent-corruption rule: report file-not-found, never a
-// fake noErr over an unfilled record. ⚠FOLLOW-UP: if a runtime wall proves a
-// target loads assets through this path, back it with a synthetic dirID->fd
-// table + stat() (same follow-up as FSpOpenDF above).
+// HFileInfo/DirInfo, addressed by vRefNum/dirID/name), resolved through the same
+// (vRefNum, dirID) -> path mapping as the FSSpec calls (carbon_fsspec_shim.c), so a
+// dirID one of them handed out round-trips. Call of Duty 4 finds its data folder with
+// it: ioFDirIndex -1 on Contents/MacOS for ioDrParID, then the folder by name for
+// ioFlAttrib's directory bit; the old always-fnfErr stub showed "could not locate the
+// Call of Duty 4 Data folder". Indexed enumeration (ioFDirIndex > 0) is not reached by
+// any target yet: loud gap. Kill M64_NO_PBGETCATINFO (the old fnfErr).
+//
+// i386 CInfoPBRec (pack 2, 108 bytes): ioResult 16, ioNamePtr 18, ioVRefNum 22,
+// ioFDirIndex 28, ioFlAttrib 30, Finder info 32..47, ioDirID/ioDrDirID 48,
+// ioFlLgLen 54 | ioDrNmFls 52, ioFlPyLen 58, ioFlCrDat/ioDrCrDat 72,
+// ioFlMdDat/ioDrMdDat 76, ioFlParID/ioDrParID 100.
+#define CIPB_SIZE   108
+#define HFS_EPOCH   2082844800u     /* 1904-01-01 -> 1970-01-01, seconds */
+static void put32(uint8_t *pb, int off, uint32_t v) { memcpy(pb + off, &v, 4); }
 uint32_t shim_PBGetCatInfoSync(uint32_t *args) {
     uint8_t *pb = (uint8_t *)PTR(0);
+    static int enabled = -1;
     if (!pb) return (uint32_t)FM_PARAM_ERR;
-    PB_IORESULT(pb) = (int16_t)FM_FNF_ERR;
-    return (uint32_t)FM_FNF_ERR;
+    if (enabled < 0) { const char *e = getenv("M64_NO_PBGETCATINFO"); enabled = !(e && *e && *e != '0'); }
+    if (!enabled) { PB_IORESULT(pb) = (int16_t)FM_FNF_ERR; return (uint32_t)FM_FNF_ERR; }
+
+    int16_t vref, index; int32_t dirID; uint32_t name32;
+    memcpy(&vref, pb + 22, 2); memcpy(&index, pb + 28, 2);
+    memcpy(&dirID, pb + 48, 4); memcpy(&name32, pb + 18, 4);
+    uint8_t *name = (uint8_t *)(uintptr_t)name32;
+    if (index > 0) {                      // the Nth entry of a directory
+        GAP_STUB(args);
+        PB_IORESULT(pb) = (int16_t)FM_FNF_ERR;
+        return (uint32_t)FM_FNF_ERR;
+    }
+
+    uint8_t spec[70];
+    char path[2048], real[1024];
+    int exists = 0;
+    struct stat st;
+    memset(spec, 0, sizeof spec);
+    memcpy(spec, &vref, 2); memcpy(spec + 2, &dirID, 4);
+    if (index == 0 && name && name[0]) {
+        uint8_t n = name[0] > 63 ? 63 : name[0];
+        spec[6] = n; memcpy(spec + 7, name + 1, n);
+    }
+    // a /.vol/<dev>/<ino> path has no meaningful parent: canonicalize first
+    int fd = -1;
+    if (!cfs_fsspec_to_path(spec, path, sizeof path, &exists) || !exists ||
+        (fd = open(path, O_RDONLY)) < 0 || fcntl(fd, F_GETPATH, real) < 0 || fstat(fd, &st) != 0) {
+        if (fd >= 0) close(fd);
+        PB_IORESULT(pb) = (int16_t)FM_FNF_ERR;
+        return (uint32_t)FM_FNF_ERR;
+    }
+    close(fd);
+
+    char parent[1024];
+    snprintf(parent, sizeof parent, "%s", real);
+    char *slash = strrchr(parent, '/');
+    if (slash == parent) slash[1] = '\0'; else if (slash) *slash = '\0';
+    const int isdir = S_ISDIR(st.st_mode);
+
+    memset(pb + 30, 0, CIPB_SIZE - 30);
+    if (index < 0 && name) {              // ioNamePtr is an OUTPUT here: the dir's own name
+        const char *leaf = strrchr(real, '/');
+        leaf = (leaf && leaf[1]) ? leaf + 1 : real;
+        size_t n = strlen(leaf) > 31 ? 31 : strlen(leaf);
+        name[0] = (uint8_t)n;
+        for (size_t k = 0; k < n; k++) name[1 + k] = (uint8_t)(leaf[k] == ':' ? '/' : leaf[k]);
+    }
+    if (isdir) {
+        pb[30] = 0x10;                    // ioFlAttrib: kioFlAttribDirMask
+        put32(pb, 48, (uint32_t)cfs_dirid_for_path(vref, real));
+        uint16_t nfiles = 0;
+        DIR *d = opendir(real);
+        if (d) {
+            struct dirent *e;
+            while ((e = readdir(d)) != NULL)
+                if (strcmp(e->d_name, ".") && strcmp(e->d_name, "..") && nfiles < 0xFFFF) nfiles++;
+            closedir(d);
+        }
+        memcpy(pb + 52, &nfiles, 2);
+    } else {
+        put32(pb, 48, st.st_ino <= 0x7FFFFFFFULL ? (uint32_t)st.st_ino : 0);
+        put32(pb, 54, (uint32_t)st.st_size);
+        put32(pb, 58, (uint32_t)(st.st_blocks * 512));
+    }
+    put32(pb, 72, (uint32_t)(st.st_birthtimespec.tv_sec + HFS_EPOCH));
+    put32(pb, 76, (uint32_t)(st.st_mtimespec.tv_sec + HFS_EPOCH));
+    put32(pb, 100, (uint32_t)cfs_dirid_for_path(vref, parent));
+    PB_IORESULT(pb) = (int16_t)FM_NO_ERR;
+    return (uint32_t)FM_NO_ERR;
 }
 
 // PBHCopyFileSync / PBHGetDirAccessSync — AFP-server-only operations (bulk

@@ -109,7 +109,7 @@ int main(void) {
 }
 EOF
 
-cc -arch x86_64 -o "$TMP/t" "$TMP/t.c" "$SRC" "$PROJ_ROOT/src/abiconv/gap.c" "$PROJ_ROOT/src/abiconv/dyld_image_list.c" "$PROJ_ROOT/build/src/abiconv/CMakeFiles/abiconv.dir/gap_tramp.asm.o" -Wl,-pagezero_size,0x1000 \
+cc -arch x86_64 -o "$TMP/t" "$TMP/t.c" "$SRC" "$PROJ_ROOT/src/abiconv/carbon_fsspec_shim.c" "$PROJ_ROOT/src/abiconv/gap.c" "$PROJ_ROOT/src/abiconv/dyld_image_list.c" "$PROJ_ROOT/build/src/abiconv/CMakeFiles/abiconv.dir/gap_tramp.asm.o" -Wl,-pagezero_size,0x1000 \
    2> "$TMP/cc.log" \
    || { echo "FAIL fmgr-vinfo (cc error)"; sed 's/^/    /' "$TMP/cc.log" | head -10; exit 1; }
 

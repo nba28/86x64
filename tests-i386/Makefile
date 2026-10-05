@@ -91,7 +91,7 @@ CPP_TESTS  := $(filter-out 99_libstdcxx_redirect,$(notdir $(basename $(CPP_SRCS)
 # uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
 # for transform-only experiments but not linked into the pipeline path.
 
-.PHONY: check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept disp-reloc-accept imm-reloc-accept call-abs-pagezero pic-anchor-call-adopt entry-pad-fallthrough export-trie-deep export-zerofill jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap sib-rbp-index-wrap abs-base-neg-wrap ebp-gpr-narrow jt-case-in-func jt-back-edge-join pic-anchor-noreturn-join pic-anchor-local-noreturn pic-anchor-orphan-block pic-anchor-unreached-pad atsu-arrays sigaction-wrap printf-length-mods cfstr-image-gate sscanf-many-args wide-printf jt-slot-snap-epilogue text-rebase-disp dir-handle scandir-sort super-hint-native pthread-create-suspended aq-mirror jt-scaled-index-not-base steam-bridge lazy-self-def standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-cb-fifo snd-status-layout jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn libstdcxx-redirect uidl-resolves agl-oversize-window
+.PHONY: check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry prologue-sched-decode cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept disp-reloc-accept imm-reloc-accept call-abs-pagezero pic-anchor-call-adopt entry-pad-fallthrough export-trie-deep export-zerofill jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap sib-rbp-index-wrap abs-base-neg-wrap ebp-gpr-narrow jt-case-in-func jt-back-edge-join pic-anchor-noreturn-join pic-anchor-local-noreturn pic-anchor-orphan-block pic-anchor-unreached-pad pic-anchor-orphan-revert atsu-arrays sigaction-wrap printf-length-mods cfstr-image-gate sscanf-many-args wide-printf jt-slot-snap-epilogue text-rebase-disp dir-handle scandir-sort super-hint-native pthread-create-suspended aq-mirror jt-scaled-index-not-base steam-bridge lazy-self-def standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk classic-dirid-chain nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-cb-fifo snd-status-layout snd-compression-info getsegbyname-absent get-window-resize-limits ir-dead-bridge cb-userdata-roundtrip jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn libstdcxx-redirect uidl-resolves agl-oversize-window
 all: run-only
 
 # check: every suite + every guard target, each under a deadline; exit 1 on any failure.
@@ -691,6 +691,16 @@ pic-anchor-unreached-pad: $(BUILD_DIR)/99_pic_anchor_unreached_pad.i386
 	[ $$r_on = 42 ] && [ $$r_M64_NO_PIC_ORPHAN_BACK_ONLY != 42 ] && [ $$r_M64_NO_PIC_UNREACHED_ONCE != 42 ] && \
 	  echo "pic-anchor-unreached-pad: PASS (on=$$r_on back_only_off=$$r_M64_NO_PIC_ORPHAN_BACK_ONLY once_off=$$r_M64_NO_PIC_UNREACHED_ONCE)" || \
 	  { echo "pic-anchor-unreached-pad: FAIL (on=$$r_on back_only_off=$$r_M64_NO_PIC_ORPHAN_BACK_ONLY once_off=$$r_M64_NO_PIC_UNREACHED_ONCE)"; exit 1; }
+# pic-anchor-orphan-revert: pass 1 reverts an orphan block's stale rewrites (section.cc;
+# Portal 2 client CHudCloseCaption::Process caption crash). ON exits 42;
+# OFF = M64_NO_PIC_ORPHAN_REVERT=1 at translate time.
+pic-anchor-orphan-revert: $(BUILD_DIR)/99_pic_anchor_orphan_revert.i386
+	@for arm in on off; do \
+	  e=""; [ $$arm = off ] && e="M64_NO_PIC_ORPHAN_REVERT=1"; \
+	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_pic_anchor_orphan_revert.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_pic_anchor_orphan_revert.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "pic-anchor-orphan-revert: PASS (on=$$r_on off=$$r_off)" || { echo "pic-anchor-orphan-revert: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
 # atsu-arrays: guard for libabiconv's own ATSUI subset on CoreText (atsu_shim.c;
 # Portal 2 vgui fonts). ON: the fixture styles, lays out, measures and DRAWS
 # text, exit 42. There is no run-time OFF arm: the old behaviour is native
@@ -1007,6 +1017,17 @@ prologue-sched-entry: $(BUILD_DIR)/99_prologue_sched_entry.i386
 	    -o $(BUILD_DIR)/99_prologue_sched_entry.$$arm $< >/dev/null 2>&1; \
 	  $(BUILD_DIR)/99_prologue_sched_entry.$$arm; echo "$$arm=$$?"; \
 	done 2>/dev/null | tr '\n' ' ' | grep -q "on=42 off=1[0-9][0-9]" && echo "prologue-sched-entry: PASS" || { echo "prologue-sched-entry: FAIL"; exit 1; }
+# prologue-sched-decode: A/B guard that entry evidence DECODES past a frame setup
+# with more than 12 bytes scheduled into it (parse.cc; Call of Duty 4's static
+# destructor handed to __cxa_atexit stayed raw). ON exits 42; OFF =
+# M64_NO_PROLOGUE_DECODE=1 at translate time.
+prologue-sched-decode: $(BUILD_DIR)/99_prologue_sched_decode.i386
+	@for arm in on off; do \
+	  e=""; [ $$arm = off ] && e="M64_NO_PROLOGUE_DECODE=1"; \
+	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_prologue_sched_decode.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_prologue_sched_decode.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "prologue-sched-decode: PASS (on=$$r_on off=$$r_off)" || { echo "prologue-sched-decode: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
 # cstring-tailmerge-ptr: A/B guard that a string-pointer table entry aimed at
 # a tail-merged cstring INTERIOR is relocated (PvZ build-info pointer). ON
 # exits 0; OFF (M64_NO_CSTR_NEIGHBOUR=1 at translate time) exits 8.
@@ -1127,6 +1148,54 @@ carbon-datetime: $(BUILD_DIR)/99_carbon_datetime.x86_64
 # come back carrying its own file's size.
 fscatinfo-bulk: $(BUILD_DIR)/99_fscatinfo_bulk.x86_64
 	@bash fscatinfo_bulk_test.sh
+# classic-dirid-chain: A/B guard for the classic (vRefNum, dirID) contract
+# (Call of Duty 4 "could not locate the Data folder"): FSGetCatalogInfo hands out
+# dirIDs the FSSpec calls resolve (carbon_fscatinfo_shim.c) and PBGetCatInfoSync
+# resolves them (fmgr_shim.c). ON exits 42; each kill switch (run time) must break it.
+classic-dirid-chain: $(BUILD_DIR)/99_classic_dirid_chain.x86_64
+	@$(RUN_FIXTURE) $< >/dev/null 2>&1; on=$$?; \
+	M64_NO_FSCAT_REAL_DIRID=1 $(RUN_FIXTURE) $< >/dev/null 2>&1; o1=$$?; \
+	M64_NO_PBGETCATINFO=1 $(RUN_FIXTURE) $< >/dev/null 2>&1; o2=$$?; \
+	[ $$on = 42 ] && [ $$o1 != 42 ] && [ $$o2 != 42 ] && echo "classic-dirid-chain: PASS (on=$$on fscat_off=$$o1 pbcat_off=$$o2)" || { echo "classic-dirid-chain: FAIL (on=$$on fscat_off=$$o1 pbcat_off=$$o2)"; exit 1; }
+# snd-compression-info: A/B guard for the Sound Manager's GetCompressionInfo
+# (sndmgr_shim.c; Call of Duty 4 called NULL through the abigen bridge at startup).
+# ON exits 42; OFF = M64_NO_SND_COMPINFO=1 at run time.
+snd-compression-info: $(BUILD_DIR)/99_snd_compression_info.x86_64
+	@$(RUN_FIXTURE) $< >/dev/null 2>&1; on=$$?; \
+	M64_NO_SND_COMPINFO=1 $(RUN_FIXTURE) $< >/dev/null 2>&1; off=$$?; \
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "snd-compression-info: PASS (on=$$on off=$$off)" || { echo "snd-compression-info: FAIL (on=$$on off=$$off)"; exit 1; }
+# getsegbyname-absent: guard for getsegbyname (dyld_image_list.c; Call of Duty 4
+# `__BOOKKEEPING` bound raw to libSystem and returned into garbage). Asserts the
+# translated fixture binds libabiconv's ___getsegbyname (the defect WAS the raw
+# bind, so a run-time switch cannot reproduce it) and that the i386 caller gets
+# NULL back (exit 42).
+getsegbyname-absent: $(BUILD_DIR)/99_getsegbyname_absent.x86_64
+	@$(RUN_FIXTURE) $< >/dev/null 2>&1; on=$$?; \
+	b=$$(dyld_info -fixups $<.dylib | grep -c 'libabiconv/___getsegbyname'); \
+	r=$$(dyld_info -fixups $<.dylib | grep -c 'libSystem.*/_getsegbyname'); \
+	[ $$on = 42 ] && [ $$b -ge 1 ] && [ $$r = 0 ] && echo "getsegbyname-absent: PASS (rc=$$on shim_binds=$$b raw_binds=$$r)" || { echo "getsegbyname-absent: FAIL (rc=$$on shim_binds=$$b raw_binds=$$r)"; exit 1; }
+# get-window-resize-limits: A/B guard for GetWindowResizeLimits (carbon_window_shim.c;
+# 32-bit only, the bridge called NULL in Call of Duty 4's setup dialog). ON exits 42;
+# OFF = M64_NO_GETWINRESIZE=1 at run time (the native-NULL forward).
+get-window-resize-limits: $(BUILD_DIR)/99_get_window_resize_limits.x86_64
+	@$(RUN_FIXTURE) $< >/dev/null 2>&1; on=$$?; \
+	M64_NO_GETWINRESIZE=1 $(RUN_FIXTURE) $< >/dev/null 2>&1; off=$$?; \
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "get-window-resize-limits: PASS (on=$$on off=$$off)" || { echo "get-window-resize-limits: FAIL (on=$$on off=$$off)"; exit 1; }
+# ir-dead-bridge: A/B guard that import_repair leaves a weak-NULL slot unwired when
+# libabiconv's bridge for it can only jump to NULL (import_repair.c ir_dead_bridge;
+# Call of Duty 4 NewControlKeyFilterUPP). ON exits 42 (loud `missing` gap, returns 0);
+# OFF = M64_NO_IR_DEAD_BRIDGE=1 at run time (wired to the bridge -> NULL call).
+ir-dead-bridge: $(BUILD_DIR)/99_ir_dead_bridge.x86_64
+	@$(RUN_FIXTURE) $< >/dev/null 2>&1; on=$$?; \
+	M64_NO_IR_DEAD_BRIDGE=1 $(RUN_FIXTURE) $< >/dev/null 2>&1; off=$$?; \
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "ir-dead-bridge: PASS (on=$$on off=$$off)" || { echo "ir-dead-bridge: FAIL (on=$$on off=$$off)"; exit 1; }
+# cb-userdata-roundtrip: A/B guard that a callback's opaque pointer comes back as
+# the i386 value the app registered (cb_bridge.c CBA_PTR re-wrap; Call of Duty 4's
+# modal dialog quit a truncated WindowRef). ON exits 42; OFF = M64_NO_CB_PTR_WRAP=1.
+cb-userdata-roundtrip: $(BUILD_DIR)/99_cb_userdata_roundtrip.x86_64
+	@$(RUN_FIXTURE) $< >/dev/null 2>&1; on=$$?; \
+	M64_NO_CB_PTR_WRAP=1 $(RUN_FIXTURE) $< >/dev/null 2>&1; off=$$?; \
+	[ $$on = 42 ] && [ $$off != 42 ] && echo "cb-userdata-roundtrip: PASS (on=$$on off=$$off)" || { echo "cb-userdata-roundtrip: FAIL (on=$$on off=$$off)"; exit 1; }
 # csmem-handle: A/B guard for CarbonCore's CSMem* Memory Manager twins. A classic
 # Handle is Ptr* (4 bytes on i386); the CSMem spelling is what CarbonCore and the
 # classic QuickTime.framework call internally, and it was never shimmed, so it
@@ -2138,6 +2207,9 @@ $(BUILD_DIR)/99_code_alias_imm_falsereloc.i386: $(SRC_DIR)/99_code_alias_imm_fal
 $(BUILD_DIR)/99_prologue_sched_entry.i386: $(BUILD_DIR)/99_prologue_sched_entry.o
 	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
 	strip -x $@
+$(BUILD_DIR)/99_prologue_sched_decode.i386: $(BUILD_DIR)/99_prologue_sched_decode.o
+	$(LD) $(LDFLAGS_I386) -e _main -o $@ $<
+	strip -x $@
 
 # 99_cstring_tailmerge_ptr: same stripped, fixed-address shape as
 # 99_cstring_interior_alias. Overrides %.i386.
@@ -2484,6 +2556,27 @@ $(BUILD_DIR)/99_carbon_datetime.i386: $(BUILD_DIR)/99_carbon_datetime.o
 # tramp.asm for the FSCatalogInfo family, abigen for FSPathMakeRef /
 # FSOpenIterator / FSCloseIterator). Overrides %.i386.
 $(BUILD_DIR)/99_fscatinfo_bulk.i386: $(BUILD_DIR)/99_fscatinfo_bulk.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_cb_userdata_roundtrip: Carbon/CF are not in the i386 sysroot.
+$(BUILD_DIR)/99_cb_userdata_roundtrip.i386: $(BUILD_DIR)/99_cb_userdata_roundtrip.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_ir_dead_bridge: HIToolbox is not in the i386 sysroot.
+$(BUILD_DIR)/99_ir_dead_bridge.i386: $(BUILD_DIR)/99_ir_dead_bridge.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_get_window_resize_limits: Carbon is not in the i386 sysroot.
+$(BUILD_DIR)/99_get_window_resize_limits.i386: $(BUILD_DIR)/99_get_window_resize_limits.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_snd_compression_info: CarbonSound is not in the i386 sysroot.
+$(BUILD_DIR)/99_snd_compression_info.i386: $(BUILD_DIR)/99_snd_compression_info.o
+	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
+
+# 99_classic_dirid_chain: CoreServices is not in the i386 sysroot; the File
+# Manager calls bind to libabiconv at translate time.
+$(BUILD_DIR)/99_classic_dirid_chain.i386: $(BUILD_DIR)/99_classic_dirid_chain.o
 	$(LD) $(LDFLAGS_I386) -undefined dynamic_lookup -e _main -o $@ $<
 
 # 99_csmem_handle_family: the whole CSMem* family is undefined dynamic_lookup --

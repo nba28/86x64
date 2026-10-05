@@ -77,6 +77,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <dlfcn.h>
+#include "gap.h"
 
 // Classic Rect: 4 packed SInt16, identical in the i386 and x86_64 ABIs, so the
 // caller's low-4GB pointer is handed to native verbatim.
@@ -135,4 +136,26 @@ uint32_t shim_CreateNewWindow(uint32_t *a)
       *out = (r >> 32) ? x64_objc_wrap(r) : (uint32_t)r;
    }
    return (uint32_t)st;
+}
+
+// OSStatus GetWindowResizeLimits(WindowRef, HISize *outMinLimits, HISize *outMaxLimits)
+// 32-bit only: 64-bit HIToolbox still exports SetWindowResizeLimits but no getter,
+// so the abigen bridge called NULL (Call of Duty 4's setup dialog reads the nib's
+// limits to pin a fixed-width window). The limits a nib sets live inside HIToolbox
+// where no surviving API reads them back, so the honest answer is unimpErr with both
+// i386 HISizes (2 floats each) defined; callers of this era treat an error as "leave
+// the limits alone". Kill M64_NO_GETWINRESIZE (the old native-NULL forward); guard
+// get-window-resize-limits.
+uint32_t shim_GetWindowResizeLimits(uint32_t *a)
+{
+   float *mn = (float *)(uintptr_t)a[1], *mx = (float *)(uintptr_t)a[2];
+   if (getenv("M64_NO_GETWINRESIZE")) {
+      int32_t (*n)(void *, void *, void *) =
+         (int32_t (*)(void *, void *, void *))dlsym(RTLD_DEFAULT, "GetWindowResizeLimits");
+      return (uint32_t)n((void *)(uintptr_t)a[0], mn, mx);   /* NULL on 64-bit: the old crash */
+   }
+   if (mn) { mn[0] = 0; mn[1] = 0; }
+   if (mx) { mx[0] = 0; mx[1] = 0; }
+   GAP_STUB(a);
+   return (uint32_t)(int32_t)-4;   /* unimpErr */
 }

@@ -91,6 +91,8 @@
 #include <CoreServices/CoreServices.h>
 
 #include "carbon_shim.h"      /* i386_ptr() */
+#include "carbon_fsspec.h"     /* cfs_dirid_for_path() */
+#include <sys/stat.h>
 
 /* Proxy arena (objc_shim.c): a native pointer that lives above 4GB cannot be
  * handed to i386 code raw, so it travels as a 32-bit arena handle.
@@ -131,6 +133,40 @@ static int fscatinfo_enabled(void)
    static int c = -1;
    if (c < 0) { const char *e = getenv("M64_NO_FSCATINFO"); c = !(e && *e && *e != '0'); }
    return c;
+}
+
+/* Modern CarbonCore answers parentDirID/nodeID with small sequential tokens out
+ * of a private table (Call of Duty 4's app folder came back as dirID 4, inode
+ * 75392976). An app hands them to the removed FSSpec calls (FSMakeFSSpec,
+ * PBGetCatInfoSync), which resolve real node ids, and finds nothing: "could not
+ * locate the Call of Duty 4 Data folder". Hand out the ids those consumers
+ * resolve, exactly as shim_FindFolder does. Kill M64_NO_FSCAT_REAL_DIRID;
+ * guard fscat-real-dirid. */
+static int fscat_real_dirid_enabled(void)
+{
+   static int c = -1;
+   if (c < 0) { const char *e = getenv("M64_NO_FSCAT_REAL_DIRID"); c = !(e && *e && *e != '0'); }
+   return c;
+}
+
+static void fsci_real_dirids(FSCatalogInfo *ci, const FSRef *ref, FSCatalogInfoBitmap which)
+{
+   FSCatalogInfo vol;
+   char path[1024];
+   struct stat st;
+   if (!(which & (kFSCatInfoParentDirID | kFSCatInfoNodeID)) || !fscat_real_dirid_enabled()) return;
+   if (FSGetCatalogInfo(ref, kFSCatInfoVolume, &vol, NULL, NULL, NULL) != noErr) return;
+   if (FSRefMakePath(ref, (UInt8 *)path, sizeof path) != noErr || strcmp(path, "/") == 0) return;
+   if ((which & kFSCatInfoNodeID) && stat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+      int32_t id = cfs_dirid_for_path(vol.volume, path);
+      if (id) ci->nodeID = (UInt32)id;
+   }
+   if (which & kFSCatInfoParentDirID) {
+      char *slash = strrchr(path, '/');
+      if (slash == path) slash[1] = '\0'; else if (slash) *slash = '\0';
+      int32_t id = slash ? cfs_dirid_for_path(vol.volume, path) : 0;
+      if (id) ci->parentDirID = (UInt32)id;
+   }
 }
 
 /* ── conversion ───────────────────────────────────────────────────────────── */
@@ -333,6 +369,7 @@ uint32_t shim_FSGetCatalogInfo(uint32_t *a)
                                 a[3] ? (HFSUniStr255 *)i386_ptr(a[3]) : NULL,
                                 a[4] ? (FSSpec *)i386_ptr(a[4]) : NULL,
                                 a[5] ? (FSRef *)i386_ptr(a[5]) : NULL);
+   if (ci32 && err == noErr) fsci_real_dirids(&ci, (const FSRef *)i386_ptr(a[0]), (FSCatalogInfoBitmap)a[1]);
    if (ci32) fsci_out(i386_ptr(ci32), &ci);
    return (uint32_t)(int32_t)err;
 }

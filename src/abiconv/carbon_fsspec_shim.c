@@ -302,6 +302,14 @@ int cfs_path_to_fsspec(const char *path, uint8_t *spec) {
     return 1;
 }
 
+CFS_HIDDEN int32_t cfs_dirid_for_path(int16_t vRefNum, const char *path) {
+    struct stat st;
+    if (stat(path, &st) != 0) { return 0; }
+    int32_t dirID = ((uint64_t)st.st_ino <= 0x7FFFFFFFULL) ? (int32_t)st.st_ino : g_dirtab_next++;
+    cfs_dirtab_remember(vRefNum, dirID, path);
+    return dirID;
+}
+
 // ── FindFolder: the PRODUCER half of the (vRefNum, dirID) contract ──────────────────────
 // Modern CarbonCore's FindFolder still exists, but returns a dirID that is a small sequential
 // token out of an internal table rather than a catalog node id, and every API that consumed
@@ -312,7 +320,6 @@ static int32_t cfs_find_folder(int16_t vRefNum, uint32_t folderType, uint8_t cre
                         int16_t *foundVRefNum, int32_t *foundDirID) {
     uint8_t ref[FSREF_SIZE];
     uint8_t path[1024];
-    struct stat st;
     int32_t e, dirID;
     int16_t outv;
 
@@ -334,7 +341,6 @@ static int32_t cfs_find_folder(int16_t vRefNum, uint32_t folderType, uint8_t cre
     if (p_FSRefMakePath(ref, path, (uint32_t)sizeof path) != 0 || path[0] == '\0') {
         return FM_FNF_ERR;
     }
-    if (stat((const char *)path, &st) != 0) { return FM_FNF_ERR; }
     // FSGetCatalogInfo's `volume` field sits at offset 2 of FSCatalogInfo.
     outv = vRefNum;
     if (p_FSGetCatalogInfo) {
@@ -345,8 +351,8 @@ static int32_t cfs_find_folder(int16_t vRefNum, uint32_t folderType, uint8_t cre
             memcpy(&outv, ci + 2, sizeof outv);
         }
     }
-    dirID = ((uint64_t)st.st_ino <= 0x7FFFFFFFULL) ? (int32_t)st.st_ino : g_dirtab_next++;
-    cfs_dirtab_remember(outv, dirID, (const char *)path);
+    dirID = cfs_dirid_for_path(outv, (const char *)path);
+    if (dirID == 0) { return FM_FNF_ERR; }
     *foundVRefNum = outv;
     *foundDirID = dirID;
     return FM_NO_ERR;

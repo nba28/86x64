@@ -89,6 +89,14 @@ static int cb_no_ptr_bounce(void) {
    return t;
 }
 
+/* Kill switch for the CBA_PTR round trip (A/B harness): restores the old
+ * truncation of a >4GB opaque callback pointer. */
+static int cb_no_ptr_wrap(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("M64_NO_CB_PTR_WRAP") != NULL; }
+   return t;
+}
+
 /* Zero-I/O crash breadcrumb ring. cb_dispatch records each invocation here with
  * plain stores (no fprintf/lock/syscall), so it does NOT perturb the thread
  * timing that the callback-return-to-0 race depends on. A crash handler
@@ -229,8 +237,18 @@ uint64_t x64_cb_dispatch(uint64_t slot, const uint64_t *gp, const uint64_t *fp,
          v = gpi < 6 ? gp[gpi++] : stk[sti++];
       }
       switch (kind) {
-      case CBA_I32:
       case CBA_PTR:
+         /* An opaque pointer (refcon / userData) above 4GB is an i386 handle the
+          * forward bridge unwrapped on the way in; truncating it handed the
+          * callback a different value than the app registered. Re-wrap it: the
+          * arena dedupes by real pointer, so the app gets its own handle back.
+          * Call of Duty 4 passes its WindowRef as an event handler's userData and
+          * quits the modal loop with it: QuitAppModalLoopForWindow(0xb27440) for
+          * the window 0x600000b27440, so OK/Quit never closed the dialog. Below
+          * 4GB unchanged. Kill M64_NO_CB_PTR_WRAP; guard cb-userdata-roundtrip. */
+         words[w++] = (v >= 0x100000000ULL && !cb_no_ptr_wrap()) ? x64_objc_wrap(v) : (uint32_t)v;
+         break;
+      case CBA_I32:
       case CBA_F32:                /* float bits = xmm/stack slot low 4 bytes */
          words[w++] = (uint32_t)v;
          break;

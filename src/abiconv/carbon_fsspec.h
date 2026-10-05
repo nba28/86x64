@@ -34,4 +34,11 @@ CFS_HIDDEN int cfs_fsspec_to_path(const uint8_t *spec, char *out, size_t outsz, 
  * cfs_fsspec_to_path even on a volume where the /.vol namespace is unavailable. */
 CFS_HIDDEN int cfs_path_to_fsspec(const char *path, uint8_t *spec);
 
+/* POSIX path -> classic dirID: the real catalog node id (inode) where it fits the
+ * classic SInt32, else a minted token; recorded either way so cfs_fsspec_to_path
+ * resolves it back. Modern CarbonCore's own dirIDs (FindFolder, FSGetCatalogInfo
+ * parentDirID/nodeID) are small sequential tokens no surviving API consumes, so
+ * every producer hands out these instead. 0 if the path cannot be stat'ed. */
+CFS_HIDDEN int32_t cfs_dirid_for_path(int16_t vRefNum, const char *path);
+
 #endif /* ABICONV_CARBON_FSSPEC_H */

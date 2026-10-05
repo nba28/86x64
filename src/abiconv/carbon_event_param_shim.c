@@ -7,7 +7,12 @@
 //   * references (WindowRef, ControlRef, MenuRef, EventRef, CF types, ...):
 //     4-byte handles on the i386 side, 8-byte pointers natively;
 //   * CGFloat geometry (HIPoint, HISize, HIRect, CGFloat): float vs double;
-//   * HICommand: it embeds a MenuRef (16 bytes i386, 24 native);
+//   * HICommand: it embeds a MenuRef (14 bytes i386 -- Carbon headers are
+//     pack(2), so no tail padding -- 24 native). It was taken as 16, so every
+//     sizeof(HICommand) caller got errDataSizeMismatch and its command handler
+//     bailed: Call of Duty 4's Key Code dialog and Halo's Graphics dialog
+//     highlighted OK/Quit and did nothing. Kill M64_NO_HICMD_PACK2 (the old 16);
+//     guard hicommand-pack2;
 //   * CFIndex: long.
 // The generic bridge passed the i386 buffer and size straight through, so a
 // WindowRef came back TRUNCATED to its low half. MEASURED (PvZ windowed,
@@ -18,6 +23,7 @@
 #include <Carbon/Carbon.h>
 #include <stdint.h>
 #include <string.h>
+#include <stdlib.h>
 
 extern uint32_t x64_objc_wrap(uint64_t real);           // objc_shim.c
 extern uint64_t _86x64_unwrap_obj_arg(uint32_t h);      // objc_shim.c: handle/CF const -> real
@@ -42,7 +48,7 @@ static int kind_of(EventParamType t)
    default:     return K_SAME;
    }
 }
-static const uint32_t i386_size[] = { 0, 4, 8, 8, 16, 4, 16, 4 };
+static uint32_t i386_size[] = { 0, 4, 8, 8, 16, 4, 14, 4 };
 static const uint32_t native_size[] = { 0, 8, 16, 16, 32, 8, 24, 8 };
 
 static uint32_t ref_out(uint64_t v) { return (v >> 32) ? x64_objc_wrap(v) : (uint32_t)v; }
@@ -64,7 +70,7 @@ static void to_i386(int k, const uint8_t *n, uint8_t *o)
    case K_CMD: {                       /* attributes, commandID, menuRef, index */
       uint64_t m; memcpy(o, n, 8); memcpy(&m, n + 8, 8);
       uint32_t mh = ref_out(m); memcpy(o + 8, &mh, 4);
-      memcpy(o + 12, n + 16, 2); memset(o + 14, 0, 2); break; }
+      memcpy(o + 12, n + 16, 2); break; }
    }
 }
 
@@ -95,8 +101,15 @@ static void to_native(int k, const uint8_t *o, uint8_t *n)
 /* OSStatus GetEventParameter(EventRef, EventParamName, EventParamType desired,
  *   EventParamType *outActualType, ByteCount bufferSize, ByteCount *outActualSize,
  *   void *outData)                                  (ByteCount = 4 bytes on i386) */
+static void hicmd_size_init(void)
+{
+   static int done;
+   if (!done) { done = 1; if (getenv("M64_NO_HICMD_PACK2")) i386_size[K_CMD] = 16; }
+}
+
 uint32_t shim_GetEventParameter(uint32_t *a)
 {
+   hicmd_size_init();
    EventRef e = (EventRef)(uintptr_t)_86x64_unwrap_obj_arg(a[0]);
    const EventParamName name = a[1];
    const EventParamType want = a[2];
@@ -126,6 +139,7 @@ uint32_t shim_GetEventParameter(uint32_t *a)
  *   ByteCount size, const void *data) */
 uint32_t shim_SetEventParameter(uint32_t *a)
 {
+   hicmd_size_init();
    EventRef e = (EventRef)(uintptr_t)_86x64_unwrap_obj_arg(a[0]);
    const EventParamType t = a[2];
    const void *data = I386PTR(a[4]);
