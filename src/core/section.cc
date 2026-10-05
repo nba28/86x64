@@ -4,6 +4,8 @@
 #include <sstream>
 #include <string>
 #include <iterator>
+#include <algorithm>
+#include <vector>
 #include <set>
 #include <map>
 #include <utility>
@@ -531,6 +533,36 @@ namespace MachO {
 
    static bool is_gpr32(xed_reg_enum_t r) { return r >= XED_REG_EAX && r <= XED_REG_EDI; }
 
+   /* Does the instruction read GPR32 `r` as a register operand? (Not as an
+    * address base/index: `leal 0x10c4c9(%esi),%esi` is an anchor's last use.) */
+   static bool reads_gpr32(const xed_decoded_inst_t& xedd, xed_reg_enum_t r) {
+      const xed_inst_t *xi = xed_decoded_inst_inst(&xedd);
+      for (unsigned i = 0; i < xed_inst_noperands(xi); ++i) {
+         const xed_operand_t *op = xed_inst_operand(xi, i);
+         const xed_operand_enum_t nm = xed_operand_name(op);
+         if (!xed_operand_read(op) || !xed_operand_is_register(nm)) continue;
+         const xed_reg_enum_t raw = xed_decoded_inst_get_reg(&xedd, nm);
+         if (raw != XED_REG_INVALID && xed_get_largest_enclosing_register32(raw) == r) { return true; }
+      }
+      return false;
+   }
+
+   /* Every GPR32 the instruction writes, sub-register writes included. */
+   template <typename F>
+   static void for_each_written_gpr32(const xed_decoded_inst_t& xedd, F f) {
+      const xed_inst_t *xi = xed_decoded_inst_inst(&xedd);
+      for (unsigned i = 0; i < xed_inst_noperands(xi); ++i) {
+         const xed_operand_t *op = xed_inst_operand(xi, i);
+         if (!xed_operand_written(op)) continue;
+         const xed_operand_enum_t nm = xed_operand_name(op);
+         if (!xed_operand_is_register(nm)) continue;
+         const xed_reg_enum_t raw = xed_decoded_inst_get_reg(&xedd, nm);
+         if (raw == XED_REG_INVALID) continue;
+         const xed_reg_enum_t r = xed_get_largest_enclosing_register32(raw);
+         if (is_gpr32(r)) { f(r); }
+      }
+   }
+
    /* A backward branch to `tgt` from `from` stays in its function: no function
     * symbol in (tgt, from], and `tgt` is not itself an entry (a jump there is a
     * tail call or a self-loop through the prologue). */
@@ -625,12 +657,19 @@ namespace MachO {
       static const bool back_edge = std::getenv("M64_NO_PIC_BACK_EDGE") == nullptr;
       std::map<std::size_t, AnchorMap> back_anchor_snap;
       std::map<std::size_t, SlotMap> back_slot_snap;
+      std::map<std::size_t, std::size_t> back_src_max;   /* target -> last source */
       int pass = 0;
       auto record_back = [&](std::size_t tgt, std::size_t from) {
          if (pass == 0 && back_edge && tgt >= sect.addr && from - tgt <= 0x10000 &&
              pic_same_function(env.func_syms, tgt, from)) {
             snapshot_for(back_anchor_snap, tgt, anchors);
             snapshot_for(back_slot_snap, tgt, anchor_slots);
+            std::size_t& m = back_src_max[tgt];
+            m = std::max(m, from);
+            if (trace) {
+               fprintf(stderr, "[anchor] back-edge 0x%zx <- 0x%zx regs=%zu slots=%zu\n",
+                       tgt, from, anchors.size(), anchor_slots.size());
+            }
          }
       };
       /* Targets of backward relative branches: the only places an ORPHAN block
@@ -654,6 +693,15 @@ namespace MachO {
             back_targets.insert(bi->loc.vmaddr + xed_decoded_inst_get_length(&bi->xedd) + bd);
          }
       }
+      /* Pass-0 rewrites made inside an ORPHAN, with the stale state left
+       * before its jmp: vmaddr -> (anchor reg, anchor). See the revert below. */
+      static const bool orphan_revert = std::getenv("M64_NO_PIC_ORPHAN_REVERT") == nullptr;
+      struct OrphanRewrite { xed_reg_enum_t reg; std::size_t anchor, top; };
+      std::unordered_map<std::size_t, OrphanRewrite> orphan_rewrites;
+      std::size_t orphan_top = 0;                  /* where the current orphan opened */
+      std::set<xed_reg_enum_t> orphan_written;     /* regs written since then */
+      /* (orphan top, reg) pairs the loop [top, last back-edge source] writes */
+      std::set<std::pair<std::size_t, xed_reg_enum_t>> loop_carried;
       for (; pass < 2; ++pass) {
          if (pass == 1) {
             if (!pic_any_nonempty(back_anchor_snap) && !pic_any_nonempty(back_slot_snap)) { break; }
@@ -661,6 +709,34 @@ namespace MachO {
             pending_forward_targets.clear();
             branch_anchor_snap.clear();
             branch_slot_snap.clear();
+            /* One linear scan for every candidate loop range (content is a list). */
+            std::map<std::size_t, std::set<xed_reg_enum_t>> want;   /* top -> regs */
+            for (const auto& kv : orphan_rewrites) { want[kv.second.top].insert(kv.second.reg); }
+            auto next = want.begin();
+            std::vector<std::pair<std::size_t, std::size_t>> active;   /* (top, end) */
+            for (SectionBlob<bits> *blob : content) {
+               if (next == want.end() && active.empty()) { break; }
+               const auto *ci = dynamic_cast<Instruction<bits> *>(blob);
+               if (!ci) { continue; }
+               const std::size_t vm = ci->loc.vmaddr;
+               for (; next != want.end() && next->first <= vm; ++next) {
+                  auto e = back_src_max.find(next->first);
+                  if (e != back_src_max.end()) { active.emplace_back(next->first, e->second); }
+               }
+               active.erase(std::remove_if(active.begin(), active.end(),
+                                           [&](const auto& a) { return vm > a.second; }),
+                            active.end());
+               for (const auto& a : active) {
+                  const auto& regs = want[a.first];
+                  /* a self-update (`addl $4,%ebx`), not a callee-saved restore,
+                   * a reload or a last-use lea (libsteam: the linear range of an
+                   * EH selector dispatch spans `popl %esi` and
+                   * `leal 0x10c4c9(%esi),%esi`) */
+                  for_each_written_gpr32(ci->xedd, [&](xed_reg_enum_t r) {
+                     if (regs.count(r) && reads_gpr32(ci->xedd, r)) { loop_carried.emplace(a.first, r); }
+                  });
+               }
+            }
          }
          Instruction<bits> *prev_inst = nullptr;
          /* category of the last non-nop instruction, and whether the linear
@@ -735,9 +811,18 @@ namespace MachO {
                }
                auto snap = branch_anchor_snap.find(inst->loc.vmaddr);
                if (orphan_gate && !env.func_syms.empty()) {
+                  const bool was_orphan = orphan;
                   orphan = no_fallthrough && snap == branch_anchor_snap.end() &&
                            prev_inst != nullptr && env.func_syms.count(inst->loc.vmaddr) == 0 &&
                            (orphan || !orphan_back_only || back_targets.count(inst->loc.vmaddr) != 0);
+                  if (orphan && !was_orphan) {
+                     orphan_top = inst->loc.vmaddr;
+                     orphan_written.clear();
+                  }
+                  if (trace && orphan && !was_orphan) {
+                     fprintf(stderr, "[anchor] orphan 0x%zx pass=%d regs=%zu\n",
+                             (size_t)inst->loc.vmaddr, pass, anchors.size());
+                  }
                }
                if (snap != branch_anchor_snap.end()) {
                   unreached = false;
@@ -747,6 +832,11 @@ namespace MachO {
                    * CClientState::SetSignonState, a switch case opening with a
                    * call lost the `je` edge carrying the %edi anchor). */
                   ft_dead = false;
+                  if (trace) {
+                     fprintf(stderr, "[anchor] join 0x%zx pass=%d %s snap-regs=%zu\n",
+                             (size_t)inst->loc.vmaddr, pass,
+                             no_fallthrough ? "adopt" : "intersect", snap->second.size());
+                  }
                   if (no_fallthrough) { anchors = snap->second; }
                   else {
                      intersect_into(anchors, snap->second);
@@ -813,6 +903,40 @@ namespace MachO {
              * may be the SIB base, or — at scale 1, the fields being symmetric —
              * the index (`lea 0xa4b0(%eax,%edi),%edx`; Portal 2 libsteam_api).
              * An anchored target overrides the parser's absolute-table guess. */
+            /* An orphan runs pass 0 on the stale state left before its jmp.
+             * Undo a pass-0 rewrite there when (1) its register came straight
+             * from that stale state, (2) the loop [orphan top, last back-edge
+             * source] updates the register from itself — an anchor is
+             * loop-invariant, a loop variable is not — and (3) the second walk's real entry
+             * state does not hold that anchor. The normal path below then
+             * redoes it from the real state if it still applies. Portal 2
+             * client CHudCloseCaption::Process: `xorl %ebx,%ebx` turns the
+             * anchor into a loop index; the loop body (reached only by a
+             * backward jae) still saw %ebx anchored and
+             * `movl %eax,-0xab74(%ebp,%ebx)` became a store into the image
+             * (SIGSEGV on a tagged caption). (3) alone is not enough: a
+             * back-edge snapshot can merely have LOST an invariant anchor
+             * (libsteam 0x499cd %esi; engine EH pad 0x16a9ad reloading it from
+             * a frame slot). Only reverts, and only where the second walk
+             * already runs. Kill M64_NO_PIC_ORPHAN_REVERT; guard
+             * 99_pic_anchor_orphan_revert. */
+            if (pass == 1 && !orphan) {
+               auto o = orphan_rewrites.find(inst->loc.vmaddr);
+               if (o != orphan_rewrites.end() &&
+                   loop_carried.count({o->second.top, o->second.reg}) != 0) {
+                  auto a = anchors.find(o->second.reg);
+                  if (a == anchors.end() || a->second != o->second.anchor) {
+                     if (trace) {
+                        fprintf(stderr, "[anchor] orphan-revert 0x%zx %s\n",
+                                (size_t)inst->loc.vmaddr, xed_reg_enum_t2str(o->second.reg));
+                     }
+                     inst->memdisp = nullptr;
+                     inst->memdisp_offset = 0;
+                     inst->pic_anchored = false;
+                     inst->pic_anchor_in_index = false;
+                  }
+               }
+            }
             if (!anchors.empty() && (inst->memdisp == nullptr || inst->memdisp_absolute)) {
                const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
                const unsigned nops = xed_decoded_inst_noperands(&xedd);
@@ -855,6 +979,10 @@ namespace MachO {
                   inst->pic_anchored = true;
                   inst->pic_anchor_in_index = anchor_is_index;
                   inst->memdisp_absolute = false;
+                  if (orphan_revert && orphan && pass == 0 &&
+                      orphan_written.count(anchor_reg) == 0) {   /* straight from the stale state */
+                     orphan_rewrites[inst->loc.vmaddr] = {anchor_reg, anchors[anchor_reg], orphan_top};
+                  }
                   /* an interior byte of opaque data binds to blob + offset (guard
                    * 97_pic_const_interior_field) */
                   if (env.vmaddr_in_writable_data(target) ||
@@ -939,17 +1067,12 @@ namespace MachO {
             /* Any other definition of a register ends its anchor — including
              * sub-register writes — except the pops described above. */
             if (!is_anchor_pop && cat != XED_CATEGORY_POP && !anchors.empty()) {
-               const xed_inst_t *xi = xed_decoded_inst_inst(&xedd);
-               for (unsigned i = 0; i < xed_inst_noperands(xi); ++i) {
-                  const xed_operand_t *op = xed_inst_operand(xi, i);
-                  if (!xed_operand_written(op)) continue;
-                  const xed_operand_enum_t nm = xed_operand_name(op);
-                  if (!xed_operand_is_register(nm)) continue;
-                  const xed_reg_enum_t raw = xed_decoded_inst_get_reg(&xedd, nm);
-                  if (raw == XED_REG_INVALID) continue;
-                  const xed_reg_enum_t r = xed_get_largest_enclosing_register32(raw);
-                  if (is_gpr32(r) && r != anchor_keep) { anchors.erase(r); }
-               }
+               for_each_written_gpr32(xedd, [&](xed_reg_enum_t r) {
+                  if (r != anchor_keep) { anchors.erase(r); }
+               });
+            }
+            if (orphan && pass == 0) {
+               for_each_written_gpr32(xedd, [&](xed_reg_enum_t r) { orphan_written.insert(r); });
             }
 
             /* `mov %src,%dst` copies the anchor (the kill above already cleared %dst). */

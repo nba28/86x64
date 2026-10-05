@@ -992,6 +992,44 @@ namespace MachO {
                if (img.template at<uint8_t>(k) == 0x89 &&
                    img.template at<uint8_t>(k + 1) == 0xe5) { return true; }
             }
+            /* The byte window misses longer schedules: Call of Duty 4's static
+             * destructor at 0x38570 is `push %ebp; mov 0x565dfc,%ecx; mov
+             * 0x565e00,%edx; mov %esp,%ebp` (the 89 e5 at +13), so the
+             * `movl $0x38570,(%esp)` handing it to __cxa_atexit stayed raw and
+             * exit jumped to the i386 address. DECODE up to four instructions
+             * after the push instead: a `mov %esp,%ebp` before anything that
+             * writes %esp/%ebp or transfers control. Additive to the byte rule.
+             * Kill M64_NO_PROLOGUE_DECODE; guard prologue-sched-decode. */
+            static const bool no_decode = std::getenv("M64_NO_PROLOGUE_DECODE") != nullptr;
+            if (!no_decode && bits == Bits::M32) {
+               std::size_t k = fo + 1;
+               for (int n = 0; n < 4 && k < img.size(); ++n) {
+                  xed_decoded_inst_t x;
+                  xed_decoded_inst_zero_set_mode(&x, &Instruction<Bits::M32>::dstate());
+                  const std::size_t avail = std::min<std::size_t>(15, img.size() - k);
+                  if (xed_decode(&x, &img.template at<uint8_t>(k), (unsigned) avail) != XED_ERROR_NONE) { break; }
+                  const xed_iform_enum_t f = xed_decoded_inst_get_iform_enum(&x);
+                  if ((f == XED_IFORM_MOV_GPRv_GPRv_89 || f == XED_IFORM_MOV_GPRv_GPRv_8B) &&
+                      xed_decoded_inst_get_reg(&x, XED_OPERAND_REG0) == XED_REG_EBP &&
+                      xed_decoded_inst_get_reg(&x, XED_OPERAND_REG1) == XED_REG_ESP) {
+                     return true;
+                  }
+                  const xed_category_enum_t c = xed_decoded_inst_get_category(&x);
+                  if (c == XED_CATEGORY_CALL || c == XED_CATEGORY_RET ||
+                      c == XED_CATEGORY_COND_BR || c == XED_CATEGORY_UNCOND_BR) { break; }
+                  bool clobbers = false;
+                  const xed_inst_t *xi = xed_decoded_inst_inst(&x);
+                  for (unsigned o = 0; o < xed_inst_noperands(xi); ++o) {
+                     const xed_operand_t *op = xed_inst_operand(xi, o);
+                     if (!xed_operand_written(op) || !xed_operand_is_register(xed_operand_name(op))) { continue; }
+                     const xed_reg_enum_t r = xed_get_largest_enclosing_register32(
+                        xed_decoded_inst_get_reg(&x, xed_operand_name(op)));
+                     if (r == XED_REG_ESP || r == XED_REG_EBP) { clobbers = true; }
+                  }
+                  if (clobbers) { break; }
+                  k += xed_decoded_inst_get_length(&x);
+               }
+            }
          }
          /* (b) an i386 C++ ABI ADJUSTOR THUNK entry: adjust the `this` pointer
           * in place on the stack, then tail-`jmp` to the real override —
