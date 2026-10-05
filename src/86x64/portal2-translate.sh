@@ -205,10 +205,9 @@ if [ -f "$STAGE/vaudio_miles.dylib" ]; then
   mp3_i386="$STAGE/.libmiles_mp3.i386"
   if bash "$REPO/src/86x64/shims/miles_mp3/build.sh" "$SRC32/libmilesx86.dylib" "$mp3_i386" &&
      "$M64" translate "$mp3_i386" -o "$STAGE/libmiles_mp3.dylib" >"$LOGS/libmiles_mp3.log" 2>&1 &&
-     "$REPO/build/src/macho-tool/macho-tool" -- modify \
-        --insert load-dylib,name=@loader_path/libmiles_mp3.dylib \
-        "$STAGE/vaudio_miles.dylib" "$STAGE/.vaudio_miles.mp3" &&
-     mv "$STAGE/.vaudio_miles.mp3" "$STAGE/vaudio_miles.dylib"; then
+     M64_EXTRA_LOAD_DYLIBS=@loader_path/libmiles_mp3.dylib \
+        "$M64" translate "$SRC32/vaudio_miles.dylib" -o "$STAGE/vaudio_miles.dylib" \
+        >>"$LOGS/libmiles_mp3.log" 2>&1; then
     echo "OK   libmiles_mp3.dylib (loaded by vaudio_miles)" >>"$results"
   else
     echo "FAIL libmiles_mp3.dylib  (see $LOGS/libmiles_mp3.log)" >>"$results"

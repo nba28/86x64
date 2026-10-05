@@ -158,6 +158,14 @@ v "$MACHO_TOOL" -- transform "$REBASE32" "$TRANSFORM64" || error
 LIBABICONV_NAME="@loader_path/$(basename "$LIBABICONV")"
 v "$MACHO_TOOL" -- modify --insert load-dylib,name="$LIBABICONV_NAME" "$TRANSFORM64" "$ABI64" || error
 
+# M64_EXTRA_LOAD_DYLIBS=<name>[,<name>...]: more load commands, inserted at this
+# same pre-layout stage (inserting into a FINISHED output overwrote its code: no
+# header room). portal2-translate.sh loads the Miles MP3 provider this way.
+for extra in ${M64_EXTRA_LOAD_DYLIBS//,/ }; do
+  v "$MACHO_TOOL" -- modify --insert load-dylib,name="$extra" "$ABI64" "$ABI64.extra" || error
+  mv "$ABI64.extra" "$ABI64"
+done
+
 # strip the $UNIX2003 bind suffix (legacy 10.5-era libSystem export names
 # that no longer exist on modern macOS). No-op for classic Mach-O binaries
 # (handled by StripBind::workT itself).
