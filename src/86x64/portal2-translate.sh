@@ -196,11 +196,31 @@ results="$STAGE/.results"
   fi
 } | xargs -0 -n 3 -P "$JOBS" bash -c 'translate_one "$0" "$1" "$2"' >>"$results"
 
+# --- Miles MP3 provider ------------------------------------------------------
+# Miles decodes MP3 (every voice line) only through mssmp3.asi, a PE32 DLL left
+# out below. Its stand-in (shims/miles_mp3) is built for i386 against this
+# Miles, translated like the rest, and loaded by vaudio_miles (the MP3 user), so
+# its constructor registers the provider before AIL_startup.
+if [ -f "$STAGE/vaudio_miles.dylib" ]; then
+  mp3_i386="$STAGE/.libmiles_mp3.i386"
+  if bash "$REPO/src/86x64/shims/miles_mp3/build.sh" "$SRC32/libmilesx86.dylib" "$mp3_i386" &&
+     "$M64" translate "$mp3_i386" -o "$STAGE/libmiles_mp3.dylib" >"$LOGS/libmiles_mp3.log" 2>&1 &&
+     "$REPO/build/src/macho-tool/macho-tool" -- modify \
+        --insert load-dylib,name=@loader_path/libmiles_mp3.dylib \
+        "$STAGE/vaudio_miles.dylib" "$STAGE/.vaudio_miles.mp3" &&
+     mv "$STAGE/.vaudio_miles.mp3" "$STAGE/vaudio_miles.dylib"; then
+    echo "OK   libmiles_mp3.dylib (loaded by vaudio_miles)" >>"$results"
+  else
+    echo "FAIL libmiles_mp3.dylib  (see $LOGS/libmiles_mp3.log)" >>"$results"
+  fi
+fi
+
 # --- copy the non-Mach-O engine payloads through -------------------------
 if [ ${#ONLY[@]} -eq 0 ]; then
   for n in $(ls -1 "$SRC32"); do
     # PE32 = the Miles .asi/.mix plugins: raw i386 Windows code that an x86_64
-    # process cannot run, so they stay out of bin/osx64 (todo_gaps).
+    # process cannot run, so they stay out of bin/osx64 (mssmp3.asi's MP3
+    # decoding is replaced above; ogg/speex/voice/mixer are todo_gaps).
     case "$(file -b "$SRC32/$n")" in *i386*|*PE32*) ;; *) cp -p "$SRC32/$n" "$STAGE/$n";; esac
   done
 fi
