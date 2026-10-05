@@ -94,6 +94,7 @@
 #include "gap.h"
 
 #include <string.h>
+#include <strings.h>
 #include <mach/mach.h>
 #include <mach/task_info.h>
 #include <mach-o/dyld.h>
@@ -212,19 +213,35 @@ intptr_t x64_img_slide(const struct mach_header *mh)
    return 0;
 }
 
+/* A load command names a dependency by its install name, but on a
+ * case-insensitive volume (the macOS default) dyld loads whatever file matches
+ * regardless of case: Portal 2's libmiles_mp3 and vaudio_miles ask for
+ * libMilesX86.dylib, the file is libmilesx86.dylib. The lookup must agree with
+ * dyld or process_deps skips that dependency and runs the dependent's
+ * initializers against a not-yet-fixed-up image (the MP3 provider registered
+ * into un-relocated Miles: Portal 2's voice lines stayed mute). Exact match
+ * first, then case-insensitive. Kill M64_NO_LEAF_CASEFOLD; guard leaf-casefold. */
+static int leaf_casefold_off(void) {
+   static int v = -1;
+   if (v < 0) { v = getenv("M64_NO_LEAF_CASEFOLD") != NULL; }
+   return v;
+}
+
 const struct mach_header *x64_img_find_leaf(const char *leaf, intptr_t *slide_out)
 {
    if (leaf == NULL) { return NULL; }
    /* Legacy mode goes through the accessors below, which chain to dyld. */
    const uint32_t n = x64_img_count();
-   for (uint32_t i = 0; i < n; ++i) {
-      const char *path = x64_img_path(i);
-      const char *b = x64_img_leaf(path);
-      if (b == NULL || strcmp(b, leaf) != 0) { continue; }
-      const struct mach_header *mh = x64_img_header(i);
-      if (mh == NULL) { continue; }
-      if (slide_out != NULL) { *slide_out = x64_img_slide(mh); }
-      return mh;
+   for (int fold = 0; fold <= !leaf_casefold_off(); ++fold) {
+      for (uint32_t i = 0; i < n; ++i) {
+         const char *path = x64_img_path(i);
+         const char *b = x64_img_leaf(path);
+         if (b == NULL || (fold ? strcasecmp(b, leaf) : strcmp(b, leaf)) != 0) { continue; }
+         const struct mach_header *mh = x64_img_header(i);
+         if (mh == NULL) { continue; }
+         if (slide_out != NULL) { *slide_out = x64_img_slide(mh); }
+         return mh;
+      }
    }
    return NULL;
 }
