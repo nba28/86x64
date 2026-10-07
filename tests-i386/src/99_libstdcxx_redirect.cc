@@ -3,7 +3,7 @@
 // surface (basic_ios/ostream/istream/filebuf/sentry, operator<<, ...) is a raw
 // cross-ABI call against modern macOS's NATIVE x86_64 libstdc++.6.dylib — the
 // i386 4-byte-return convention vs. the native 8-byte `ret` fuses the return
-// address (see unbridged_native_call_bug). abi-hazard-vendor.py redirects a
+// address (see the unbridged native-call bug). abi-hazard-vendor.py redirects a
 // translated consumer's bind onto our own TRANSLATED i386 libstdc++ (a sibling
 // translated module, same 4-byte-return convention, correct object layout).
 //
@@ -13,7 +13,7 @@
 // fused-PC crash loses buffered stdout (see the silently-inert-guard gotcha).
 //
 // NOT exercised here, deliberately, because each hits its OWN separate,
-// still-open bug (verified 2026-09-29, logged in todo_gaps) that is not what
+// still-open bug (verified 2026-09-29, logged as a known gap) that is not what
 // this guard exists to prove -- conflating them would make this guard fail
 // for a reason that has nothing to do with the redirect:
 //   - operator<<(double): basic_ostream::_M_insert<double> -> ostream::sentry

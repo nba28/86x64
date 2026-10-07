@@ -41,8 +41,7 @@
  * (the one-shim-one-job rule). It interposes the REAL GL entry points, which
  * works because abigen's `___glXxx` bridge reaches OpenGL through an ordinary
  * symbol stub — so it needs no cooperation from the shim layer and no rebuild of
- * anything else. Distinct from halo-gl-texprobe.c, which asks about texture
- * geometry and vertex strides; different question, different surface.
+ * anything else.
  *
  * ── WHAT IT ESTABLISHED, and WHAT IS STILL UNKNOWN (2026-09-13) ───────────────
  * FOUND, reproducible:

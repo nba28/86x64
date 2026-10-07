@@ -264,7 +264,7 @@ uint32_t shim_ReallocateHandle(uint32_t *a)
  * use this almost exclusively on a Ptr they got from *h moments earlier. There
  * is no correct answer we can synthesise, so return 0 (the classic failure
  * value) rather than a fabricated Handle that would corrupt on dispose.
- * Recorded in todo_gaps; if a target is ever MEASURED depending on this, the
+ * Recorded as a known gap; if a target is ever MEASURED depending on this, the
  * fix is a back-pointer field in struct hblk_hdr (there are two spare words). */
 uint32_t shim_RecoverHandle(uint32_t *a)  { GAP_STUB(a); return 0; }
 

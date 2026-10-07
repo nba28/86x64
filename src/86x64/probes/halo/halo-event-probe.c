@@ -5,7 +5,7 @@
  * ⚠Delete with the other #46/menu probes when this closes. It touches nothing
  * in libabiconv: DYLD_INSERT_LIBRARIES + __DATA,__interpose replaces the real
  * Carbon entry points, which works because libabiconv's abigen bridges reach
- * Carbon through ordinary symbol stubs (the same trick halo-gl-texprobe.c uses
+ * Carbon through ordinary symbol stubs (gl-call-probe.c uses the same trick
  * for OpenGL). Two files, and it is gone.
  *
  * WHY. Menu items HIGHLIGHT but do not respond to a click. The first reading —
@@ -44,7 +44,7 @@
  * lines gave it away. With __DATA,__interpose the correct call-through is the
  * ORDINARY NAMED CALL: dyld rewrites the bindings of OTHER images, not those of
  * the interposing image itself, so a direct `InstallEventHandler(...)` here
- * reaches the real one. That is the same pattern halo-gl-texprobe.c uses.
+ * reaches the real one.
  * A re-entry seatbelt below makes a future mistake of this kind lose logging
  * instead of taking the app down.
  */

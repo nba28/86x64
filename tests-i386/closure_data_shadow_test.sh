@@ -22,7 +22,8 @@
 # slice (see gotcha: an agent once translated the pool's SFTabular IN PLACE).
 # i386 linking needs the Snow Leopard ld64-95 wrapper: modern ld dropped -arch i386
 # (same resolution as the Makefile's LD). Override with LD=... in the environment.
-LD="${LD:-$HOME/projects/Library/Toolchains/sl-ld64/ld-i386}"; [ -x "$LD" ] || LD=ld
+. "$(dirname "$0")/../src/86x64/paths.sh"   # M64_* local paths
+LD="${LD:-$M64_I386_LD}"; [ -x "$LD" ] || LD=ld
 
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
@@ -34,7 +35,7 @@ LIBWRAPPER="$PROJ_ROOT/build/src/86x64/libwrapper.a"
 LIBINTERPOSE="$PROJ_ROOT/build/src/86x64/libinterpose.dylib"
 PIPELINE="$PROJ_ROOT/src/86x64/86x64.sh"
 SYSROOT=/tmp/i386-sysroot
-SDK106="$HOME/projects/Library/SDKs/MacOSX10.6.sdk"
+SDK106="$M64_SDK106"
 
 [ -x "$MACHO_TOOL" ]   || { echo "SKIP closure-data-shadow (macho-tool not built)"; exit 0; }
 [ -f "$LIBABICONV" ]   || { echo "SKIP closure-data-shadow (libabiconv not built)"; exit 0; }
@@ -47,7 +48,7 @@ if ! nm -gU "$LIBABICONV" | grep -q ' ___kABTitleProperty$'; then
    echo "FAIL closure-data-shadow: libabiconv exports no ___kABTitleProperty shadow."
    echo "  -> closure import-discovery regressed (abigen_modern_manifest/_i386_closure),"
    echo "     AddressBook umbrella mapping lost, or the source pool's SFTabular original"
-   echo "     lost its i386 slice (~/projects/Library/Frameworks/iLife11/SFTabular.framework)."
+   echo "     lost its i386 slice ($M64_FRAMEWORKS/iLife11/SFTabular.framework)."
    exit 1
 fi
 

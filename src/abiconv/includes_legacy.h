@@ -1,7 +1,7 @@
 /* includes_legacy.h — umbrella headers for the LEGACY abigen pass.
  *
  * This file is parsed by a SEPARATE abigen invocation whose -isysroot is the
- * extracted MacOSX10.6 SDK (~/projects/Library/SDKs/MacOSX10.6.sdk), parsed as
+ * extracted MacOSX10.6 SDK ($M64_SDK106), parsed as
  * -arch i386, isolated from the modern pass (includes.h). Its job is to give
  * abigen the PROTOTYPES for framework C functions whose HEADERS modern macOS
  * deleted, so it can emit real i386->x86_64 ABI-marshalling shims for them.

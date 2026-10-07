@@ -15,6 +15,7 @@
 # asserts: (a) transform exits 0 (no "not supported" throw); (b) the translated
 # x86_64 output still carries LC_SUB_FRAMEWORK naming the "Helium" umbrella.
 # Needs the i386 sysroot; SKIPs without it.
+. "$(dirname "$0")/../src/86x64/paths.sh"   # M64_* local paths
 set -u
 MT="${1:?usage: sub_framework_test.sh <path-to-macho-tool>}"
 SYSROOT="${I386_SYSROOT:-/tmp/i386-sysroot}"
@@ -30,7 +31,7 @@ fail() { echo "FAIL sub-framework: $1"; exit 1; }
 
 echo 'int helium_render(void){return 42;}' > "$TMP/r.c"
 # i386 links need Snow Leopard's ld64-95 (modern ld dropped -arch i386).
-LD="${LD:-$HOME/projects/Library/Toolchains/sl-ld64/ld-i386}"; [ -x "$LD" ] || LD=ld
+LD="${LD:-$M64_I386_LD}"; [ -x "$LD" ] || LD=ld
 clang -arch i386 -isysroot "$SYSROOT" -mmacosx-version-min=10.6 -c \
    -o "$TMP/r.o" "$TMP/r.c" 2>/dev/null &&
 "$LD" -arch i386 -dylib -macos_version_min 10.6 -syslibroot "$SYSROOT" -lSystem \

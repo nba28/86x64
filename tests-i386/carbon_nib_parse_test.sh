@@ -8,6 +8,7 @@
 # control classes, and controlID/command/bounds extraction with XML unescaping.
 #
 # Exit 0 = parser produces the values the shim needs; non-zero = regression.
+. "$(dirname "$0")/../src/86x64/paths.sh"   # M64_* local paths
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 HDR="$HERE/../src/abiconv/carbon_nib_parse.h"
@@ -106,7 +107,7 @@ clang -arch x86_64 -Wall -o "$TMP/t" "$TMP/t.c" || { echo "compile failed"; exit
 # If Halo's real nib is on disk, sanity-check the exact live gap the shim targets:
 # the "Graphics" window (id 236) parses and its 3 IBCarbonEditText controls are seen.
 HALO=""
-for p in "$HOME/projects/translations/Apps32/Halo.app" "$HOME/projects/translations/Apps64/Halo.app"; do
+for p in "$M64_APPS32/Halo.app" "$M64_APPS64/Halo.app"; do
   [ -f "$p/Contents/Resources/English.lproj/Halo.nib/objects.xib" ] && HALO="$p" && break
 done
 if [ -n "$HALO" ]; then

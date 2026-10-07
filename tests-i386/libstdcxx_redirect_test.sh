@@ -10,12 +10,13 @@
 # OFF arm = the SAME translated fixture, UNTOUCHED: its bind reaches the
 #           NATIVE x86_64 system libstdc++ raw (i386 cdecl call into a SysV
 #           callee whose `ret` pops 8 bytes where the translator pushed 4 ->
-#           fused PC, see unbridged_native_call_bug) -> expect exit != 42.
+#           fused PC, see the unbridged native-call bug) -> expect exit != 42.
 #
 # Needs the i386 sysroot + staged libstdc++ (make sysroot-cpp) to link the
 # i386 fixture, AND a built golden translated libstdc++ (m64 translate
-# <i386-original> -o ~/projects/Library/Frameworks/libstdc++-x86_64/
+# <i386-original> -o $M64_FRAMEWORKS/libstdc++-x86_64/
 # libstdc++.6.dylib) for the ON arm's redirect target. SKIPs without either.
+. "$(dirname "$0")/../src/86x64/paths.sh"   # M64_* local paths
 set -u
 MT="${1:?usage: libstdcxx_redirect_test.sh <path-to-macho-tool>}"
 
@@ -23,7 +24,7 @@ fail() { echo "FAIL libstdcxx-redirect: $1"; exit 1; }
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 SYSROOT=/tmp/i386-sysroot
-GOLDEN="$HOME/projects/Library/Frameworks/libstdc++-x86_64/libstdc++.6.dylib"
+GOLDEN="$M64_FRAMEWORKS/libstdc++-x86_64/libstdc++.6.dylib"
 if [ ! -f "$SYSROOT/usr/lib/libstdc++.dylib" ]; then
     echo "SKIP libstdcxx-redirect (no i386 sysroot / libstdc++ at $SYSROOT)"
     exit 0
@@ -41,7 +42,7 @@ PIPELINE="$PROJ_ROOT/src/86x64/86x64.sh"
 VENDOR="$PROJ_ROOT/src/86x64/abi-hazard-vendor.py"
 [ -f "$LIBABICONV" ] || fail "missing $LIBABICONV (run make first)"
 
-LD="${LD:-$HOME/projects/Library/Toolchains/sl-ld64/ld-i386}"; [ -x "$LD" ] || LD=ld
+LD="${LD:-$M64_I386_LD}"; [ -x "$LD" ] || LD=ld
 HOST_SDK="$(xcrun --show-sdk-path)"
 # The modern SDK ships ONLY libc++ headers (usr/include/c++/v1) -- #include
 # <sstream> etc. against them would mangle names in the std::__1:: inline
@@ -49,7 +50,7 @@ HOST_SDK="$(xcrun --show-sdk-path)"
 # what a real i386 app calls. Compile against the preserved GNU 4.2.1 headers
 # instead (same convention as 66_cpp_cow_string.cc's writeup), so the object
 # code's mangled names match the real GNU libstdc++ entry points.
-GCC421="$HOME/projects/Library/SDKs/MacOSX10.6.sdk/usr/include/c++/4.2.1"
+GCC421="$M64_SDK106/usr/include/c++/4.2.1"
 if [ ! -d "$GCC421" ]; then
     echo "SKIP libstdcxx-redirect (no GNU libstdc++ 4.2.1 headers at $GCC421)"
     exit 0

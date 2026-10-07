@@ -21,8 +21,22 @@
 # we synthesize one from /Volumes/Mac OS X Install DVD. Mount the SL DVD
 # (or the iLife/SL install image) before first build.
 
-I386_SYSROOT := /tmp/i386-sysroot
-SL_DVD       := /Volumes/Mac OS X Install DVD
+# Local paths. Same names and defaults as src/86x64/paths.sh (`m64 paths`
+# shows them). Set any of them in the environment or on the make command line;
+# unset ones derive from M64_WORKSPACE.
+M64_WORKSPACE  := $(or $(M64_WORKSPACE),$(HOME)/projects)
+M64_LIBRARY    := $(or $(M64_LIBRARY),$(M64_WORKSPACE)/Library)
+M64_SDK106     := $(or $(M64_SDK106),$(M64_LIBRARY)/SDKs/MacOSX10.6.sdk)
+M64_I386_LD    := $(or $(M64_I386_LD),$(M64_LIBRARY)/Toolchains/sl-ld64/ld-i386)
+M64_FRAMEWORKS := $(or $(M64_FRAMEWORKS),$(M64_LIBRARY)/Frameworks)
+M64_APPS32     := $(or $(M64_APPS32),$(M64_WORKSPACE)/translations/Apps32)
+M64_APPS64     := $(or $(M64_APPS64),$(M64_WORKSPACE)/translations/Apps64)
+export M64_WORKSPACE M64_LIBRARY M64_SDK106 M64_I386_LD M64_FRAMEWORKS M64_APPS32 M64_APPS64
+
+# The i386 sysroot is rebuilt in /tmp (lost on reboot) from the mounted Snow
+# Leopard install image; both locations can be overridden the same way.
+I386_SYSROOT ?= /tmp/i386-sysroot
+SL_DVD       ?= /Volumes/Mac OS X Install DVD
 PROJ_ROOT     := $(realpath ..)
 MACHO_TOOL    := $(PROJ_ROOT)/build/src/macho-tool/macho-tool
 MACHO_TOOL_DIR:= $(PROJ_ROOT)/build/src/macho-tool
@@ -34,8 +48,8 @@ export PATH   := $(MACHO_TOOL_DIR):$(PATH)
 
 NASM   := nasm
 # Modern ld (ld-27037+) no longer links i386; prefer Snow Leopard's ld64-95 wrapper
-# when it is installed (see memory sl_sysroot_remount). Override with LD=...
-SL_LD  := $(HOME)/projects/Library/Toolchains/sl-ld64/ld-i386
+# when it is installed (M64_I386_LD, see tests-i386/README.md). Override with LD=...
+SL_LD  := $(M64_I386_LD)
 LD     := $(if $(wildcard $(SL_LD)),$(SL_LD),ld)
 CC_I386:= clang -arch i386 -isysroot $(I386_SYSROOT) -mmacosx-version-min=10.6
 LDFLAGS_I386 := -arch i386 -macos_version_min 10.6 -no_pie -syslibroot $(I386_SYSROOT) -lSystem
@@ -90,8 +104,7 @@ CPP_TESTS  := $(filter-out 99_libstdcxx_redirect,$(notdir $(basename $(CPP_SRCS)
 # No crt0 — the 86x64.sh pipeline's wrapper exec calls into the translated
 # _main directly, replacing the libc start crt0 would have provided. Tests
 # end their _main with `call _exit` rather than `ret` since the wrapper
-# uses `jmp` (no return address) to enter _main. crt0.s is kept in src/
-# for transform-only experiments but not linked into the pipeline path.
+# uses `jmp` (no return address) to enter _main.
 
 .PHONY: check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry prologue-sched-decode cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal heap-below-2g classic-reloc-accept disp-reloc-accept imm-reloc-accept call-abs-pagezero pic-anchor-call-adopt entry-pad-fallthrough export-trie-deep export-zerofill jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap sib-rbp-index-wrap abs-base-neg-wrap ebp-gpr-narrow jt-case-in-func jt-back-edge-join pic-anchor-noreturn-join pic-anchor-local-noreturn pic-anchor-orphan-block pic-anchor-unreached-pad pic-anchor-orphan-revert atsu-arrays sigaction-wrap printf-length-mods cfstr-image-gate sscanf-many-args wide-printf jt-slot-snap-epilogue text-rebase-disp dir-handle scandir-sort super-hint-native pthread-create-suspended aq-mirror jt-scaled-index-not-base steam-bridge lazy-self-def standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk classic-dirid-chain nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-cb-fifo snd-status-layout snd-compression-info getsegbyname-absent get-window-resize-limits ir-dead-bridge cb-userdata-roundtrip jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn libstdcxx-redirect uidl-resolves agl-oversize-window rebase-exact-const miles-mp3 classic-fileio ctrl-range-refcon cod4-dead-imports nib-edit-field netdb-pwd-marshal leaf-casefold stripped-pmf-even tm-marshal
 all: run-only
@@ -136,7 +149,7 @@ pcmap-stage-shift: $(MACHO_TOOL)
 # 2026-09-29): a translated i386 caller into libstdc++'s iostream/ios_base
 # surface (basic_ios/ostream/istream/filebuf/sentry, operator<<, ...) was a
 # raw cross-ABI call against the NATIVE x86_64 system libstdc++
-# (unbridged_native_call_bug). src/86x64/abi-hazard-vendor.py redirects a
+# (the unbridged native-call bug). src/86x64/abi-hazard-vendor.py redirects a
 # translated consumer's bind to our own TRANSLATED i386 libstdc++ instead (a
 # sibling translated module -> same 4-byte-return convention, correct object
 # layout). Needs the i386 sysroot + staged libstdc++ AND a built golden
@@ -794,7 +807,7 @@ scandir-sort: $(BUILD_DIR)/99_scandir_sort.x86_64
 # leaves no stale super hint (objc_shim.c reverse_note_super_if_legacy; Portal 2
 # trackpad clicks). Links the 10.6 SDK AppKit stub. ON exits 42; OFF
 # (M64_NO_SUPER_HINT_GATE=1 at run time) does not.
-SDK106 := $(HOME)/projects/Library/SDKs/MacOSX10.6.sdk
+SDK106 := $(M64_SDK106)
 $(BUILD_DIR)/99_super_hint_native.i386: $(SRC_DIR)/99_super_hint_native.m
 	@clang -arch i386 -isysroot $(SDK106) -mmacosx-version-min=10.6 -fobjc-runtime=macosx-fragile -c $< -o $(BUILD_DIR)/99_super_hint_native.o
 	@$(LD) $(LDFLAGS_I386) -F$(SDK106)/System/Library/Frameworks -lobjc -framework AppKit -framework Foundation -framework CoreFoundation -undefined dynamic_lookup -e _main -o $@ $(BUILD_DIR)/99_super_hint_native.o
@@ -1894,11 +1907,11 @@ run-only: build-only
 sysroot:
 	@mkdir -p $(I386_SYSROOT)/usr/lib/system
 	@# headers: the install DVD carries no usr/include; stage the extracted
-	@# 10.6 SDK's headers (see memory asset_library_convention) so CC_I386's
+	@# 10.6 SDK's headers (M64_SDK106) so CC_I386's
 	@# -isysroot finds <stdio.h> etc. after a /tmp wipe.
 	@if [ ! -f "$(I386_SYSROOT)/usr/include/stdio.h" ] && \
-	    [ -d "$(HOME)/projects/Library/SDKs/MacOSX10.6.sdk/usr/include" ]; then \
-	  cp -R "$(HOME)/projects/Library/SDKs/MacOSX10.6.sdk/usr/include" "$(I386_SYSROOT)/usr/include"; \
+	    [ -d "$(M64_SDK106)/usr/include" ]; then \
+	  cp -R "$(M64_SDK106)/usr/include" "$(I386_SYSROOT)/usr/include"; \
 	fi
 	@for f in "$(SL_DVD)/usr/lib"/libSystem*.dylib; do \
 	  n=$$(basename "$$f"); \
@@ -2843,20 +2856,20 @@ shimgen-translated-skip:
 $(BUILD_DIR)/99_disp_reloc_accept.o: $(SRC_DIR)/99_disp_reloc_accept.s | $(BUILD_DIR)
 	$(CC_I386) -c -o $@ $<
 $(BUILD_DIR)/99_disp_reloc_accept.i386: $(BUILD_DIR)/99_disp_reloc_accept.o
-	$(LD) $(filter-out -no_pie -macos_version_min 10.6,$(LDFLAGS_I386)) -macos_version_min 10.5 -pie -read_only_relocs suppress -x -no_compact_linkedit -e _main -o $@ $< $(HOME)/projects/Library/SDKs/MacOSX10.6.sdk/usr/lib/crt1.10.5.o
+	$(LD) $(filter-out -no_pie -macos_version_min 10.6,$(LDFLAGS_I386)) -macos_version_min 10.5 -pie -read_only_relocs suppress -x -no_compact_linkedit -e _main -o $@ $< $(M64_SDK106)/usr/lib/crt1.10.5.o
 
 # 99_imm_reloc_accept: same link recipe as 99_disp_reloc_accept.
 $(BUILD_DIR)/99_imm_reloc_accept.o: $(SRC_DIR)/99_imm_reloc_accept.s | $(BUILD_DIR)
 	$(CC_I386) -c -o $@ $<
 $(BUILD_DIR)/99_imm_reloc_accept.i386: $(BUILD_DIR)/99_imm_reloc_accept.o
-	$(LD) $(filter-out -no_pie -macos_version_min 10.6,$(LDFLAGS_I386)) -macos_version_min 10.5 -pie -read_only_relocs suppress -x -no_compact_linkedit -e _main -o $@ $< $(HOME)/projects/Library/SDKs/MacOSX10.6.sdk/usr/lib/crt1.10.5.o
+	$(LD) $(filter-out -no_pie -macos_version_min 10.6,$(LDFLAGS_I386)) -macos_version_min 10.5 -pie -read_only_relocs suppress -x -no_compact_linkedit -e _main -o $@ $< $(M64_SDK106)/usr/lib/crt1.10.5.o
 
 # 99_classic_reloc_accept: -O2 -fomit-frame-pointer (no prologue at the
 # targets), linked -x -pie for 10.5 so the image carries CLASSIC local relocs.
 $(BUILD_DIR)/99_classic_reloc_accept.o: $(SRC_DIR)/99_classic_reloc_accept.c | $(BUILD_DIR)
 	$(CC_I386) -O2 -fomit-frame-pointer -c -o $@ $<
 $(BUILD_DIR)/99_classic_reloc_accept.i386: $(BUILD_DIR)/99_classic_reloc_accept.o
-	$(LD) $(filter-out -no_pie -macos_version_min 10.6,$(LDFLAGS_I386)) -macos_version_min 10.5 -pie -x -no_compact_linkedit -e _main -o $@ $< $(HOME)/projects/Library/SDKs/MacOSX10.6.sdk/usr/lib/crt1.10.5.o
+	$(LD) $(filter-out -no_pie -macos_version_min 10.6,$(LDFLAGS_I386)) -macos_version_min 10.5 -pie -x -no_compact_linkedit -e _main -o $@ $< $(M64_SDK106)/usr/lib/crt1.10.5.o
 
 # rebase-exact-const: in a slidable image with an LC_DYLD_INFO rebase stream, a
 # data word with no rebase is a constant (section.cc DataParser; minimp3's g_hz

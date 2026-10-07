@@ -29,6 +29,7 @@ import argparse, json, os, subprocess, sys, glob
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 from _i386_closure import expand_target
+import m64_paths
 
 def framework_stub_binaries(sdk):
     """Every <FW>.framework/<FW> Mach-O stub under the SDK (incl. sub-frameworks)."""
@@ -123,9 +124,10 @@ def asm_emitted_shims(asmpath):
 
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--sdk", default=os.path.expanduser("~/projects/Library/SDKs/MacOSX10.6.sdk"))
+    ap.add_argument("--sdk", default=str(m64_paths.SDK106))
     ap.add_argument("--libabiconv",
-                    default=os.path.expanduser("~/projects/86x64/build/src/abiconv/libabiconv.dylib"))
+                    default=os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "../../build/src/abiconv/libabiconv.dylib")))
     ap.add_argument("--exclude-asm", action="append", default=[],
                     help="modern abiconv.asm whose `global ___sym` shims to exclude. "
                          "When given, this is the authoritative exclusion source and "

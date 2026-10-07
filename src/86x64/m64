@@ -31,6 +31,8 @@ from pathlib import Path
 # ---- locations -------------------------------------------------------------
 SCRIPT_DIR = Path(__file__).resolve().parent          # src/86x64
 PROJ_ROOT  = SCRIPT_DIR.parent.parent                 # repo root
+sys.path.insert(0, str(SCRIPT_DIR))
+import m64_paths  # noqa: E402  (the M64_* local paths, shared with paths.sh)
 
 
 def _resolve_build_root():
@@ -324,7 +326,7 @@ def cmd_translate(args):
                 f"overwrite that\n  target (e.g. a live Steam install / a "
                 f"read-only i386 source).\n"
                 f"  Re-run with -o to translate a COPY instead, e.g.:\n"
-                f'    m64 translate "{args.target}" -o "$HOME/projects/translations/Apps64"')
+                f'    m64 translate "{args.target}" -o "{m64_paths.APPS64}"')
 
     # Bundle vs single binary.
     if target.is_dir():
@@ -551,16 +553,16 @@ def translate_bundle(bundle, args):
     # framework/dylib ACTUALLY bundled in Contents/Frameworks over to @rpath, so
     # the bundle launches WITHOUT a global DYLD_FRAMEWORK_PATH — which otherwise
     # shadows system frameworks' own internal deps with our bundled shims and
-    # aborts in native objc-init (0xbad4007 "missing from an installed root",
-    # see deploy_rpath_vs_dyld_framework_path). A (re)translate re-emits each
-    # binary from its original-ref i386 backup, so the absolute /Library//System
-    # refs reappear every run and MUST be re-swept here, not just at first deploy.
+    # aborts in native objc-init (0xbad4007 "missing from an installed root").
+    # A (re)translate re-emits each binary from its original-ref i386 backup,
+    # so the absolute /Library//System refs reappear every run and MUST be
+    # re-swept here, not just at first deploy.
     if not getattr(args, "no_rpath", False):
         cmd_rpath_fix(argparse.Namespace(app=str(bundle), dry_run=args.dry_run))
     if not args.no_shim:
         cmd_shim(argparse.Namespace(app=str(bundle), targets=plan_translate,
                                     dry_run=args.dry_run))
-    # One runtime per bundle (runtime_jurisdictions): translation co-locates a
+    # One runtime per bundle: translation co-locates a
     # copy next to every translated image and a vendored framework (the golden
     # QuickTime, a Python.framework) brings its OWN, frozen at whatever build
     # produced it. Sync them all to the current build (consolidation requires
@@ -621,8 +623,8 @@ def cmd_retranslate(args):
 #     resource is missing or invalid / In subcomponent: …QuickTime.framework".
 # What DOES need care is the opposite thing: a VENDORED golden framework is a
 # translated artifact frozen at whatever commit produced it, so it keeps the
-# binds it was translated with. Re-translate those when the core changes; see
-# halo_target memory for Halo's stale ___ResolveAliasFile.
+# binds it was translated with. Re-translate those when the core changes (Halo's
+# stale ___ResolveAliasFile bind was one such case).
 
 
 def cmd_resync(args):
@@ -769,7 +771,7 @@ def cmd_consolidate_runtime(args):
         if r.returncode != 0 and "EXECUTE" in subprocess.run(
                 ["otool", "-hv", str(m)], capture_output=True, text=True).stdout:
             # change-deps re-emit of a wrapper EXECUTABLE crashed iPhoto at
-            # launch (todo_gaps). An executable is its own process, so it keeps
+            # launch (known gap). An executable is its own process, so it keeps
             # its local copy instead: still one runtime per process.
             subprocess.run(["codesign", "-f", "-s", "-", str(m)], capture_output=True)
             changed.remove(m)
@@ -1660,6 +1662,19 @@ def cmd_build(args):
         cmd_resync(argparse.Namespace(app=args.resync, dry_run=args.dry_run))
 
 
+def cmd_paths(args):
+    """Show the local paths (M64_* variables) and whether each one exists."""
+    width = max(len(name) for name, _, _ in m64_paths.ALL)
+    for name, path, what in m64_paths.ALL:
+        origin = "set" if os.environ.get(name) else "default"
+        state = "\033[1;32mok\033[0m" if path.exists() else "\033[1;33mmissing\033[0m"
+        print(f"{name:<{width}}  {path}  [{state}, {origin}]")
+        print(f"{'':<{width}}  {what}")
+    print("\nSet any of these in your shell profile (e.g. export M64_WORKSPACE=...);"
+          "\nunset ones derive from M64_WORKSPACE. Re-run cmake after changing them"
+          "\n(-D<NAME>=... or a fresh build directory), since CMake caches its copy.")
+
+
 def cmd_macho(args):
     require(MACHO_TOOL)
     os.execv(str(MACHO_TOOL), [str(MACHO_TOOL), *args.rest])
@@ -1892,6 +1907,10 @@ def build_parser():
     b.add_argument("--resync", metavar="APP",
                    help="after building, resync libabiconv into this bundle")
     common(b); b.set_defaults(func=cmd_build)
+
+    # paths
+    pa = sub.add_parser("paths", help="show the local paths (M64_* variables) and whether they exist")
+    pa.set_defaults(func=cmd_paths)
 
     # macho (passthrough)
     m = sub.add_parser("macho", help="passthrough to the low-level macho-tool engine")

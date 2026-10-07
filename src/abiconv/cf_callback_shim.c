@@ -23,7 +23,7 @@
  *    the abigen passthrough shims compose. Only Create (callout + context)
  *    and Invalidate (slot teardown) are hand-shimmed, plus Add/Remove whose
  *    rl/ref/MODE arguments may be handles (CFRunLoopGetCurrent returns and
- *    the kCFRunLoopDefaultMode data-symbol shadows, see data_symbol_shadow).
+ *    the kCFRunLoopDefaultMode data-symbol shadows, see data_shadows.syms).
  *  - context.retain/release are dropped: info passes back to the legacy
  *    callout raw; its lifetime is owned by the legacy caller.
  *

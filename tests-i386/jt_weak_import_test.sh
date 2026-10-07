@@ -27,16 +27,17 @@
 # from source; like synth_dyld_info_test.sh this needs a real classic binary. It
 # searches $JT_CLASSIC_BINARY and known on-disk classic i386 binaries that carry
 # a `__jump_table`; if none is present it SKIPs.
+. "$(dirname "$0")/../src/86x64/paths.sh"   # M64_* local paths
 set -u
 MT="${1:?usage: jt_weak_import_test.sh <path-to-macho-tool>}"
 
 # Find a real classic i386 binary with a __IMPORT,__jump_table section.
 CANDIDATES=(
    "${JT_CLASSIC_BINARY:-}"
-   "$HOME/projects/Library/Frameworks/iLife11/eOkaoCom.dylib"
-   "$HOME/projects/Library/Frameworks/iLife11/eOkaoPt.dylib"
-   "$HOME/projects/Library/Frameworks/iLife11/eOkaoDt.dylib"
-   "$HOME/projects/Library/Frameworks/iLife11/SFWebView.framework/Versions/A/SFWebView"
+   "$M64_FRAMEWORKS/iLife11/eOkaoCom.dylib"
+   "$M64_FRAMEWORKS/iLife11/eOkaoPt.dylib"
+   "$M64_FRAMEWORKS/iLife11/eOkaoDt.dylib"
+   "$M64_FRAMEWORKS/iLife11/SFWebView.framework/Versions/A/SFWebView"
 )
 JT=""
 for c in "${CANDIDATES[@]}"; do

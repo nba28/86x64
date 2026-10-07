@@ -29,9 +29,10 @@
 #
 # NEVER run Halo under lldb (any-observer heisenbug). Never clear
 # com.macsoft.halo prefs (hand-entered GameSpy key + EULA).
+. "$(dirname "$0")/../../paths.sh"   # M64_* local paths
 set -u
 
-APP="${HALO_APP:-$HOME/projects/translations/Apps64/Halo.app}"
+APP="${HALO_APP:-$M64_APPS64/Halo.app}"
 OUT="${1:-/tmp/halo-input-probe.log}"
 
 if pgrep -x Halo >/dev/null; then
@@ -94,4 +95,4 @@ fi
 echo
 echo "  ⚠THE REAL VERDICT IS WHAT YOU SAW: did clicking a menu item DO anything?"
 echo "   The log explains the mechanism; only the screen decides the outcome."
-echo "   Control arm: HALO_INPUT_OFF=1 bash src/86x64/halo-input-probe.sh"
+echo "   Control arm: HALO_INPUT_OFF=1 bash src/86x64/probes/halo/halo-input-probe.sh"

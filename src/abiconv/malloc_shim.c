@@ -325,7 +325,7 @@ static int owned(const void *p) {
  *     against the image's __text start before believing it (libvstdlib+0x740 looked
  *     like a call site and is below __text at 0x...e90).
  *   - a TRANSLATED static initializer runs on the low-4GB init stack, not this one
- *     (see init_high_stack_bug), so its frames are NOT here at all. What survives is
+ *     (see the init high-stack bug), so its frames are NOT here at all. What survives is
  *     the native chain (the bridge, and the translated dylib frames that the bridge
  *     re-entered), which is usually enough to name the requesting LIBRARY but not
  *     the instruction. For the instruction, the exit-trace probe's scan plus

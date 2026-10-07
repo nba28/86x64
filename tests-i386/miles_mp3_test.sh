@@ -9,6 +9,7 @@
 # decodes a lame-made tone the way vaudio_miles does.
 # ON  = exit 42 and PCM within ±1 LSB of a native minimp3 decode (float rounding).
 # OFF = M64_NO_MILES_MP3=1 at run time: no provider registers -> exit 1.
+. "$(dirname "$0")/../src/86x64/paths.sh"   # M64_* local paths
 set -u
 cd "$(dirname "$0")"
 ROOT="$(cd .. && pwd)"
@@ -16,7 +17,7 @@ MILES="${MILES_DYLIB:-$HOME/Library/Application Support/Steam/steamapps/common/P
 [ -f "$MILES" ] || { echo "miles-mp3: SKIP (no i386 Miles at $MILES)"; exit 0; }
 command -v lame >/dev/null || { echo "miles-mp3: SKIP (no lame to make the test MP3)"; exit 0; }
 SR="${I386_SYSROOT:-/tmp/i386-sysroot}"
-LD="$HOME/projects/Library/Toolchains/sl-ld64/ld-i386"; [ -x "$LD" ] || LD=ld
+LD="$M64_I386_LD"; [ -x "$LD" ] || LD=ld
 SHIM="$ROOT/src/86x64/shims/miles_mp3"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 mkdir -p "$TMP/i386" "$TMP/x64"

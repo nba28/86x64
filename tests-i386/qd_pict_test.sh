@@ -9,12 +9,13 @@
 # Uses a real system .pict, strips its 512-byte file header to simulate the
 # in-memory PicHandle body, and asserts the decode yields a valid CGImage.
 # SKIPs (exit 0) if no .pict is present. Exit 0 = decode semantic validated.
+. "$(dirname "$0")/../src/86x64/paths.sh"   # M64_* local paths
 set -u
 PICT=""
 for c in \
   "/System/Library/Components/CoreAudio.component/Contents/Resources/GEQ10BandAqua.pict" \
-  "$HOME/projects/translations/Apps64/Numbers.app/Contents/Resources/empty_equation.pict" \
-  "$HOME/projects/translations/Apps64/Pages.app/Contents/Resources/default_equation.pict"; do
+  "$M64_APPS64/Numbers.app/Contents/Resources/empty_equation.pict" \
+  "$M64_APPS64/Pages.app/Contents/Resources/default_equation.pict"; do
   [ -f "$c" ] && { PICT="$c"; break; }
 done
 if [ -z "$PICT" ]; then echo "qd-pict: SKIP (no system .pict found)"; exit 0; fi

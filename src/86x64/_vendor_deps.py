@@ -38,15 +38,17 @@ import subprocess
 import sys
 from pathlib import Path
 
+import m64_paths
+
 # Default places to look for the original i386 frameworks, most-specific first.
 # Repeatable --source args are searched ahead of these.
 DEFAULT_SOURCES = [
     # Curated i386 originals after the 2026-07-05 reorg (~/Downloads/iLife11 is
-    # GONE). ~/projects/Library/Frameworks holds the reusable framework library
+    # GONE). $M64_FRAMEWORKS holds the reusable framework library
     # (incl. the iLife11/ subdir with iLifeFaceRecognition/Helium/…); each root is
     # rglob-walked, so the iLife11/ nesting resolves automatically.
-    Path.home() / "projects/Library/Frameworks",
-    Path.home() / "projects/Library/Application Support",
+    m64_paths.FRAMEWORKS,
+    m64_paths.LIBRARY / "Application Support",
     Path("/Library/Application Support"),
     Path("/Library/Frameworks"),
 ]
@@ -118,10 +120,10 @@ def fw_name(path):
 # not loaded: .../QuickTime … not in dyld cache"). A bare directory-exists check
 # wrongly treats these as host-resolvable and skips them → the translated app then
 # hard-fails at LOAD. These must be VENDORED (from a curated x86_64 copy in
-# ~/projects/Library/Frameworks, e.g. QuickTime.framework/{86x64,iLife11,legacy}).
+# $M64_FRAMEWORKS, e.g. QuickTime.framework/{86x64,iLife11,legacy}).
 # QuickTime is the documented one for our i386 targets (Halo/iMovie/iLife); extend
 # as other removed frameworks surface. (General follow-up: replace this curated set
-# with a live `arch -x86_64` dlopen loadability probe — see todo_gaps.)
+# with a live `arch -x86_64` dlopen loadability probe — a known gap.)
 HOLLOW_SHELL_SYSTEM_FRAMEWORKS = {"QuickTime"}
 
 
@@ -269,7 +271,7 @@ def donor_arch_mismatch(kind, src, app_is_translated):
     MEASURED 2026-08-05 (Civ IV): Civ links /System/Library/Frameworks/
     Python.framework/Versions/2.6/Python by ABSOLUTE path. Apple removed Python 2
     in macOS 12.3, so the dependency became unresolvable and this function's
-    caller happily satisfied it from ~/projects/Library/Frameworks/iLife11/
+    caller happily satisfied it from $M64_FRAMEWORKS/iLife11/
     Python.framework — which is **x86_64-ONLY**. That donated a NATIVE
     interpreter into a TRANSLATED i386-world app: the translated extension
     modules (wx/_core_.so links libabiconv, 122 undefined _Py* symbols) bound

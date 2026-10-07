@@ -22,7 +22,7 @@
 # NON-ZERO pointer BELOW 4GB whose bytes were readable — exactly what Halo does next
 # (strcpy of glGetString(GL_EXTENSIONS), then strstr for GL_EXT_framebuffer_object
 # and NVIDIA). That emit was reverted once before over a NASM convergence problem,
-# so it gets a standing assertion here rather than a note in todo_gaps.
+# so it gets a standing assertion here rather than a known-gap note.
 #
 # Needs the i386 sysroot; SKIPs when the binary has not been built.
 set -u

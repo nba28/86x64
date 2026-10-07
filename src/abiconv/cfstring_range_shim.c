@@ -49,8 +49,8 @@
  * (CFStringGetBytes, CFStringGetCharacterAtIndex, ...): they share the contract
  * but nothing has been MEASURED hitting them, and shipping unverified surface
  * is how a "universal" fix turns into a guess. The clamp helper below is
- * factored so adding a sibling is a few lines once one is observed. Tracked in
- * todo_gaps.
+ * factored so adding a sibling is a few lines once one is observed. Tracked as a
+ * known gap.
  *
  *   kill switch : M64_NO_CFSTRING_RANGE_CLAMP=1  (exact pre-fix behaviour:
  *                 hand the raw range straight to CF and let it throw)

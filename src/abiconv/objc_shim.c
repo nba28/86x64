@@ -4600,7 +4600,7 @@ static void chrome_install_overlay(id win) {
     * metal-pattern substrate that modern macOS removed — so the re-invoke paints a
     * uniformly BLACK band, a REGRESSION vs the stock titled chrome (which already
     * shows the title + traffic-lights = the functionality-first fallback). Until a
-    * classic textured-window / metal-pattern substrate shim exists (see todo_gaps
+    * classic textured-window / metal-pattern substrate shim exists (a known gap;
     * "legacy brushed-metal window substrate"), leave the stock chrome and DON'T
     * paint. The full structural detection + install funnel + overlay class + guard
     * stay as landed infrastructure: any future legacy app whose re-invoked chrome
@@ -5585,7 +5585,7 @@ static int bp_block_copy(struct objc_call_plan *plan, const uint32_t *args32,
  * buffer is ALREADY <4GB (an i386-side dataWithBytesNoCopy:) passes through
  * uncopied. Triggers on the NSData class + `bytes` selector, never the app.
  * (mutableBytes is intentionally NOT handled — it needs write-back; no current
- * target writes through it. See todo_gaps.) */
+ * target writes through it. Known gap.) */
 static const char nsdata_lowbytes_key;
 
 /* ---- -[NSMutableData mutableBytes] low-4GB shadow with write-back ----------
@@ -11407,7 +11407,7 @@ uint32_t ___dealloc = 0;            /* exported as ____dealloc */
  *
  * cgfloat_sels.inc is GENERATED from the i386 Snow Leopard frameworks' own
  * method lists (gen_cgfloat_sels.py; inputs in
- * ~/projects/Library/Frameworks/i386-originals/sl-objc/). Keyed by bare SEL: a
+ * $M64_FRAMEWORKS/i386-originals/sl-objc/). Keyed by bare SEL: a
  * selector with a real double where another definition has a CGFloat is left
  * out. Only post-10.6 API, absent from those frameworks, is listed by hand. */
 static const struct { const char *name; uint32_t mask; } g_cgfloat_sels[] = {

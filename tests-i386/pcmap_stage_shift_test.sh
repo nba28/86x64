@@ -43,7 +43,8 @@
 # SKIPs without.
 # i386 linking needs the Snow Leopard ld64-95 wrapper: modern ld dropped -arch i386
 # (same resolution as the Makefile's LD). Override with LD=... in the environment.
-LD="${LD:-$HOME/projects/Library/Toolchains/sl-ld64/ld-i386}"; [ -x "$LD" ] || LD=ld
+. "$(dirname "$0")/../src/86x64/paths.sh"   # M64_* local paths
+LD="${LD:-$M64_I386_LD}"; [ -x "$LD" ] || LD=ld
 
 set -u
 MT="${1:?usage: pcmap_stage_shift_test.sh <path-to-macho-tool>}"

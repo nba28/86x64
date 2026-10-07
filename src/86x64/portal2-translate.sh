@@ -219,7 +219,7 @@ if [ ${#ONLY[@]} -eq 0 ]; then
   for n in $(ls -1 "$SRC32"); do
     # PE32 = the Miles .asi/.mix plugins: raw i386 Windows code that an x86_64
     # process cannot run, so they stay out of bin/osx64 (mssmp3.asi's MP3
-    # decoding is replaced above; ogg/speex/voice/mixer are todo_gaps).
+    # decoding is replaced above; ogg/speex/voice/mixer are known gaps).
     case "$(file -b "$SRC32/$n")" in *i386*|*PE32*) ;; *) cp -p "$SRC32/$n" "$STAGE/$n";; esac
   done
 fi

@@ -4,8 +4,8 @@
  * low-4GB translation stack.  ONE job (Unix philosophy); a separate shim from
  * webnoop (which SUPPRESSES the WebView) and from geoshim.
  *
- * Problem (the WebKit-B fix; see project memory init_high_stack_bug /
- * iphoto_fairplay_pic_jumptable s59):
+ * Problem (the WebKit-B fix; the init high-stack bug and the
+ * iPhoto FairPlay PIC jump-table investigation):
  *   Translated i386 code runs on a <4GB stack.  A nib-embedded or programmatic
  *   WebView spins up a JSC VM; JSC::sanitizeStackForVM RELEASE_ASSERTs that the
  *   current rsp lies within WTF::Thread::current()'s cached stack bounds.  WTF
@@ -40,7 +40,7 @@
  * low-4GB stack) — pair with JSC_useJIT=0 / JSC_useGigacage=0 and TEST
  * File->Import end to end.  geoshim's SIGSEGV/BUS handler also does not chain to
  * the previous handler; once WebKit runs it will take SIGSEGV/SIGTRAP for GC/JIT
- * barriers, so geoshim's handler must be made to chain first (see memory).
+ * barriers, so geoshim's handler must be made to chain first.
  *
  * Enable with JSCSTACKPATCH=1 (opt-in: leaves the working build untouched until
  * deliberately turned on).

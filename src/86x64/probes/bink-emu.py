@@ -318,7 +318,7 @@ def trans_to_orig(trans):
     """translated pc -> (i386 pc of the nearest pcmap row at or before it, delta)."""
     import bisect, importlib.util
     spec = importlib.util.spec_from_file_location(
-        'pcmap_diff', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pcmap-diff.py'))
+        'pcmap_diff', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pcmap-diff.py'))
     pd = importlib.util.module_from_spec(spec); spec.loader.exec_module(pd)
     data = open(trans, 'rb').read()
     rows = sorted((t, o) for o, t in pd.read_pcmap(data, pd.macho_sections(data, 0)))
@@ -332,7 +332,7 @@ def trans_to_orig(trans):
 def exact_rows(trans):
     import importlib.util
     spec = importlib.util.spec_from_file_location(
-        'pcmap_diff', os.path.join(os.path.dirname(os.path.abspath(__file__)), 'pcmap-diff.py'))
+        'pcmap_diff', os.path.join(os.path.dirname(os.path.abspath(__file__)), '..', 'pcmap-diff.py'))
     pd = importlib.util.module_from_spec(spec); spec.loader.exec_module(pd)
     data = open(trans, 'rb').read()
     return {t: o for o, t in pd.read_pcmap(data, pd.macho_sections(data, 0))}

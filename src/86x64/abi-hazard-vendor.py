@@ -17,8 +17,8 @@ ABI convention, so a marshalling shim would have to reimplement the class,
 not just convert arguments.
 
 THE FIX (decision, 2026-09-29): translate a genuine i386 libstdc++.6.dylib
-with the ordinary pipeline -- see reference_i386_system_originals.md /
-sl_sysroot_remount.md for provenance -- so libstdc++ becomes a SIBLING
+with the ordinary pipeline (the i386 original comes from the Snow Leopard
+install image, as for the test sysroot) -- so libstdc++ becomes a SIBLING
 TRANSLATED module, exactly like every other dylib in the tree. Sibling
 translated modules already use the same 4-byte-return convention as each
 other (that's why the 42-module Portal 2 tree works at all), and the object
@@ -50,12 +50,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+import m64_paths
+
 # system dylib basename -> our translated (i386-ABI, libabiconv-linked) replacement.
 # Built by: m64 translate <i386-original> -o <path>. Extend this registry, never
 # special-case an app -- any translated tree binding the same system dylib benefits.
 GOLDEN = {
     "libstdc++.6.dylib":
-        Path.home() / "projects/Library/Frameworks/libstdc++-x86_64/libstdc++.6.dylib",
+        m64_paths.FRAMEWORKS / "libstdc++-x86_64/libstdc++.6.dylib",
 }
 
 

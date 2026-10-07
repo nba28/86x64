@@ -5,7 +5,7 @@
 ## This is the OPEN sibling of the 92_ptr_imm_field_store / 9510f29 fix. That
 ## fix relocates a genbase mem-dest pointer immediate ONLY when the immediate
 ## VALUE lands in FILE-BACKED writable __DATA (`!vmaddr_in_zerofill(value)`).
-## The Civ IV census (todo_gaps gap (2)) found 5158 sibling sites whose stored
+## The Civ IV census (known gap (2)) found 5158 sibling sites whose stored
 ## pointer VALUE is a __bss/__common (ZEROFILL) address, e.g.
 ## `movl $0x154d828,(%rax)` — deliberately EXCLUDED by that gate, so the raw
 ## i386 zerofill address ships VERBATIM into __text. Once translated to a dylib

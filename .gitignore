@@ -2,12 +2,13 @@ CMakeCache.txt
 CMakeFiles/
 *.old
 Makefile
+!tests-i386/Makefile
 cmake_install.cmake
 *~
 *.o
 *.s
-# ...but tests-i386 fixtures are sources (NN_name.s)
-!tests-i386/src/[0-9]*.s
+# ...but tests-i386 fixtures are sources
+!tests-i386/src/*.s
 *.dmp
 a.out
 macho

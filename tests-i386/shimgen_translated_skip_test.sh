@@ -13,7 +13,7 @@
 # native stub (a stub's 8-byte `ret` over-pops the caller's 4-byte-return
 # frame). Feeding shimgen a translated image polluted observed.json and
 # generated/*ShimAuto.m with translated-only symbols (DateToSeconds, NewAlias,
-# ResolveAlias, create_fftsetup — see runtime_jurisdictions memory).
+# ResolveAlias, create_fftsetup — see "How it works" in the README).
 #
 # THE FIX: shimgen's main() now skips a binary that links libabiconv.dylib
 # (is_translated_consumer) BEFORE collecting its binds, at the single

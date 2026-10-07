@@ -16,8 +16,9 @@
 #                    retranslate libbink once per translate-time knob (default:
 #                    every M64_* getenv in src/core) set to 1, score each, and
 #                    print the knobs that CHANGE the score vs the baseline.
+. "$(dirname "$0")/../paths.sh"   # M64_* local paths
 set -uo pipefail
-REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../../.." && pwd)"
 P2="${P2:-$HOME/Library/Application Support/Steam/steamapps/common/Portal 2}"
 BIK="$P2/portal2/media/valve.bik"
 N=60
@@ -41,9 +42,9 @@ if [ ! -x "$W/binkdec" ] || [ "$REPO/src/86x64/probes/binkdec.c" -nt "$W/binkdec
    [ "$B/macho-tool/macho-tool" -nt "$W/binkdec" ]; then
   clang -arch i386 -isysroot /tmp/i386-sysroot -mmacosx-version-min=10.6 \
         -c "$REPO/src/86x64/probes/binkdec.c" -o "$W/binkdec.o" || exit 1
-  "$HOME/projects/Library/Toolchains/sl-ld64/ld-i386" -arch i386 -macos_version_min 10.6 \
+  "$M64_I386_LD" -arch i386 -macos_version_min 10.6 \
         -no_pie -syslibroot /tmp/i386-sysroot -lSystem "$W/binkdec.o" \
-        "$HOME/projects/Library/SDKs/MacOSX10.6.sdk/usr/lib/crt1.10.6.o" -o "$W/binkdec.i386" || exit 1
+        "$M64_SDK106/usr/lib/crt1.10.6.o" -o "$W/binkdec.i386" || exit 1
   bash "$REPO/src/86x64/86x64.sh" -m "$B/macho-tool/macho-tool" -l "$B/abiconv/libabiconv.dylib" \
        -w "$B/86x64/libwrapper.a" -i "$B/86x64/libinterpose.dylib" \
        -o "$W/binkdec" "$W/binkdec.i386" >"$W/binkdec.translate.log" 2>&1 || { echo "harness translate failed"; exit 1; }

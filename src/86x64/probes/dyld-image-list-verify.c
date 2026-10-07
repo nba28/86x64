@@ -22,7 +22,7 @@
  *
  * build:
  *   clang -arch x86_64 -I src/abiconv -o /tmp/dyld-image-list-verify \
- *         src/86x64/dyld-image-list-verify.c src/abiconv/dyld_image_list.c
+ *         src/86x64/probes/dyld-image-list-verify.c src/abiconv/dyld_image_list.c
  * run (plain, ~45 images), then again with many images loaded:
  *   /tmp/dyld-image-list-verify
  *   DYLD_INSERT_LIBRARIES=<some.dylib> /tmp/dyld-image-list-verify

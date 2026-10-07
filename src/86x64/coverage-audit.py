@@ -41,12 +41,13 @@ HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(os.path.dirname(HERE))
 sys.path.insert(0, HERE)
 from find_null_jump_bridges import resolves_on_x86_64, system_deps  # noqa: E402
+import m64_paths  # noqa: E402
 import importlib.util  # noqa: E402
 _spec = importlib.util.spec_from_file_location("unbridged", os.path.join(HERE, "unbridged-native-calls.py"))
 unbridged = importlib.util.module_from_spec(_spec); _spec.loader.exec_module(unbridged)
 
 ABICONV = os.path.join(REPO, "src/abiconv")
-DEF_ROOTS = sorted(glob.glob(os.path.expanduser("~/projects/translations/Apps64/*.app"))) + \
+DEF_ROOTS = sorted(glob.glob(str(m64_paths.APPS64 / "*.app"))) + \
     [os.path.expanduser("~/Library/Application Support/Steam/steamapps/common/Portal 2/bin/osx64")]
 
 

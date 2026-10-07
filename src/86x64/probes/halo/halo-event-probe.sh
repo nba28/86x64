@@ -6,7 +6,7 @@
 # ⚠DIAGNOSTIC ONLY. Touches nothing in libabiconv: DYLD_INSERT_LIBRARIES +
 # __DATA,__interpose replaces the real Carbon entry points, which works because
 # the abigen bridges reach Carbon through ordinary symbol stubs (the same trick
-# halo-gl-texprobe.sh uses for OpenGL). Delete two files and it is gone.
+# probes/gl-call-probe.c uses for OpenGL). Delete two files and it is gone.
 #
 # WHY THIS AND NOT MORE BUTTON WORK. The first reading — classic Button()
 # polling stuck at 0 — was MEASURED AND FALSIFIED: Halo calls Button() exactly
@@ -15,10 +15,11 @@
 #
 # NEVER run Halo under lldb (any-observer heisenbug). Never clear
 # com.macsoft.halo prefs (hand-entered GameSpy key + EULA).
+. "$(dirname "$0")/../../paths.sh"   # M64_* local paths
 set -u
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
-APP="${HALO_APP:-$HOME/projects/translations/Apps64/Halo.app}"
+APP="${HALO_APP:-$M64_APPS64/Halo.app}"
 # ⚠FLAGS MUST BE PARSED BEFORE $1 BECOMES THE LOG PATH. The first cut assigned
 # OUT here and parsed flags below it, so `--forward-down` was silently taken as
 # the log filename: the log landed in a file called "--forward-down" and every

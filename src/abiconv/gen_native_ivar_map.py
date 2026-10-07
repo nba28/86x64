@@ -35,7 +35,7 @@ SEL (:), structs ({), bitfields (b), 8-byte i386 scalars (q/Q/d — no clean
 
 DEPENDENCY: the SnowLeopard install DVD must be mounted (it carries real i386
 AppKit/Foundation/QuartzCore with __OBJC ivar metadata; the 10.6 SDK is a stub):
-  hdiutil attach -nobrowse -readonly "~/projects/oses/SnowLeopardInstall/snow leopard install.iso"
+  hdiutil attach -nobrowse -readonly "<Snow Leopard install image>.iso"
   -> /Volumes/Mac OS X Install DVD
 
 This header is a COMMITTED generated artifact (the DVD is not present on every

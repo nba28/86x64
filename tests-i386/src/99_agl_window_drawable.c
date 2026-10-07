@@ -200,7 +200,7 @@ int main(void)
         aglSwapBuffers(ctx);
         printf("presented\n");
         /* Not RunCurrentEventLoop: it has no abigen bridge unless a target
-         * imports it (todo_gaps), and raw it reads its timeout from xmm0 and
+         * imports it (known gap), and raw it reads its timeout from xmm0 and
          * returns at once, so the surface was sampled after the fixture exited. */
         CFRunLoopRunInMode(__builtin___CFStringMakeConstantString("kCFRunLoopDefaultMode"), 4.0, 0);
         warp_roundtrip(win);

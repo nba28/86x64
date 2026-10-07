@@ -81,7 +81,7 @@ int main(void)
       printf("FAIL invocation_invoke_object got=%d\n", [t gotValue]);
       failures++;
    }
-   /* KNOWN GAP (recorded in todo_gaps): the float-struct VALUE arrives
+   /* KNOWN GAP: the float-struct VALUE arrives
     * garbled through -[NSInvocation invoke] into a legacy IMP. NSInvocation
     * builds its ABI frame from the LITERAL legacy signature (packed floats in
     * xmm), while the reverse marshaller expects the compiled-native-caller

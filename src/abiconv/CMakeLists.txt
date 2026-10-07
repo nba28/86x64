@@ -205,15 +205,15 @@ add_custom_target(abiconv_syms
 # carry the true import names. (Old ~/Downloads/iLife11 paths were deleted in the
 # 2026-07-05 reorg → the whole legacy Carbon/QT surface silently dropped to 0.)
 set(ABICONV_MODERN_TARGETS
-    "$ENV{HOME}/projects/translations/Apps32/Civilization IV.app/Contents/MacOS/Civilization IV"
-    "$ENV{HOME}/projects/translations/Apps32/Halo.app/Contents/MacOS/Halo"
-    "$ENV{HOME}/projects/translations/Apps32/iMovie.app/Contents/MacOS/iMovie"
-    "$ENV{HOME}/projects/translations/Apps32/iPhoto.app/Contents/MacOS/iPhoto"
-    "$ENV{HOME}/projects/translations/Apps32/iWeb.app/Contents/MacOS/iWeb"
-    "$ENV{HOME}/projects/translations/Apps32/Keynote.app/Contents/MacOS/Keynote"
-    "$ENV{HOME}/projects/translations/Apps32/Numbers.app/Contents/MacOS/Numbers"
-    "$ENV{HOME}/projects/translations/Apps32/Pages.app/Contents/MacOS/Pages"
-    "$ENV{HOME}/projects/translations/Apps32/Quinn.app/Contents/MacOS/Quinn"
+    "${M64_APPS32}/Civilization IV.app/Contents/MacOS/Civilization IV"
+    "${M64_APPS32}/Halo.app/Contents/MacOS/Halo"
+    "${M64_APPS32}/iMovie.app/Contents/MacOS/iMovie"
+    "${M64_APPS32}/iPhoto.app/Contents/MacOS/iPhoto"
+    "${M64_APPS32}/iWeb.app/Contents/MacOS/iWeb"
+    "${M64_APPS32}/Keynote.app/Contents/MacOS/Keynote"
+    "${M64_APPS32}/Numbers.app/Contents/MacOS/Numbers"
+    "${M64_APPS32}/Pages.app/Contents/MacOS/Pages"
+    "${M64_APPS32}/Quinn.app/Contents/MacOS/Quinn"
     CACHE STRING "i386 ORIGINAL app executables (Apps32) whose imports drive the universal modern shim set")
 # Extra source pools for the import-closure dep resolution (_i386_closure.py
 # --source; searched before _vendor_deps' DEFAULT_SOURCES). Normally empty —
@@ -231,8 +231,8 @@ endforeach()
 # (CoreAudio AudioGetCurrentHostTime/...) got no bridge and bound raw. One level
 # deeper too: a game folder holding several apps beside its data (Call of Duty 4
 # campaign + multiplayer; EventAvail bound raw and spun the main thread).
-file(GLOB ABICONV_APPS32_BUNDLES "$ENV{HOME}/projects/translations/Apps32/*.app"
-                                 "$ENV{HOME}/projects/translations/Apps32/*/*.app")
+file(GLOB ABICONV_APPS32_BUNDLES "${M64_APPS32}/*.app"
+                                 "${M64_APPS32}/*/*.app")
 foreach(app IN LISTS ABICONV_APPS32_BUNDLES)
   execute_process(COMMAND /usr/libexec/PlistBuddy -c "Print CFBundleExecutable"
                           "${app}/Contents/Info.plist"
@@ -363,7 +363,7 @@ add_custom_target(abiconv_asm DEPENDS abiconv.asm)
 # pass) for the same reason. Hand shims (carbon_memory.c, ...) are excluded via
 # the shared -i custom.syms. If the 10.6 SDK is absent the pass is skipped and
 # libabiconv builds with the modern shims only.
-set(ABICONV_LEGACY_SDK "$ENV{HOME}/projects/Library/SDKs/MacOSX10.6.sdk"
+set(ABICONV_LEGACY_SDK "${M64_SDK106}"
     CACHE PATH "Extracted MacOSX10.6 SDK providing legacy framework headers")
 # Restrict the legacy shim pass to the symbols our TARGETS actually import
 # ("only useful symbols"): the whole legacy framework surface is ~9k functions /
@@ -384,15 +384,15 @@ set(ABICONV_LEGACY_SDK "$ENV{HOME}/projects/Library/SDKs/MacOSX10.6.sdk"
 # Carbon-nib UI load — plus the QuickDraw/Window/Menu Mgr surface). Same stable
 # input + naming convention as ABICONV_MODERN_TARGETS above.
 set(ABICONV_LEGACY_TARGETS
-    "$ENV{HOME}/projects/translations/Apps32/Civilization IV.app/Contents/MacOS/Civilization IV"
-    "$ENV{HOME}/projects/translations/Apps32/Halo.app/Contents/MacOS/Halo"
-    "$ENV{HOME}/projects/translations/Apps32/iMovie.app/Contents/MacOS/iMovie"
-    "$ENV{HOME}/projects/translations/Apps32/iPhoto.app/Contents/MacOS/iPhoto"
-    "$ENV{HOME}/projects/translations/Apps32/iWeb.app/Contents/MacOS/iWeb"
-    "$ENV{HOME}/projects/translations/Apps32/Keynote.app/Contents/MacOS/Keynote"
-    "$ENV{HOME}/projects/translations/Apps32/Numbers.app/Contents/MacOS/Numbers"
-    "$ENV{HOME}/projects/translations/Apps32/Pages.app/Contents/MacOS/Pages"
-    "$ENV{HOME}/projects/translations/Apps32/Quinn.app/Contents/MacOS/Quinn"
+    "${M64_APPS32}/Civilization IV.app/Contents/MacOS/Civilization IV"
+    "${M64_APPS32}/Halo.app/Contents/MacOS/Halo"
+    "${M64_APPS32}/iMovie.app/Contents/MacOS/iMovie"
+    "${M64_APPS32}/iPhoto.app/Contents/MacOS/iPhoto"
+    "${M64_APPS32}/iWeb.app/Contents/MacOS/iWeb"
+    "${M64_APPS32}/Keynote.app/Contents/MacOS/Keynote"
+    "${M64_APPS32}/Numbers.app/Contents/MacOS/Numbers"
+    "${M64_APPS32}/Pages.app/Contents/MacOS/Pages"
+    "${M64_APPS32}/Quinn.app/Contents/MacOS/Quinn"
     CACHE STRING "i386 ORIGINAL app executables (Apps32) whose imports define the legacy Carbon/QT shim set")
 # Same Apps32 auto-discovery as the modern pass (a new target like PvZ got
 # no legacy Carbon bridges: SetWindowAlpha/window groups stayed NULL).

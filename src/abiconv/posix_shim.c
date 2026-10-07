@@ -642,8 +642,8 @@ int32_t shim_dlerror(uint32_t *a) {
  * a native function pointer for i386 to call), not on any app — benefits every
  * i386 target using this idiom (Civ IV, Halo, iPhoto). The other native
  * function-pointer-by-name lookups (NSAddressOfSymbol,
- * CFBundleGetFunctionPointersForNames) have the identical latent defect; see
- * todo_gaps. */
+ * CFBundleGetFunctionPointersForNames) have the identical latent defect (a
+ * known gap). */
 extern uint64_t _86x64_unwrap_obj_arg(uint32_t a);  /* objc_shim.c: full resolver */
 
 /* ★ The generic marshalling thunk fnptr_lookup_result mints is NOT enough for a

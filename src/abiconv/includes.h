@@ -130,7 +130,7 @@
  * SPIs. (CGImageSourceGetTypeWithData / GetTypeWithDataProvider are intentionally
  * OMITTED — they SIGSEGV even from a clean native x86_64 caller, i.e. dead on
  * modern macOS; a graceful no-op shim is the right tool there if a target ever
- * calls them — see todo_gaps, cf. the ICA/FSSpec dead-API shims.) */
+ * calls them — a known gap, cf. the ICA/FSSpec dead-API shims.) */
 extern CFArrayRef  CGImageSourceCopyTypeExtensions(CGImageSourceRef isrc);
 extern CFStringRef CGImageSourceGetTypeWithExtension(CFStringRef ext);
 extern CFStringRef CGImageSourceGetTypeWithURL(CFURLRef url);

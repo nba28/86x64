@@ -2,7 +2,7 @@
 #
 # make_golden_quicktime.sh — build the canonical ("golden") TRANSLATED x86_64
 # QuickTime.framework from the pristine i386 one, for deposit in
-# ~/projects/Library/Frameworks/86x64/ and reuse by every QuickTime app
+# $M64_FRAMEWORKS/86x64/ and reuse by every QuickTime app
 # (Halo CE, Civ IV, iPhoto, Numbers, Pages, iWeb).
 #
 # The whole recipe is the CURRENT standard pipeline — nothing app-specific:
@@ -14,10 +14,11 @@
 #      output; cures artifacts translated before the weak-import emission.
 #   3. @rpath id + @rpath rewrites of the two deps that are dead on modern
 #      macOS (NavigationServices, CarbonSound — bundle the x86_64 natives
-#      from ~/projects/Library/Frameworks/iLife11/ alongside).
+#      from $M64_FRAMEWORKS/iLife11/ alongside).
 #   4. ad-hoc sign.
 #
 # Usage: make_golden_quicktime.sh [pristine-framework] [dest-dir]
+. "$(dirname "$0")/paths.sh"   # M64_* local paths
 set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -26,7 +27,7 @@ M64="$SCRIPT_DIR/m64"
 LIBABICONV="$PROJ_ROOT/build/src/abiconv/libabiconv.dylib"
 
 SRC_FW="${1:-$HOME/Downloads/iLife11/Library/Frameworks/QuickTime.framework}"
-DEST="${2:-$HOME/projects/Library/Frameworks/86x64}"
+DEST="${2:-$M64_FRAMEWORKS/86x64}"
 
 [ -f "$SRC_FW/Versions/A/QuickTime" ] || { echo "no pristine QuickTime at $SRC_FW" >&2; exit 1; }
 file -b "$SRC_FW/Versions/A/QuickTime" | grep -q i386 || { echo "$SRC_FW is not i386 (already translated?)" >&2; exit 1; }

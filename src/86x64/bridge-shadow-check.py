@@ -41,6 +41,8 @@ import re
 import subprocess
 import sys
 
+import m64_paths
+
 
 def sh(*cmd):
     return subprocess.run(cmd, capture_output=True, text=True).stdout
@@ -102,8 +104,7 @@ def main():
     lib = a.lib
     if not lib:
         for c in ("build/src/abiconv/libabiconv.dylib",
-                  os.path.expanduser("~/projects/translations/Apps64/Halo.app/"
-                                     "Contents/MacOS/libabiconv.dylib")):
+                  str(m64_paths.APPS64 / "Halo.app/Contents/MacOS/libabiconv.dylib")):
             if os.path.exists(c):
                 lib = c
                 break

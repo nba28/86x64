@@ -26,6 +26,7 @@
 #      now routes to ____ZNSt8ios_base4InitC1Ev) reports CLEAN, exit 0 — the fix
 #      is guarded against regressing, and the tool does not false-positive on the
 #      still-native libstdc++ runtime externals it legitimately leaves native.
+. "$(dirname "$0")/../src/86x64/paths.sh"   # M64_* local paths
 set -u
 HERE="$(cd "$(dirname "$0")" && pwd)"
 PROJ_ROOT="$(cd "$HERE/.." && pwd)"
@@ -146,7 +147,7 @@ PY
 # ---- 4: deployed HeliumRender (if present) — REPORTED, not asserted: whether a
 # deployed image is stale depends on when it was translated vs the current
 # libabiconv (fixed by `m64 reinterpose`), not on this detector.
-HR="$HOME/projects/translations/Apps64/iMovie.app/Contents/Frameworks/Helium.framework/Versions/A/Frameworks/HeliumRender.framework/Versions/A/HeliumRender"
+HR="$M64_APPS64/iMovie.app/Contents/Frameworks/Helium.framework/Versions/A/Frameworks/HeliumRender.framework/Versions/A/HeliumRender"
 if [ -f "$HR" ] && [ -x "$MT" ]; then
   if python3 "$M64" stale-check --libabiconv "$LIBAB" -q "$HR" >/dev/null 2>&1; then
     echo "note: deployed HeliumRender clean"
@@ -158,7 +159,7 @@ fi
 # ---- 5: end-to-end on PyObjC's _objc.so (if deployed): its Python API binds
 # are flat-namespace (-> the app's translated Python). libabiconv exports
 # ___PyDict_GetItem, so a detector that ignored the provider would flag it.
-OBJC_SO="$HOME/projects/translations/Apps64/iPhoto.app/Contents/Frameworks/Python.framework/Versions/2.6/Extras/lib/python/PyObjC/objc/_objc.so"
+OBJC_SO="$M64_APPS64/iPhoto.app/Contents/Frameworks/Python.framework/Versions/2.6/Extras/lib/python/PyObjC/objc/_objc.so"
 if [ -f "$OBJC_SO" ] && [ -x "$MT" ]; then
   if python3 "$M64" stale-check --libabiconv "$LIBAB" "$OBJC_SO" 2>&1 | grep -q "_PyDict_GetItem "; then
     echo "FAIL: flat-namespace _PyDict_GetItem reported stale"; fail=1

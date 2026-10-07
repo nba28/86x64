@@ -44,7 +44,7 @@
  *   you want from this probe is the identity of the corrupted image.
  *
  * build:  clang -arch x86_64 -dynamiclib -O0 -g -o /tmp/imgwalk_probe.dylib \
- *               src/86x64/dyld-imagewalk-probe.c
+ *               src/86x64/probes/dyld-imagewalk-probe.c
  * use:    DYLD_INSERT_LIBRARIES=/tmp/imgwalk_probe.dylib <app>
  *
  * ⚠ Build it -arch x86_64: on Apple Silicon a default build is arm64 and dyld

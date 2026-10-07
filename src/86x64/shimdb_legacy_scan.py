@@ -66,7 +66,8 @@ def main():
     ap.add_argument("--legacy-dylib", required=True)
     ap.add_argument("--modern-fw", required=True)
     ap.add_argument("--libabiconv",
-                    default=os.path.expanduser("~/projects/86x64/build/src/abiconv/libabiconv.dylib"))
+                    default=os.path.normpath(os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                                     "../../build/src/abiconv/libabiconv.dylib")))
     ap.add_argument("--arch", default="x86_64")
     ap.add_argument("-o", "--out")
     a = ap.parse_args()

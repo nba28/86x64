@@ -13,7 +13,7 @@ out. Objects/structs/ints never set bits.
 usage: gen_cgfloat_sels.py <i386 framework binary>... > cgfloat_sels.inc
 Inputs: i386 slices of the Snow Leopard AppKit/Foundation/QuartzCore (the DVD's
 own /System, `lipo -thin i386`; kept in
-~/projects/Library/Frameworks/i386-originals/sl-objc/).
+$M64_FRAMEWORKS/i386-originals/sl-objc/).
 """
 import struct
 import sys

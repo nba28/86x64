@@ -1,10 +1,11 @@
 #!/bin/bash
 # Build objc_send_bench.m as i386 (translated through the real pipeline) and as
 # native x86_64, run both, print side by side.
+. "$(dirname "$0")/../../src/86x64/paths.sh"   # M64_* local paths
 set -eu
 cd "$(dirname "$0")/.."
 ROOT=$(cd .. && pwd); O=build/bench; mkdir -p $O
-LD="$HOME/projects/Library/Toolchains/sl-ld64/ld-i386"
+LD="$M64_I386_LD"
 clang -arch i386 -isysroot "$(xcrun --show-sdk-path)" -mmacosx-version-min=10.6 \
       -fobjc-runtime=macosx-fragile -O2 -c bench/objc_send_bench.m -o $O/bench.o
 "$LD" -arch i386 -macos_version_min 10.6 -no_pie -syslibroot /tmp/i386-sysroot -lSystem -lobjc \

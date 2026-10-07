@@ -19,7 +19,7 @@
  * killed the process.
  *
  * ★ THE STATE IS TRANSIENT, WHICH IS WHY NOTHING CHEAPER WORKS
- * Measured with `src/86x64/dyld-imagewalk-probe.c` (which can catch the assert by
+ * Measured with `src/86x64/probes/dyld-imagewalk-probe.c` (which can catch the assert by
  * siglongjmp and so classify entries good/bad without dying): the badness MOVES.
  * One scan of indices 1037..1044 read [X.....X.], the next [......X.] — index 1037
  * had become queryable while 1043 (engine.dylib, named by elimination) had not.

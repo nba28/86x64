@@ -1,6 +1,6 @@
 /* 22_objc_fp_struct.m — forward and reverse struct-by-value / XMM arg bridging
  * (28th blocker family: NSUnionRect rax=0, struct-by-value args/returns, float
- * args in XMM regs). Tests the objc_bridge_abi_gap FP+struct paths.
+ * args in XMM regs). Tests the ObjC bridge's FP+struct paths.
  *
  * Validates via puts("ok N") / puts("FAIL N ...") + exit(failures).
  * IMPORTANT: no printf("%f") — fp varargs in printf C shims are still broken.

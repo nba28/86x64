@@ -34,6 +34,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED True)
 include_directories("${PROJECT_SOURCE_DIR}/include")
 
 include(cmake/86x64.cmake)
+include(cmake/paths.cmake)   # M64_WORKSPACE and the local paths derived from it
 
 add_subdirectory(extern)
 add_subdirectory(src)
