@@ -184,8 +184,9 @@ export Objective-C classes to other images.
 | `src/86x64/interpose.c`, `wrapper.asm`, `wrapper_setup.c` | `libinterpose.dylib` and the wrapper executable |
 | `src/86x64/shimgen.py`, `src/86x64/shimdb/` | Missing-symbol shim generator and its curated implementation pool |
 | `src/86x64/shims/` | Self-contained helper shims (for example the Miles MP3 provider, built on minimp3) |
-| `src/86x64/*.py`, `*-probe.c` | Diagnostics: `fault-symbolize.py`, `pcmap-diff.py`, `coverage-audit.py`, `unbridged-native-calls.py`, `bridge-shadow-check.py`, `weakdef-coalesce-scan.py`, `diff-digest.py`, … |
-| `src/86x64/probes/` | One-off investigation probes. Diagnostics for a single investigation live here, never in the runtime libraries. |
+| `src/86x64/paths.sh`, `m64_paths.py`, `cmake/paths.cmake` | The configurable local paths (see [Local paths](#local-paths)) |
+| `src/86x64/*.py`, `exit-trace-probe.c` | Diagnostics: `fault-symbolize.py`, `pcmap-diff.py`, `coverage-audit.py`, `unbridged-native-calls.py`, `bridge-shadow-check.py`, `weakdef-coalesce-scan.py`, `diff-digest.py`, … |
+| `src/86x64/probes/` | Probes written for one investigation (see its README). They live here, never in the runtime libraries |
 | `tests-i386/` | End-to-end fixtures (`src/NN_*.{c,m,cc,s,asm}` + `expected/`) and the A/B regression guards in its `Makefile` |
 | `extern/` | Git submodules: Intel XED and mbuild |
 | `cmake/`, `scripts/` | Build helpers, shell completion |
@@ -225,39 +226,59 @@ against a Snow Leopard (10.6) sysroot:
 - A **Mac OS X 10.6 Snow Leopard install image**, mounted at
   `/Volumes/Mac OS X Install DVD`. The sysroot targets extract the i386
   slices of `libSystem` and friends from it.
-- The **macOS 10.6 SDK** at `~/projects/Library/SDKs/MacOSX10.6.sdk` (for
-  headers).
-- **Snow Leopard's `ld64-95`** with an `ld-i386` wrapper at
-  `~/projects/Library/Toolchains/sl-ld64/ld-i386`. It is extracted from the
-  install image's `DeveloperToolsCLI.pkg`. The wrapper drops `-no_pie` and
-  renames `-macos_version_min` to `-macosx_version_min`. The Makefile uses it
-  automatically when present.
+- The **macOS 10.6 SDK** (`M64_SDK106`), for headers.
+- **Snow Leopard's `ld64-95`** behind an `ld-i386` wrapper (`M64_I386_LD`). It
+  is extracted from the install image's `DeveloperToolsCLI.pkg`. The wrapper
+  drops `-no_pie` and renames `-macos_version_min` to `-macosx_version_min`.
+
+Where these live is configurable; see [Local paths](#local-paths) below and
+[`tests-i386/README.md`](tests-i386/README.md) for the full test setup.
 
 You must own legitimate copies of the Apple software and of any application
 you translate. Nothing from those products is, or may be, committed to this
 repository.
 
-### Expected local directory layout
+### Local paths
 
-Several scripts, the abiconv build (`ABICONV_MODERN_TARGETS` in
-`src/abiconv/CMakeLists.txt`) and the test Makefile assume this layout under
-your home directory. Adjust the paths or create the directories:
+Everything outside the repository (the SDK, the i386 linker, your app
+originals and the translated output) is found through a small set of `M64_*`
+variables. All of them derive from **`M64_WORKSPACE`** (default
+`~/projects`), so most people set one variable, or none if they use the
+default layout:
 
 ```
-~/projects/
-├── 86x64/                         # this repository
-├── Library/
-│   ├── SDKs/MacOSX10.6.sdk/       # headers for the i386 sysroot and abigen's legacy pass
-│   ├── Toolchains/sl-ld64/        # Snow Leopard ld64 + ld-i386 wrapper
-│   └── Frameworks/                # reusable translated ("golden") frameworks, e.g. QuickTime
+$M64_WORKSPACE/                     # default: ~/projects
+├── Library/                        # M64_LIBRARY
+│   ├── SDKs/MacOSX10.6.sdk/        # M64_SDK106      headers for the i386 sysroot and abigen's legacy pass
+│   ├── Toolchains/sl-ld64/ld-i386  # M64_I386_LD     Snow Leopard linker wrapper
+│   └── Frameworks/                 # M64_FRAMEWORKS  reusable translated frameworks (e.g. QuickTime)
 └── translations/
-    ├── Apps32/                    # READ-ONLY pristine i386 originals
-    └── Apps64/                    # translated output bundles
+    ├── Apps32/                     # M64_APPS32      pristine i386 originals, read-only
+    └── Apps64/                     # M64_APPS64      translated output
 ```
 
-`ABICONV_MODERN_TARGETS` lists i386 executables whose imports seed abigen's
-bridge set. Missing entries are skipped, but a build that sees none of them
-has a much smaller bridge surface.
+Any variable can also be set on its own, for example an SDK somewhere else:
+
+```sh
+# in ~/.zshrc
+export M64_WORKSPACE="$HOME/dev/86x64-workspace"
+export M64_SDK106="/Volumes/SDKs/MacOSX10.6.sdk"   # optional: override just one
+```
+
+**`m64 paths`** prints every variable, its resolved value, whether it was set
+or defaulted, and whether the path exists. The same names and defaults are
+used by the shell scripts (`src/86x64/paths.sh`), the Python tools
+(`src/86x64/m64_paths.py`), CMake (`cmake/paths.cmake`) and the test
+`Makefile`. CMake caches the values on its first configure, so after changing
+one either pass `-DM64_<NAME>=...` or configure a fresh build directory.
+
+The repository itself can live anywhere; nothing assumes it is inside
+`M64_WORKSPACE`.
+
+`M64_APPS32` matters for the runtime build: abigen seeds its bridge set from
+the imports of the i386 executables it finds there (`ABICONV_MODERN_TARGETS`
+in `src/abiconv/CMakeLists.txt`). Missing apps are skipped, but a build that
+sees none has a much smaller bridge surface.
 
 ---
 
@@ -314,14 +335,19 @@ m64 run Some.app              # launch
 |---|---|
 | `translate <app\|binary>` | Discover and translate i386-only binaries (`--only`/`--skip RELPATH`, `--list`, `-j`, `-k`, `-n`). Translate the whole **bundle** when you want a launchable app: a single binary translated alone does not get the bundle's dependency graph rewritten. |
 | `retranslate <app>` | Redo only binaries 86x64 produced earlier, from their i386 backups. Use after a **core** change. |
-| `resync <app>` | Copy the freshly built `libabiconv.dylib` (and `libinterpose.dylib`) over every copy in the bundle, then re-seal the signature. Use after a **runtime-only** change. |
-| `reinterpose <app>` | Re-run static interposition, for when libabiconv gained a **new export** that existing translations should bind. |
-| `consolidate-runtime <app>` | Collapse multiple copies of the runtime libraries into one per bundle. dyld loads each copy at a different path as a separate image with separate globals. |
-| `rpath-fix`, `sign`, `deploy` | Individual post-translation steps. `deploy` runs rpath → shim → resync → sign. |
+| `resync <app>` | Copy the freshly built `libabiconv.dylib` and `libinterpose.dylib` over every copy in the bundle and re-sign. Use after a **runtime-only** change. |
+| `reinterpose <app>` | Re-run static interposition against the current libabiconv, so existing translations bind **newly added** shims without a full retranslate. |
+| `stale-check <app>` | Find translated binaries that still bind a native symbol raw although a shim for it now exists. Exits non-zero if any are found. |
+| `consolidate-runtime <app>` | Keep one libabiconv/libinterpose per bundle and point every image at it. dyld loads each copy at a different path as a separate image with separate globals. |
+| `tree <dir>` | Translate a non-bundle directory tree (e.g. a Source-engine game) out of place, with runtime copy, path patching and signing. |
 | `vendor <app>` | Copy missing external framework dependencies into a bundle. |
+| `abi-libs <app\|dir>` | Redirect binds on a system C++ runtime dylib (e.g. `libstdc++.6.dylib`) to a translated i386-ABI replacement. |
+| `shim <app\|binary>` | Generate shims for native symbols removed from modern macOS (shimgen). |
+| `rpath-fix`, `sign`, `deploy` | Individual post-translation steps. `deploy` runs rpath → shim → resync → sign → clear saved state. |
+| `forks <app>` | List or restore classic Mac resource forks. |
 | `run`, `debug` | Launch a translated app, optionally under lldb (`debug` = `run --exc`, which traps ObjC exceptions). |
-| `forks` | List or restore classic Mac resource forks. |
 | `build [target] [--resync APP]` | CMake build, optionally followed by a resync. |
+| `paths` | Show the local paths (`M64_*`) and whether each exists. |
 | `macho …` | Pass-through to `macho-tool`. |
 
 Run `m64 <command> -h` for full options.
@@ -346,9 +372,9 @@ process.
 ### Non-bundle programs
 
 Games such as Source-engine titles ship as a directory tree, not an `.app`.
-Translate them out-of-place into a parallel directory. Never write into the
-original `bin/osx32`. `src/86x64/portal2-translate.sh` and
-`src/86x64/run-portal2.sh` are the worked example.
+Translate them out of place into a parallel directory with `m64 tree`, and
+never write into the original `bin/osx32`. `src/86x64/portal2-translate.sh`
+and `src/86x64/run-portal2.sh` are the worked example.
 
 ---
 
@@ -391,72 +417,25 @@ original `bin/osx32`. `src/86x64/portal2-translate.sh` and
 ## The test suite (`tests-i386`)
 
 Each fixture is a small i386 program. The suite compiles and links it for
-i386 against the Snow Leopard sysroot, translates it with the real pipeline,
-runs the x86_64 result, and diffs stdout against `expected/<name>.txt`.
-**Guards** are named Makefile targets that each pin down one fixed bug.
-
-### One-time setup (and after every reboot)
-
-The sysroots live in `/tmp` and disappear on reboot.
-
-```sh
-hdiutil attach "<path to Snow Leopard install image>" -readonly -nobrowse
-cd tests-i386
-make sysroot && make sysroot-objc && make sysroot-cpp   # three separate steps
-ls /tmp/i386-sysroot/usr/lib     # MUST list libSystem.dylib and libSystem.B.dylib
-```
-
-`make sysroot` **exits 0 even when the install image is not mounted** and
-produces a sysroot with headers but no libraries. If every fixture fails to
-link (`library not found for -lSystem`, or `objc 0/N`), your environment is
-the problem, not a regression. Without `make sysroot-cpp`, the whole C++
-suite reports link failures.
-
-### Running
-
-```sh
-cd tests-i386
-make check          # every suite + every non-GUI guard, each under a deadline (~12 min)
-make                # core fixtures only
-make objc           # Objective-C fixtures
-make cpp            # C++ fixtures
-make <guard-name>   # one guard, e.g. make jt-back-edge-join
-bash check.sh <targets…>   # a subset, with the same deadlines and summary
-make check-gui      # also the guards that open windows or go fullscreen (they take over the screen)
-```
-
-`make check` writes per-target logs to `build/check/<target>.log`.
-**Run `make check` before every commit.** Never run two copies at once
-because they share `build/`.
-
-`tests-i386/build/libabiconv.dylib` is a **copy**. After rebuilding abiconv,
-refresh it with `make build/libabiconv.dylib`, or the guards keep testing the
-old runtime.
-
-### Fixture conventions
-
-- Name: `src/NN_short_description.{c,m,cc,s,asm}`. `NN` orders the suite and
-  has no other meaning.
-- Fixtures link with `-e _main`: `main` is the raw entry point with no crt
-  `start` behind it. **End with `exit()`**, never `return`. **`argv` does not
-  arrive**, so take knobs from `getenv`.
-- Expected output: `expected/NN_name.txt`, ending with `exit_code: N`.
-- `*.s` files are globally ignored except `tests-i386/src/[0-9]*.s`. If you
-  name an assembly fixture differently, `git add -f` it, or it silently never
-  reaches the repository.
-
-### Guards: every fix is proven in both directions
-
-A guard is a fixture plus a Makefile target that asserts **both arms**:
+i386 against a Snow Leopard sysroot, translates it with the real pipeline,
+runs the x86_64 result, and diffs its output and exit code against
+`expected/<name>.txt`. **Guards** are named Makefile targets that each pin
+down one fixed bug, in both directions:
 
 - **ON** (default): the fixed behaviour.
 - **OFF** (`M64_NO_<FIX>=1`): the kill switch reproduces the original bug.
 
-The OFF arm is what proves the guard actually exercises the fix; a guard that
-passes in both arms tests nothing. **Run every new guard standalone and check
-both arms by hand at least once.** A guard can pass while inert, for example
-when a fused-PC crash discards buffered stdout. An OFF arm can also hang
-instead of failing, which is why the suite runs under watchdogs.
+The OFF arm is what proves the guard really exercises the fix.
+
+```sh
+cd tests-i386
+make sysroot && make sysroot-objc && make sysroot-cpp   # once per boot, with the SL install image mounted
+make check          # every suite + every non-GUI guard, each under a deadline (~12 min)
+```
+
+**Run `make check` before every commit.** Setup, all the targets, how to
+write fixtures and guards, and troubleshooting are in
+[`tests-i386/README.md`](tests-i386/README.md).
 
 ---
 
