@@ -522,10 +522,9 @@ trampolines, Python 3 and POSIX shell for tooling.
 
 ### Licensing of contributions
 
-This project is licensed under the Apache License 2.0. Under its Section 5,
-any contribution you intentionally submit is provided under the same license,
-with no additional terms, unless you state otherwise in writing. Only submit
-code you wrote or have the right to submit under these terms.
+The project does not have a license yet (see [License](#license)). Only submit
+code you wrote yourself. Once a license is adopted, it will apply to
+contributions made from then on.
 
 ---
 
@@ -664,9 +663,10 @@ compatibility; all trademarks belong to their respective owners.
 
 ## License
 
-Licensed under the [Apache License, Version 2.0](LICENSE). See [NOTICE](NOTICE)
-for attribution and for the provenance of code inherited from the original
-upstream project.
+86x64 does not have an open-source license yet. It builds on the original
+86x64 by Nicholas Mosier, which was published without a license, so its code
+remains the copyright of its author. A license will be added once its terms
+can cover the whole codebase.
 
 Third-party components keep their own licenses:
 
