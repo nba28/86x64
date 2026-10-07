@@ -379,6 +379,27 @@ namespace MachO {
    }
 
    template <Bits bits>
+   bool ParseEnv<bits>::zerofill_small_pair_constant(std::size_t value) const {
+      static const bool off = std::getenv("M64_NO_ZF_SMALL_PAIR_IMM") != nullptr;
+      const uint32_t h = (uint32_t)value >> 16, l = (uint32_t)value & 0xffffu;
+      if (off || h == 0 || l == 0 || l >= 0x40) { return false; }
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(value)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(value)) { continue; }
+            const uint32_t st = sec->sect.flags & SECTION_TYPE;
+            if (st != S_ZEROFILL && st != S_GB_ZEROFILL) { return false; }
+            /* a data symbol at or below the target in this section names the
+             * object it points into: then it is an address after all */
+            const auto it = func_syms.upper_bound(value);
+            return !(it != func_syms.begin() && *std::prev(it) >= sec->sect.addr);
+         }
+         return false;
+      }
+      return false;
+   }
+
+   template <Bits bits>
    bool ParseEnv<bits>::zerofill_target_unattested(const Image& img, std::size_t vmaddr,
                                                    bool sibling) const {
       static const bool disabled =

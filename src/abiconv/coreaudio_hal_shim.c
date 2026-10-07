@@ -21,6 +21,7 @@
  * Converted to the i386 layout for GetProperty and sized for GetPropertyInfo.
  * ABI: MTSHIM (rdi -> &i386 args[0]); symbols in custom.syms.
  */
+#include <stdio.h>
 #include <CoreAudio/CoreAudio.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -108,6 +109,14 @@ uint32_t shim_AudioDeviceGetProperty(uint32_t *a)
       return (uint32_t)get_stream_config(a[0], a[1], in, sz, P(a[5]));
    }
    const OSStatus r = AudioDeviceGetProperty(a[0], a[1], in, a[3], sz, P(a[5]));
+   static int trace = -1;   /* M64_AU_TRACE=1 */
+   if (trace < 0) trace = getenv("M64_AU_TRACE") != NULL;
+   if (trace) {
+      const uint32_t *d = P(a[5]);
+      fprintf(stderr, "[au] DeviceGetProperty dev=%u in=%d id='%.4s' r=%d size=%u first=0x%x,0x%x,0x%x,0x%x\n",
+              a[0], (int)in, (const char *)&(uint32_t){ __builtin_bswap32(a[3]) }, (int)r, sz ? *sz : 0,
+              d ? d[0] : 0, d ? d[1] : 0, d ? d[2] : 0, d ? d[3] : 0);
+   }
    return (uint32_t)widen(r, asked, sz, P(a[5]), ^(UInt32 *s8, uint64_t *v) {
       return AudioDeviceGetProperty(a[0], a[1], in, a[3], s8, v);
    });

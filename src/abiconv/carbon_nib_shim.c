@@ -826,6 +826,46 @@ int sd_ctrl_key(void *ctrl, unsigned char ch, uint32_t mods) {
     return ccw_edit_key((ccw_edit *)s->rec, ch, mods);
 }
 
+// ---- IBCarbonPicture: the PICT resource drawn by a self-drawn view ----
+// The picture control is gone from 64-bit HIToolbox; the nib names a 'PICT'
+// resource id (contentResID) in the app's resource file (Call of Duty 4's key
+// dialog icon, PICT 2000). Decoded once through ImageIO (qd_gworld.c).
+CGImageRef qd_pict_decode(const void *body, size_t len);
+static CGImageRef nib_pict(int id) {
+    static void **(*GetResource)(uint32_t, int16_t);
+    static long (*GetHandleSize)(void **);
+    static int16_t (*OpenMap)(CFBundleRef);
+    static int opened;
+    if (!GetResource) {
+        GetResource   = (void *)dlsym(RTLD_DEFAULT, "GetResource");
+        GetHandleSize = (void *)dlsym(RTLD_DEFAULT, "GetHandleSize");
+        OpenMap       = (void *)dlsym(RTLD_DEFAULT, "CFBundleOpenBundleResourceMap");
+    }
+    if (!GetResource || !GetHandleSize) return NULL;
+    void **h = GetResource('PICT', (int16_t)id);
+    if (!h && !opened && OpenMap && n_CFBundleGetMainBundle) {   /* map not open yet */
+        opened = 1;
+        OpenMap(n_CFBundleGetMainBundle());
+        h = GetResource('PICT', (int16_t)id);
+    }
+    if (!h || !*h) { GAP_ONCE("nib", "PICT resource missing", __func__, 0); return NULL; }
+    return qd_pict_decode(*h, (size_t)GetHandleSize(h));
+}
+static CCWStatus pict_draw(void *call, CCWEventRef ev, void *ud) {
+    (void)call;
+    CGImageRef img = (CGImageRef)ud;
+    CGContextRef cg = ccw_draw_cg(ev);
+    double W = 0, H = 0;
+    if (!img || !cg) return ccwEventNotHandled;
+    W = (double)CGImageGetWidth(img); H = (double)CGImageGetHeight(img);
+    CGContextSaveGState(cg);
+    CGContextTranslateCTM(cg, 0, H);              /* view is y-down; images are y-up */
+    CGContextScaleCTM(cg, 1, -1);
+    CGContextDrawImage(cg, CGRectMake(0, 0, W, H), img);
+    CGContextRestoreGState(cg);
+    return 0;
+}
+
 // Build every control directly under [lo,hi) and embed into `parent`.
 static void build_children(const char *x, long lo, long hi, ControlRef parent, WindowRef win) {
     long p = lo;
@@ -848,7 +888,24 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
                    !strcmp(cls, "IBCarbonHILayoutInfo")) {   // not view controls
             p = oe; continue;
         } else if (!strcmp(cls, "IBCarbonStaticText")) {
-            n_CreateStaticTextControl(win, &r, cfs(title), NULL, &c);
+            // `small` / controlSize 1 = the small system font: its 13px box clips
+            // regular-size text (CoD4 key dialog's second line lost its descenders
+            // and its last word). ControlFontStyleRec: flags, font, ... (SInt16s).
+            int small = 0, csz = 0;
+            nibx_int(x, il, ih, "controlSize", &csz);
+            nibx_bool(x, il, ih, "small", &small);
+            small = small || csz == 1;
+            int16_t fs[12] = { 0x0001 /*kControlUseFontMask*/, -2 /*kControlFontSmallSystemFont*/ };
+            n_CreateStaticTextControl(win, &r, cfs(title), small ? (void *)fs : NULL, &c);
+        } else if (!strcmp(cls, "IBCarbonPicture")) {
+            int rid = 0;
+            CGImageRef img = nibx_int(x, il, ih, "contentResID", &rid) ? nib_pict(rid) : NULL;
+            if (img) {
+                CGRect fr = CGRectMake(r.left, r.top, r.right - r.left, r.bottom - r.top);
+                c = (ControlRef)ccw_make_view(fr, (void *)pict_draw, NULL, NULL, NULL, (void *)img, (CCWViewRef)parent);
+                if (c) wire_ids(x, il, ih, c);
+            }
+            p = oe; continue;                                 // ccw_make_view embedded it
         } else if (!strcmp(cls, "IBCarbonButton")) {
             n_CreatePushButtonControl(win, &r, cfs(title), &c);
         } else if (!strcmp(cls, "IBCarbonCheckBox")) {
@@ -1051,6 +1108,23 @@ static ControlRef content_view_of(WindowRef win, ControlRef root) {
 }
 
 // Custom-build window `wname` from objects.xib. Returns a WindowRef or NULL.
+// ---- keyboard for a rebuilt nib window ----
+// HIToolbox will not focus our self-drawn fields (SetKeyboardFocus ->
+// errCouldntSetFocus), so its user focus stays on the window and every key
+// lands at the WINDOW target (Call of Duty 4's key-code dialog: clicks worked,
+// typing went nowhere). Route keys to the field WE focused, as the classic
+// Dialog Manager did (carbon_classic_widgets.c ccw_route_keys_to_fields). Kill
+// M64_NO_NIB_KEY_ROUTE; guard nib-key-route.
+static int nib_key_route_off(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("M64_NO_NIB_KEY_ROUTE") != NULL;
+    return v;
+}
+static void nib_route_keys(WindowRef win) {
+    (void)win;
+    if (!nib_key_route_off()) ccw_route_keys_to_fields();
+}
+
 static WindowRef build_window(const char *xibpath, CFStringRef wname) {
     char wc[256]; if (!CFStringGetCString(wname, wc, sizeof wc, kCFStringEncodingUTF8)) return NULL;
     long len; char *x = nibx_slurp(xibpath, &len); if (!x) return NULL;
@@ -1101,6 +1175,7 @@ static WindowRef build_window(const char *xibpath, CFStringRef wname) {
     // lazily when the window is first shown, so defer to a one-shot kEventWindowShown
     // handler (see title_on_show) rather than acting now (when it doesn't exist yet).
     if (title[0]) title_on_show(win, titleCF);
+    nib_route_keys(win);
 
     ControlRef root = NULL;
     if (!n_CreateRootControl || n_CreateRootControl(win, &root) != 0 || !root)
@@ -1151,6 +1226,7 @@ static void swap_native_edit_fields(const char *xibpath, CFStringRef wname, Wind
     }
     ControlRef root = n_HIViewGetRoot ? n_HIViewGetRoot(win) : NULL;
     char wc[256];
+    ccw_edit_trace_keys();
     if (!findByID || !superview || !getFrame || !unparent || !root ||
         !CFStringGetCString(wname, wc, sizeof wc, kCFStringEncodingUTF8)) return;
     long len; char *x = nibx_slurp(xibpath, &len); if (!x) return;
@@ -1166,11 +1242,17 @@ static void swap_native_edit_fields(const char *xibpath, CFStringRef wname, Wind
         if (!nibx_int(x, os, oe, "controlID", &cid) && !have_sig) continue;
         HIViewRef old = NULL, parent;
         CtrlID want = { sig, cid };
-        if (findByID(root, want, &old) != 0 || !old || !(parent = superview(old))) continue;
+        if (findByID(root, want, &old) != 0 || !old || !(parent = superview(old))) {
+            if (ccw_edit_trace()) fprintf(stderr, "[edit] swap '%.4s'/%d: stand-in not found\n", (char *)&sig, cid);
+            continue;
+        }
         HIRectD fr = { 0, 0, 0, 0 };
         getFrame(old, &fr);
         CRect r = { (int16_t)fr.y, (int16_t)fr.x, (int16_t)(fr.y + fr.h), (int16_t)(fr.x + fr.w) };
         ControlRef ec = make_edit_field(x, os, oe, &r, parent, win);
+        if (ccw_edit_trace())
+            fprintf(stderr, "[edit] swap id=%d frame=%.0f,%.0f %.0fx%.0f old=%p new=%p\n",
+                    cid, fr.x, fr.y, fr.w, fr.h, (void *)old, (void *)ec);
         if (!ec) continue;
         unparent(old);              // GetControlByID must now resolve to ours
         wire_ids(x, os, oe, ec);
@@ -1226,6 +1308,12 @@ uint32_t shim_CreateWindowFromNib(uint32_t *a) {
 
     WindowRef w = NULL;
     OSStatus st = n_CreateWindowFromNib ? n_CreateWindowFromNib(ref, wn, &w) : (OSStatus)-108;
+    if (ccw_edit_trace()) {
+        char nm[128] = "";
+        if (wn) CFStringGetCString(wn, nm, sizeof nm, kCFStringEncodingUTF8);
+        fprintf(stderr, "[edit] CreateWindowFromNib '%s' native st=%d win=%p xib=%s\n", nm, (int)st,
+                (void *)w, nib_lookup(ref) ? nib_lookup(ref) : "(none)");
+    }
 
     if ((st != 0 || !w)) {                       // native gutted path failed (e.g. -5601)
         const char *xib = nib_lookup(ref);

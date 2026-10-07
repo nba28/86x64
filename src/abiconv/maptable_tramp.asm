@@ -278,6 +278,7 @@
 	MTSHIM	___AudioDeviceStop,           _shim_AudioDeviceStop
 	MTSHIM	___AudioUnitSetProperty, _shim_AudioUnitSetProperty
 	MTSHIM	___AudioUnitGetProperty, _shim_AudioUnitGetProperty
+	MTSHIM	___AUGraphGetNodeInfo, _shim_AUGraphGetNodeInfo
 	MTSHIM	___AudioUnitInitialize, _shim_AudioUnitInitialize
 	MTSHIM	___AudioUnitUninitialize, _shim_AudioUnitUninitialize
 	MTSHIM	___AudioOutputUnitStart, _shim_AudioOutputUnitStart
@@ -1096,6 +1097,7 @@ _x64_exc_longjmp:
 	MTSHIM	___aglQueryRendererInfoForCGDirectDisplayIDs, _shim_aglQueryRendererInfoForCGDirectDisplayIDs
 	MTSHIM	___aglNextRendererInfo,               _shim_aglNextRendererInfo
 	MTSHIM	___aglDescribeRenderer,               _shim_aglDescribeRenderer
+	MTSHIM	___CGLDescribeRenderer,               _shim_CGLDescribeRenderer
 	MTSHIM	___aglDestroyRendererInfo,            _shim_aglDestroyRendererInfo
 	; --- CGL/AGL CONTEXT OBJECT (cgl_macro_shim.c) ---
 	;     <OpenGL/CGLMacro.h> #defines every glXxx() to jump through the

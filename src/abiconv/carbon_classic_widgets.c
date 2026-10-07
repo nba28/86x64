@@ -581,6 +581,25 @@ CCWViewRef ccw_button_install(ccw_button *b, CCWViewRef parent) {
 #define CCW_EDIT_FONT 11.0
 #define CCW_EDIT_PADX 4.0
 
+/* M64_EDIT_TRACE=1: one line per focus change, key and swap on our edit fields,
+ * plus every raw key the app is dispatched (see ccw_edit_trace_keys) — answers
+ * "where does a keystroke stop?" in a single run. */
+int ccw_edit_trace(void) {
+    static int v = -1;
+    if (v < 0) v = getenv("M64_EDIT_TRACE") != NULL;
+    return v;
+}
+#define ETRACE(...) do { if (ccw_edit_trace()) fprintf(stderr, "[edit] " __VA_ARGS__); } while (0)
+static CCWStatus (*n_GetKeyboardFocus)(CCWWindowRef, CCWViewRef *);
+static CCWWindowRef (*n_GetUserFocusWindow)(void);
+static void focus_fns(void) {
+    static int done;
+    if (done) return;
+    done = 1;
+    n_GetKeyboardFocus   = (void *)dlsym(RTLD_DEFAULT, "GetKeyboardFocus");
+    n_GetUserFocusWindow = (void *)dlsym(RTLD_DEFAULT, "GetUserFocusWindow");
+}
+
 /* Focus group, scoped by window.  Owned here so a click on one field un-focuses
  * its siblings without every shim reimplementing focus. */
 #define CCW_FOCUS_MAX 128
@@ -770,6 +789,7 @@ static CCWStatus edit_ctrl_key(void *call, CCWEventRef ev, void *ud) {
         return ccwEventNotHandled;
     ccw_GetEventParameter(ev, 'kmod' /*kEventParamKeyModifiers*/, 'magn',
                           NULL, sizeof mods, NULL, &mods);
+    ETRACE("KeyDown %p ch=0x%02x mods=0x%x\n", (void *)e->view, ch, mods);
     return ccw_edit_key(e, ch, mods) ? 0 : ccwEventNotHandled;
 }
 
@@ -786,13 +806,20 @@ static CCWStatus edit_text_input(void *call, CCWEventRef ev, void *ud) {
     uint32_t mods = 0;
     void *raw = NULL;
     if (!e || !ccw_GetEventParameter) return ccwEventNotHandled;
-    if (ccw_GetEventParameter(ev, 'tstx', 'utf8', NULL, sizeof buf, &n, buf) != 0 ||
-        n == 0 || n > sizeof buf)
-        return ccwEventNotHandled;
+    if (ccw_GetEventParameter(ev, 'tstx', 'utf8', NULL, sizeof buf, &n, buf) != 0 || n == 0) {
+        uint16_t u16[32];                       /* typeUnicodeText (no utf8 coercion) */
+        unsigned long nb = 0;
+        if (ccw_GetEventParameter(ev, 'tstx', 'utxt', NULL, sizeof u16, &nb, u16) != 0 || nb < 2)
+            return ccwEventNotHandled;
+        n = nb / 2;
+        for (unsigned long i = 0; i < n; i++) buf[i] = u16[i] < 0x80 ? (char)u16[i] : 0;
+    }
+    if (n == 0 || n > sizeof buf) return ccwEventNotHandled;
     for (unsigned long i = 0; i < n; i++)
         if ((unsigned char)buf[i] < 0x20 || (unsigned char)buf[i] >= 0x7f) return ccwEventNotHandled;
     if (ccw_GetEventParameter(ev, 'tske', 'evrf', NULL, sizeof raw, NULL, &raw) == 0 && raw)
         ccw_GetEventParameter(raw, 'kmod', 'magn', NULL, sizeof mods, NULL, &mods);
+    ETRACE("TextInput %p \"%.*s\" mods=0x%x\n", (void *)e->view, (int)n, buf, mods);
     if (mods & 0x0100) return ccwEventNotHandled;       /* Cmd: a menu key */
     for (unsigned long i = 0; i < n; i++) ccw_edit_key(e, (unsigned char)buf[i], mods);
     return 0;
@@ -807,6 +834,7 @@ static CCWStatus edit_focus_ev(void *call, CCWEventRef ev, void *ud) {
     ccw_edit *e = (ccw_edit *)ud;
     int16_t part = 0;
     if (ccw_GetEventParameter) ccw_GetEventParameter(ev, 'cprt', 'cprt', NULL, sizeof part, NULL, &part);
+    ETRACE("SetFocusPart %p part=%d (was focused=%d)\n", e ? (void *)e->view : NULL, part, e ? e->focused : -1);
     if (part < 0 && e && e->focused) part = 0;
     if (e) ccw_edit_set_focus(e, part != 0);
     if (ccw_SetEventParameter) ccw_SetEventParameter(ev, 'cprt', 'cprt', sizeof part, &part);
@@ -905,16 +933,143 @@ CCWViewRef ccw_edit_install(ccw_edit *e, CCWViewRef parent) {
         void *tgt = ccw_GetControlEventTarget(e->view);
         struct { uint32_t cls, kind; } kd = { 'cntl', 11   };  /* KeyDown      */
         struct { uint32_t cls, kind; } fp = { 'cntl', 4013 };  /* SetFocusPart */
-        struct { uint32_t cls, kind; } ti = { 'tnpt', 2 };     /* UnicodeForKeyEvent */
+        struct { uint32_t cls, kind; } ti = { 'text', 2 };     /* UnicodeForKeyEvent */
         ccw_InstallEventHandler(tgt, (void *)edit_ctrl_key,  1, &kd, e, NULL);
         ccw_InstallEventHandler(tgt, (void *)edit_focus_ev,  1, &fp, e, NULL);
         ccw_InstallEventHandler(tgt, (void *)edit_text_input, 1, &ti, e, NULL);
     }
     /* A bare hiview advertises no features, so HIToolbox will not route keyboard
-     * focus to it.  Advertise kHIViewFeatureGetsFocusOnClick (1<<8). */
+     * focus to it.  Advertise kHIViewFeatureGetsFocusOnClick (1<<8).  (Even so
+     * SetKeyboardFocus answers errCouldntSetFocus on modern macOS, with or
+     * without kControlSupportsFocus: keys reach a field through
+     * ccw_route_keys_to_fields, not HIToolbox focus.) */
     if (e->view && ccw_HIViewChangeFeatures) ccw_HIViewChangeFeatures(e->view, (1ull << 8), 0);
     if (e->view) field_register(e);
+    ETRACE("field %p win=%p frame=%.0f,%.0f %.0fx%.0f\n", (void *)e->view, (void *)e->win,
+           e->frame.origin.x, e->frame.origin.y, e->frame.size.width, e->frame.size.height);
+    ccw_edit_trace_keys();
     return e->view;
+}
+
+
+/* Trace only: log every raw key the app is dispatched, with HIToolbox's user
+ * focus window and that window's focused view (ours or not). Never handles. */
+static CCWStatus trace_raw_key(void *call, CCWEventRef ev, void *ud) {
+    (void)call; (void)ud;
+    unsigned char ch = 0;
+    if (ccw_GetEventParameter) ccw_GetEventParameter(ev, 'kchr', 'TEXT', NULL, sizeof ch, NULL, &ch);
+    CCWWindowRef w = n_GetUserFocusWindow ? n_GetUserFocusWindow() : NULL;
+    CCWViewRef f = NULL;
+    if (w && n_GetKeyboardFocus) n_GetKeyboardFocus(w, &f);
+    int ours = 0;
+    for (int i = 0; i < g_nfields; i++) if (g_fields[i] && g_fields[i]->view == f) ours = 1;
+    fprintf(stderr, "[edit] RawKey ch=0x%02x kind=%u focusWin=%p focus=%p ours=%d\n", ch,
+            ccw_GetEventKind ? ccw_GetEventKind(ev) : 0, (void *)w, (void *)f, ours);
+    return ccwEventNotHandled;
+}
+void ccw_edit_trace_keys(void) {
+    static int done;
+    if (done || !ccw_edit_trace() || !ccw_available() || !ccw_GetEventDispatcherTarget) return;
+    done = 1;
+    focus_fns();
+    struct { uint32_t cls, kind; } k[2] = { { 'keyb', 1 }, { 'keyb', 2 } };  /* RawKeyDown/Repeat */
+    ccw_InstallEventHandler(ccw_GetEventDispatcherTarget(), (void *)trace_raw_key, 2, k, NULL, NULL);
+}
+
+/* Keys for windows whose fields HIToolbox will not focus (a rebuilt nib
+ * window: SetKeyboardFocus -> errCouldntSetFocus, so HIToolbox's focus stays
+ * NULL and no control ever receives a key). Routed at the event DISPATCHER,
+ * which every keystroke provably crosses, to the field WE focused:
+ *   printable -> a kEventTextInputUnicodeForKeyEvent sent to the field's
+ *     control target, so the app's own handlers there run first (Call of Duty
+ *     4 upper-cases its key-code boxes) before edit_text_input inserts it;
+ *   Tab -> next field; Backspace/arrows/Delete -> the field's editor;
+ *   Return/Enter/Esc/Cmd-keys -> left alone (default buttons, menus). */
+static CCWStatus (*n_CreateEvent)(void *, uint32_t, uint32_t, double, uint32_t, CCWEventRef *);
+/* One printable character into field f, as a kEventTextInputUnicodeForKeyEvent
+ * on the field's control target (the app's handlers there run first). `raw`
+ * (the RawKeyDown, or NULL for pasted text) rides as kEventParamTextInputSendKeyboardEvent. */
+static void route_text_char(ccw_edit *f, unsigned char ch, uint32_t mods, CCWEventRef raw) {
+    CCWEventRef ti = NULL;
+    const char u = (char)ch;   /* typeUTF8Text: CoD4's upper-caser checks the ACTUAL type */
+    if (!n_CreateEvent || n_CreateEvent(NULL, 'text' /*kEventClassTextInput*/, 2, 0, 0, &ti) != 0 || !ti) {
+        int ok = ccw_edit_key(f, ch, mods);            /* no TSM event: type directly */
+        ETRACE("route '%c' direct -> %d\n", ch, ok);
+        return;
+    }
+    ccw_SetEventParameter(ti, 'tstx', 'utf8', sizeof u, &u);
+    if (raw) ccw_SetEventParameter(ti, 'tske', 'evrf', sizeof raw, &raw);
+    CCWStatus st = ccw_SendEventToEventTarget(ti, ccw_GetControlEventTarget(f->view));
+    ETRACE("route '%c' -> TextInput st=%d\n", ch, (int)st);
+    if (ccw_ReleaseEvent) ccw_ReleaseEvent(ti);
+}
+CFDataRef clipboard_text(void);                         /* carbon_scrap_shim.c */
+OSStatus  clipboard_put_text(const void *bytes, long len);
+OSStatus  clipboard_clear(void);
+/* Cmd-V types the clipboard as if keyed (each character re-finds the focused
+ * field, so the app's key filter can fill a box and advance: a pasted CoD4 key
+ * lands across all five boxes); Cmd-C copies the selection (or the whole
+ * field); Cmd-A selects all. Anything else stays a menu key. */
+static int route_cmd_key(ccw_edit *f, unsigned char ch) {
+    if (ch == 'v' || ch == 'V') {
+        CFDataRef d = clipboard_text();
+        if (!d) return 1;
+        const UInt8 *p = CFDataGetBytePtr(d);
+        const CFIndex n = CFDataGetLength(d);
+        for (CFIndex i = 0; i < n; i++) {
+            if (p[i] < 0x20 || p[i] == 0x7f) continue;
+            CCWWindowRef w = n_GetUserFocusWindow ? n_GetUserFocusWindow() : f->win;
+            ccw_edit *cur = ccw_focused_edit(w ? w : f->win);
+            if (cur) route_text_char(cur, p[i], 0, NULL);
+        }
+        CFRelease(d);
+        ETRACE("route Cmd-V %ld bytes\n", (long)n);
+        return 1;
+    }
+    if (ch == 'c' || ch == 'C') {
+        int lo = f->caret < f->selAnchor ? f->caret : f->selAnchor;
+        int hi = f->caret < f->selAnchor ? f->selAnchor : f->caret;
+        if (lo == hi) { lo = 0; hi = (int)strlen(f->text); }
+        clipboard_clear();
+        clipboard_put_text(f->text + lo, hi - lo);
+        return 1;
+    }
+    if (ch == 'a' || ch == 'A') { ccw_edit_select_all(f); return 1; }
+    return 0;
+}
+static CCWStatus route_raw_key(void *call, CCWEventRef ev, void *ud) {
+    (void)call; (void)ud;
+    CCWWindowRef w = n_GetUserFocusWindow ? n_GetUserFocusWindow() : NULL;
+    ccw_edit *f = w ? ccw_focused_edit(w) : NULL;
+    if (!f || !ccw_GetEventParameter) return ccwEventNotHandled;
+    unsigned char ch = 0;
+    uint32_t mods = 0;
+    if (ccw_GetEventParameter(ev, 'kchr', 'TEXT', NULL, sizeof ch, NULL, &ch) != 0) return ccwEventNotHandled;
+    ccw_GetEventParameter(ev, 'kmod', 'magn', NULL, sizeof mods, NULL, &mods);
+    if (mods & 0x0100) return route_cmd_key(f, ch) ? 0 : ccwEventNotHandled;
+    if (ch == 13 || ch == 3 || ch == 27) return ccwEventNotHandled;
+    if (ch == 9) {
+        int ok = ccw_focus_next(w, (mods & 0x0200) ? 1 : 0);
+        ETRACE("route Tab -> %d\n", ok);
+        return ok ? 0 : ccwEventNotHandled;
+    }
+    if (ch < 0x20 || ch == 0x7f) {
+        int ok = ccw_edit_key(f, ch, mods);
+        ETRACE("route edit-key 0x%02x -> %d\n", ch, ok);
+        return ok ? 0 : ccwEventNotHandled;
+    }
+    route_text_char(f, ch, mods, ev);
+    return 0;
+}
+void ccw_route_keys_to_fields(void) {
+    static int done;
+    if (done || !ccw_available()) return;
+    done = 1;
+    focus_fns();
+    n_CreateEvent = (void *)dlsym(RTLD_DEFAULT, "CreateEvent");
+    struct { uint32_t cls, kind; } k[2] = { { 'keyb', 1 }, { 'keyb', 2 } };  /* RawKeyDown/Repeat */
+    CCWStatus st = ccw_InstallEventHandler(ccw_GetEventDispatcherTarget(), (void *)route_raw_key, 2, k, NULL, NULL);
+    ETRACE("route installed st=%d\n", (int)st);
 }
 
 /* =============================== MODAL PUMP ============================== */

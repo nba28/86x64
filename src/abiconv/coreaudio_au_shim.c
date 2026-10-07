@@ -16,6 +16,7 @@
  * AudioBufferLists (coreaudio_abl.h).
  * ABI: MTSHIM (rdi -> &i386 args[0]); symbols in custom.syms.
  */
+#include <stdio.h>
 #include <AudioUnit/AudioUnit.h>
 #include <AudioToolbox/AudioToolbox.h>
 #include <os/lock.h>
@@ -159,10 +160,26 @@ static OSStatus au_render_tramp(void *ctx, AudioUnitRenderActionFlags *flags,
 /* ---- AudioUnit calls ---------------------------------------------------- */
 
 /* OSStatus AudioUnitSetProperty(AudioUnit, PropertyID, Scope, Element, const void *, UInt32) */
+static int layout_implied_off(void)
+{
+   static int v = -1;
+   if (v < 0) v = getenv("M64_NO_AU_LAYOUT_IMPLIED") != NULL;
+   return v;
+}
+
 uint32_t shim_AudioUnitSetProperty(uint32_t *a)
 {
    AudioUnit u = au_in(a[0]);
    const uint32_t *v = P(a[4]);
+   static int trace = -1;   /* M64_AU_TRACE=1: what the app configures */
+   if (trace < 0) trace = getenv("M64_AU_TRACE") != NULL;
+   if (trace) {
+      fprintf(stderr, "[au] SetProperty unit=%p id=%u scope=%u el=%u size=%u", (void *)u, a[1], a[2], a[3], a[5]);
+      if (a[1] == kAudioUnitProperty_StreamFormat && v && a[5] >= 40)
+         fprintf(stderr, " fmt='%.4s' flags=0x%x bpf=%u ch=%u bits=%u", (const char *)&(uint32_t){ __builtin_bswap32(v[2]) },
+                 v[3], v[6], v[7], v[8]);
+      fprintf(stderr, "\n");
+   }
    if (a[1] == kAudioUnitProperty_MakeConnection && v && a[5] >= 12) {
       AudioUnitConnection c = { v[0] ? au_in(v[0]) : NULL, v[1], v[2] };
       return (uint32_t)AudioUnitSetProperty(u, a[1], a[2], a[3], &c, sizeof c);
@@ -176,7 +193,53 @@ uint32_t shim_AudioUnitSetProperty(uint32_t *a)
       }
       return (uint32_t)AudioUnitSetProperty(u, a[1], a[2], a[3], &s, sizeof s);
    }
-   return (uint32_t)AudioUnitSetProperty(u, a[1], a[2], a[3], v, a[5]);
+   OSStatus r = AudioUnitSetProperty(u, a[1], a[2], a[3], v, a[5]);
+   /* A channel layout the unit no longer takes but that only restates the
+    * scope's stream format: the 2008 3D mixer accepted kAudioChannelLayoutTag_
+    * Stereo on its OUTPUT scope, today's spatial mixer answers
+    * kAudioUnitErr_InvalidProperty (-10879, measured) for any layout there —
+    * Call of Duty 4 threw that as a fatal audio error. Accept it only when the
+    * layout's channel count equals the channels already set on that scope.
+    * Kill M64_NO_AU_LAYOUT_IMPLIED; guard augraph-nodeinfo. */
+   if (r == kAudioUnitErr_InvalidProperty && a[1] == kAudioUnitProperty_AudioChannelLayout && v &&
+       a[5] >= 12 && !layout_implied_off()) {
+      AudioStreamBasicDescription f;
+      UInt32 fs = sizeof f;
+      if (AudioUnitGetProperty(u, kAudioUnitProperty_StreamFormat, a[2], a[3], &f, &fs) == noErr &&
+          AudioChannelLayoutTag_GetNumberOfChannels(v[0]) == f.mChannelsPerFrame) {
+         r = noErr;
+      }
+   }
+   if (trace) {
+      fprintf(stderr, "[au]   -> r=%d", (int)r);
+      for (uint32_t i = 0; v && i < a[5] / 4 && i < 12; i++) fprintf(stderr, " %08x", v[i]);
+      fprintf(stderr, "\n");
+   }
+   return (uint32_t)r;
+}
+
+/* OSStatus AUGraphGetNodeInfo(AUGraph, AUNode, ComponentDescription *, UInt32 *classDataSize,
+ *                             void **classData, AudioUnit *outAudioUnit)
+ * The generated bridge left the 8-byte AudioUnit out of the caller's 4-byte slot:
+ * success with a NULL unit, so Call of Duty 4's mixer setup queried unit 0 and
+ * threw the error (uncaught, abort). The unit goes back as the low handle au_in
+ * decodes; the description (5 UInt32s) is layout-identical; classData (dead since
+ * Carbon) comes back NULL. Kill M64_NO_AUGRAPH_NODEINFO; guard augraph-nodeinfo. */
+extern uint64_t _86x64_unwrap_obj_arg(uint32_t h);
+uint32_t shim_AUGraphGetNodeInfo(uint32_t *a)
+{
+   uint32_t *out_unit = P(a[5]), *out_data = P(a[4]);
+   static int off = -1;
+   if (off < 0) off = getenv("M64_NO_AUGRAPH_NODEINFO") != NULL;
+   AUGraph g = (AUGraph)(uintptr_t)_86x64_unwrap_obj_arg(a[0]);
+   AudioUnit u = NULL;
+   AudioComponentDescription d = { 0 };
+   const OSStatus r = AUGraphNodeInfo(g, (AUNode)a[1], a[2] ? &d : NULL, &u);
+   if (a[2]) memcpy(P(a[2]), &d, sizeof d);          /* ComponentDescription == ACD */
+   if (a[3]) *(uint32_t *)P(a[3]) = 0;
+   if (out_data) *out_data = 0;
+   if (out_unit) *out_unit = (r == noErr && u && !off) ? x64_objc_wrap((uint64_t)(uintptr_t)u) : 0;
+   return (uint32_t)r;
 }
 
 /* OSStatus AudioUnitGetProperty(AudioUnit, PropertyID, Scope, Element, void *, UInt32 *) */
