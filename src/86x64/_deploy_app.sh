@@ -8,7 +8,7 @@ APP="${1:?app path}"
 IDENT="${2:?codesign identifier}"
 TARGETS="${3:?shimgen targets file}"
 SAVEDSTATE="${4:-}"
-ROOT=$HOME/projects/86x64
+ROOT="$(cd "$(dirname "$0")/../.." && pwd)"   # repo root (this script lives in src/86x64)
 L="$ROOT/build/src/abiconv/libabiconv.dylib"
 
 echo "== rpath sweep =="
