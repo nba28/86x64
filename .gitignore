@@ -29,6 +29,8 @@ build/
 build-*/
 references/
 scratchpad/
+cmake-build-debug
+cmake
 # shimgen run output: per-framework stubs every app's run overwrites, and its
 # accumulated curation queue. Nothing builds from them; curated code is impl/.
 src/86x64/shimdb/generated/
