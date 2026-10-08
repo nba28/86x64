@@ -1135,10 +1135,6 @@ uint32_t shim_TestDeviceAttribute(uint32_t *a)
  * read-only com.apple.pict decoder. An in-memory PicHandle holds the picture
  * body ([SInt16 picSize][Rect picFrame][opcodes...]) WITHOUT the 512-byte PICT
  * file header; prepend a zero header so ImageIO accepts it, then decode. */
-static CGImageRef pict_decode(const void *body, size_t len);
-/* shared: carbon_nib_shim.c draws a nib's IBCarbonPicture through this */
-CGImageRef qd_pict_decode(const void *body, size_t len) { return pict_decode(body, len); }
-
 static CGImageRef pict_decode(const void *body, size_t len)
 {
    if (!body || !len) return NULL;

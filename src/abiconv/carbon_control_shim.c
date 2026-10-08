@@ -36,7 +36,6 @@
 #include <CoreFoundation/CoreFoundation.h>
 #include "carbon_shim.h"
 #include "gap.h"
-#include "carbon_classic_widgets.h"
 
 extern uint64_t x64_objc_unwrap(uint32_t h);
 extern uint32_t x64_objc_wrap(uint64_t real);
@@ -177,12 +176,6 @@ static int32_t ctrl_get_range(uint32_t *a, int max) {
     if (ctrl_range_off()) return max;
     if (max && sd_ctrl_get_max(c, &v)) return v;
     if (!c) return 0;
-    /* a bare self-drawn hiview (our edit field) has no range storage: HIViewSet-
-     * Maximum is dropped and reads back 0, so Call of Duty 4's key filter saw an
-     * unlimited box. The value rides as a control property, like the refCon. */
-    DL(GetControlProperty, OSStatus, (void *, uint32_t, uint32_t, uint64_t, uint64_t *, void *));
-    if (GetControlProperty && GetControlProperty(c, 'x64r', max ? 'rmax' : 'rmin', sizeof v, NULL, &v) == 0)
-        return v;
     if (max) return HIViewGetMaximum ? HIViewGetMaximum(c) : 0;
     return HIViewGetMinimum ? HIViewGetMinimum(c) : 0;
 }
@@ -191,11 +184,6 @@ static void ctrl_set_range(uint32_t *a, int max, int32_t v) {
     DL(HIViewSetMaximum, OSStatus, (void *, int32_t));
     void *c = UNWRAP(0);
     if (ctrl_range_off() || !c) return;
-    DL(SetControlProperty, OSStatus, (void *, uint32_t, uint32_t, uint64_t, const void *));
-    if (sd_ctrl_get_text(c, NULL, 0) >= 0 && SetControlProperty) {   /* our field */
-        SetControlProperty(c, 'x64r', max ? 'rmax' : 'rmin', sizeof v, &v);
-        return;
-    }
     if (max && HIViewSetMaximum) HIViewSetMaximum(c, v);
     if (!max && HIViewSetMinimum) HIViewSetMinimum(c, v);
 }
@@ -365,14 +353,7 @@ uint32_t shim_GetControlData(uint32_t *a) {
             *(uint32_t *)data = cf ? x64_objc_wrap((uint64_t)(uintptr_t)cf) : 0;
             if (actual) *actual = 4;
         } else if (tag == 'text' && data) {
-            // Raw bytes, min(len, bufsize), NO terminator: Call of Duty 4 reads each
-            // 4-char key box into a 4-byte buffer and NULs buf[actual] itself; a
-            // C-string copy kept 3 chars and the 16-char key check always failed.
-            char tmp[256];
-            int n = sd_ctrl_get_text(c, tmp, sizeof tmp);
-            if (n > (int)sizeof tmp - 1) n = (int)sizeof tmp - 1;
-            const int cp = n < (int)maxsz ? n : (int)maxsz;
-            if (cp > 0) memcpy(data, tmp, (size_t)cp);
+            int n = sd_ctrl_get_text(c, (char *)data, (int)maxsz);
             if (actual) *actual = (uint32_t)(n < 0 ? 0 : n);
         } else if (tag == 'sele' && data && maxsz >= 4) {
             sd_ctrl_get_sel(c, &((int16_t *)data)[0], &((int16_t *)data)[1]);
@@ -439,10 +420,6 @@ static uint32_t kbd_focus(uint32_t *a, uint32_t mods) {
     DL(HIViewGetRoot, void *, (void *));
     DL(HIViewAdvanceFocus, OSStatus, (void *, uint32_t));
     void *w = UNWRAP(0);
-    /* our self-drawn fields keep their own focus chain (HIToolbox will not
-     * focus them); a window holding one advances through it */
-    if (w && ccw_focused_edit((CCWWindowRef)w) && !getenv("M64_NO_NIB_KEY_ROUTE"))
-        return ccw_focus_next((CCWWindowRef)w, (mods & 0x0200) ? 1 : 0) ? 0 : (uint32_t)-50;
     void *root = (w && HIViewGetRoot) ? HIViewGetRoot(w) : NULL;
     return (root && HIViewAdvanceFocus) ? (uint32_t)HIViewAdvanceFocus(root, mods) : (uint32_t)-50;
 }

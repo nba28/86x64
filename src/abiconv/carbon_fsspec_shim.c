@@ -368,9 +368,6 @@ static int16_t FSpMakeFSRef(const uint8_t *spec, uint8_t *newRef) {
     if (!spec || !newRef) { return FM_PARAM_ERR; }
     if (!cfs_fsspec_to_path(spec, path, sizeof path, &exists)) { return FM_NSV_ERR; }
     if (!exists) { return FM_FNF_ERR; }
-    /* resolve before use: a spec answered from the dirID table never reached
-     * fs_native_ready (Call of Duty 4's loader thread: call 0, first FS call) */
-    if (!fs_native_ready()) { return FM_NSV_ERR; }
     if (p_FSPathMakeRef((const uint8_t *)path, newRef, NULL) != 0) {
         memset(newRef, 0, FSREF_SIZE);
         return FM_FNF_ERR;

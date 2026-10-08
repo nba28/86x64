@@ -813,15 +813,6 @@ uint32_t shim_cxa_throw(uint32_t *a) {
     * address at [rbp+8] = a[-1]. */
    uint32_t thrower_ebp = a[-3];
    uint32_t thrower_ret = a[-1];
-   /* M64_EH_TRACE=1: name every throw (an app that catches and quits quietly
-    * leaves no other trace). i386 type_info = { vptr, const char *name }. */
-   static int trace = -1;
-   if (trace < 0) trace = getenv("M64_EH_TRACE") != NULL;
-   if (trace) {
-      const uint32_t *ti = (const uint32_t *)(uintptr_t)tinfo;
-      const char *nm = ti ? (const char *)(uintptr_t)ti[1] : NULL;
-      fprintf(stderr, "[eh] throw %s obj=0x%x from ret=0x%x\n", nm ? nm : "?", obj, thrower_ret);
-   }
    /* &a[0] is the throwing frame's body esp (where it staged the throw args). */
    eh_raise_from(h, thrower_ebp, thrower_ret, (uint32_t)(uintptr_t)a);
 

@@ -27,8 +27,6 @@
 #include <dlfcn.h>
 #include <unistd.h>
 #include <sys/syscall.h>
-#include <stdint.h>
-#include <pthread.h>
 
 static void describe(const char *label, void *addr) {
    Dl_info info;
@@ -56,15 +54,11 @@ static void describe(const char *label, void *addr) {
  * the caller of a null-pointer call from [rsp].)
  */
 static void scan_stack_for_sites(int words) {
-   /* 4-byte slots: translated i386 frames push 4-byte return addresses, so an
-    * 8-byte scan sees only half of them (and pairs the rest with garbage).
-    * Bounded by the thread's real stack top: scanning past it faults. */
-   uint32_t *sp = (uint32_t *)__builtin_frame_address(0);
-   uint32_t *top = (uint32_t *)pthread_get_stackaddr_np(pthread_self());
+   void **sp = (void **)__builtin_frame_address(0);
    fprintf(stderr, "[exit-trace] stack scan for in-image return addresses:\n");
    int found = 0;
-   for (int i = 0; i < words && sp + i < top; ++i) {
-      void *w = (void *)(uintptr_t)sp[i];
+   for (int i = 0; i < words; ++i) {
+      void *w = sp[i];
       if (w == NULL) { continue; }
       Dl_info info;
       if (dladdr(w, &info) == 0 || info.dli_fname == NULL) { continue; }
@@ -74,7 +68,7 @@ static void scan_stack_for_sites(int words) {
           strstr(info.dli_fname, "/System/") != NULL ||
           strstr(info.dli_fname, "exit_trace") != NULL) { continue; }
       char lbl[24];
-      snprintf(lbl, sizeof lbl, "[sp+0x%x]", (unsigned)(i * 4));
+      snprintf(lbl, sizeof lbl, "[rsp+0x%x]", (unsigned)(i * sizeof(void *)));
       describe(lbl, w);
       ++found;
    }
@@ -95,7 +89,7 @@ static void report(const char *who, int status, void *caller) {
    }
    {
       const char *w = getenv("EXIT_TRACE_WORDS");
-      scan_stack_for_sites(w ? atoi(w) : 4096);
+      scan_stack_for_sites(w ? atoi(w) : 256);
    }
    fflush(stderr);
 }

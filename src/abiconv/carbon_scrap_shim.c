@@ -30,8 +30,8 @@ static PasteboardRef clipboard(void) {
 }
 
 /* The clipboard's plain text as MacRoman bytes (+1 CFData the caller releases),
- * or NULL if it holds no text. Shared: the classic edit field's Cmd-V. */
-CFDataRef clipboard_text(void) {
+ * or NULL if it holds no text. */
+static CFDataRef clipboard_text(void) {
     PasteboardRef pb = clipboard();
     ItemCount n = 0;
     if (!pb || PasteboardGetItemCount(pb, &n) != noErr || n < 1) return NULL;
@@ -112,27 +112,18 @@ uint32_t shim_ClearCurrentScrap(uint32_t *a) {
     return pb ? (uint32_t)PasteboardClear(pb) : PARAM_ERR;
 }
 
-/* Put MacRoman text on the (already cleared) clipboard. Shared: Cmd-C. */
-OSStatus clipboard_put_text(const void *bytes, long len) {
-    PasteboardRef pb = clipboard();
-    if (!pb) return (OSStatus)PARAM_ERR;
-    CFStringRef s = CFStringCreateWithBytes(NULL, (const UInt8 *)bytes, (CFIndex)len,
-                                            kCFStringEncodingMacRoman, false);
-    if (!s) return (OSStatus)PARAM_ERR;
-    CFDataRef utf8 = CFStringCreateExternalRepresentation(NULL, s, kCFStringEncodingUTF8, 0);
-    CFRelease(s);
-    if (!utf8) return (OSStatus)PARAM_ERR;
-    OSStatus st = PasteboardPutItemFlavor(pb, (PasteboardItemID)1, CFSTR("public.utf8-plain-text"), utf8, 0);
-    CFRelease(utf8);
-    return st;
-}
-OSStatus clipboard_clear(void) {
-    PasteboardRef pb = clipboard();
-    return pb ? PasteboardClear(pb) : (OSStatus)PARAM_ERR;
-}
-
 /* OSStatus PutScrapFlavor(ScrapRef, ScrapFlavorType, ScrapFlavorFlags, Size, const void *) */
 uint32_t shim_PutScrapFlavor(uint32_t *a) {
     if (a[1] != FLAVOR_TEXT) return NO_TYPE_ERR;
-    return (uint32_t)clipboard_put_text(PTR(4), (long)(int32_t)a[3]);
+    PasteboardRef pb = clipboard();
+    if (!pb) return PARAM_ERR;
+    CFStringRef s = CFStringCreateWithBytes(NULL, (const UInt8 *)PTR(4), (CFIndex)(int32_t)a[3],
+                                            kCFStringEncodingMacRoman, false);
+    if (!s) return PARAM_ERR;
+    CFDataRef utf8 = CFStringCreateExternalRepresentation(NULL, s, kCFStringEncodingUTF8, 0);
+    CFRelease(s);
+    if (!utf8) return PARAM_ERR;
+    OSStatus st = PasteboardPutItemFlavor(pb, (PasteboardItemID)1, CFSTR("public.utf8-plain-text"), utf8, 0);
+    CFRelease(utf8);
+    return (uint32_t)st;
 }

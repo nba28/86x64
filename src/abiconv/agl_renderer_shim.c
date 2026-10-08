@@ -1,6 +1,5 @@
 /*
- * agl_renderer_shim.c — ONE job: the renderer-info ENUMERATION family (AGL, and
- * CGLDescribeRenderer's classic answers).
+ * agl_renderer_shim.c — ONE job: the AGL renderer-info ENUMERATION family.
  *
  * (Distinct from agl_drawable_shim.c, which owns the drawable BINDING of a
  * Carbon window. Different API family, different failure, different kill
@@ -179,21 +178,6 @@ uint32_t shim_aglNextRendererInfo(uint32_t *a)
 /* ---- GLboolean aglDescribeRenderer(AGLRendererInfo rend, GLint prop,
  *                                    GLint *value)
  * Rule A: *value is defined before any path that can return false. */
-/* Depth modes in the classic vocabulary. Every 32-bit-era Mac renderer listed
- * kCGL24Bit/AGL_24_BIT_BIT (0x800); Apple Silicon's GL lists only 0 and 32-bit
- * (0x1001, measured), and Call of Duty 4 rejects a renderer without 24-bit depth
- * -> "Display: no valid displays" -> quits silently. A 24-bit depth request IS
- * honoured there (it gets 32), so the bit states something true. Kill
- * M64_NO_DEPTH24_MODE; guard depth24-mode. */
-static GLint classic_depth_modes(GLint prop, GLint v)
-{
-   static int off = -1;
-   if (off < 0) off = getenv("M64_NO_DEPTH24_MODE") != NULL;
-   if (!off && prop == 105 /*kCGLRPDepthModes = AGL_DEPTH_MODES*/ && (v & 0x1000 /*32-bit*/))
-      v |= 0x800;                                                   /* 24-bit */
-   return v;
-}
-
 uint32_t shim_aglDescribeRenderer(uint32_t *a)
 {
    GLint *value = (GLint *)(uintptr_t)a[2];
@@ -207,26 +191,7 @@ uint32_t shim_aglDescribeRenderer(uint32_t *a)
    if (!desc) return 0;
    GLboolean ok = desc(r, prop, value);
    if (!ok) *value = 0;                 /* native leaves it untouched on failure */
-   else *value = classic_depth_modes(prop, *value);
    return ok ? 1 : 0;
-}
-
-/* ---- CGLError CGLDescribeRenderer(CGLRendererInfoObj, GLint, CGLRendererProperty, GLint *)
- * The CGL twin of the same enumeration contract (the query/destroy pair stays on
- * abigen's opaque-handle bridge; the handle is decoded the way it encodes it). */
-extern uint64_t _86x64_unwrap_obj_arg(uint32_t h);
-uint32_t shim_CGLDescribeRenderer(uint32_t *a)
-{
-   GLint *value = (GLint *)(uintptr_t)a[3];
-   if (value) *value = 0;
-   static int (*desc)(void *, GLint, int, GLint *);
-   if (!desc) desc = (int (*)(void *, GLint, int, GLint *))dlsym(RTLD_DEFAULT, "CGLDescribeRenderer");
-   void *r = (void *)(uintptr_t)_86x64_unwrap_obj_arg(a[0]);
-   if (!desc || !r || !value) return 10000;   /* kCGLBadAttribute-range: never "ok" */
-   GLint v = 0;
-   int err = desc(r, (GLint)a[1], (int)a[2], &v);
-   *value = err ? 0 : classic_depth_modes((GLint)a[2], v);
-   return (uint32_t)err;
 }
 
 /* ---- void aglDestroyRendererInfo(AGLRendererInfo rend) ------------------ */

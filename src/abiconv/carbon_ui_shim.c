@@ -12,7 +12,6 @@
 #include <stdint.h>
 #include "gap.h"
 #include <stdlib.h>
-#include <stdio.h>
 #include <string.h>
 #include <dlfcn.h>
 #include <malloc/malloc.h>
@@ -66,13 +65,8 @@ uint32_t shim_GetWRefCon(uint32_t *args) {
     if (!win) return 0;
     UIDL(GetWindowProperty, int32_t, (void *, uint32_t, uint32_t, uint64_t, uint64_t *, void *));
     uint32_t v = 0;
-    static int trace = -1;   /* M64_EDIT_TRACE: a modal dialog's result is its refCon */
-    if (trace < 0) trace = getenv("M64_EDIT_TRACE") != NULL;
-    if (GetWindowProperty && GetWindowProperty(win, REFCON_CREATOR, REFCON_TAG, 4, NULL, &v) == 0) {
-        if (trace) fprintf(stderr, "[dlg] GetWRefCon %p -> 0x%08x '%.4s'\n", win, v, (char *)&(uint32_t){ __builtin_bswap32(v) });
+    if (GetWindowProperty && GetWindowProperty(win, REFCON_CREATOR, REFCON_TAG, 4, NULL, &v) == 0)
         return v;
-    }
-    if (trace) fprintf(stderr, "[dlg] GetWRefCon %p -> (never set)\n", win);
     UIDL(GetWRefCon, intptr_t, (void *));   /* never set through us: native answer */
     return GetWRefCon ? (uint32_t)GetWRefCon(win) : 0;
 }
