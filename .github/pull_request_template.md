@@ -18,3 +18,4 @@
 - [ ] The fix triggers on a structural property (an ABI shape, a Mach-O invariant, an encoding), not on an app name, address or offset.
 - [ ] Any new shim that returns a constant uses `GAP_STUB(args)` or has a reasoned entry in `src/86x64/coverage-audit.ok`.
 - [ ] No generated files, build output, IDE settings, application binaries, game data or SDK files are included.
+- [ ] I wrote this code (or have the right to submit it), and I agree it is licensed under the project's BSD 2-Clause License.

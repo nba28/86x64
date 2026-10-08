@@ -501,9 +501,10 @@ trampolines, Python 3 and POSIX shell for tooling.
 
 ### Licensing of contributions
 
-The project does not have a license yet (see [License](#license)). Only submit
-code you wrote yourself. Once a license is adopted, it will apply to
-contributions made from then on.
+86x64 is licensed under the BSD 2-Clause License (see [License](#license)).
+By submitting a contribution, you agree that it is licensed under the same
+terms. Only submit code you wrote yourself or have the right to submit under
+this license.
 
 ---
 
@@ -642,10 +643,11 @@ compatibility; all trademarks belong to their respective owners.
 
 ## License
 
-86x64 does not have an open-source license yet. It builds on the original
-86x64 by Nicholas Mosier, which was published without a license, so its code
-remains the copyright of its author. A license will be added once its terms
-can cover the whole codebase.
+86x64 is licensed under the [BSD 2-Clause License](LICENSE): you may use,
+modify and redistribute it, in source or binary form, as long as you keep the
+copyright notice and the license text. The original code is copyright
+Nicholas Mosier, who released it under this license; the additions are
+copyright Noah Batiz and the 86x64 contributors, under the same terms.
 
 Third-party components keep their own licenses:
 
