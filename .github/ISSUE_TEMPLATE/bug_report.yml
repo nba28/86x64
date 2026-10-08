@@ -1,0 +1,104 @@
+name: Bug report
+description: Translation fails, a translated app crashes or misbehaves, or 86x64 itself won't build.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting! Please search existing issues first and keep to **one problem per issue**.
+
+        **Never attach application binaries, game data, SDK files or anything else you don't own the rights to.** Logs and descriptions are all we need.
+
+  - type: input
+    id: app
+    attributes:
+      label: App and version
+      description: The app you translated, or "86x64 build" if the problem is building 86x64 itself.
+      placeholder: "e.g. Plants vs. Zombies 1.0.40, Steam"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: stage
+    attributes:
+      label: Where does it fail?
+      options:
+        - Translating (m64 translate / retranslate fails)
+        - Launching (the app never shows a window)
+        - Crash while running
+        - Runs, but something behaves or looks wrong
+        - Building 86x64 itself
+        - Something else
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: macOS version and Mac
+      placeholder: "e.g. macOS 15.4, MacBook Air M2"
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: 86x64 commit
+      description: Output of `git rev-parse --short HEAD` in your checkout.
+      placeholder: "e.g. d777535"
+    validations:
+      required: true
+
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: The exact commands you ran and what you did in the app.
+      placeholder: |
+        1. m64 translate "Some.app" -o ~/Apps64
+        2. M64_FAULT_REPORT=1 m64 run ~/Apps64/Some.app
+        3. Click "New Game"
+    validations:
+      required: true
+
+  - type: textarea
+    id: behaviour
+    attributes:
+      label: What happened, and what did you expect?
+    validations:
+      required: true
+
+  - type: textarea
+    id: fault-log
+    attributes:
+      label: Fault log (for crashes)
+      description: |
+        Run the app with `M64_FAULT_REPORT=1`, then symbolize the output:
+        `src/86x64/fault-symbolize.py --orig <i386 dir> --trans <x86_64 dir> <log>`
+        Paste the symbolized report here.
+      render: text
+
+  - type: textarea
+    id: gaps
+    attributes:
+      label: Gap report
+      description: |
+        Output of `python3 src/86x64/coverage-audit.py --reach` after the run. It lists the missing or stubbed APIs the app actually reached.
+      render: text
+
+  - type: textarea
+    id: build-log
+    attributes:
+      label: Build log (for build problems)
+      description: The first error from `cmake --build build`, with some lines of context.
+      render: text
+
+  - type: checkboxes
+    id: checks
+    attributes:
+      label: Checklist
+      options:
+        - label: I translated a copy, not my only original of the app.
+          required: true
+        - label: I did not attach any application binaries, game data or SDK files.
+          required: true

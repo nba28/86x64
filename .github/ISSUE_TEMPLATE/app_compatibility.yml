@@ -1,0 +1,72 @@
+name: App compatibility report
+description: Tell us how far a 32-bit app gets after translation, whether it works or not.
+title: "[Compatibility] "
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Reports like this show which apps work and where the common blockers are. Successes are just as useful as failures.
+
+        If the app crashes and you want it investigated, a **Bug report** with a fault log is more helpful.
+
+  - type: input
+    id: app
+    attributes:
+      label: App and version
+      placeholder: "e.g. Quinn 2.4"
+    validations:
+      required: true
+
+  - type: input
+    id: source
+    attributes:
+      label: Where the app came from
+      description: Helps others find the same build.
+      placeholder: "e.g. Steam, original CD, developer's website"
+    validations:
+      required: true
+
+  - type: dropdown
+    id: result
+    attributes:
+      label: How far does it get?
+      options:
+        - Does not translate
+        - Translates, but won't launch
+        - Launches, then crashes early
+        - Reaches its main menu or main window
+        - Usable or playable, with problems
+        - Works fully, as far as I can tell
+    validations:
+      required: true
+
+  - type: input
+    id: system
+    attributes:
+      label: macOS version and Mac
+      placeholder: "e.g. macOS 15.4, Mac mini M4"
+    validations:
+      required: true
+
+  - type: input
+    id: commit
+    attributes:
+      label: 86x64 commit
+      description: Output of `git rev-parse --short HEAD` in your checkout.
+    validations:
+      required: true
+
+  - type: textarea
+    id: details
+    attributes:
+      label: What works and what doesn't
+      description: Graphics, sound, input, saving, menus, and anything else you noticed.
+    validations:
+      required: true
+
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs (optional)
+      description: A symbolized fault log or `coverage-audit.py --reach` output, if you have one.
+      render: text
