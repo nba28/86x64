@@ -6,10 +6,12 @@
 # translated fixture against it. The window is never shown, but it is a real
 # HIToolbox window, so this is a GUI guard (check-gui).
 # ON exits 42; OFF = M64_NO_NIB_EDIT_SWAP=1 (the native UserPane stays).
+# Also drives nib-key-route (env NAME/FIXTURE/OFFVAR; see the Makefile).
 set -u
+NAME="${NAME:-nib-edit-field}"; FIXTURE="${FIXTURE:-99_nib_edit_field}"; OFFVAR="${OFFVAR:-M64_NO_NIB_EDIT_SWAP}"
 HERE="$(cd "$(dirname "$0")" && pwd)"
-BIN="$HERE/build/99_nib_edit_field.x86_64"
-[ -x "$BIN" ] || { echo "nib-edit-field: FAIL (fixture not built: $BIN)"; exit 1; }
+BIN="$HERE/build/$FIXTURE.x86_64"
+[ -x "$BIN" ] || { echo "$NAME: FAIL (fixture not built: $BIN)"; exit 1; }
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 NIB="$TMP/Key.bundle/Contents/Resources/Key.nib"
@@ -60,9 +62,9 @@ cat > "$NIB/objects.xib" <<'XIB'
 XIB
 run() { perl -e 'alarm 60; exec @ARGV' "$@" >"$TMP/out.$#" 2>&1; echo $?; }
 on=$(run "$BIN" "$TMP/Key.bundle")
-off=$(M64_NO_NIB_EDIT_SWAP=1 run "$BIN" "$TMP/Key.bundle")
+off=$(export "$OFFVAR=1"; run "$BIN" "$TMP/Key.bundle")
 if [ "$on" = 42 ] && [ "$off" != 42 ]; then
-    echo "nib-edit-field: PASS (on=$on off=$off)"
+    echo "$NAME: PASS (on=$on off=$off)"
 else
-    echo "nib-edit-field: FAIL (on=$on off=$off)"; cat "$TMP"/out.*; exit 1
+    echo "$NAME: FAIL (on=$on off=$off)"; cat "$TMP"/out.*; exit 1
 fi
