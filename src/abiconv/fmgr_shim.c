@@ -521,10 +521,21 @@ uint32_t shim_PBGetCatInfoSync(uint32_t *args) {
     if (slash == parent) slash[1] = '\0'; else if (slash) *slash = '\0';
     const int isdir = S_ISDIR(st.st_mode);
 
+    // The volume root answers as classic HFS did: its name is the VOLUME name and its
+    // parent is fsRtParID (1). Callers that build a full path walk ioDrParID up to the
+    // root and prepend each name; a root named "/" whose parent was itself gave Halo
+    // "/:Users:..." and its own path check refused it. Kill M64_NO_CATINFO_ROOT_VOL;
+    // guard catinfo-root-volume.
+    static int root_vol = -1;
+    if (root_vol < 0) root_vol = getenv("M64_NO_CATINFO_ROOT_VOL") == NULL;
+    const int is_root = root_vol && strcmp(real, "/") == 0;
+    char volname[256];
+    if (is_root) boot_volume_name(volname, sizeof volname);
+
     memset(pb + 30, 0, CIPB_SIZE - 30);
     if (index < 0 && name) {              // ioNamePtr is an OUTPUT here: the dir's own name
         const char *leaf = strrchr(real, '/');
-        leaf = (leaf && leaf[1]) ? leaf + 1 : real;
+        leaf = is_root ? volname : (leaf && leaf[1]) ? leaf + 1 : real;
         size_t n = strlen(leaf) > 31 ? 31 : strlen(leaf);
         name[0] = (uint8_t)n;
         for (size_t k = 0; k < n; k++) name[1 + k] = (uint8_t)(leaf[k] == ':' ? '/' : leaf[k]);
@@ -548,7 +559,7 @@ uint32_t shim_PBGetCatInfoSync(uint32_t *args) {
     }
     put32(pb, 72, (uint32_t)(st.st_birthtimespec.tv_sec + HFS_EPOCH));
     put32(pb, 76, (uint32_t)(st.st_mtimespec.tv_sec + HFS_EPOCH));
-    put32(pb, 100, (uint32_t)cfs_dirid_for_path(vref, parent));
+    put32(pb, 100, is_root ? 1u /*fsRtParID*/ : (uint32_t)cfs_dirid_for_path(vref, parent));
     PB_IORESULT(pb) = (int16_t)FM_NO_ERR;
     return (uint32_t)FM_NO_ERR;
 }
