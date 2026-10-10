@@ -429,6 +429,12 @@ namespace MachO {
        * Kill switch: M64_NO_ZEROFILL_TARGET_GATE. */
       bool zerofill_target_unattested(const Image& img, std::size_t vmaddr,
                                       bool sibling = false) const;
+      /* A lone imm32 into symbol-free zero-fill whose u16 halves are a nonzero
+       * tag and a tiny count ({0x65,2} = kAudioChannelLayoutTag_Stereo,
+       * {0x82,0x11} flags): a packed constant, not an address (a random
+       * pointer's low half is < 0x40 one time in 1000). Kill
+       * M64_NO_ZF_SMALL_PAIR_IMM; guard zf-small-pair-imm. */
+      bool zerofill_small_pair_constant(std::size_t value) const;
       /* Lazily built by zerofill_target_unattested: every aligned-or-not
        * 4-byte window of the instruction sections whose value lands in a
        * zero-fill section. */

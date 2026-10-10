@@ -833,7 +833,8 @@ namespace MachO {
          if (imm_off > 0) {
             const uint32_t value = img.template at<uint32_t>(loc.offset + imm_off);
             if (image_addr(value) &&
-                !(bits == Bits::M32 && imm32_code_alias_is_constant(img, env, value))) {
+                !(bits == Bits::M32 && imm32_code_alias_is_constant(img, env, value)) &&
+                !(bits == Bits::M32 && env.zerofill_small_pair_constant(value))) {
                parse_imm(imm_off, true);
             }
          }
