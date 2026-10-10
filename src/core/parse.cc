@@ -486,6 +486,20 @@ namespace MachO {
                   build_zf_code_literals(img);
                }
                if (zf_code_literals.count(static_cast<uint32_t>(vmaddr))) { return false; }
+               /* ... and so does code reading or writing memory right beside it
+                * (`movl 0x92bd84(,%eax,4)` for Call of Duty 4's table entry
+                * 0x92bdc4, whose only __common symbols sit at the section end):
+                * a live object, not a pair of u16s. Kill
+                * M64_NO_ZF_ABS_NEIGHBOUR; guard zf-abs-neighbour. */
+               static const bool no_abs_neighbour =
+                  std::getenv("M64_NO_ZF_ABS_NEIGHBOUR") != nullptr;
+               /* ...unless the word has the (small, <0x40) u16 pair shape: an
+                * exception table's 0x00410000 sits beside live __common too */
+               if (!no_abs_neighbour && (vmaddr & 0xffffu) >= 0x40) {
+                  const uint32_t v = static_cast<uint32_t>(vmaddr);
+                  const auto near = zf_abs_mem.lower_bound(v >= 0x40 ? v - 0x40 : 0);
+                  if (near != zf_abs_mem.end() && *near <= v + 0x40) { return false; }
+               }
             }
             return true;   /* no anchoring symbol in this section -> constant */
          }
@@ -536,8 +550,41 @@ namespace MachO {
        * refuses to declassify it and `pointer_sibling` vetoes — which is exactly
        * the separation between a record array and a jump table that this gate
        * exists to draw. */
-      const auto sibling_is_pointerish = [this, &img](uint32_t v) -> bool {
+      /* When this slot's own value points into zero-fill, a sibling that does
+       * too is the same column of a pointer array, not an integer that happens
+       * to alias it: Call of Duty 4's init table holds __bss and __common object
+       * pointers side by side and every one demoted the next. (Halo's packed
+       * pairs are the other shape: a candidate into mapped code or data among
+       * zero-fill-aliasing integers.) Kill M64_NO_RECFIELD_ZF_COLUMN; guard
+       * recfield-zf-column. */
+      static const bool no_zf_column = std::getenv("M64_NO_RECFIELD_ZF_COLUMN") != nullptr;
+      const Section<bits> *cand_zf = nullptr;
+      if (!no_zf_column) {
+         for (Segment<bits> *seg : archive.segments()) {
+            if (!seg->contains_vmaddr(slot_vmaddr)) { continue; }
+            for (Section<bits> *sec : seg->sections) {
+               if (!sec->contains_vmaddr(slot_vmaddr) || sec->sect.offset == 0) { continue; }
+               const uint32_t cand = img.template at<uint32_t>(
+                  sec->sect.offset + (slot_vmaddr - sec->sect.addr));
+               const Section<bits> *t = section_at(cand);
+               const uint32_t tt = t ? (t->sect.flags & SECTION_TYPE) : 0;
+               /* a (small, <0x40) u16 pair is Halo's packed-record shape
+                * (0x003c0000 in __bss), never an object pointer column */
+               if (t && (tt == S_ZEROFILL || tt == S_GB_ZEROFILL) && (cand & 0xffffu) >= 0x40) {
+                  cand_zf = t;
+               }
+               break;
+            }
+            break;
+         }
+      }
+      const auto sibling_is_pointerish = [this, &img, cand_zf](uint32_t v) -> bool {
          if (v == 0) { return false; }              /* neutral, handled by caller */
+         if (cand_zf && (v & 0xffffu) >= 0x40) {
+            const Section<bits> *t = section_at(v);
+            const uint32_t tt = t ? (t->sect.flags & SECTION_TYPE) : 0;
+            if (tt == S_ZEROFILL || tt == S_GB_ZEROFILL) { return true; }
+         }
          bool in_section = false, in_exec = false;
          for (Segment<bits> *seg : archive.segments()) {
             if (!seg->contains_vmaddr(v)) { continue; }
