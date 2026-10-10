@@ -15,9 +15,9 @@ removed from 64-bit macOS (Carbon, QuickDraw, the QuickTime C API, AGL, the
 classic Sound Manager, and others).
 
 > **Status: experimental, under active development.** Real applications and
-> games run, but every new app tends to surface new gaps. Expect to read crash
-> reports. Contributions that turn a crash into a minimal regression test are
-> the most valuable kind (see [Contributing](#contributing)).
+> games run, but almost every new app turns up something new, so expect to
+> read crash reports. The most useful contribution is turning a crash into a
+> small regression test (see [Contributing](#contributing)).
 
 ---
 
@@ -43,8 +43,8 @@ classic Sound Manager, and others).
 
 ## What works today
 
-Status of the main test targets as of October 2026. "Works" means verified by
-a person using the translated app, not only "it launches".
+Where the main test targets stand as of October 2026. "Works" means someone
+actually used the translated app, not just that it launched.
 
 | Target | State |
 |---|---|
@@ -136,8 +136,10 @@ Important runtime mechanisms:
 - **Hand shims.** Shapes abigen can't express (callbacks, varargs, `va_list`,
   struct returns, out-parameters with pointer fields) and re-implemented
   removed APIs are written by hand as `*_shim.c` files. Each hand shim has a
-  trampoline (the `MTSHIM` macro in a `*_tramp.asm` file) and an entry in
-  `src/abiconv/custom.syms`, so abigen skips that symbol.
+  trampoline (the `MTSHIM` macro). Symbols defined in `maptable_tramp.asm`
+  are collected by the build and skipped by abigen automatically; a shim
+  whose trampoline lives in another `*_tramp.asm` file also needs an entry in
+  `src/abiconv/custom.syms`.
 - **Objective-C bridge.** Forward calls (i386 → native objects), reverse calls
   (native → i386 methods and blocks), registration of legacy (ObjC 1) classes
   with per-instance i386 shadows, and IBOutlet bridging.
@@ -212,7 +214,7 @@ Rosetta.
 
 - Xcode Command Line Tools (`clang`, `ld`, `lipo`, `codesign`, `otool`, `dyld_info`)
 - CMake ≥ 3.10
-- NASM (the generated `abiconv.asm` is about 600k lines; NASM 3.x works, see
+- NASM (the generated `abiconv.asm` is over 700k lines; NASM 3.x works, see
   the note in `CMakeLists.txt` about `label-redef-late`)
 - An **x86_64** LLVM with libclang at `/usr/local/opt/llvm`, which is where
   Homebrew running under Rosetta (`arch -x86_64 /usr/local/bin/brew install llvm`)
@@ -464,9 +466,8 @@ documentation.
    both outputs' `__text` with layout-dependent operands normalised, and
    **explain every hunk that is not layout noise** in your pull request. Core
    heuristics are validated on real apps; a harmless-looking refactor once
-   mistranslated 64 SSE instructions that no fixture covered. The
-   maintainer's corpus harness is not in this repository yet. Describe the
-   corpus you used.
+   mistranslated 64 SSE instructions that no fixture covered. My own corpus
+   harness isn't in the repository yet, so just describe the corpus you used.
 6. **Run `cd tests-i386 && make check`**. It must be fully green, or every red
    target must be explained as environmental.
 7. **Open a pull request** with a focused diff.
@@ -510,8 +511,8 @@ this license.
 
 ## Engineering rules
 
-These rules come from bugs that cost days. Reviewers will hold pull requests
-to them.
+Each of these comes from a bug that took days to track down, and I'll ask for
+them in review.
 
 1. **Trigger fixes on structure, never on an application name.** A fix keys
    on an ABI shape, a Mach-O layout invariant or an instruction encoding, never
@@ -557,15 +558,16 @@ to them.
 12. **Apps should look like they did on their original macOS**, including on
     Retina: points everywhere, authentic 1x GL, and the app's own original
     windows and resources. Fix this generically, not with per-app presenters.
-13. **Read `references/` before touching opcodes or Mach-O structures** (keep
-    your own copy of the Mach-O and Intel SDM references there; the directory
-    is ignored).
+13. **Check the specs before touching opcodes or Mach-O structures.** Keep the
+    Intel SDM and Apple's Mach-O headers (`<mach-o/loader.h>`, `<mach-o/nlist.h>`,
+    the ld64/dyld sources) at hand. Encodings and load-command layouts are
+    easy to get almost right.
 
 ---
 
 ## Recurring bug families
 
-Most new crashes are one of these. Recognising the shape saves hours.
+Most new crashes turn out to be one of these, so it pays to recognise the shape.
 
 1. **Over-pop / fused PC.** An i386 `call` pushes 4 bytes. If a native callee
    was bound raw (no bridge), it `ret`s 8, giving
@@ -611,9 +613,9 @@ A partial list of open problems:
   their own temporaries (`heapsort`, `mergesort`, `qsort_r`); callback
   arguments typed `const void *`; header-derived struct sizes that disagree
   with the runtime (`struct dirent`); ~200 functions abigen skips per build.
-- **Carbon / legacy APIs:** MLTE (text views) has no implementation; refNum
-  file calls, Desktop Manager, Icon Services suites, Font Manager/ATS,
-  QuickDraw regions and text, and the List Manager are unimplemented.
+- **Carbon / legacy APIs:** MLTE (text views) has no implementation; the
+  Desktop Manager, Icon Services suites, Font Manager/ATS, QuickDraw text,
+  much of the region API, and the List Manager are still stubs.
 - **Removed frameworks:** QuickTime Movie Toolbox **authoring** → AVFoundation
   (iMovie editing/export); ATSUI → CoreText; the classic Print Manager;
   classic ColorSync; Component Manager codecs.
@@ -623,7 +625,7 @@ A partial list of open problems:
   model; unexplained `malloc_shim` growth during long sessions.
 - **Tooling:** `shimgen` stubs some private symbols that still exist;
   classic type/creator info is discarded on fork-less files.
-- **Horizon:** an arm64-native backend for a post-Rosetta world.
+- **Longer term:** an arm64 backend, for when Rosetta 2 goes away.
 
 New fixtures for already-fixed bugs that lack a behavioural guard (for
 example cross-ABI weak-def coalescing, or an uninitialised co-located
