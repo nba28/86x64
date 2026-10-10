@@ -97,3 +97,4 @@ FindSymbol                                   # an Intel process has no PowerPC f
 
 # AVPlayer prerolls on its own: noErr is what QuickTime reported for a ready movie
 PrerollMovie                                 # AVPlayer prerolls on its own: noErr is what QuickTime reported for a ready movie
+SetMoviePlayHints                            # scheduling hints for the classic playback engine; AVPlayer has none to take

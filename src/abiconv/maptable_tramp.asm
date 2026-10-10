@@ -1570,6 +1570,15 @@ _x64_exc_longjmp:
 	MTSHIM	___SetMovieTimeValue,                 _shim_SetMovieTimeValue
 	MTSHIM	___IsMovieDone,                       _shim_IsMovieDone
 	MTSHIM	___MoviesTask,                        _shim_MoviesTask
+	MTSHIM	___OpenMovieFile, _shim_OpenMovieFile
+	MTSHIM	___NewMovieFromFile, _shim_NewMovieFromFile
+	MTSHIM	___CloseMovieFile, _shim_CloseMovieFile
+	MTSHIM	___GoToEndOfMovie, _shim_GoToEndOfMovie
+	MTSHIM	___SetMovieActiveSegment, _shim_SetMovieActiveSegment
+	MTSHIM	___SetMoviePlayHints, _shim_SetMoviePlayHints
+	MTSHIM	___GetMovieTimeBase, _shim_GetMovieTimeBase
+	MTSHIM	___GetTimeBaseFlags, _shim_GetTimeBaseFlags
+	MTSHIM	___SetTimeBaseFlags, _shim_SetTimeBaseFlags
 	MTSHIM	___UpdateMovie,                       _shim_UpdateMovie
 	MTSHIM	___GetMoviePict,                      _shim_GetMoviePict
 	MTSHIM	___PrerollMovie,                      _shim_PrerollMovie

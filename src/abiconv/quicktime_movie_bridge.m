@@ -72,6 +72,7 @@ typedef struct qt_movie {
    int32_t           timeScale;    /* units/sec */
    double            durationSec;
    int               started;
+   uint32_t          tbFlags;      /* TimeBase flags: loopTimeBase 1, palindrome 2 */
 } qt_movie;
 
 /* ---- live registry (validate handles; never deref a bogus Movie) -------- */
@@ -347,9 +348,26 @@ uint32_t shim_IsMovieDone(uint32_t *a) {
 
 /* void MoviesTask(Movie, long maxMilliSecToUse); — pump one frame. maxMs==0/NULL
  * movie in classic code means "service all movies"; we service the one passed. */
+static void qt_task(qt_movie *m) {
+   if (m->started && (m->tbFlags & 1) && m->durationSec > 0 &&
+       CMTimeGetSeconds([m->player currentTime]) >= m->durationSec - 0.001) {
+      [m->player seekToTime:kCMTimeZero];               /* loopTimeBase */
+      [m->player play];
+   }
+   qt_pump_frame(m);
+}
 uint32_t shim_MoviesTask(uint32_t *a) {
+   if (!a[0]) {                                          /* NULL: every movie */
+      qt_movie *live[QT_MAX_MOVIES];
+      int n = 0;
+      pthread_mutex_lock(&g_lock);
+      for (int i = 0; i < QT_MAX_MOVIES; i++) if (g_movies[i]) live[n++] = g_movies[i];
+      pthread_mutex_unlock(&g_lock);
+      for (int i = 0; i < n; i++) qt_task(live[i]);
+      return cmNoErr;
+   }
    qt_movie *m = qt_from_i386(a[0]);
-   if (m) qt_pump_frame(m);
+   if (m) qt_task(m);
    return cmNoErr;
 }
 /* void UpdateMovie(Movie); — force a repaint of the current frame. */
@@ -431,4 +449,111 @@ uint32_t shim_GetMoviePict(uint32_t *a) {
    memcpy(blk + 14, CFDataGetBytePtr(png), pnglen);
    CFRelease(png);
    return handle;
+}
+
+/* ---- movie FILES: OpenMovieFile / NewMovieFromFile / CloseMovieFile -------
+ * The classic file path: an FSSpec opened to a "movie file refNum", then a
+ * Movie made from it. FSSpecs resolve through carbon_fsspec_shim.c now, so the
+ * file opens as a URL into the same AVFoundation graph as NewMovieFromDataRef.
+ * Halo plays its studio logos this way; without it the open fell through to the
+ * translated QuickTime.framework, its Movie never reached this bridge, and the
+ * intros were skipped. Kill M64_NO_QT_MOVIE_FILE (decline: fnfErr); guard
+ * qt-movie-file. */
+extern int cfs_fsspec_to_path(const uint8_t *spec, char *out, size_t outsz, int *exists);
+#define QT_FNF_ERR    (-43)
+#define QT_REF_BASE   0x5100
+#define QT_MAX_FILES  16
+static char *g_movie_files[QT_MAX_FILES];
+
+static int qt_file_off(void) {
+   static int v = -1;
+   if (v < 0) v = getenv("M64_NO_QT_MOVIE_FILE") != NULL;
+   return v;
+}
+
+/* OSErr OpenMovieFile(const FSSpec *fileSpec, short *resRefNum, SInt8 permission); */
+uint32_t shim_OpenMovieFile(uint32_t *a) {
+   int16_t *ref = a[1] ? (int16_t *)i386_ptr(a[1]) : NULL;
+   if (ref) *ref = 0;
+   char path[1024];
+   int exists = 0;
+   if (qt_file_off() || !a[0] ||
+       !cfs_fsspec_to_path((const uint8_t *)i386_ptr(a[0]), path, sizeof path, &exists) || !exists)
+      return (uint32_t)QT_FNF_ERR;
+   pthread_mutex_lock(&g_lock);
+   int slot = -1;
+   for (int i = 0; i < QT_MAX_FILES; i++) if (!g_movie_files[i]) { slot = i; break; }
+   if (slot >= 0) g_movie_files[slot] = strdup(path);
+   pthread_mutex_unlock(&g_lock);
+   if (slot < 0) return (uint32_t)(-42);                 /* tmfoErr: too many open */
+   if (ref) *ref = (int16_t)(QT_REF_BASE + slot);
+   return cmNoErr;
+}
+
+static const char *qt_file_path(int16_t ref) {
+   const int i = ref - QT_REF_BASE;
+   return (i >= 0 && i < QT_MAX_FILES) ? g_movie_files[i] : NULL;
+}
+
+/* OSErr NewMovieFromFile(Movie *theMovie, short resRefNum, short *resId,
+ *                        StringPtr resName, short newMovieFlags, Boolean *dataRefWasChanged); */
+uint32_t shim_NewMovieFromFile(uint32_t *a) {
+   put_u32(a[0], 0);
+   if (a[2]) *(int16_t *)i386_ptr(a[2]) = 0;
+   if (a[3]) *(uint8_t *)i386_ptr(a[3]) = 0;
+   if (a[5]) *(uint8_t *)i386_ptr(a[5]) = 0;
+   const char *path = qt_file_path((int16_t)a[1]);
+   if (qt_file_off() || !path) return (uint32_t)QT_FNF_ERR;
+   CFURLRef url = CFURLCreateFromFileSystemRepresentation(NULL, (const UInt8 *)path,
+                                                          (CFIndex)strlen(path), false);
+   qt_movie *m = qt_open_url(url);
+   if (url) CFRelease(url);
+   if (!m) return (uint32_t)QT_COULD_NOT_RESOLVE_DATAREF;
+   put_u32(a[0], to_i386(m));
+   return cmNoErr;
+}
+
+/* OSErr CloseMovieFile(short resRefNum); */
+uint32_t shim_CloseMovieFile(uint32_t *a) {
+   const int i = (int16_t)a[0] - QT_REF_BASE;
+   if (i < 0 || i >= QT_MAX_FILES) return (uint32_t)(-51);   /* rfNumErr */
+   pthread_mutex_lock(&g_lock);
+   free(g_movie_files[i]);
+   g_movie_files[i] = NULL;
+   pthread_mutex_unlock(&g_lock);
+   return cmNoErr;
+}
+
+/* void GoToEndOfMovie(Movie); */
+uint32_t shim_GoToEndOfMovie(uint32_t *a) {
+   qt_movie *m = qt_from_i386(a[0]);
+   if (m) [m->player seekToTime:CMTimeMakeWithSeconds(m->durationSec, m->timeScale)];
+   return cmNoErr;
+}
+
+/* void SetMovieActiveSegment(Movie, TimeValue startTime, TimeValue duration);
+ * -1 = the whole movie, the only form a target has reached. */
+uint32_t shim_SetMovieActiveSegment(uint32_t *a) {
+   if ((int32_t)a[1] != -1) GAP_STUB(a);
+   return cmNoErr;
+}
+
+/* void SetMoviePlayHints(Movie, long flags, long flagsMask); — scheduling hints
+ * for the classic engine; AVPlayer has no equivalent and needs none. */
+uint32_t shim_SetMoviePlayHints(uint32_t *a) { (void)a; return cmNoErr; }
+
+/* TimeBase GetMovieTimeBase(Movie): the movie stands in for its own time base,
+ * which Get/SetTimeBaseFlags resolve back (loop flags). */
+uint32_t shim_GetMovieTimeBase(uint32_t *a) {
+   return qt_from_i386(a[0]) ? a[0] : 0;
+}
+/* long GetTimeBaseFlags(TimeBase); / void SetTimeBaseFlags(TimeBase, long); */
+uint32_t shim_GetTimeBaseFlags(uint32_t *a) {
+   qt_movie *m = qt_from_i386(a[0]);
+   return m ? m->tbFlags : 0;
+}
+uint32_t shim_SetTimeBaseFlags(uint32_t *a) {
+   qt_movie *m = qt_from_i386(a[0]);
+   if (m) m->tbFlags = a[1];
+   return cmNoErr;
 }
