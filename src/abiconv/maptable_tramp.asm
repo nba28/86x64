@@ -278,6 +278,7 @@
 	MTSHIM	___AudioDeviceStop,           _shim_AudioDeviceStop
 	MTSHIM	___AudioUnitSetProperty, _shim_AudioUnitSetProperty
 	MTSHIM	___AudioUnitGetProperty, _shim_AudioUnitGetProperty
+	MTSHIM	___AUGraphGetNodeInfo, _shim_AUGraphGetNodeInfo
 	MTSHIM	___AudioUnitInitialize, _shim_AudioUnitInitialize
 	MTSHIM	___AudioUnitUninitialize, _shim_AudioUnitUninitialize
 	MTSHIM	___AudioOutputUnitStart, _shim_AudioOutputUnitStart
