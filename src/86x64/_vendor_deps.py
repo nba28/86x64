@@ -38,7 +38,8 @@ import subprocess
 import sys
 from pathlib import Path
 
-import m64_paths
+sys.path.insert(0, str(Path(__file__).resolve().parent))   # loaded by path too
+import m64_paths  # noqa: E402
 
 # Default places to look for the original i386 frameworks, most-specific first.
 # Repeatable --source args are searched ahead of these.
