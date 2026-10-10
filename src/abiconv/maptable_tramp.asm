@@ -1096,6 +1096,7 @@ _x64_exc_longjmp:
 	MTSHIM	___aglQueryRendererInfoForCGDirectDisplayIDs, _shim_aglQueryRendererInfoForCGDirectDisplayIDs
 	MTSHIM	___aglNextRendererInfo,               _shim_aglNextRendererInfo
 	MTSHIM	___aglDescribeRenderer,               _shim_aglDescribeRenderer
+	MTSHIM	___CGLDescribeRenderer,               _shim_CGLDescribeRenderer
 	MTSHIM	___aglDestroyRendererInfo,            _shim_aglDestroyRendererInfo
 	; --- CGL/AGL CONTEXT OBJECT (cgl_macro_shim.c) ---
 	;     <OpenGL/CGLMacro.h> #defines every glXxx() to jump through the
