@@ -323,12 +323,6 @@ int qd_port_pixels(uint32_t port_h, void **base, int *rowBytes, int *w, int *h)
    if (h) *h = p->height;
    return 1;
 }
-/* Borrow the port's live CGContextRef (not retained), or NULL. */
-CGContextRef qd_port_context(uint32_t port_h)
-{
-   qd_port *p = port_from_i386(port_h ? port_h : tl_cur_port);
-   return p ? p->ctx : NULL;
-}
 
 /* ---- window-backed ports: THE Carbon + AGL drawable substrate -------------
  *

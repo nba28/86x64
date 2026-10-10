@@ -36,7 +36,6 @@ void       (*ccw_SelectWindow)(CCWWindowRef);
 void       (*ccw_DisposeWindow)(CCWWindowRef);
 CCWStatus  (*ccw_RepositionWindow)(CCWWindowRef, CCWWindowRef, uint32_t);
 CCWStatus  (*ccw_GetWindowBounds)(CCWWindowRef, uint32_t, CCWRect *);
-CCWStatus  (*ccw_SetWindowBounds)(CCWWindowRef, uint32_t, const CCWRect *);
 CCWStatus  (*ccw_BeginAppModalStateForWindow)(CCWWindowRef);
 CCWStatus  (*ccw_EndAppModalStateForWindow)(CCWWindowRef);
 CCWViewRef (*ccw_HIViewGetRoot)(CCWWindowRef);
@@ -58,7 +57,6 @@ CCWStatus  (*ccw_SetEventParameter)(CCWEventRef, uint32_t, uint32_t, unsigned lo
 CCWStatus  (*ccw_ReceiveNextEvent)(uint32_t, const void *, double, uint8_t, CCWEventRef *);
 CCWStatus  (*ccw_SendEventToEventTarget)(CCWEventRef, void *);
 void       (*ccw_ReleaseEvent)(CCWEventRef);
-uint32_t   (*ccw_GetEventClass)(CCWEventRef);
 uint32_t   (*ccw_GetEventKind)(CCWEventRef);
 
 int ccw_available(void) {
@@ -67,7 +65,7 @@ int ccw_available(void) {
 #define R(f) if (!(ccw_##f = (void *)dlsym(RTLD_DEFAULT, #f))) GAP_ONCE("dlsym", #f, __func__, 0)
     R(CreateNewWindow); R(GetAvailableWindowAttributes); R(SetWindowTitleWithCFString);
     R(ShowWindow); R(SelectWindow); R(DisposeWindow); R(RepositionWindow);
-    R(GetWindowBounds); R(SetWindowBounds);
+    R(GetWindowBounds);
     R(BeginAppModalStateForWindow); R(EndAppModalStateForWindow);
     R(HIViewGetRoot); R(HIViewGetFirstSubview); R(HIViewGetNextView); R(HIViewGetBounds);
     R(HIViewSetFrame); R(HIViewAddSubview); R(HIViewSetVisible); R(HIViewSetNeedsDisplay);
@@ -75,7 +73,7 @@ int ccw_available(void) {
     R(GetControlEventTarget); R(GetWindowEventTarget); R(GetEventDispatcherTarget);
     R(InstallEventHandler); R(GetEventParameter); R(SetEventParameter);
     R(ReceiveNextEvent); R(SendEventToEventTarget); R(ReleaseEvent);
-    R(GetEventClass); R(GetEventKind);
+    R(GetEventKind);
 #undef R
     state = (ccw_CreateNewWindow && ccw_HIObjectCreate && ccw_ShowWindow &&
              ccw_HIViewSetFrame && ccw_InstallEventHandler && ccw_GetControlEventTarget &&

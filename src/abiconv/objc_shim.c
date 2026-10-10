@@ -4258,7 +4258,6 @@ static void legacy_invocation_widen_install(void) {
  * Env ABICONV_QUINN_DISPLAYRECT_COMARK (default OFF pending the live pixel A/B;
  * flip default-on once the tester confirms the trail is gone). */
 static __thread int g_displayrect_legacy;         /* set by objc_bridge_prep */
-void _86x64_test_set_displayrect_legacy(int v) { g_displayrect_legacy = v; }
 static IMP g_view_displayRect;
 static IMP g_view_displayRectIgnoringOpacity;
 static int displayrect_comark_on(void) {
@@ -4320,7 +4319,6 @@ static void legacy_displayrect_comark_install(void) {
 static id  g_gstate_view[GSTATE_TOKEN_CAP];
 static os_unfair_lock g_gstate_lock = OS_UNFAIR_LOCK_INIT;
 static __thread int g_gstate_legacy;              /* set by objc_bridge_prep */
-void _86x64_test_set_gstate_legacy(int v) { g_gstate_legacy = v; }
 /* NSCopyBits shim (nscopybits_shim.c) resolves a token -> source view here. */
 id _86x64_gstate_token_view(long tok) {
    long i = tok - GSTATE_TOKEN_BASE;
@@ -8343,10 +8341,6 @@ static void ivar_wb_flush(uint32_t mark) {
       }
    }
 }
-
-/* Public: map a shadow self32 back to its real object (forward bridge). 0 if
- * not a shadow. */
-id _86x64_shadow_real(uint32_t s) { return shadow_real(s); }
 
 /* Public: fully resolve an i386 `@`/`#` value to a real x86_64 id — the same
  * canonical resolver the forward arg-bridge uses (arena proxy handles, R/S

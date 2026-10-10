@@ -77,8 +77,7 @@ uint32_t shim_SetUpControlBackground(uint32_t *args) { GAP_STUB(args); return 0;
 uint32_t shim_TestControl(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_TrackControl(uint32_t *args) { GAP_STUB(args); return 0; }
 
-// ---- Dialog Manager (21) ----
-uint32_t shim_Alert(uint32_t *args) { GAP_STUB(args); return 0; }
+// ---- Dialog Manager (20; Alert is shim_AlertReal in carbon_standardalert_shim.m) ----
 uint32_t shim_DialogCopy(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_DialogCut(uint32_t *args) { GAP_STUB(args); return 0; }
 uint32_t shim_DialogDelete(uint32_t *args) { GAP_STUB(args); return 0; }

@@ -62,7 +62,6 @@ extern void       (*ccw_SelectWindow)(CCWWindowRef);
 extern void       (*ccw_DisposeWindow)(CCWWindowRef);
 extern CCWStatus  (*ccw_RepositionWindow)(CCWWindowRef, CCWWindowRef, uint32_t);
 extern CCWStatus  (*ccw_GetWindowBounds)(CCWWindowRef, uint32_t, CCWRect *);
-extern CCWStatus  (*ccw_SetWindowBounds)(CCWWindowRef, uint32_t, const CCWRect *);
 extern CCWStatus  (*ccw_BeginAppModalStateForWindow)(CCWWindowRef);
 extern CCWStatus  (*ccw_EndAppModalStateForWindow)(CCWWindowRef);
 extern CCWViewRef (*ccw_HIViewGetRoot)(CCWWindowRef);
@@ -88,7 +87,6 @@ extern CCWStatus  (*ccw_SetEventParameter)(CCWEventRef, uint32_t, uint32_t, unsi
 extern CCWStatus  (*ccw_ReceiveNextEvent)(uint32_t, const void *, double, uint8_t, CCWEventRef *);
 extern CCWStatus  (*ccw_SendEventToEventTarget)(CCWEventRef, void *);
 extern void       (*ccw_ReleaseEvent)(CCWEventRef);
-extern uint32_t   (*ccw_GetEventClass)(CCWEventRef);
 extern uint32_t   (*ccw_GetEventKind)(CCWEventRef);
 
 /* Resolve the natives once.  Returns 1 if the substrate can be used at all

@@ -419,21 +419,6 @@ void ccd_set_cancel_item(ccd_dialog *d, int item) {
     if (it->btn) it->btn->isCancel = 1;
 }
 
-int ccd_get_value(ccd_dialog *d, int item, int *outValue) {
-    struct ccd_item_live *it = item_at(d, item);
-    if (!it || !it->btn) return 0;
-    if (outValue) *outValue = it->btn->value;
-    return 1;
-}
-
-int ccd_set_value(ccd_dialog *d, int item, int value) {
-    struct ccd_item_live *it = item_at(d, item);
-    if (!it || !it->btn) return 0;
-    it->btn->value = value;
-    if (ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(it->btn->view, 1);
-    return 1;
-}
-
 void ccd_clear_focus(ccd_dialog *d) {
     if (!d) return;
     ccw_edit *f = ccw_focused_edit(d->win);

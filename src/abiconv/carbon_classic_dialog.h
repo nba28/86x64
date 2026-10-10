@@ -56,9 +56,6 @@ void ccd_set_cancel_item(ccd_dialog *d, int item);
  * defaults itself). 0 = none. */
 int  ccd_default_item(ccd_dialog *d);
 int  ccd_cancel_item(ccd_dialog *d);
-/* Classic control value (checkbox/radio) — GetControlValue on a DITL control. */
-int  ccd_get_value(ccd_dialog *d, int item, int *outValue);
-int  ccd_set_value(ccd_dialog *d, int item, int value);
 void ccd_clear_focus(ccd_dialog *d);
 void ccd_dispose(ccd_dialog *d);
 

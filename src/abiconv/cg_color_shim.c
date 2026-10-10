@@ -51,10 +51,6 @@ void cgfloat_i386_to_native(double *dst, const float *src, size_t n)
 {
    for (size_t i = 0; i < n; i++) { dst[i] = (double)src[i]; }
 }
-void cgfloat_native_to_i386(float *dst, const double *src, size_t n)
-{
-   for (size_t i = 0; i < n; i++) { dst[i] = (float)src[i]; }
-}
 
 /* ---- per-CGContextRef colour-space component counts --------------------
  * Small open-addressing map keyed by the (real) CGContextRef. fill_n/stroke_n

@@ -61,11 +61,6 @@ struct sb_iface  { const char *version; int n; const struct sb_method *m; };
 static uint64_t sb_u64(const uint32_t *p) { return (uint64_t)p[0] | ((uint64_t)p[1] << 32); }
 static float    sb_f32(const uint32_t *p) { float f; memcpy(&f, p, 4); return f; }
 static double   sb_f64(const uint32_t *p) { double d; memcpy(&d, p, 8); return d; }
-static void     sb_gap(struct sb_ret *r, const char *name) __attribute__((unused));
-static void     sb_gap(struct sb_ret *r, const char *name) {
-   x64_gap_hit("steam", name, 0, 0);    /* every hit: each is a missing feature */
-   r->v = 0; r->kind = SB_INT;
-}
 static uint64_t sb_lowstr(const char *s);
 static uint64_t sb_lowptr(void *p, const char *who);
 static uint64_t sb_wrap(void *native, const char *version);

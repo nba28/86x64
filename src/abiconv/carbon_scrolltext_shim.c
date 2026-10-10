@@ -91,10 +91,6 @@ static struct box *box_for_ctrl(void *c) {
     for (int i = 0; i < NBOX; i++) if (c && g_box[i].ctrl == c) return &g_box[i];
     return NULL;
 }
-static struct box *box_for_win(void *w) {
-    for (int i = 0; i < NBOX; i++) if (w && g_box[i].win == w) return &g_box[i];
-    return NULL;
-}
 static struct box *box_alloc(void) {
     for (int i = 0; i < NBOX; i++) if (!g_box[i].ctrl) return &g_box[i];
     struct box *b = &g_box[0];                 /* recycle; window long dead  */
@@ -432,6 +428,3 @@ uint32_t shim_CreateScrollingTextBoxControl(uint32_t *a) {
     if (out) *out = WRAPH(ctrl);
     return 0;
 }
-
-/* box_for_win is used by the wheel handler indirectly; keep -Wunused quiet. */
-__attribute__((unused)) static void *st_unused_ref = (void *)box_for_win;
