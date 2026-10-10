@@ -487,6 +487,13 @@ namespace MachO {
        * (zlib's {op,bits,val} codes), not addresses. */
       bool packed_pair_family(const Image& img, std::size_t slot_vmaddr,
                               uint32_t value) const;
+      /* FLAG-COLUMN gate: a single-bit word (0x20000) that happens to be a
+       * function entry, sitting in a record column whose siblings at some
+       * stride are >=3 single-bit flags that address nothing (Call of Duty 4's
+       * D3D caps table {offset, any, all, severity, msg}) is a flag too. Kill
+       * M64_NO_FLAG_COLUMN; guard flag-column-entry. */
+      bool flag_column_power_of_two(const Image& img, std::size_t slot_vmaddr,
+                                    uint32_t value) const;
       bool record_field_neighbours_are_integers(const Image& img,
                                                 std::size_t slot_vmaddr) const;
 

@@ -352,6 +352,12 @@ namespace MachO {
            env.packed_pair_family(img, loc.vmaddr, value))) {
          return false;
       }
+      /* A single-bit "entry" in a column of single-bit flags is a flag (Call of
+       * Duty 4's caps mask 0x20000 = a function entry; guard flag-column-entry). */
+      if (m32 && exec && !is_text_const_sect && !env.have_classic_local_relocs &&
+          env.flag_column_power_of_two(img, loc.vmaddr, value)) {
+         return false;
+      }
       /* ... and, in a classic image, a slot with no reloc is a constant
        * (Portal 2 engine.dylib's 637 packed int16 pairs). */
       if (m32 && env.have_classic_local_relocs && env.local_reloc_addrs.count(loc.vmaddr) == 0) {

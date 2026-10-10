@@ -680,6 +680,60 @@ namespace MachO {
    }
 
    template <Bits bits>
+   bool ParseEnv<bits>::flag_column_power_of_two(const Image& img,
+                                                 std::size_t slot_vmaddr,
+                                                 uint32_t value) const {
+      static const bool disabled = std::getenv("M64_NO_FLAG_COLUMN") != nullptr;
+      if (disabled || value == 0 || (value & (value - 1)) != 0) { return false; }
+      const auto in_some_section = [this](uint32_t w) {
+         for (Segment<bits> *seg : archive.segments()) {
+            if (!seg->contains_vmaddr(w)) { continue; }
+            for (Section<bits> *sec : seg->sections) {
+               if (sec->contains_vmaddr(w)) { return true; }
+            }
+            return false;
+         }
+         return false;
+      };
+      for (Segment<bits> *seg : archive.segments()) {
+         if (!seg->contains_vmaddr(slot_vmaddr)) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            if (!sec->contains_vmaddr(slot_vmaddr)) { continue; }
+            const uint32_t stype = sec->sect.flags & SECTION_TYPE;
+            if (sec->sect.offset == 0 || stype == S_LAZY_SYMBOL_POINTERS ||
+                stype == S_NON_LAZY_SYMBOL_POINTERS || stype == S_MOD_INIT_FUNC_POINTERS ||
+                stype == S_MOD_TERM_FUNC_POINTERS || stype == S_LITERAL_POINTERS) {
+               return false;
+            }
+            const std::size_t lo = sec->sect.addr, hi = sec->sect.addr + sec->sect.size;
+            /* The candidate being a single bit is what keeps the stride search
+             * from fishing: a function pointer only lands here when its entry
+             * sits exactly on a power of two, and then its column would have to
+             * be mostly flags as well. */
+            static const std::size_t strides[] =
+               { 8, 12, 16, 20, 24, 28, 32, 36, 40, 48, 56, 64 };
+            for (std::size_t stride : strides) {
+               int flags = 0, pointers = 0;
+               for (int k = -3; k <= 3; ++k) {
+                  if (k == 0) { continue; }
+                  const long long a = (long long)slot_vmaddr + (long long)k * (long long)stride;
+                  if (a < (long long)lo || a + 4 > (long long)hi) { continue; }
+                  const uint32_t w = img.template at<uint32_t>(
+                     sec->sect.offset + ((std::size_t)a - sec->sect.addr));
+                  if (w == 0) { continue; }
+                  if (in_some_section(w)) { ++pointers; continue; }   /* address-shaped */
+                  if ((w & (w - 1)) == 0) { ++flags; }
+               }
+               if (flags >= 3 && flags > pointers) { return true; }
+            }
+            return false;
+         }
+         return false;
+      }
+      return false;
+   }
+
+   template <Bits bits>
    bool ParseEnv<bits>::packed_pair_family(const Image& img,
                                            std::size_t slot_vmaddr,
                                            uint32_t value) const {
