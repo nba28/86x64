@@ -432,13 +432,16 @@ namespace MachO {
       /* A lone imm32 into symbol-free zero-fill whose u16 halves are a nonzero
        * tag and a tiny count ({0x65,2} = kAudioChannelLayoutTag_Stereo,
        * {0x82,0x11} flags): a packed constant, not an address (a random
-       * pointer's low half is < 0x40 one time in 1000). Kill
+       * pointer's low half is < 0x40 one time in 1000) -- unless the code
+       * addresses memory within 0x40 of it (zf_abs_mem). Kill
        * M64_NO_ZF_SMALL_PAIR_IMM; guard zf-small-pair-imm. */
-      bool zerofill_small_pair_constant(std::size_t value) const;
+      bool zerofill_small_pair_constant(const Image& img, std::size_t value) const;
       /* Lazily built by zerofill_target_unattested: every aligned-or-not
        * 4-byte window of the instruction sections whose value lands in a
        * zero-fill section. */
       mutable std::set<uint32_t> zf_code_literals;
+      /* the subset that is an absolute memory operand (disp32/moffs/SIB no-base) */
+      mutable std::set<uint32_t> zf_abs_mem;
       void build_zf_code_literals(const Image& img) const;
       mutable bool zf_code_literals_built = false;
 

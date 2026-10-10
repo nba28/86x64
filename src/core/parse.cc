@@ -371,7 +371,19 @@ namespace MachO {
             for (std::size_t i = 0; i + 4 <= sec->sect.size; ++i) {
                const uint32_t v = img.at<uint32_t>(off + i);
                for (const auto& r : zf) {
-                  if (v >= r.first && v < r.second) { zf_code_literals.insert(v); break; }
+                  if (v >= r.first && v < r.second) {
+                     zf_code_literals.insert(v);
+                     /* preceded by an absolute-addressing byte: modrm mod=00
+                      * rm=101 (disp32, no base), a moffs mov (A0-A3), or a
+                      * no-base SIB under modrm rm=100 -- a memory operand AT v */
+                     const uint8_t b1 = i >= 1 ? img.at<uint8_t>(off + i - 1) : 0;
+                     const uint8_t b2 = i >= 2 ? img.at<uint8_t>(off + i - 2) : 0;
+                     if (i >= 1 && ((b1 & 0xc7) == 0x05 || (b1 >= 0xa0 && b1 <= 0xa3) ||
+                                    (i >= 2 && (b1 & 7) == 5 && (b2 & 0xc7) == 0x04))) {
+                        zf_abs_mem.insert(v);
+                     }
+                     break;
+                  }
                }
             }
          }
@@ -379,7 +391,7 @@ namespace MachO {
    }
 
    template <Bits bits>
-   bool ParseEnv<bits>::zerofill_small_pair_constant(std::size_t value) const {
+   bool ParseEnv<bits>::zerofill_small_pair_constant(const Image& img, std::size_t value) const {
       static const bool off = std::getenv("M64_NO_ZF_SMALL_PAIR_IMM") != nullptr;
       const uint32_t h = (uint32_t)value >> 16, l = (uint32_t)value & 0xffffu;
       if (off || h == 0 || l == 0 || l >= 0x40) { return false; }
@@ -392,7 +404,16 @@ namespace MachO {
             /* a data symbol at or below the target in this section names the
              * object it points into: then it is an address after all */
             const auto it = func_syms.upper_bound(value);
-            return !(it != func_syms.begin() && *std::prev(it) >= sec->sect.addr);
+            if (it != func_syms.begin() && *std::prev(it) >= sec->sect.addr) { return false; }
+            /* the code reads or writes memory within 0x40 of it: a live data
+             * region, so a pointer into it (Civ IV's static-init `this` args
+             * 0x1530029.. sit among `movl %eax, 0x1530024`-style globals) */
+            if (!zf_code_literals_built) {
+               zf_code_literals_built = true;
+               build_zf_code_literals(img);
+            }
+            const auto near = zf_abs_mem.lower_bound(value >= 0x40 ? (uint32_t)value - 0x40 : 0);
+            return !(near != zf_abs_mem.end() && *near <= (uint32_t)value + 0x40);
          }
          return false;
       }
