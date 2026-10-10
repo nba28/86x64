@@ -1158,6 +1158,12 @@ static WindowRef build_window(const char *xibpath, CFStringRef wname) {
     // lazily when the window is first shown, so defer to a one-shot kEventWindowShown
     // handler (see title_on_show) rather than acting now (when it doesn't exist yet).
     if (title[0]) title_on_show(win, titleCF);
+    // HIToolbox will not focus our self-drawn fields (SetKeyboardFocus ->
+    // errCouldntSetFocus), so every key lands at the WINDOW target (Call of Duty
+    // 4's key-code dialog: clicks worked, typing went nowhere). Route keys to the
+    // field WE focused, as the classic Dialog Manager did. Kill
+    // M64_NO_NIB_KEY_ROUTE; guard nib-key-route.
+    ccw_route_keys_to_fields();
 
     ControlRef root = NULL;
     if (!n_CreateRootControl || n_CreateRootControl(win, &root) != 0 || !root)
@@ -1208,6 +1214,7 @@ static void swap_native_edit_fields(const char *xibpath, CFStringRef wname, Wind
     }
     ControlRef root = n_HIViewGetRoot ? n_HIViewGetRoot(win) : NULL;
     char wc[256];
+    ccw_edit_trace_keys();
     if (!findByID || !superview || !getFrame || !unparent || !root ||
         !CFStringGetCString(wname, wc, sizeof wc, kCFStringEncodingUTF8)) return;
     long len; char *x = nibx_slurp(xibpath, &len); if (!x) return;
@@ -1223,11 +1230,17 @@ static void swap_native_edit_fields(const char *xibpath, CFStringRef wname, Wind
         if (!nibx_int(x, os, oe, "controlID", &cid) && !have_sig) continue;
         HIViewRef old = NULL, parent;
         CtrlID want = { sig, cid };
-        if (findByID(root, want, &old) != 0 || !old || !(parent = superview(old))) continue;
+        if (findByID(root, want, &old) != 0 || !old || !(parent = superview(old))) {
+            if (ccw_edit_trace()) fprintf(stderr, "[edit] swap '%.4s'/%d: stand-in not found\n", (char *)&sig, cid);
+            continue;
+        }
         HIRectD fr = { 0, 0, 0, 0 };
         getFrame(old, &fr);
         CRect r = { (int16_t)fr.y, (int16_t)fr.x, (int16_t)(fr.y + fr.h), (int16_t)(fr.x + fr.w) };
         ControlRef ec = make_edit_field(x, os, oe, &r, parent, win);
+        if (ccw_edit_trace())
+            fprintf(stderr, "[edit] swap id=%d frame=%.0f,%.0f %.0fx%.0f old=%p new=%p\n",
+                    cid, fr.x, fr.y, fr.w, fr.h, (void *)old, (void *)ec);
         if (!ec) continue;
         unparent(old);              // GetControlByID must now resolve to ours
         wire_ids(x, os, oe, ec);
@@ -1283,6 +1296,12 @@ uint32_t shim_CreateWindowFromNib(uint32_t *a) {
 
     WindowRef w = NULL;
     OSStatus st = n_CreateWindowFromNib ? n_CreateWindowFromNib(ref, wn, &w) : (OSStatus)-108;
+    if (ccw_edit_trace()) {
+        char nm[128] = "";
+        if (wn) CFStringGetCString(wn, nm, sizeof nm, kCFStringEncodingUTF8);
+        fprintf(stderr, "[edit] CreateWindowFromNib '%s' native st=%d win=%p xib=%s\n", nm, (int)st,
+                (void *)w, nib_lookup(ref) ? nib_lookup(ref) : "(none)");
+    }
 
     if ((st != 0 || !w)) {                       // native gutted path failed (e.g. -5601)
         const char *xib = nib_lookup(ref);
