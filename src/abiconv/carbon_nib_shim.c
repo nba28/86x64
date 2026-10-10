@@ -826,6 +826,46 @@ int sd_ctrl_key(void *ctrl, unsigned char ch, uint32_t mods) {
     return ccw_edit_key((ccw_edit *)s->rec, ch, mods);
 }
 
+// ---- IBCarbonPicture: the PICT resource drawn by a self-drawn view ----
+// The picture control is gone from 64-bit HIToolbox; the nib names a 'PICT'
+// resource id (contentResID) in the app's resource file (Call of Duty 4's key
+// dialog icon, PICT 2000). Decoded once through ImageIO (qd_gworld.c).
+CGImageRef qd_pict_decode(const void *body, size_t len);
+static CGImageRef nib_pict(int id) {
+    static void **(*GetResource)(uint32_t, int16_t);
+    static long (*GetHandleSize)(void **);
+    static int16_t (*OpenMap)(CFBundleRef);
+    static int opened;
+    if (!GetResource) {
+        GetResource   = (void *)dlsym(RTLD_DEFAULT, "GetResource");
+        GetHandleSize = (void *)dlsym(RTLD_DEFAULT, "GetHandleSize");
+        OpenMap       = (void *)dlsym(RTLD_DEFAULT, "CFBundleOpenBundleResourceMap");
+    }
+    if (!GetResource || !GetHandleSize) return NULL;
+    void **h = GetResource('PICT', (int16_t)id);
+    if (!h && !opened && OpenMap && n_CFBundleGetMainBundle) {   /* map not open yet */
+        opened = 1;
+        OpenMap(n_CFBundleGetMainBundle());
+        h = GetResource('PICT', (int16_t)id);
+    }
+    if (!h || !*h) { GAP_ONCE("nib", "PICT resource missing", __func__, 0); return NULL; }
+    return qd_pict_decode(*h, (size_t)GetHandleSize(h));
+}
+static CCWStatus pict_draw(void *call, CCWEventRef ev, void *ud) {
+    (void)call;
+    CGImageRef img = (CGImageRef)ud;
+    CGContextRef cg = ccw_draw_cg(ev);
+    double W = 0, H = 0;
+    if (!img || !cg) return ccwEventNotHandled;
+    W = (double)CGImageGetWidth(img); H = (double)CGImageGetHeight(img);
+    CGContextSaveGState(cg);
+    CGContextTranslateCTM(cg, 0, H);              /* view is y-down; images are y-up */
+    CGContextScaleCTM(cg, 1, -1);
+    CGContextDrawImage(cg, CGRectMake(0, 0, W, H), img);
+    CGContextRestoreGState(cg);
+    return 0;
+}
+
 // Build every control directly under [lo,hi) and embed into `parent`.
 static void build_children(const char *x, long lo, long hi, ControlRef parent, WindowRef win) {
     long p = lo;
@@ -848,7 +888,24 @@ static void build_children(const char *x, long lo, long hi, ControlRef parent, W
                    !strcmp(cls, "IBCarbonHILayoutInfo")) {   // not view controls
             p = oe; continue;
         } else if (!strcmp(cls, "IBCarbonStaticText")) {
-            n_CreateStaticTextControl(win, &r, cfs(title), NULL, &c);
+            // `small` / controlSize 1 = the small system font: its 13px box clips
+            // regular-size text (CoD4 key dialog's second line lost its descenders
+            // and its last word). ControlFontStyleRec: flags, font, ... (SInt16s).
+            int small = 0, csz = 0;
+            nibx_int(x, il, ih, "controlSize", &csz);
+            nibx_bool(x, il, ih, "small", &small);
+            small = small || csz == 1;
+            int16_t fs[12] = { 0x0001 /*kControlUseFontMask*/, -2 /*kControlFontSmallSystemFont*/ };
+            n_CreateStaticTextControl(win, &r, cfs(title), small ? (void *)fs : NULL, &c);
+        } else if (!strcmp(cls, "IBCarbonPicture")) {
+            int rid = 0;
+            CGImageRef img = nibx_int(x, il, ih, "contentResID", &rid) ? nib_pict(rid) : NULL;
+            if (img) {
+                CGRect fr = CGRectMake(r.left, r.top, r.right - r.left, r.bottom - r.top);
+                c = (ControlRef)ccw_make_view(fr, (void *)pict_draw, NULL, NULL, NULL, (void *)img, (CCWViewRef)parent);
+                if (c) wire_ids(x, il, ih, c);
+            }
+            p = oe; continue;                                 // ccw_make_view embedded it
         } else if (!strcmp(cls, "IBCarbonButton")) {
             n_CreatePushButtonControl(win, &r, cfs(title), &c);
         } else if (!strcmp(cls, "IBCarbonCheckBox")) {
