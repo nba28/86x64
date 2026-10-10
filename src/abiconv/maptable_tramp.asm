@@ -1392,6 +1392,7 @@ _x64_exc_longjmp:
 	;; resolution after its settings dialog and dies. See
 	;; carbon_window_resize_guard.c.
 	MTSHIM	___SetWindowBounds,                  _shim_SetWindowBounds
+	MTSHIM	___SizeWindow,                       _shim_SizeWindow
 	;; ShowWindow/IsWindowVisible/HideWindow: unwrap the WindowRef handle and
 	;; forward. See carbon_window_show_shim.c.
 	MTSHIM	___ShowWindow,                       _shim_ShowWindow

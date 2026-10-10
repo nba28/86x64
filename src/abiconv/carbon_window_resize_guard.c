@@ -124,21 +124,45 @@ static int wrg_ever_shown(void *win) {
    return 0;
 }
 
-static uint32_t set_window_bounds(uint32_t *args);
+static uint32_t set_window_bounds(void *win, uint32_t region, const WRGRect *want);
+extern void agl_window_fit(void *);   /* agl_drawable_shim.c: too big for the screen? */
 
 /* OSStatus SetWindowBounds(WindowRef, WindowRegionCode, const Rect *) */
 uint32_t shim_SetWindowBounds(uint32_t *args) {
-   const uint32_t st = set_window_bounds(args);
-   extern void agl_window_fit(void *);   /* agl_drawable_shim.c: too big for the screen? */
-   agl_window_fit((void *)(uintptr_t)x64_objc_unwrap(args[0]));
+   void *win = (void *)(uintptr_t)x64_objc_unwrap(args[0]);
+   const uint32_t st = set_window_bounds(win, args[1], (const WRGRect *)i386_ptr(args[2]));
+   agl_window_fit(win);
    return st;
 }
 
-static uint32_t set_window_bounds(uint32_t *args) {
-   void          *win    = (void *)(uintptr_t)x64_objc_unwrap(args[0]);
-   const uint32_t region = args[1];
-   const WRGRect *want   = (const WRGRect *)i386_ptr(args[2]);
+/* void SizeWindow(WindowRef, short w, short h, Boolean fUpdate)
+ * The classic spelling of the same resize: the content region keeps its origin
+ * and takes the new size, so it goes through the same guard. Call of Duty 4
+ * resizes its shown GL window with it on every video restart (HideWindow first,
+ * which does not help: see the table above) and died in NSCGSPanic. Kill
+ * M64_NO_SIZEWINDOW_GUARD (the native call); guard sizewindow-guard. */
+uint32_t shim_SizeWindow(uint32_t *args) {
+   void *win = (void *)(uintptr_t)x64_objc_unwrap(args[0]);
+   const int16_t w = (int16_t)args[1], h = (int16_t)args[2];
+   static int off = -1;
+   if (off < 0) off = getenv("M64_NO_SIZEWINDOW_GUARD") != NULL;
+   if (off) {
+      static void (*native)(void *, int16_t, int16_t, uint8_t);
+      if (!native) native = (void (*)(void *, int16_t, int16_t, uint8_t))dlsym(RTLD_DEFAULT, "SizeWindow");
+      if (native && win) native(win, w, h, (uint8_t)args[3]);
+      return 0;
+   }
+   static wrg_getb_fn getb;
+   if (!getb) { getb = (wrg_getb_fn)dlsym(RTLD_DEFAULT, "GetWindowBounds"); }
+   WRGRect cur = { 0, 0, 0, 0 };
+   if (!win || !getb || getb(win, WRG_CONTENT_RGN, &cur) != 0) { return 0; }
+   const WRGRect want = { cur.top, cur.left, (int16_t)(cur.top + h), (int16_t)(cur.left + w) };
+   (void)set_window_bounds(win, WRG_CONTENT_RGN, &want);
+   agl_window_fit(win);
+   return 0;
+}
 
+static uint32_t set_window_bounds(void *win, uint32_t region, const WRGRect *want) {
    static wrg_bounds_fn setb;
    static wrg_getb_fn   getb;
    if (!setb) { setb = (wrg_bounds_fn)dlsym(RTLD_DEFAULT, "SetWindowBounds"); }

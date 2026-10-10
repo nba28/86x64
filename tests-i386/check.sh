@@ -32,7 +32,7 @@ fi
 GUI='agl-fullscreen-present agl-oversize-window agl-window-drawable cgl-fullscreen
 display-fullscreen-bridge classic-input-coords carbon-window-compositing
 classic-alert classic-dialog standard-alert carbon-dangling
-focus-ring layerback-invariance snapshot-compat window-chrome nib-edit-field nib-key-route'
+focus-ring layerback-invariance snapshot-compat window-chrome nib-edit-field sizewindow-guard nib-key-route'
 skipped=()
 if [ $# -eq 0 ] && [ -z "${CHECK_GUI:-}" ]; then
     for g in $GUI; do grep -qx "$g" <<<"$(tr ' ' '\n' <<<"$targets")" && skipped+=("$g"); done
