@@ -1337,6 +1337,7 @@ namespace MachO {
       struct Deferred { std::size_t dispatch, end, anchor; };
       std::vector<Deferred> deferred;
       std::set<std::size_t> lea_bases;   /* every in-section lea [anchor+d] / [rip+d] target */
+      std::size_t case_bound = 0, case_bound_at = 0;   /* last `cmp $N,%reg`: N+1 at vmaddr */
       xed_category_enum_t prev_cat = XED_CATEGORY_INVALID;
       static const bool nop_keeps_dead = std::getenv("M64_NO_DEAD_ENTRY_EVEN") == nullptr;
       bool prev_call0 = false;     /* previous insn was `call $+0` */
@@ -1454,6 +1455,16 @@ namespace MachO {
        * idempotent. Kill M64_NO_PIC_BACK_EDGE; guard 99_jt_back_edge_join. */
       static const bool back_edge = std::getenv("M64_NO_PIC_BACK_EDGE") == nullptr;
       std::map<std::size_t, RegMap> back_snap;
+      /* ORPHAN code (DetectPicAnchoredDisps' rule): after a ret/jmp, a block
+       * no recorded edge reaches yet (a loop entered by a forward jmp to its
+       * test, whose body sits after an early epilogue). It runs on the stale
+       * linear state, so its branches record nothing and the next join ADOPTS
+       * its snapshot instead of intersecting with the stale state. Portal 2
+       * engine: two dispatches after such a loop lost their spilled anchor.
+       * Kill M64_NO_JT_ORPHAN; guard 99_jt_orphan_loop. */
+      static const bool orphan_on = std::getenv("M64_NO_JT_ORPHAN") == nullptr;
+      bool orphan = false;
+      bool prev_tcall = false;   /* prev_cat is the jmp of a translated call: it returns */
       /* dispatch -> table base claimed from lea evidence after a walk. Until
        * then the walk decoded that table as instructions, which can drop the
        * anchor for every later dispatch of the function, so the walk is
@@ -1468,10 +1479,11 @@ namespace MachO {
          anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
          stack_tbl.clear(); stack_anchor.clear(); esp_off = 0;
          pending_targets.clear(); anchor_snap.clear(); slot_snap.clear();
-         prev_cat = XED_CATEGORY_INVALID; prev_call0 = false;
+         prev_cat = XED_CATEGORY_INVALID; prev_call0 = false; orphan = false; prev_tcall = false;
          /* An intra-function edge from `at`: a forward target stays pending
           * and joins this state there; a backward one joins on the second walk. */
          auto join_edge = [&](std::size_t at, std::size_t tgt, bool forward) {
+            if (orphan) { return; }
             if (forward && tgt < sect_hi && tgt - at <= 0x10000) {
                pending_targets.insert(tgt);
                snapshot_for(anchor_snap, tgt, anchors);
@@ -1513,16 +1525,22 @@ namespace MachO {
                anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
                stack_tbl.clear(); stack_anchor.clear(); pending_targets.clear();
                anchor_snap.clear(); slot_snap.clear();
-               prev_call0 = false;
+               prev_call0 = false; orphan = false;
             }
             if (pass == 1) {
                auto b = back_snap.find(vmaddr);
                if (b != back_snap.end()) { snapshot_for(anchor_snap, vmaddr, b->second); }
             }
+            const bool dead_ft = prev_cat == XED_CATEGORY_RET || prev_cat == XED_CATEGORY_UNCOND_BR;
+            const bool joined = anchor_snap.count(vmaddr) != 0 || slot_snap.count(vmaddr) != 0;
+            const bool adopt = dead_ft || orphan;
+            if (orphan_on && env.func_syms.count(vmaddr) == 0) {
+               orphan = joined ? false : (orphan || (dead_ft && !prev_tcall));
+            }
             if (!anchor_snap.empty()) {
                auto sn = anchor_snap.find(vmaddr);
                if (sn != anchor_snap.end()) {
-                  if (prev_cat == XED_CATEGORY_RET || prev_cat == XED_CATEGORY_UNCOND_BR) {
+                  if (adopt) {
                      anchors = sn->second;
                   } else {
                      intersect_into(anchors, sn->second);
@@ -1533,7 +1551,7 @@ namespace MachO {
             if (!slot_snap.empty()) {
                auto sn = slot_snap.find(vmaddr);
                if (sn != slot_snap.end()) {
-                  if (prev_cat == XED_CATEGORY_RET || prev_cat == XED_CATEGORY_UNCOND_BR) {
+                  if (adopt) {
                      drop_slots_of(stack_tbl, XED_REG_EBP);
                      drop_slots_of(stack_anchor, XED_REG_EBP);
                      stack_tbl.insert(sn->second.tbl.begin(), sn->second.tbl.end());
@@ -1560,6 +1578,7 @@ namespace MachO {
             if (iform == XED_IFORM_POP_GPRv_58 && prev_call0 && is_gpr32(reg0)) {
                /* i386 anchor: `call $+0; pop %reg` */
                anchors[reg0] = vmaddr;
+               orphan = false;
                tbl_addr.erase(reg0); tbl_val.erase(reg0);
                sets_state = true;
             } else if (iform == XED_IFORM_MOV_GPRv_MEMv && pend_r11 != 0 && vmaddr == pend_r11 &&
@@ -1569,6 +1588,7 @@ namespace MachO {
                /* translated anchor: the `mov %reg,[rsp]` the translated
                 * `call $+0` returns to */
                anchors[reg0] = pend_r11;
+               orphan = false;
                tbl_addr.erase(reg0); tbl_val.erase(reg0);
                sets_state = true;
             } else if ((iform == XED_IFORM_MOV_GPRv_GPRv_89 ||
@@ -1715,8 +1735,16 @@ namespace MachO {
                    * the anchor and was never claimed. Kill M64_NO_JT_CASE_SNAP;
                    * guard 99_jt_case_after_ret. */
                   static const bool case_snap = std::getenv("M64_NO_JT_CASE_SNAP") == nullptr;
-                  for (std::size_t k = 0; case_snap && k < i; ++k) {
+                  /* The auto-sized count can run on into the next table of the
+                   * function (clamped only after the walk), whose targets
+                   * belong to another dispatch: stop at a known table base,
+                   * and at the bound of a range check just before (`cmp
+                   * $N,%idx; ja default` = N+1 cases). */
+                  std::size_t ncase = i;
+                  if (case_bound != 0 && vmaddr - case_bound_at <= 32) { ncase = std::min(ncase, case_bound); }
+                  for (std::size_t k = 0; case_snap && k < ncase; ++k) {
                      const std::size_t slot = table_base + k * 4;
+                     if (k > 0 && tables.count(slot) != 0) { break; }
                      const std::size_t tgt =
                         tv->second.second + (int32_t)img.at<uint32_t>(sect.offset + (slot - sect.addr));
                      join_edge(vmaddr, tgt, tgt > vmaddr);
@@ -1736,6 +1764,14 @@ namespace MachO {
                      }
                   }
                }
+            }
+
+            /* `cmp $N,%idx` before a dispatch's `ja default` bounds its cases */
+            if ((iform == XED_IFORM_CMP_GPRv_IMMb || iform == XED_IFORM_CMP_GPRv_IMMz ||
+                 iform == XED_IFORM_CMP_OrAX_IMMz) && is_gpr32(reg0)) {
+               const xed_int64_t n = xed_decoded_inst_get_signed_immediate(&xedd);
+               case_bound = n >= 0 && n < 0x10000 ? (std::size_t)n + 1 : 0;
+               case_bound_at = vmaddr;
             }
 
             /* A write that did not (re)define table state clears it. */
@@ -1829,7 +1865,7 @@ namespace MachO {
                (bits == Bits::M64 && cat == XED_CATEGORY_UNCOND_BR && pend_r11 == vmaddr + len);
             if (is_call && bd != 0) {
                auto t = pic_thunks.find(vmaddr + len + bd);
-               if (t != pic_thunks.end()) { anchors[t->second] = vmaddr + len; }
+               if (t != pic_thunks.end()) { anchors[t->second] = vmaddr + len; orphan = false; }
             }
 
             prev_call0 = iform == XED_IFORM_CALL_NEAR_RELBRz && len == 5 && bd == 0;
@@ -1842,6 +1878,7 @@ namespace MachO {
              * before a block after an early epilogue; M64_NO_DEAD_ENTRY_EVEN) */
             if (!nop_keeps_dead || (cat != XED_CATEGORY_NOP && cat != XED_CATEGORY_WIDENOP)) {
                prev_cat = cat;
+               prev_tcall = bits == Bits::M64 && is_call;   /* the translated call's jmp */
             }
             it += len;
             vmaddr += len;
