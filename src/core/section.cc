@@ -656,6 +656,7 @@ namespace MachO {
       const bool entry_save_gate =
          std::getenv("M64_NO_PIC_ANCHOR_ENTRY_SAVE") == nullptr;   /* guard OFF arm */
       const bool trace = std::getenv("MACHO_TRACE_ANCHOR") != nullptr;
+      static const bool slots_past_ret = std::getenv("M64_NO_PIC_SLOTS_PAST_RET") == nullptr;
 
       auto clear_all = [&]() {
          anchors.clear();
@@ -845,7 +846,10 @@ namespace MachO {
                      snapshot_for(branch_slot_snap, b->first, back_slot_snap[b->first]);
                   }
                }
-               if (env.func_syms.count(inst->loc.vmaddr) != 0) { unreached = false; }
+               if (env.func_syms.count(inst->loc.vmaddr) != 0) {
+                  unreached = false;
+                  if (slots_past_ret) { anchor_slots.clear(); }   /* a new frame */
+               }
                /* the linear predecessor cannot fall through here */
                const bool dead_edge = prev_inst != nullptr &&
                   (last_flow_cat == XED_CATEGORY_RET ||
@@ -1176,7 +1180,24 @@ namespace MachO {
                iform == XED_IFORM_CALL_NEAR_RELBRz &&
                xed_decoded_inst_get_branch_displacement(&xedd) == 0;
             if (cat == XED_CATEGORY_RET) {
-               if (pending_forward_targets.empty()) { clear_all(); }
+               if (pending_forward_targets.empty()) {
+                  /* The EH landing pads GCC places after the final `ret` are
+                   * entered by the unwinder in this function's frame, and -O0
+                   * code reloads the anchor from its frame slot there (Portal
+                   * 2 launcher `mov -0x10(%ebp),%ecx; mov 0x24812(%ecx),%ecx`
+                   * left raw: a wild read in every cleanup path). With
+                   * function symbols to bound them, the frame slots survive
+                   * the `ret` until the next function. Registers do not: a pad
+                   * gets the callee-saved values of whichever call threw.
+                   * Kill M64_NO_PIC_SLOTS_PAST_RET; guard 99_pic_anchor_pad_slot. */
+                  if (slots_past_ret && !env.func_syms.empty()) {
+                     const SlotMap keep = anchor_slots;
+                     clear_all();
+                     anchor_slots = keep;
+                  } else {
+                     clear_all();
+                  }
+               }
             } else if ((cat == XED_CATEGORY_INTERRUPT &&
                         xed_decoded_inst_get_iclass(&xedd) != XED_ICLASS_INT3) ||
                        cat == XED_CATEGORY_SYSCALL || cat == XED_CATEGORY_SYSRET) {
