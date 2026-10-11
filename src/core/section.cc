@@ -657,6 +657,15 @@ namespace MachO {
          std::getenv("M64_NO_PIC_ANCHOR_ENTRY_SAVE") == nullptr;   /* guard OFF arm */
       const bool trace = std::getenv("MACHO_TRACE_ANCHOR") != nullptr;
       static const bool slots_past_ret = std::getenv("M64_NO_PIC_SLOTS_PAST_RET") == nullptr;
+      /* Past the final ret (landing pads), -O0 code first re-spills the PIC
+       * register into the anchor's frame slot: the unwinder restored the
+       * callee-saved registers of the throwing call, where that register is
+       * the anchor. Such a store keeps the slot (and names the register) an
+       * anchor instead of killing it (Portal 2 launcher `mov %ebx,-0x18(%ebp)`
+       * then `mov -0x18(%ebp),%ecx; mov 0x20152(%ecx),%ecx`). Kill
+       * M64_NO_PIC_PAD_RESPILL; guard 99_pic_anchor_pad_respill. */
+      static const bool pad_respill = std::getenv("M64_NO_PIC_PAD_RESPILL") == nullptr;
+      bool past_ret = false;
 
       auto clear_all = [&]() {
          anchors.clear();
@@ -849,6 +858,7 @@ namespace MachO {
                if (env.func_syms.count(inst->loc.vmaddr) != 0) {
                   unreached = false;
                   if (slots_past_ret) { anchor_slots.clear(); }   /* a new frame */
+                  past_ret = false;
                }
                /* the linear predecessor cannot fall through here */
                const bool dead_edge = prev_inst != nullptr &&
@@ -935,6 +945,7 @@ namespace MachO {
                   anchored_region = true;
                   is_anchor_pop = true;
                   orphan = false;   /* a fresh anchor: the state is known again */
+                  past_ret = false;
                }
             }
 
@@ -1091,9 +1102,14 @@ namespace MachO {
                   if (iform == XED_IFORM_MOV_MEMv_GPRv) {               /* spill */
                      entry_save_slots.erase(slot);
                      auto a = anchors.find(reg);
+                     auto pad_slot = anchor_slots.find(slot);
                      if (a != anchors.end()) {
                         anchor_slots[slot] = a->second;
                         pre_anchor_saves.erase(slot);
+                     } else if (pad_respill && past_ret && pad_slot != anchor_slots.end() &&
+                                (reg == XED_REG_EBX || reg == XED_REG_ESI || reg == XED_REG_EDI)) {
+                        anchors[reg] = pad_slot->second;
+                        anchor_keep = reg;
                      } else {
                         anchor_slots.erase(slot);
                         if (is_gpr32(reg)) { pre_anchor_saves[slot] = reg; }
@@ -1194,6 +1210,7 @@ namespace MachO {
                      const SlotMap keep = anchor_slots;
                      clear_all();
                      anchor_slots = keep;
+                     past_ret = true;
                   } else {
                      clear_all();
                   }
