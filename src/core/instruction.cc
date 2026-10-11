@@ -316,10 +316,16 @@ namespace MachO {
          if (!has_sib || idx == 4) {
             rip_rel();
          } else {
+            static const xed_reg_enum_t gpr32[8] = {
+               XED_REG_EAX, XED_REG_ECX, XED_REG_EDX, XED_REG_EBX,
+               XED_REG_ESP, XED_REG_EBP, XED_REG_ESI, XED_REG_EDI,
+            };
             lea_r11();
             out.operand = {0x04, (uint8_t)((scale << 6) | (idx << 3) | 0x03)};
             out.rex = 0x01;                            /* REX.B: base r11 */
-            out.addr32 = idx != 5;
+            /* the same wrap policy as every other indexed operand (an %ebp
+             * index is a data register; guard 99_pic_anchor_ebp_index_wrap) */
+            out.addr32 = wants_addr32(XED_REG_R11, gpr32[idx]);
          }
       } else if (memdisp && base == XED_REG_INVALID && index == XED_REG_INVALID) {
          rip_rel();
