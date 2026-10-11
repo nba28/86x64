@@ -23,7 +23,8 @@
 #             follows it through the slot.
 #
 # ON  : both dispatches land on their intended case; binary exits 0.
-# OFF : M64_NO_JT_SPILL_SLOTS=1 — the SPILL table keeps its stale i386 deltas and
+# OFF : M64_NO_JT_SPILL_SLOTS=1 (+ M64_NO_JT_BASE_EVIDENCE=1, whose lea-evidence
+#       fallback recovers the spilled base on its own) — the SPILL table keeps its stale i386 deltas and
 #       the dispatch lands somewhere else (the defect reproduces).
 set -u
 cd "$(dirname "$0")"
@@ -48,7 +49,7 @@ det() { # $1 = extra env ; prints the number of tables detected
     | grep -c '^\[jumptable\] dispatch@'
 }
 n_on=$(det "")
-n_off=$(env M64_NO_JT_SPILL_SLOTS=1 MACHO_TRACE_JUMPTABLE=1 "$MT" transform "$I386" \
+n_off=$(env M64_NO_JT_SPILL_SLOTS=1 M64_NO_JT_BASE_EVIDENCE=1 MACHO_TRACE_JUMPTABLE=1 "$MT" transform "$I386" \
         "$BUILD/$NAME.det.off.out" 2>&1 | grep -c '^\[jumptable\] dispatch@')
 
 if [ "$n_on" = 2 ]; then
@@ -114,7 +115,7 @@ else
   cp "$LIBABICONV" "$BUILD/libabiconv.dylib" 2>/dev/null
   cp "$(dirname "$LIBABICONV")/libabiconv.nulljump" "$BUILD/" 2>/dev/null
   for arm in on off; do
-    ENVV=""; [ "$arm" = off ] && ENVV="M64_NO_JT_SPILL_SLOTS=1"
+    ENVV=""; [ "$arm" = off ] && ENVV="M64_NO_JT_SPILL_SLOTS=1 M64_NO_JT_BASE_EVIDENCE=1"
     rm -f "$BUILD/$NAME.$arm.x86_64"
     env $ENVV bash $ROOT/src/86x64/86x64.sh -m "$MT" \
         -l "$LIBABICONV" \

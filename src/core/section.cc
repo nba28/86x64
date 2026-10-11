@@ -1325,6 +1325,18 @@ namespace MachO {
       /* table base -> (entry count, anchor), and -> its dispatch vmaddr */
       std::map<std::size_t, std::pair<std::size_t, std::size_t>> tables;
       std::map<std::size_t, std::size_t> table_dispatch;
+      /* A dispatch whose table base the walk cannot see: GCC hoists a loop's
+       * table base below the switch, so it reaches the dispatch only through
+       * a back edge (register) or a frame slot written there (expat in
+       * iMovie's MobileMe, 63 dispatches). Such a dispatch is claimed after
+       * the walk when an anchor-relative lea elsewhere computes the address
+       * just past its jmp. Kill M64_NO_JT_BASE_EVIDENCE; guard
+       * 99_jt_base_after_dispatch. */
+      static const bool base_evidence = std::getenv("M64_NO_JT_BASE_EVIDENCE") == nullptr;
+      constexpr std::size_t unknown_base = SIZE_MAX;
+      struct Deferred { std::size_t dispatch, end, anchor; };
+      std::vector<Deferred> deferred;
+      std::set<std::size_t> lea_bases;   /* every in-section lea [anchor+d] / [rip+d] target */
       xed_category_enum_t prev_cat = XED_CATEGORY_INVALID;
       static const bool nop_keeps_dead = std::getenv("M64_NO_DEAD_ENTRY_EVEN") == nullptr;
       bool prev_call0 = false;     /* previous insn was `call $+0` */
@@ -1341,6 +1353,55 @@ namespace MachO {
          if (len <= 1) { return false; }
          auto ns = env.func_syms.upper_bound(vm);
          return ns != env.func_syms.end() && *ns < vm + len;
+      };
+
+      /* Claim the table at `table_base` for the dispatch at `dispatch`: it is
+       * auto-sized and every entry must land in the dispatching function.
+       * Returns the entry count (claimed when >= 2). */
+      auto claim = [&](std::size_t table_base, std::size_t anchor, std::size_t dispatch) {
+         std::size_t min_target = sect_hi;
+         auto ns = env.func_syms.upper_bound(table_base);
+         if (ns != env.func_syms.end() && *ns < min_target) { min_target = *ns; }
+         /* A case body lies inside the dispatching function. Without
+          * this, the padding after a table read as one more entry: Portal
+          * 2 server `cmpl $3 ; ja` table (dispatch 0x24aed5) gained a 5th
+          * "case" from its `nopl` alignment, 4 MB away, and that target's
+          * empty-anchor snapshot erased %esi mid-function at 0x64c800 ->
+          * raw PIC stores into __TEXT. Bounded by symbols; a stripped
+          * image keeps the section bounds. Kill M64_NO_JT_CASE_IN_FUNC;
+          * guard 99_jt_case_in_func. */
+         static const bool case_anywhere = std::getenv("M64_NO_JT_CASE_IN_FUNC") != nullptr;
+         std::size_t fn_lo = sect_lo, fn_hi = sect_hi;
+         if (!case_anywhere) {
+            auto nx = env.func_syms.upper_bound(dispatch);
+            if (nx != env.func_syms.end()) { fn_hi = std::min(fn_hi, *nx); }
+            if (nx != env.func_syms.begin()) { fn_lo = std::max(fn_lo, *std::prev(nx)); }
+         }
+         std::size_t i = 0;
+         for (; ; ++i) {
+            const std::size_t slot = table_base + i * 4;
+            if (slot + 4 > sect_hi || slot >= min_target) { break; }
+            const int32_t raw = (int32_t)img.at<uint32_t>(sect.offset + (slot - sect.addr));
+            const std::size_t target = anchor + raw;
+            if (target < sect_lo || target >= sect_hi) { break; }
+            if (target < fn_lo || target >= fn_hi) { break; }
+            if (target > table_base && target < min_target) {
+               min_target = target;
+            }
+         }
+         if (i >= 2) {
+            for (std::size_t k = 0; k < i; ++k) {
+               env.jump_table_slots[table_base + k * 4] = anchor;
+            }
+            auto& tr = tables[table_base];
+            if (i > tr.first) { tr = { i, anchor }; }
+            table_dispatch[table_base] = dispatch;
+            if (trace) {
+               fprintf(stderr, "[jumptable] dispatch@0x%zx anchor=0x%zx table=0x%zx count=%zu\n",
+                       (size_t)dispatch, (size_t)anchor, (size_t)table_base, (size_t)i);
+            }
+         }
+         return i;
       };
 
       /* GCC PIC thunks: `mov (%esp),%reg; ret` — or, translated, the
@@ -1393,14 +1454,21 @@ namespace MachO {
        * idempotent. Kill M64_NO_PIC_BACK_EDGE; guard 99_jt_back_edge_join. */
       static const bool back_edge = std::getenv("M64_NO_PIC_BACK_EDGE") == nullptr;
       std::map<std::size_t, RegMap> back_snap;
+      /* dispatch -> table base claimed from lea evidence after a walk. Until
+       * then the walk decoded that table as instructions, which can drop the
+       * anchor for every later dispatch of the function, so the walk is
+       * repeated, stepping over these tables, until it claims nothing new. */
+      std::map<std::size_t, std::size_t> evidence_claims;
+      for (int round = 0; round < 4; ++round) {
+      const std::size_t claims_before = evidence_claims.size();
+      back_snap.clear();
+      deferred.clear();
       for (int pass = 0; pass < 2; ++pass) {
-         if (pass == 1) {
-            if (!pic_any_nonempty(back_snap)) { break; }
-            anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
-            stack_tbl.clear(); stack_anchor.clear(); esp_off = 0;
-            pending_targets.clear(); anchor_snap.clear(); slot_snap.clear();
-            prev_cat = XED_CATEGORY_INVALID; prev_call0 = false;
-         }
+         if (pass == 1 && !pic_any_nonempty(back_snap)) { break; }
+         anchors.clear(); tbl_addr.clear(); tbl_val.clear(); pend_r11 = 0;
+         stack_tbl.clear(); stack_anchor.clear(); esp_off = 0;
+         pending_targets.clear(); anchor_snap.clear(); slot_snap.clear();
+         prev_cat = XED_CATEGORY_INVALID; prev_call0 = false;
          std::size_t it = sect.offset;
          std::size_t vmaddr = sect.addr;
          const std::size_t end = sect.offset + sect.size;
@@ -1502,6 +1570,7 @@ namespace MachO {
                      tbl_addr[reg0] = vmaddr + len + disp;
                      tbl_val.erase(reg0);
                      sets_state = true;
+                     lea_bases.insert(vmaddr + len + disp);
                   } else {
                      auto a = anchors.find(jt_norm32(base));
                      const std::size_t cand = a != anchors.end() ? (std::size_t)((ssize_t)a->second + disp) : 0;
@@ -1509,6 +1578,7 @@ namespace MachO {
                         tbl_addr[reg0] = cand;
                         tbl_val.erase(reg0);
                         sets_state = true;
+                        lea_bases.insert(cand);
                      }
                   }
                }
@@ -1564,6 +1634,11 @@ namespace MachO {
                      tbl_val[reg0] = { a->second + xed_decoded_inst_get_memory_displacement(ops, 0), 0 };
                      tbl_addr.erase(reg0);
                      sets_state = true;
+                  } else if (base_evidence && is_gpr32(base) &&
+                             xed_decoded_inst_get_memory_displacement(ops, 0) == 0) {
+                     tbl_val[reg0] = { unknown_base, 0 };
+                     tbl_addr.erase(reg0);
+                     sets_state = true;
                   }
                }
             } else if (iform == XED_IFORM_ADD_GPRv_MEMv && is_gpr32(reg0)) {
@@ -1601,49 +1676,18 @@ namespace MachO {
             } else if (iform == XED_IFORM_JMP_GPRv) {
                auto tv = tbl_val.find(reg0);
                if (tv != tbl_val.end() && tv->second.second != 0) {
-                  const std::size_t table_base = tv->second.first;
-                  const std::size_t anchor = tv->second.second;
-                  std::size_t min_target = sect_hi;
-                  auto ns = env.func_syms.upper_bound(table_base);
-                  if (ns != env.func_syms.end() && *ns < min_target) { min_target = *ns; }
-                  /* A case body lies inside the dispatching function. Without
-                   * this, the padding after a table read as one more entry: Portal
-                   * 2 server `cmpl $3 ; ja` table (dispatch 0x24aed5) gained a 5th
-                   * "case" from its `nopl` alignment, 4 MB away, and that target's
-                   * empty-anchor snapshot erased %esi mid-function at 0x64c800 ->
-                   * raw PIC stores into __TEXT. Bounded by symbols; a stripped
-                   * image keeps the section bounds. Kill M64_NO_JT_CASE_IN_FUNC;
-                   * guard 99_jt_case_in_func. */
-                  static const bool case_anywhere = std::getenv("M64_NO_JT_CASE_IN_FUNC") != nullptr;
-                  std::size_t fn_lo = sect_lo, fn_hi = sect_hi;
-                  if (!case_anywhere) {
-                     auto nx = env.func_syms.upper_bound(vmaddr);
-                     if (nx != env.func_syms.end()) { fn_hi = std::min(fn_hi, *nx); }
-                     if (nx != env.func_syms.begin()) { fn_lo = std::max(fn_lo, *std::prev(nx)); }
-                  }
-                  std::size_t i = 0;
-                  for (; ; ++i) {
-                     const std::size_t slot = table_base + i * 4;
-                     if (slot + 4 > sect_hi || slot >= min_target) { break; }
-                     const int32_t raw = (int32_t)img.at<uint32_t>(sect.offset + (slot - sect.addr));
-                     const std::size_t target = anchor + raw;
-                     if (target < sect_lo || target >= sect_hi) { break; }
-                     if (target < fn_lo || target >= fn_hi) { break; }
-                     if (target > table_base && target < min_target) {
-                        min_target = target;
+                  std::size_t table_base = tv->second.first;
+                  if (table_base == unknown_base) {
+                     auto ec = evidence_claims.find(vmaddr);
+                     if (ec == evidence_claims.end()) {
+                        deferred.push_back({ vmaddr, vmaddr + len, tv->second.second });
+                     } else {
+                        table_base = ec->second;
                      }
                   }
+                  const std::size_t i =
+                     table_base == unknown_base ? 0 : claim(table_base, tv->second.second, vmaddr);
                   if (i >= 2) {
-                     for (std::size_t k = 0; k < i; ++k) {
-                        env.jump_table_slots[table_base + k * 4] = anchor;
-                     }
-                     auto& tr = tables[table_base];
-                     if (i > tr.first) { tr = { i, anchor }; }
-                     table_dispatch[table_base] = vmaddr;
-                     if (trace) {
-                        fprintf(stderr, "[jumptable] dispatch@0x%zx anchor=0x%zx table=0x%zx count=%zu\n",
-                                (size_t)vmaddr, (size_t)anchor, (size_t)table_base, (size_t)i);
-                     }
                      /* An inline table right after the jmp: step over it so the
                       * walk stays aligned for the rest of the function. */
                      const std::size_t table_end = table_base + i * 4;
@@ -1783,6 +1827,20 @@ namespace MachO {
             it += len;
             vmaddr += len;
          }
+      }
+
+      /* The deferred dispatches: an inline table starts within the alignment
+       * padding after its jmp, at an address some lea computes. */
+      for (const Deferred& d : deferred) {
+         auto b = lea_bases.lower_bound(d.end);
+         if (b == lea_bases.end() || *b - d.end >= 16 || evidence_claims.count(d.dispatch) != 0) {
+            continue;
+         }
+         if (tables.count(*b) != 0 || claim(*b, d.anchor, d.dispatch) >= 2) {
+            evidence_claims[d.dispatch] = *b;
+         }
+      }
+      if (evidence_claims.size() == claims_before) { break; }
       }
 
       /* Two tables sharing an anchor often sit back to back below every case
