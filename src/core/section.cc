@@ -1469,6 +1469,26 @@ namespace MachO {
          stack_tbl.clear(); stack_anchor.clear(); esp_off = 0;
          pending_targets.clear(); anchor_snap.clear(); slot_snap.clear();
          prev_cat = XED_CATEGORY_INVALID; prev_call0 = false;
+         /* An intra-function edge from `at`: a forward target stays pending
+          * and joins this state there; a backward one joins on the second walk. */
+         auto join_edge = [&](std::size_t at, std::size_t tgt, bool forward) {
+            if (forward && tgt < sect_hi && tgt - at <= 0x10000) {
+               pending_targets.insert(tgt);
+               snapshot_for(anchor_snap, tgt, anchors);
+               if (slot_snap_on && jt_spill) {
+                  SlotSnap cur{ ebp_only(stack_tbl), ebp_only(stack_anchor) };
+                  auto ex = slot_snap.find(tgt);
+                  if (ex == slot_snap.end()) { slot_snap.emplace(tgt, std::move(cur)); }
+                  else {
+                     intersect_into(ex->second.tbl, cur.tbl);
+                     intersect_into(ex->second.anchor, cur.anchor);
+                  }
+               }
+            } else if (!forward && pass == 0 && back_edge && tgt >= sect_lo &&
+                       at - tgt <= 0x10000 && pic_same_function(env.func_syms, tgt, at)) {
+               snapshot_for(back_snap, tgt, anchors);
+            }
+         };
          std::size_t it = sect.offset;
          std::size_t vmaddr = sect.addr;
          const std::size_t end = sect.offset + sect.size;
@@ -1687,6 +1707,20 @@ namespace MachO {
                   }
                   const std::size_t i =
                      table_base == unknown_base ? 0 : claim(table_base, tv->second.second, vmaddr);
+                  /* Its case bodies are branch targets: a forward one stays
+                   * pending (a `ret` before it does not end the function) and
+                   * joins this state, like any forward branch; a backward one
+                   * joins on the second walk. Portal 2 libtier0: an inner
+                   * switch in a case body placed after the early epilogue lost
+                   * the anchor and was never claimed. Kill M64_NO_JT_CASE_SNAP;
+                   * guard 99_jt_case_after_ret. */
+                  static const bool case_snap = std::getenv("M64_NO_JT_CASE_SNAP") == nullptr;
+                  for (std::size_t k = 0; case_snap && k < i; ++k) {
+                     const std::size_t slot = table_base + k * 4;
+                     const std::size_t tgt =
+                        tv->second.second + (int32_t)img.at<uint32_t>(sect.offset + (slot - sect.addr));
+                     join_edge(vmaddr, tgt, tgt > vmaddr);
+                  }
                   if (i >= 2) {
                      /* An inline table right after the jmp: step over it so the
                       * walk stays aligned for the rest of the function. */
@@ -1771,22 +1805,7 @@ namespace MachO {
             if (cat == XED_CATEGORY_COND_BR || cat == XED_CATEGORY_UNCOND_BR) {
                const ssize_t bd = xed_decoded_inst_get_branch_displacement(&xedd);
                const std::size_t tgt = vmaddr + len + bd;
-               if (bd > 0 && tgt < sect_hi && tgt - vmaddr <= 0x10000) {
-                  pending_targets.insert(tgt);
-                  snapshot_for(anchor_snap, tgt, anchors);
-                  if (slot_snap_on && jt_spill) {
-                     SlotSnap cur{ ebp_only(stack_tbl), ebp_only(stack_anchor) };
-                     auto ex = slot_snap.find(tgt);
-                     if (ex == slot_snap.end()) { slot_snap.emplace(tgt, std::move(cur)); }
-                     else {
-                        intersect_into(ex->second.tbl, cur.tbl);
-                        intersect_into(ex->second.anchor, cur.anchor);
-                     }
-                  }
-               } else if (pass == 0 && back_edge && bd < 0 && tgt >= sect_lo &&
-                          vmaddr - tgt <= 0x10000 && pic_same_function(env.func_syms, tgt, vmaddr)) {
-                  snapshot_for(back_snap, tgt, anchors);
-               }
+               if (bd != 0) { join_edge(vmaddr, tgt, bd > 0); }
             }
             const bool is_pic_call0 =
                iform == XED_IFORM_CALL_NEAR_RELBRz &&
