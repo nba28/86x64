@@ -137,6 +137,11 @@ namespace MachO::opcode {
       return {0x44, 0x01, modrm};
    }
 
+   opcode_t sub_r32_r11d(xed_reg_enum_t r32) {
+      assert(r32 >= XED_REG_EAX && r32 <= XED_REG_EDI);
+      return {0x44, 0x29, (uint8_t)(0xc0 | (0x3 << 3) | (uint8_t)(r32 - XED_REG_EAX))};
+   }
+
    opcode_t cmp_r32_r11d(xed_reg_enum_t r32) {
       assert(r32 >= XED_REG_EAX && r32 <= XED_REG_EDI);
       /* cmp r/m32, r32 (opcode 0x39): r/m = dest r32, reg = source r11d.

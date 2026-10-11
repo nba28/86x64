@@ -794,6 +794,31 @@ namespace MachO {
          }
          break;
 
+      /* `sub $X,%reg`: the pointer difference `p - &array` (Call of Duty 4
+       * `strstr(buf,s) - buf`, Civilization IV). Far more often an integer
+       * than `add $X` is (iPhoto subtracts odd constants that alias its
+       * __DATA), so only the store-side discriminator counts: aligned,
+       * writable data, fixed-load image, and not a power of two (Call of
+       * Duty 4 `sub $0x800000` after a range check aliases its __common). A
+       * frame allocation `sub $N,%esp` is never one. Kill M64_NO_SUB_PTR_IMM; guard 99_sub_ptr_imm. */
+      case XED_IFORM_SUB_GPRv_IMMz:
+      case XED_IFORM_SUB_OrAX_IMMz:
+         {
+            static const bool no_sub_ptr = std::getenv("M64_NO_SUB_PTR_IMM") != nullptr;
+            const std::size_t imm_idx = instbuf.size() - sizeof(uint32_t);
+            bool imm_is_ptr = false;
+            if (!no_sub_ptr && fixed_load && bits == Bits::M32 &&
+                xed_decoded_inst_get_immediate_width_bits(operands) == 32 &&
+                xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0) != XED_REG_ESP) {
+               const uint32_t imm_val = img.template at<uint32_t>(loc.offset + imm_idx);
+               imm_is_ptr = ptr32_range(imm_val) && (imm_val & 3) == 0 &&
+                            (imm_val & (imm_val - 1)) != 0 &&   /* `sub $0x800000` */
+                            env.vmaddr_in_writable_data(imm_val);
+            }
+            parse_imm(imm_idx, imm_is_ptr);
+         }
+         break;
+
       /* `cmp $X,%reg`: a pointer only as the end sentinel of a table whose base
        * was relocated (Halo static-init table walk), or under the store-side
        * discriminator so an identity compare classifies like the store
@@ -1050,6 +1075,14 @@ namespace MachO {
                const auto r32 = reg32("ADD imm-ptr");
                return {rip_to_pointee(opcode::lea_r11_mem_rip_disp32()),
                        new Instruction<opposite<bits>>(opcode::add_r32_r11d(r32))};
+            }
+
+         case XED_IFORM_SUB_GPRv_IMMz:   /* lea r11,[rip+ptr]; sub r32,r11d */
+         case XED_IFORM_SUB_OrAX_IMMz:
+            {
+               const auto r32 = reg32("SUB imm-ptr");
+               return {rip_to_pointee(opcode::lea_r11_mem_rip_disp32()),
+                       new Instruction<opposite<bits>>(opcode::sub_r32_r11d(r32))};
             }
 
          case XED_IFORM_CMP_GPRv_IMMz:   /* lea r11,[rip+ptr]; cmp r32,r11d */

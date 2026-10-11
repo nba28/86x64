@@ -82,6 +82,9 @@ namespace MachO {
        * instruction.cc CMP_*_IMMz transform). */
       opcode_t cmp_r32_r11d(xed_reg_enum_t r32);
 
+      /* `sub r32, r11d` (29 /r): the pointer difference `sub r32, $&array`. */
+      opcode_t sub_r32_r11d(xed_reg_enum_t r32);
+
       /* jmp r64 */
       opcode_t jmp_r64(xed_reg_enum_t r64);
 
