@@ -432,6 +432,12 @@ namespace MachO {
             "_siglongjmp", "_pthread_exit", "___cxa_bad_cast", "___cxa_bad_typeid",
             "___cxa_call_unexpected", "_err", "_errx", "__ZSt9terminatev",
          };
+         /* GCC's resume routine in some toolchains (Portal 2 libsteam: 3253 EH
+          * pads end with it): it returns only into std::terminate, so the code
+          * after it is reached by branches only. Kill
+          * M64_NO_NORETURN_RESUME_RETHROW; guard 99_pic_anchor_resume_rethrow. */
+         static const bool resume_rethrow =
+            std::getenv("M64_NO_NORETURN_RESUME_RETHROW") == nullptr;
          for (Segment<bits> *seg : env.archive.segments()) {
             for (Section<bits> *section : seg->sections) {
                const auto& sect = section->sect;
@@ -443,7 +449,9 @@ namespace MachO {
                   const auto& nl = img.at<nlist_t<bits>>(symoff + symidx * Nlist<bits>::size());
                   if ((nl.n_type & N_STAB) || (nl.n_type & N_TYPE) != N_UNDF ||
                       stroff == 0 || nl.n_un.n_strx >= strsize) { continue; }
-                  if (noreturn.count(&img.at<char>(stroff + nl.n_un.n_strx))) {
+                  const char *nm = &img.at<char>(stroff + nl.n_un.n_strx);
+                  if (noreturn.count(nm) ||
+                      (resume_rethrow && std::strcmp(nm, "__Unwind_Resume_or_Rethrow") == 0)) {
                      env.noreturn_stubs.insert(sect.addr + k * sect.reserved2);
                   }
                }
