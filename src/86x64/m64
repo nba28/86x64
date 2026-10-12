@@ -1488,24 +1488,37 @@ def _discover_shim_targets(app, translated_only=False):
     return sorted(out)
 
 
-def _strip_native_execution(app):
-    """Remove LSRequiresNativeExecution from a translated app's Info.plist.
-    Intel-era apps (iMovie '11, …) set it to force x86_64-native and avoid
-    PPC-via-Rosetta. On Apple Silicon "native" means arm64, so LaunchServices
-    refuses to launch our x86_64 (Rosetta) executable and Finder/`open` fails
-    with "The application cannot be opened because it has an incorrect executable
-    format." A translated bundle always runs x86_64 under Rosetta, so the key is
-    never appropriate — strip it so the app is Finder-launchable. Idempotent."""
+def _fix_info_plist(app):
+    """Bring a translated app's Info.plist up to what today's macOS requires.
+
+    * LSRequiresNativeExecution goes. Intel-era apps (iMovie '11, …) set it to
+      force x86_64-native and avoid PPC-via-Rosetta. On Apple Silicon "native"
+      means arm64, so LaunchServices refuses to launch our x86_64 (Rosetta)
+      executable and Finder/ fails with "The application cannot be opened
+      because it has an incorrect executable format."
+    * A missing CFBundleShortVersionString is copied from CFBundleVersion. helpd
+      registers an app's help book under its short version and, without one,
+      never copies the book into the help viewer's sandbox: Help opens a blank
+      page (Quinn 3.5.7 sets only CFBundleVersion).
+
+    Idempotent."""
     ip = Path(app) / "Contents" / "Info.plist"
     try:
         with open(ip, "rb") as f:
             d = plistlib.load(f)
     except Exception:
         return
+    changed = False
     if d.pop("LSRequiresNativeExecution", None) is not None:
+        changed = True
+        info("  stripped LSRequiresNativeExecution (Finder-launchable under Rosetta)")
+    if "CFBundleShortVersionString" not in d and isinstance(d.get("CFBundleVersion"), str):
+        d["CFBundleShortVersionString"] = d["CFBundleVersion"]
+        changed = True
+        info(f"  CFBundleShortVersionString = {d['CFBundleVersion']} (help books need it)")
+    if changed:
         with open(ip, "wb") as f:
             plistlib.dump(d, f)
-        info("  stripped LSRequiresNativeExecution (Finder-launchable under Rosetta)")
 
 
 def strip_signing_blockers(app, verbose=True):
@@ -1558,7 +1571,7 @@ def cmd_sign(args):
     flatten_forks(app, dry_run=args.dry_run)
     if not args.dry_run:
         strip_signing_blockers(app)
-        _strip_native_execution(app)
+        _fix_info_plist(app)
         for d in (app / "Contents" / "Frameworks").glob("*.dylib"):
             subprocess.run(["codesign", "-f", "-s", "-", str(d)],
                            capture_output=True)
