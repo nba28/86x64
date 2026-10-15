@@ -231,6 +231,22 @@ uint32_t shim_SteamAPI_InitSafe(uint32_t *a) {
    return ok;
 }
 uint32_t shim_SteamAPI_Init(uint32_t *a) { return shim_SteamAPI_InitSafe(a); }
+/* The newer SDKs' init (SteamAPI_InitEx / InitFlat inline into it): returns
+ * ESteamAPIInitResult, 0 = OK, and fills a SteamErrMsg (char[1024]). Left on
+ * the translated libsteam_api, it loads steamclient itself and then drives the
+ * NATIVE client objects from i386 code (Portal's CInputSystem). */
+uint32_t shim_SteamInternal_SteamAPI_Init(uint32_t *a) {
+   NATIVE(int32_t, SteamInternal_SteamAPI_Init, const char *, char *);
+   char *err = (char *)(uintptr_t)a[1];
+   if (!n_SteamInternal_SteamAPI_Init) {
+      if (err) strcpy(err, "native libsteam_api not found");
+      return 1;   /* k_ESteamAPIInitResult_FailedGeneric */
+   }
+   int32_t r = n_SteamInternal_SteamAPI_Init((const char *)(uintptr_t)a[0], err);
+   if (r == 0) g_init_gen++;
+   TR("SteamInternal_SteamAPI_Init -> %d\n", r);
+   return (uint32_t)r;
+}
 uint32_t shim_SteamAPI_Shutdown(uint32_t *a) {
    (void)a;
    NATIVE(void, SteamAPI_Shutdown, void);

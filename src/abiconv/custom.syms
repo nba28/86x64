@@ -911,6 +911,7 @@ _RemoveTimeTask
 # Steam game imports from libsteam_api, routed to the game's native x86_64 slice.
 _SteamAPI_Init
 _SteamAPI_InitSafe
+_SteamInternal_SteamAPI_Init
 _SteamAPI_Shutdown
 _SteamAPI_RestartAppIfNecessary
 _SteamAPI_RunCallbacks

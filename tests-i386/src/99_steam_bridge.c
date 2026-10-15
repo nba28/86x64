@@ -18,9 +18,12 @@
  *       heap, also above 4GB under Rosetta); the truncated pointer was
  *       unmapped and Portal 2 matchmaking died in strncpy. OFF arm 2:
  *       M64_NO_STEAM_LOWSTR_HEAP=1 brings strdup back.
+ *   SteamInternal_SteamAPI_Init (the newer SDKs' init) -> 0 and the native
+ *       lib's message in the caller's SteamErrMsg buffer.
  *
  * Exit 42 = all four right. 3 = no interfaces (the OFF arm: no native lib).
- * 10 + bits = a wrong value (1 id, 2 float, 4 struct, 8 esp drift, 16 string).
+ * 10 + bits = a wrong value (1 id, 2 float, 4 struct, 8 esp drift, 16 string,
+ * 32 init).
  */
 #include <stdint.h>
 #include <stdlib.h>
@@ -31,6 +34,7 @@ struct obj { void **vt; };
 
 extern void *SteamInternal_FindOrCreateUserInterface(int32_t, const char *);
 extern void *SteamInternal_FindOrCreateGameServerInterface(int32_t, const char *);
+extern int32_t SteamInternal_SteamAPI_Init(const char *, char *);
 
 typedef uint64_t (*sid_fn)(void *);
 typedef float (*vol_fn)(void *);
@@ -38,6 +42,8 @@ typedef ip20 (*ip_fn)(void *);
 typedef const char *(*name_fn)(void *);
 
 int main(void) {
+   char err[1024] = "unset";
+   int32_t init = SteamInternal_SteamAPI_Init("SteamUser021\0", err);
    struct obj *u = SteamInternal_FindOrCreateUserInterface(1, "SteamUser021");
    struct obj *m = SteamInternal_FindOrCreateUserInterface(1, "STEAMMUSIC_INTERFACE_VERSION001");
    struct obj *g = SteamInternal_FindOrCreateGameServerInterface(1, "SteamGameServer014");
@@ -61,5 +67,6 @@ int main(void) {
    if (v != 0.75f) bad |= 2;
    if (ip.w[0] != 0x11111111u || ip.w[4] != 0x55555555u) bad |= 4;
    if (e0 != e1) bad |= 8;
+   if (init != 0 || strcmp(err, "fake-ok") != 0) bad |= 32;
    exit(bad ? 10 + bad : 42);
 }

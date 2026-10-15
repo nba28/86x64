@@ -2318,7 +2318,7 @@ $(BUILD_DIR)/99_memmgr_blockmove.i386: $(BUILD_DIR)/99_memmgr_blockmove.o $(BUIL
 # symbols-only i386 stub, WEAK so the translated binary (every import rebound to
 # libabiconv's bridge) loads without it.
 $(BUILD_DIR)/steam_api_stub.dylib: | $(BUILD_DIR)
-	@printf 'void SteamInternal_FindOrCreateUserInterface(){}\nvoid SteamInternal_FindOrCreateGameServerInterface(){}\n' > $(BUILD_DIR)/steam_api_stub.c
+	@printf 'void SteamInternal_FindOrCreateUserInterface(){}\nvoid SteamInternal_FindOrCreateGameServerInterface(){}\nvoid SteamInternal_SteamAPI_Init(){}\n' > $(BUILD_DIR)/steam_api_stub.c
 	@$(CC_I386) -c $(BUILD_DIR)/steam_api_stub.c -o $(BUILD_DIR)/steam_api_stub.o
 	@$(LD) -arch i386 -macos_version_min 10.6 -syslibroot $(I386_SYSROOT) -lSystem -dylib \
 	  -install_name @loader_path/libsteam_api.dylib -o $@ $(BUILD_DIR)/steam_api_stub.o

@@ -115,6 +115,7 @@ _sb_slot_addrs:
 
 	MTSHIM	___SteamAPI_Init,				_shim_SteamAPI_Init
 	MTSHIM	___SteamAPI_InitSafe,				_shim_SteamAPI_InitSafe
+	MTSHIM	___SteamInternal_SteamAPI_Init,			_shim_SteamInternal_SteamAPI_Init
 	MTSHIM	___SteamAPI_Shutdown,				_shim_SteamAPI_Shutdown
 	MTSHIM	___SteamAPI_RestartAppIfNecessary,		_shim_SteamAPI_RestartAppIfNecessary
 	MTSHIM	___SteamAPI_RunCallbacks,			_shim_SteamAPI_RunCallbacks

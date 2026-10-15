@@ -27,6 +27,11 @@ static const char *get_persona_name(void *self) {
    return hi;
 }
 
+int32_t SteamInternal_SteamAPI_Init(const char *versions, char *err) {
+   strcpy(err, "fake-ok");
+   return strcmp(versions, "SteamUser021") == 0 ? 0 : 2;
+}
+
 static void *user_vt[40], *music_vt[40], *gs_vt[40], *friends_vt[80];
 static struct { void **vt; } user = {user_vt}, music = {music_vt}, gs = {gs_vt},
                              friends = {friends_vt};
