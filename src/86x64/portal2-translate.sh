@@ -260,6 +260,10 @@ if [ "$DEPLOY" -eq 1 ]; then
       codesign -f -s - "$nat" 2>/dev/null && echo "    native slice -> $(basename "$nat")"
   done
   # libabiconv + libinterpose must match the macho-tool that produced the code.
+  # resync only refreshes copies that already exist; a fresh tree has none.
+  for lib in abiconv/libabiconv 86x64/libinterpose; do
+    [ -f "$DST64/${lib##*/}.dylib" ] || cp -p "$REPO/build/src/$lib.dylib" "$DST64/"
+  done
   "$M64" resync "$DST64" || echo "!! m64 resync failed — check by CONTENT before measuring" >&2
   echo "==> deployed. Verify the deployed libabiconv is YOURS before measuring:"
   echo "    nm -a '$DST64/libabiconv.dylib' | grep -c shim_"
