@@ -8,17 +8,21 @@
  * dirent: u32 d_ino, u16 d_reclen, u8 d_type, u8 d_namlen, char d_name[256].
  * The caller gets a low wrapper owning the native DIR plus one converted entry
  * (valid until the next readdir/closedir on that stream, as POSIX allows).
- * The $INODE64 variants keep their abigen bridges (native layout).
+ * The other $INODE64 variants keep their abigen bridges (native layout).
  *
  * scandir/alphasort (classic) build the same i386 dirents: native scandir handed
  * the i386 select/compar callbacks native 64-bit dirent pointers, truncated to
  * 32 bits (Portal 2 filesystem_stdio FS_FindNextFile -> SIGSEGV in alphasort).
+ * scandir$INODE64/alphasort$INODE64 do the same with low copies of the native
+ * dirent (that IS the INODE64 layout): the bridge left the 4-byte namelist slot
+ * NULL under a nonzero count (Portal filesystem_stdio FillDataStruct).
  *
  * Kill switch M64_NO_DIR_SHIM=1 hands back the raw native DIR and dirent (the old
  * bridge). Guard tests-i386 dir-handle.
  */
 #include <dirent.h>
 #include <malloc/malloc.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
@@ -89,6 +93,23 @@ uint32_t shim_alphasort(uint32_t *a) {
    const struct dirent32 *x = P(*(uint32_t *)P(a[0])), *y = P(*(uint32_t *)P(a[1]));
    return (uint32_t)strcoll(x->d_name, y->d_name);
 }
+uint32_t shim_alphasort_ino64(uint32_t *a) {
+   const struct dirent *x = P(*(uint32_t *)P(a[0])), *y = P(*(uint32_t *)P(a[1]));
+   return (uint32_t)strcoll(x->d_name, y->d_name);
+}
+
+/* a low-heap entry in the caller's layout (the caller free()s it) */
+static void *low_entry(const struct dirent *e, int ino64) {
+   if (!ino64) {
+      struct dirent32 *x = malloc(sizeof *x);
+      if (x) to_dirent32(x, e);
+      return x;
+   }
+   const size_t sz = offsetof(struct dirent, d_name) + e->d_namlen + 1;
+   struct dirent *x = malloc(sz);
+   if (x) { memcpy(x, e, sz - 1); x->d_name[e->d_namlen] = 0; x->d_reclen = (uint16_t)sz; }
+   return x;
+}
 
 static const x64_cb_sig k_sig1 = { 1, CBR_I32SX, { CBA_I32 }, { 0 } };
 static const x64_cb_sig k_sig2 = { 2, CBR_I32SX, { CBA_I32, CBA_I32 }, { 0 } };
@@ -105,7 +126,7 @@ static int by_slot(void *vc, const void *pa, const void *pb) {
 /* int scandir(const char *, struct dirent ***, int (*select)(const struct dirent *),
  *             int (*compar)(const struct dirent **, const struct dirent **))
  * The namelist and every entry come from the low heap: the caller free()s them. */
-uint32_t shim_scandir(uint32_t *a) {
+static uint32_t scandir_low(uint32_t *a, int ino64) {
    if (raw()) {
       struct dirent **l64 = NULL;
       int n = scandir(P(a[0]), &l64,
@@ -120,9 +141,8 @@ uint32_t shim_scandir(uint32_t *a) {
    int32_t (*cmp)(uint64_t, uint64_t) = a[3] ? (void *)(uintptr_t)x64_cb_wrap(a[3], &k_sig2) : NULL;
    uint32_t *list = NULL, n = 0, cap = 0;
    for (struct dirent *e; (e = readdir(d)); ) {
-      struct dirent32 *x = malloc(sizeof *x);
+      void *x = low_entry(e, ino64);
       if (!x) goto fail;
-      to_dirent32(x, e);
       if (sel && !sel((uint32_t)(uintptr_t)x)) { free(x); continue; }
       if (n == cap) {
          uint32_t *grown = realloc(list, (cap = cap ? cap * 2 : 32) * sizeof *list);
@@ -154,3 +174,5 @@ fail:
    *(uint32_t *)P(a[1]) = 0;
    return (uint32_t)-1;
 }
+uint32_t shim_scandir(uint32_t *a) { return scandir_low(a, 0); }
+uint32_t shim_scandir_ino64(uint32_t *a) { return scandir_low(a, 1); }

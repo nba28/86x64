@@ -37,3 +37,5 @@
 	MTSHIM	___closedir,	_shim_closedir
 	MTSHIM	___scandir,	_shim_scandir
 	MTSHIM	___alphasort,	_shim_alphasort
+	MTSHIM	___scandir$INODE64,	_shim_scandir_ino64
+	MTSHIM	___alphasort$INODE64,	_shim_alphasort_ino64

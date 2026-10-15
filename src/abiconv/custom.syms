@@ -954,12 +954,14 @@ _ATSFontGetName
 _ATSFontGetHorizontalMetrics
 _ATSFontActivateFromMemory
 # dir_shim.c / dir_tramp.asm — opendir/readdir/closedir: a low DIR wrapper and
-# the classic i386 struct dirent (the $INODE64 variants keep their bridges).
+# the classic i386 struct dirent; scandir/alphasort also in the $INODE64 layout.
 _opendir
 _readdir
 _closedir
 _scandir
 _alphasort
+_scandir$INODE64
+_alphasort$INODE64
 # aq_shim.c / aq_tramp.asm — the AudioQueue output API for i386 callers (low
 # queue handles, i386-layout buffer mirrors, bridged output/property callbacks).
 _AudioQueueNewOutput
