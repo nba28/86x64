@@ -1446,9 +1446,9 @@ namespace MachO {
       /* GCC PIC thunks: `mov (%esp),%reg; ret` — or, translated, the
        * `mov r11d,[rsp]` that begins the translated return. */
       std::unordered_map<std::size_t, xed_reg_enum_t> pic_thunks;
-      {
-         std::size_t pit = sect.offset, pvm = sect.addr;
-         const std::size_t pend = sect.offset + sect.size;
+      const auto scan_thunks = [&](std::size_t soff, std::size_t saddr, std::size_t ssize) {
+         std::size_t pit = soff, pvm = saddr;
+         const std::size_t pend = soff + ssize;
          std::size_t mvm = 0;
          xed_reg_enum_t mreg = XED_REG_INVALID;
          while (pit < pend) {
@@ -1478,6 +1478,26 @@ namespace MachO {
             }
             pit += l; pvm += l;
          }
+      };
+      /* Translated code calls a thunk wherever it lives: GCC puts
+       * ___i686.get_pc_thunk.bx in __textcoal_nt, so a __text-only scan found
+       * no anchor and the x86_64 re-parse decoded every GCC PIC table as code;
+       * a table byte that read as a short jcc re-encoded wider and shifted the
+       * entries after it (Halo's digit-key switch at 0x2ee904: SIGSEGV). Kill
+       * M64_NO_JT_XSECT_THUNK; guard jt-xsect-thunk. */
+      static const bool xsect_thunk = std::getenv("M64_NO_JT_XSECT_THUNK") == nullptr;
+      if (bits == Bits::M64 && xsect_thunk) {
+         for (Segment<bits> *seg : env.archive.segments()) {
+            for (Section<bits> *other : seg->sections) {
+               if (other->sect.offset == 0 ||
+                   !(other->sect.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS))) {
+                  continue;
+               }
+               scan_thunks(other->sect.offset, other->sect.addr, other->sect.size);
+            }
+         }
+      } else {
+         scan_thunks(sect.offset, sect.addr, sect.size);
       }
       /* Cross-section named thunks (i386 only: the keys are i386 vmaddrs). */
       if constexpr (bits == Bits::M32) {
