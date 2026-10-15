@@ -65,6 +65,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include "gap.h"
+#include "dyld_image_list.h"
 
 /* macho-tool's M64 layout base for translated output (Archive::Build). */
 #define IR_TRANSLATED_TEXT_BASE 0x10000000ULL
@@ -151,6 +152,12 @@ static int ir_dead_bridge(const char *name) {
    const char *dl = (name[0] == '_') ? name + 1 : name;
    if (dlsym(RTLD_DEFAULT, dl) != NULL) { return 0; }
    return ir_self_imports(name);
+}
+
+static int ir_keep_translated_bound(void) {
+   static int on = -1;
+   if (on < 0) { const char *e = getenv("M64_NO_IR_TRANSLATED_BOUND"); on = !(e && *e && *e != '0'); }
+   return on;
 }
 
 /* Resolve an undefined import `name` (nlist spelling, leading '_') to the
@@ -324,6 +331,15 @@ void _86x64_import_repair(const struct mach_header_64 *mh64, intptr_t slide,
                       cur.dli_fname != NULL &&
                       strstr(cur.dli_fname, "libabiconv") != NULL) {
                      continue;   /* already a libabiconv shim */
+                  }
+                  /* Bound to another TRANSLATED image: its code already speaks
+                   * the i386 convention, and a same-named bridge is a different
+                   * function (Portal's vstdlib CreateThreadPool vs the Carbon
+                   * Thread Manager one, which returned paramErr as the pool).
+                   * Kill M64_NO_IR_TRANSLATED_BOUND; guard bundled-owner-bind. */
+                  if (ir_keep_translated_bound() && cur.dli_fbase != NULL &&
+                      x64_img_is_translated(cur.dli_fbase)) {
+                     continue;
                   }
                   const uint64_t sh = ir_resolve_shim_only(name);
                   if (sh != 0 && sh != v) { slots[k] = sh; n_unbound++; n_shim++; }
