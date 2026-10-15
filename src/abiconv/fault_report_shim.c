@@ -46,6 +46,13 @@
 //                        wrong value is usually several hops upstream of the
 //                        faulting instruction and in no register at all.
 //   M64_FAULT_CHAIN_BYTES=N    bytes to hexdump at the chain end (default 64)
+//   M64_WATCH="ADDR:LEN[=VALUE]"  report the first write into that range (once it
+//                        holds nonzero bytes, or VALUE) with the i386 frame chain,
+//                        then continue.
+//   M64_FAULT_SAVE="0x40000000:0x1b40000,Image.dylib+0xOFF:LEN,..."
+//                        write those memory ranges to $TMPDIR/86x64-fault-<pid>-<addr>.bin
+//                        for offline decoding (an app's runtime tables, which
+//                        no chain spec can index into).
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -63,6 +70,7 @@
 #include <errno.h>
 #include <sys/mman.h>
 #include <pthread/introspection.h>
+#include <libproc.h>
 #include "dyld_image_list.h"
 
 /* objc_shim.c: 1 + description when the address is a proxy-arena handle. */
@@ -371,6 +379,51 @@ static void fr_walk_chain(x86_thread_state64_t *ss, const char *spec) {
    }
 }
 
+/* ── M64_FAULT_SAVE: write memory ranges to files at fault time ───────────────
+ * For state that needs index arithmetic to reach (Halo's script threads and
+ * nodes live in its fixed game-state block): save it, decode it offline.
+ * Unreadable pages are written as zeros so file offsets stay addresses. */
+#include <fcntl.h>
+static void fr_save_ranges(const char *spec) {
+   char buf[512];
+   snprintf(buf, sizeof buf, "%s", spec);
+   const char *tmp = getenv("TMPDIR");
+   for (char *tok = strtok(buf, ","); tok; tok = strtok(NULL, ",")) {
+      char *colon = strchr(tok, ':');
+      if (!colon) continue;
+      uint64_t addr = strtoull(tok, NULL, 0);
+      const uint64_t len = strtoull(colon + 1, NULL, 0);
+      /* IMAGE+0xOFF: relative to a loaded image's header (its slide varies) */
+      const char *plus = strchr(tok, '+');
+      if (plus && plus < colon && !(tok[0] >= '0' && tok[0] <= '9')) {
+         addr = 0;
+         for (int i = 0; i < (int)g_nimgs; i++) {
+            const char *b = strrchr(g_imgs[i].name, '/');
+            b = b ? b + 1 : g_imgs[i].name;
+            if (strlen(b) == (size_t)(plus - tok) && strncmp(b, tok, (size_t)(plus - tok)) == 0) {
+               addr = g_imgs[i].base + strtoull(plus + 1, NULL, 0);
+               break;
+            }
+         }
+         if (!addr) { fprintf(stderr, "[fault] save %s: no such image\n", tok); continue; }
+      }
+      char path[1024];
+      snprintf(path, sizeof path, "%s/86x64-fault-%d-%llx.bin", tmp ? tmp : "/tmp", (int)getpid(),
+               (unsigned long long)addr);
+      const int fd = open(path, O_CREAT | O_WRONLY | O_TRUNC, 0644);
+      if (fd < 0) { fprintf(stderr, "[fault] save %s: open failed\n", path); continue; }
+      static unsigned char chunk[65536];
+      for (uint64_t at = 0; at < len; at += sizeof chunk) {
+         const size_t n = (size_t)(len - at < sizeof chunk ? len - at : sizeof chunk);
+         if (!fr_read(addr + at, chunk, n)) memset(chunk, 0, n);
+         if (write(fd, chunk, n) != (ssize_t)n) break;
+      }
+      close(fd);
+      fprintf(stderr, "[fault] saved 0x%llx+0x%llx -> %s\n", (unsigned long long)addr,
+              (unsigned long long)len, path);
+   }
+}
+
 /* ── WHAT IS THIS MEMORY? ──────────────────────────────────────────────────────
  * An address that resolves to NO loaded image used to be the end of the trail.
  * That is exactly the case worth digging into, because the honest "no image"
@@ -413,6 +466,11 @@ static void fr_print_region(const char *label, uint64_t v) {
            (bi.max_protection & VM_PROT_EXECUTE) ? 'x' : '-',
            bi.shared ? "shared" : "private",
            bi.reserved ? " reserved" : "");
+   /* a file-backed region names its file (one syscall, no allocation) */
+   char path[1024];
+   if (proc_regionfilename(getpid(), (uint64_t)a, path, sizeof path) > 0) {
+      fprintf(stderr, "[fault]   backed by %s\n", path);
+   }
 }
 
 /* Raw bytes at the faulting instruction. With no image to name it, the bytes
@@ -558,9 +616,82 @@ static void fr_dump_dladdr_ring(void) {
    }
 }
 
+/* ── M64_WATCH="ADDR:LEN": who writes this memory? ───────────────────────────
+ * Diagnostic. A poll thread waits until the range holds nonzero bytes (the app
+ * has filled it), then write-protects its pages; the first write into them is
+ * reported with the i386 frame chain, the pages are unprotected and the app
+ * continues. A write elsewhere on those pages is reported too and re-arms. */
+static volatile uint64_t g_watch_lo, g_watch_hi, g_watch_plo, g_watch_phi, g_watch_want;
+static volatile int g_watch_has_want;
+static volatile int g_watch_state;            /* 1 waiting, 2 armed, 3 done */
+static void *fr_watch_thread(void *u) {
+   (void)u;
+   for (;;) {
+      usleep(1000);
+      if (g_watch_state == 3) return NULL;
+      if (g_watch_state != 1) continue;
+      uint8_t b[64];
+      size_t n = (size_t)(g_watch_hi - g_watch_lo);
+      if (n > sizeof b) n = sizeof b;
+      int any = 0;
+      if (fr_read(g_watch_lo, b, n)) {
+         if (g_watch_has_want) {
+            uint64_t v = 0;
+            memcpy(&v, b, n < 8 ? n : 8);
+            any = v == g_watch_want;
+         } else {
+            for (size_t i = 0; i < n; i++) any |= b[i];
+         }
+      }
+      if (any && mprotect((void *)(uintptr_t)g_watch_plo, (size_t)(g_watch_phi - g_watch_plo),
+                          PROT_READ) == 0)
+         g_watch_state = 2;
+   }
+}
+static void fr_watch_arm(const char *spec) {
+   char *colon = strchr(spec, ':');
+   if (!colon) return;
+   const uint64_t pg = (uint64_t)getpagesize();
+   g_watch_lo = strtoull(spec, NULL, 0);
+   g_watch_hi = g_watch_lo + strtoull(colon + 1, NULL, 0);
+   const char *eq = strchr(colon, '=');            /* ADDR:LEN=VALUE: arm on that value */
+   if (eq) { g_watch_want = strtoull(eq + 1, NULL, 0); g_watch_has_want = 1; }
+   g_watch_plo = g_watch_lo & ~(pg - 1);
+   g_watch_phi = (g_watch_hi + pg - 1) & ~(pg - 1);
+   g_watch_state = 1;
+   pthread_t t;
+   pthread_create(&t, NULL, fr_watch_thread, NULL);
+   fprintf(stderr, "[watch] armed on 0x%llx..0x%llx (waits for nonzero contents)\n",
+           (unsigned long long)g_watch_lo, (unsigned long long)g_watch_hi);
+}
+/* Returns 1 when the fault was the watch (handled; resume). */
+static int fr_watch_hit(void *fault, ucontext_t *uc) {
+   const uint64_t a = (uint64_t)(uintptr_t)fault;
+   if (g_watch_state != 2 || a < g_watch_plo || a >= g_watch_phi || !uc || !uc->uc_mcontext) return 0;
+   x86_thread_state64_t *ss = &uc->uc_mcontext->__ss;
+   const int in = a < g_watch_hi && a + 8 > g_watch_lo;   /* an access up to 8 bytes wide */
+   char img[256];
+   fprintf(stderr, "[watch] write to 0x%llx (%s range)  rip=0x%llx %s\n", (unsigned long long)a,
+           in ? "IN" : "outside", (unsigned long long)ss->__rip,
+           fr_image_for(ss->__rip, img, sizeof img) ? img : "");
+   uint32_t fp = (uint32_t)ss->__rbp;
+   for (int level = 0; level < 12; level++) {
+      uint32_t saved = 0, ret = 0;
+      if (!fr_read(fp, &saved, 4) || !fr_read((uint64_t)fp + 4, &ret, 4)) break;
+      fprintf(stderr, "[watch]   #%-2d ret=0x%08x  %s\n", level, ret,
+              ret && fr_image_for(ret, img, sizeof img) ? img : "");
+      if (saved <= fp) break;
+      fp = saved;
+   }
+   mprotect((void *)(uintptr_t)g_watch_plo, (size_t)(g_watch_phi - g_watch_plo), PROT_READ | PROT_WRITE);
+   g_watch_state = in ? 3 : 1;
+   return 1;
+}
+
 static void fr_handler(int sig, siginfo_t *info, void *uctx) {
    ucontext_t *uc = (ucontext_t *)uctx;
    void *fault = info ? info->si_addr : NULL;
+   if ((sig == SIGSEGV || sig == SIGBUS) && fr_watch_hit(fault, uc)) return;
 
    if (g_depth) {
       static const char m[] =
@@ -767,6 +898,8 @@ static void fr_handler(int sig, siginfo_t *info, void *uctx) {
       const char *chain = getenv("M64_FAULT_CHAIN");
       if (chain && *chain) fr_walk_chain(ss, chain);
    }
+   const char *save = getenv("M64_FAULT_SAVE");
+   if (save && *save) fr_save_ranges(save);
 
    fr_dump_dladdr_ring();
    fr_dump_callring();
@@ -934,5 +1067,7 @@ static void fr_install(void) {
    sigaction(SIGILL, &sa, &g_prev_ill);
    fprintf(stderr, "[fault] armed: SIGSEGV/SIGBUS/SIGTRAP/SIGILL reporter (M64_FAULT_REPORT), "
                    "%d stack slots\n", g_words);
+   const char *watch = getenv("M64_WATCH");
+   if (watch && *watch) fr_watch_arm(watch);
    fflush(stderr);
 }
