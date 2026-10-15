@@ -126,6 +126,13 @@ int ModifyCommand::Update::BindNode::subopthandler(int index, char *value) {
       weak = true;
       return 1;
 
+   case 13: // system_only
+      if (value) {
+         throw std::string("`system_only' flag takes no arguments");
+      }
+      system_only = true;
+      return 1;
+
    default: abort();
    }
 }
@@ -204,6 +211,11 @@ void ModifyCommand::Update::BindNode::workT(MachO::Archive<b> *archive) {
    unsigned matched = 0;
    for (auto bindee : bindinfo->bindees) {
       if (bindee->sym != *old_sym) { continue; }
+      if (system_only && (bindee->dylib_special == BIND_SPECIAL_DYLIB_MAIN_EXECUTABLE ||
+                          (bindee->dylib != nullptr && bindee->dylib->name.rfind("@", 0) == 0))) {
+         ++matched;   /* present, deliberately kept */
+         continue;
+      }
       ++matched;
       if (new_type) { bindee->type = *new_type; }
       if (new_addend) { bindee->addend = *new_addend; }
@@ -237,6 +249,26 @@ void ModifyCommand::Update::BindNode::classic_symbind(MachO::Archive<b> *archive
       if (optional) { return; }
       throw MachO::error("classic interpose: undefined symbol `%s' not found",
                          old_sym->c_str());
+   }
+
+   /* system_only: keep a bind whose two-level owner is app code (the main
+    * executable, or an @-relative dylib). The ordinal counts every
+    * dylib-loading command in load-command order (see below). */
+   if (system_only) {
+      const unsigned have = GET_LIBRARY_ORDINAL(target->nlist.n_desc);
+      if (have == EXECUTABLE_ORDINAL) { return; }
+      unsigned count = 0;
+      for (auto *lc : archive->load_commands) {
+         auto *dc = dynamic_cast<MachO::DylibCommand<b> *>(lc);
+         if (dc == nullptr) { continue; }
+         switch (dc->cmd()) {
+         case LC_LOAD_DYLIB: case LC_LOAD_WEAK_DYLIB: case LC_REEXPORT_DYLIB:
+         case LC_LOAD_UPWARD_DYLIB: case LC_LAZY_LOAD_DYLIB:
+            if (++count == have && dc->name.rfind("@", 0) == 0) { return; }
+            break;
+         default: break;
+         }
+      }
    }
 
    /* Rename: point the nlist at a freshly-synthesized string in the table. */

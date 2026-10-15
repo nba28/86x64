@@ -1013,3 +1013,19 @@ add_custom_command(
   VERBATIM)
 add_custom_target(abiconv_nulljump ALL
   DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/libabiconv.nulljump)
+
+# ── libabiconv.bridges ──────────────────────────────────────────────────────
+# Every abigen-generated `global ___X` line: a marshaller to the SYSTEM _X.
+# static-interpose.sh redirects such a symbol only where the app bound it to a
+# system library, never where it bound its own @-relative dylib: Source's
+# vstdlib exports a CreateThreadPool that is not the Carbon Thread Manager one.
+# Hand shims are absent by construction, so a deliberate redirect of a bundled
+# library (the Steamworks bridge) still applies.
+add_custom_command(
+  OUTPUT  ${CMAKE_CURRENT_BINARY_DIR}/libabiconv.bridges
+  COMMAND grep -h -E "^[[:space:]]*global[[:space:]]+___" abiconv.asm ${ABICONV_LEGACY_SRC}
+          > ${CMAKE_CURRENT_BINARY_DIR}/libabiconv.bridges
+  DEPENDS abiconv.asm ${ABICONV_LEGACY_SRC}
+  VERBATIM)
+add_custom_target(abiconv_bridges ALL
+  DEPENDS ${CMAKE_CURRENT_BINARY_DIR}/libabiconv.bridges)

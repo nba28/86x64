@@ -63,6 +63,13 @@ struct ModifyCommand::Update::BindNode: Operation {
                              * lookup resolving to libabiconv (its only
                              * definition). */
 
+   bool system_only = false; /* if set, leave a bind alone when the original
+                              * owner is app code: an @-relative dylib (@loader_path,
+                              * @rpath, @executable_path) or the main executable.
+                              * A system-API bridge of the same name is not what
+                              * that bind meant (Source's vstdlib CreateThreadPool
+                              * vs the Carbon Thread Manager one). */
+
    std::optional<uint8_t> new_type;
    std::optional<ssize_t> new_addend;
    std::optional<unsigned> new_dylib_ord;
@@ -79,6 +86,7 @@ struct ModifyCommand::Update::BindNode: Operation {
               "lazy",
               "optional",
               "weak",
+              "system_only",
               nullptr};
    }
    virtual int subopthandler(int index, char *value) override;

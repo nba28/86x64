@@ -84,6 +84,23 @@ elif [ "$NULLJUMP" != /dev/null ]; then
     fi
 fi
 
+# Generated system-API bridges (`global ___X` lines). A bind the app resolved
+# against its OWN dylib (@loader_path/@rpath/@executable_path, or the main
+# executable) keeps that owner even when a bridge of the same name exists:
+# Source's vstdlib CreateThreadPool is not the Carbon Thread Manager one, and
+# the bridge returned paramErr (-50) where Portal expected a thread pool.
+# macho-tool's `system_only` flag skips such binds. Same sidecar rules as the
+# NULL-jump list; BRIDGES=/dev/null disables it (the guard's OFF arm).
+BRIDGES="${BRIDGES:-$(dirname "$DYLIB")/libabiconv.bridges}"
+BRIDGE_SYMS=$(mktemp)
+if [ -s "$BRIDGES" ]; then
+    awk '{print $2}' "$BRIDGES" | sort -u > "$BRIDGE_SYMS"
+elif [ "$BRIDGES" != /dev/null ]; then
+    echo "$0: WARNING: no generated-bridge list at $BRIDGES" >&2
+    echo "$0:   binds owned by the app's own dylibs may be redirected into" >&2
+    echo "$0:   same-named system-API bridges. It is built next to libabiconv.dylib." >&2
+fi
+
 ORD=$(macho-tool translate --load-dylib "$DYLIB_NAME" "$INPATH")
 if [[ $? != 0 ]]; then
     echo "$0: failed to translate dylib ordinal" >&2
@@ -94,7 +111,7 @@ fi
 # each external defined symbol as "<addr> T <name>" (or other types) — we
 # accept anything that's not undefined (U).
 SHIM_EXPORTS=$(mktemp)
-trap "rm -f $SHIM_EXPORTS" EXIT
+trap "rm -f $SHIM_EXPORTS $BRIDGE_SYMS" EXIT
 nm -gU "$DYLIB" 2>/dev/null | awk '{print $NF}' | sort -u > "$SHIM_EXPORTS"
 
 # Sanity check: empty SHIM_EXPORTS would cause every interpose check to
@@ -142,7 +159,7 @@ fi
 # no-op table searches). A classic (LC_DYSYMTAB-only) binary has no dyld_info
 # weak_bind table; print fails harmless and the set is empty.
 WEAK_SYMS=$(mktemp)
-trap "rm -f $SHIM_EXPORTS $WEAK_SYMS" EXIT
+trap "rm -f $SHIM_EXPORTS $WEAK_SYMS $BRIDGE_SYMS" EXIT
 macho-tool print --weak-bind "$INPATH" 2>/dev/null | tail +2 | cut -d" " -f5 \
     | sort -u > "$WEAK_SYMS"
 
@@ -204,8 +221,10 @@ while IFS= read -r SYM; do
     # bind table, external DATA constants (e.g. NSString* consts like
     # NSArgumentDomain) in the non-lazy table. Emit BOTH updates, each marked
     # `optional` so the one targeting the wrong table is silently skipped.
-    ARGS="$ARGS --update bind,lazy,optional,old_sym=$SYM,new_sym=$REPLACEMENT,new_dylib=$ORD"
-    ARGS="$ARGS --update bind,optional,old_sym=$SYM,new_sym=$REPLACEMENT,new_dylib=$ORD"
+    SCOPE=""
+    grep -qFx "$REPLACEMENT" "$BRIDGE_SYMS" && SCOPE=",system_only"
+    ARGS="$ARGS --update bind,lazy,optional$SCOPE,old_sym=$SYM,new_sym=$REPLACEMENT,new_dylib=$ORD"
+    ARGS="$ARGS --update bind,optional$SCOPE,old_sym=$SYM,new_sym=$REPLACEMENT,new_dylib=$ORD"
     # If this symbol is ALSO bound through the WEAK bind table, redirect that
     # entry too. C++ runtime weak-coalesced externals (operator new/delete:
     # __Znwm/__Znam/__ZdlPv/__ZdaPv, and any weakly-referenced template/vtable
