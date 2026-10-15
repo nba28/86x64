@@ -184,6 +184,17 @@ void *mmap(void *addr, size_t len, int prot, int flags, int fd, off_t offset) {
    if (!anon || fd >= 0 || (flags & MAP_JIT) ||
        ((flags & MAP_FIXED) && addr != NULL)) {
       if (!real_mmap) { errno = ENOMEM; return MAP_FAILED; }
+      if (anon && (flags & MAP_FIXED) && addr && len) {
+         /* A fixed anonymous map silently REPLACES whatever is there; say so
+          * when that is not a free range (the runtime's own heap lives low too). */
+         mach_vm_address_t a = (uintptr_t)addr;
+         const mach_vm_size_t l = (len + PAGE_SZ - 1) & ~(PAGE_SZ - 1);
+         if (mach_vm_allocate(mach_task_self(), &a, l, VM_FLAGS_FIXED) == KERN_SUCCESS)
+            mach_vm_deallocate(mach_task_self(), a, l);
+         else
+            fprintf(stderr, "abiconv: mmap(MAP_FIXED) %p+0x%zx replaces an existing mapping\n",
+                    addr, len);
+      }
       return real_mmap(addr, len, prot, flags, fd, offset);
    }
 
