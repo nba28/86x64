@@ -991,7 +991,24 @@ namespace MachO {
             if (!sec->contains_vmaddr(slot_vmaddr)) { continue; }
             if (sec->sect.offset == 0) { return false; }
             const std::size_t lo_a = sec->sect.addr, hi_a = sec->sect.addr + sec->sect.size;
-            int family = 0, homeless = 0, pairs = 0, pairs_homeless = 0, near = 0;
+            int family = 0, homeless = 0, pairs = 0, pairs_homeless = 0, near = 0, proven = 0;
+            /* In a small image every member may alias some section (Halo's
+             * {2, 0x36..0x5b} column at 0x39cd88: __data, __const, __bss and
+             * __common); a member that a gate already proved constant (zero-fill
+             * with no anchor, mid-instruction code) is as good as a homeless
+             * one. Kill M64_NO_PACKED_FAMILY_PROVEN; guard packed-family-proven. */
+            static const bool no_proven = std::getenv("M64_NO_PACKED_FAMILY_PROVEN") != nullptr;
+            const auto proven_constant = [&](uint32_t w) {
+               if (no_proven) { return false; }
+               const Section<bits> *t = section_at(w);
+               if (!t) { return false; }
+               const uint32_t tt = t->sect.flags & SECTION_TYPE;
+               if (tt == S_ZEROFILL || tt == S_GB_ZEROFILL) { return zerofill_target_unattested(img, w, true); }
+               if (t->sect.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) {
+                  return code_interior_alias(w);
+               }
+               return false;
+            };
             uint32_t his[17]; int nhi = 0;
             /* A u16 PAIR: nonzero high half, small low half. A real pointer's
              * low half is ~uniform, so <1/16 of a pointer column looks like
@@ -1019,8 +1036,9 @@ namespace MachO {
                if ((w & 0xffffu) != lo || (w >> 16) == (value >> 16)) { continue; }
                ++family;
                if (!addresses_something(w)) { ++homeless; }
+               else if (proven_constant(w)) { ++proven; }
             }
-            if (family >= 3 && homeless >= 1) { return true; }
+            if (family >= 3 && (homeless >= 1 || proven >= 1)) { return true; }
             /* A word aimed at the START of a C string is a string pointer. */
             for (Segment<bits> *s2 : archive.segments()) {
                if (!s2->contains_vmaddr(value)) { continue; }
