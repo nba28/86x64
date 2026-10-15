@@ -349,7 +349,8 @@ namespace MachO {
       if (m32 && !env.have_classic_local_relocs &&
           (!exec || !env.code_target_has_entry_evidence(img, value)) &&
           (env.record_field_neighbours_are_integers(img, loc.vmaddr) ||
-           env.packed_pair_family(img, loc.vmaddr, value))) {
+           env.packed_pair_family(img, loc.vmaddr, value) ||
+           env.record_array_column_integers(img, loc.vmaddr, value))) {
          return false;
       }
       /* A single-bit "entry" in a column of single-bit flags is a flag (Call of

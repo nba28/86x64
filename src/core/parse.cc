@@ -1,3 +1,4 @@
+#include <numeric>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -722,6 +723,72 @@ namespace MachO {
             return false;
          }
          return false;
+      }
+      return false;
+   }
+
+   template <Bits bits>
+   void ParseEnv<bits>::build_record_arrays(const Image& img) const {
+      for (Segment<bits> *seg : archive.segments()) {
+         if (seg->segment_command.initprot & VM_PROT_EXECUTE) { continue; }
+         for (Section<bits> *sec : seg->sections) {
+            const uint32_t st = sec->sect.flags & SECTION_TYPE;
+            if (sec->sect.offset == 0 || st != S_REGULAR) { continue; }
+            std::vector<std::size_t> run;
+            const Section<bits> *run_tgt = nullptr;
+            const auto close = [&]() {
+               if (run.size() >= 4) {
+                  std::vector<std::size_t> t(run);
+                  std::sort(t.begin(), t.end());
+                  if (std::adjacent_find(t.begin(), t.end()) == t.end()) {
+                     std::size_t g = 0;
+                     for (std::size_t x : t) { g = std::gcd(g, x - t.front()); }
+                     const std::size_t n = g ? (t.back() - t.front()) / g + 1 : 0;
+                     if (g > 64 && g <= 0x1000 && 2 * t.size() >= n) {
+                        record_arrays.push_back({t.front(), g, n});
+                     }
+                  }
+               }
+               run.clear();
+               run_tgt = nullptr;
+            };
+            for (std::size_t i = 0; i + 4 <= sec->sect.size; i += 4) {
+               const uint32_t w = img.template at<uint32_t>(sec->sect.offset + i);
+               const Section<bits> *t = (w & 3) == 0 ? section_at(w) : nullptr;
+               const bool ok = t && t->sect.offset != 0 &&
+                               (t->sect.flags & SECTION_TYPE) == S_REGULAR &&
+                               !(t->sect.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS));
+               if (!ok || (run_tgt && t != run_tgt)) { close(); }
+               if (ok) { run.push_back(w); run_tgt = t; }
+            }
+            close();
+         }
+      }
+   }
+
+   template <Bits bits>
+   bool ParseEnv<bits>::record_array_column_integers(const Image& img, std::size_t slot_vmaddr,
+                                                     uint32_t value) const {
+      static const bool off = std::getenv("M64_NO_RECORD_ARRAY_COLUMN") != nullptr;
+      const auto is_pair = [](uint32_t w) {
+         const uint32_t h = w >> 16, l = w & 0xffffu;
+         return h != 0 && h < 0x1000u && l != 0 && l < 0x1000u;
+      };
+      if (off || !is_pair(value)) { return false; }
+      if (!record_arrays_built) {
+         record_arrays_built = true;
+         build_record_arrays(img);
+      }
+      for (const record_array& a : record_arrays) {
+         if (slot_vmaddr < a.base || slot_vmaddr >= a.base + a.stride * a.n) { continue; }
+         const Section<bits> *sec = section_at(a.base);
+         const std::size_t f = (slot_vmaddr - a.base) % a.stride;
+         for (std::size_t i = 0; i < a.n; ++i) {
+            const std::size_t at = a.base + i * a.stride + f;
+            if (!sec || at + 4 > sec->sect.addr + sec->sect.size) { break; }
+            const uint32_t w = img.template at<uint32_t>(sec->sect.offset + (at - sec->sect.addr));
+            if (is_pair(w) && section_at(w) == nullptr) { return true; }
+         }
       }
       return false;
    }

@@ -496,6 +496,22 @@ namespace MachO {
                                     uint32_t value) const;
       bool record_field_neighbours_are_integers(const Image& img,
                                                 std::size_t slot_vmaddr) const;
+      /* RECORD-ARRAY COLUMN gate. A data run of >=4 pointers whose targets
+       * share one spacing (the gcd, here > the record-field gate's 64) and
+       * cover at least half the slots between the first and the last is a
+       * pointer table into ONE array of records; a field of that array whose
+       * column holds a u16-pair-shaped value that addresses nothing is a
+       * column of packed integers, so a pair-shaped word in it that aliases
+       * the image is one too. Halo's object-type definitions (0xe0-byte
+       * records listed at 0x37a540): +0xc of `mach` is {0x2a0, 0x40} =
+       * 0x004002a0 in __bss, its column holds 0x00780234 past the image.
+       * Kill M64_NO_RECORD_ARRAY_COLUMN; guard record-array-column. */
+      bool record_array_column_integers(const Image& img, std::size_t slot_vmaddr,
+                                        uint32_t value) const;
+      struct record_array { std::size_t base, stride, n; };
+      mutable std::vector<record_array> record_arrays;
+      mutable bool record_arrays_built = false;
+      void build_record_arrays(const Image& img) const;
 
       /* CODE-INTERIOR ALIAS gate (see section.cc DataParser). True iff `vmaddr`
        * lands STRICTLY INSIDE a decoded instruction of an
