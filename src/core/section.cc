@@ -1315,6 +1315,7 @@ namespace MachO {
       }
       const bool jt_spill = std::getenv("M64_NO_JT_SPILL_SLOTS") == nullptr;   /* guard OFF arm */
       const bool jt_esp_track = std::getenv("M64_NO_JT_ESP_TRACK") == nullptr; /* guard OFF arm */
+      static const bool lea_sum = std::getenv("M64_NO_JT_LEA_SUM") == nullptr;
 
       using RegMap = std::unordered_map<xed_reg_enum_t, std::size_t>;
       RegMap anchors;                                   /* reg -> anchor vmaddr */
@@ -1678,6 +1679,25 @@ namespace MachO {
                         tbl_val.erase(reg0);
                         sets_state = true;
                         lea_bases.insert(cand);
+                     }
+                  }
+               } else if (lea_sum && is_gpr32(reg0) && disp == 0 &&
+                          xed_operand_values_get_scale(ops) == 1) {
+                  /* `lea %d,(%t,%anchor)`: the -O0 spelling of `add %t,%anchor`
+                   * (Portal's libSDL2 SDL_GL_SetAttribute). Scale 1 makes the
+                   * fields symmetric, so either one may hold the entry. Kill
+                   * M64_NO_JT_LEA_SUM; guard 99_jt_lea_sum_dispatch. */
+                  const xed_reg_enum_t index = jt_norm32(xed_decoded_inst_get_index_reg(ops, 0));
+                  const xed_reg_enum_t b32 = jt_norm32(base);
+                  for (const auto& [t, an] : {std::pair{b32, index}, std::pair{index, b32}}) {
+                     auto tv = tbl_val.find(t);
+                     auto a = anchors.find(an);
+                     if (tv != tbl_val.end() && tv->second.second == 0 && a != anchors.end()) {
+                        const std::size_t table = tv->second.first;
+                        tbl_val[reg0] = { table, a->second };
+                        tbl_addr.erase(reg0);
+                        sets_state = true;
+                        break;
                      }
                   }
                }
