@@ -1,3 +1,4 @@
+#include <optional>
 #include <typeinfo>
 #include <cassert>
 #include <cstring>
@@ -759,6 +760,15 @@ namespace MachO {
       /* Pass-0 rewrites made inside an ORPHAN, with the stale state left
        * before its jmp: vmaddr -> (anchor reg, anchor). See the revert below. */
       static const bool orphan_revert = std::getenv("M64_NO_PIC_ORPHAN_REVERT") == nullptr;
+      static const bool post_ret_body = std::getenv("M64_NO_PIC_POST_RET_BODY") == nullptr;
+      static const bool slot_write_kill = std::getenv("M64_NO_PIC_SLOT_WRITE_KILL") == nullptr;
+      AnchorMap post_ret_keep;   /* callee-saved anchors live at the last `ret` */
+      AnchorMap post_ret_live;   /* ...as handed to the code after it */
+      /* Only symbols inside this section bound its functions: Halo has data
+       * symbols but no code ones, and every function after a ret inherited
+       * the previous one's anchors. */
+      const auto sect_sym = env.func_syms.lower_bound(sect.addr);
+      const bool sect_func_syms = sect_sym != env.func_syms.end() && *sect_sym < sect.addr + sect.size;
       struct OrphanRewrite { xed_reg_enum_t reg; std::size_t anchor, top; };
       std::unordered_map<std::size_t, OrphanRewrite> orphan_rewrites;
       std::size_t orphan_top = 0;                  /* where the current orphan opened */
@@ -766,6 +776,8 @@ namespace MachO {
       /* (orphan top, reg) pairs the loop [top, last back-edge source] writes */
       std::set<std::pair<std::size_t, xed_reg_enum_t>> loop_carried;
       for (; pass < 2; ++pass) {
+         post_ret_keep.clear();
+         post_ret_live.clear();
          if (pass == 1) {
             if (!pic_any_nonempty(back_anchor_snap) && !pic_any_nonempty(back_slot_snap)) { break; }
             clear_all();
@@ -858,6 +870,16 @@ namespace MachO {
                }
                if (env.func_syms.count(inst->loc.vmaddr) != 0) {
                   unreached = false;
+                  /* The body's anchors end with the body: a landing pad that
+                   * ends in _Unwind_Resume leaves them set, and the next
+                   * function's prologue spill of %ebx then read as an anchor
+                   * slot, not an entry save (Portal 2 libsteam
+                   * CryptoPP::FileSink::~FileSink pad lost %ebx). */
+                  for (const auto& [r, a] : post_ret_live) {
+                     auto it = anchors.find(r);
+                     if (it != anchors.end() && it->second == a) { anchors.erase(it); }
+                  }
+                  post_ret_live.clear();
                   if (slots_past_ret) { anchor_slots.clear(); }   /* a new frame */
                   past_ret = false;
                }
@@ -930,6 +952,31 @@ namespace MachO {
                   else { intersect_into(anchor_slots, ssnap->second); }
                   branch_slot_snap.erase(ssnap);
                }
+            }
+
+            /* Code after a `ret` that no new function starts is the same
+             * function's body, entered by branches whose state derives from
+             * here: it holds the body's callee-saved anchors, not the empty set
+             * the epilogue leaves (Portal 2009 filesystem_stdio
+             * CSearchPathsIterator::GetNext: a block reached only by branches
+             * from after the ret kept `0x5af18(%ebx)` raw -> NULL deref).
+             * Padding keeps it pending; a function start drops it. Kill
+             * M64_NO_PIC_POST_RET_BODY; guard 99_pic_anchor_post_ret. */
+            if (!post_ret_keep.empty() && cat != XED_CATEGORY_NOP && cat != XED_CATEGORY_WIDENOP) {
+               /* `push %ebp` opens a frame: an unnamed function, not a landing
+                * pad (pvz/civ4 static functions lost their absolute pointers). */
+               if (env.func_syms.count(inst->loc.vmaddr) == 0 && inst->instbuf[0] != 0x55) {
+                  for (const auto& [r, a] : post_ret_keep) {
+                     if (anchors.find(r) == anchors.end()) { anchors[r] = a; post_ret_live[r] = a; }
+                  }
+                  anchored_region = true;
+                  orphan = false;
+                  if (trace) {
+                     fprintf(stderr, "[anchor] post-ret 0x%zx pass=%d kept=%zu\n",
+                             (size_t)inst->loc.vmaddr, pass, post_ret_keep.size());
+                  }
+               }
+               post_ret_keep.clear();
             }
 
             /* `call $+0; pop %reg` establishes an anchor. Slots spilled before it
@@ -1133,8 +1180,34 @@ namespace MachO {
                      } else {
                         anchors.erase(reg);
                      }
+                  } else if (slot_write_kill && xed_decoded_inst_mem_written(&xedd, 0)) {
+                     /* Any other write ends what the slot held, as in
+                      * DetectJumpTables: Portal server reused its anchor slot
+                      * as a loop counter (`movl $0,-0x18(%ebp)`), and the
+                      * counter reloaded into %ecx was taken for the anchor in
+                      * `leal 0x874(%eax,%ecx),%edx`. Kill
+                      * M64_NO_PIC_SLOT_WRITE_KILL; guard 99_pic_anchor_slot_reuse. */
+                     anchor_slots.erase(slot);
+                     entry_save_slots.erase(slot);
+                     pre_anchor_saves.erase(slot);
                   }
                }
+            }
+
+            /* `xchg %a,%b` swaps the anchors (the kill below clears both): the
+             * cpuid idiom `mov %ebx,%esi; cpuid; xchg %ebx,%esi` hands the PIC
+             * register back (Portal 2009 libtier0 GetProcessorVendorId stored
+             * VendorID through a raw i386 disp into __TEXT). Kill
+             * M64_NO_PIC_ANCHOR_XCHG; guard 99_pic_anchor_xchg. */
+            static const bool xchg_swap = std::getenv("M64_NO_PIC_ANCHOR_XCHG") == nullptr;
+            const xed_reg_enum_t xa = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+            const xed_reg_enum_t xb = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1);
+            const bool is_xchg = xchg_swap && xed_decoded_inst_get_iclass(&xedd) == XED_ICLASS_XCHG &&
+                                 is_gpr32(xa) && is_gpr32(xb) && xa != xb;
+            std::optional<std::size_t> xa_anchor, xb_anchor;
+            if (is_xchg) {
+               if (auto i = anchors.find(xa); i != anchors.end()) { xa_anchor = i->second; }
+               if (auto i = anchors.find(xb); i != anchors.end()) { xb_anchor = i->second; }
             }
 
             /* Any other definition of a register ends its anchor — including
@@ -1146,6 +1219,11 @@ namespace MachO {
             }
             if (orphan && pass == 0) {
                for_each_written_gpr32(xedd, [&](xed_reg_enum_t r) { orphan_written.insert(r); });
+            }
+
+            if (is_xchg) {
+               if (xb_anchor) { anchors[xa] = *xb_anchor; }
+               if (xa_anchor) { anchors[xb] = *xa_anchor; }
             }
 
             /* `mov %src,%dst` copies the anchor (the kill above already cleared %dst). */
@@ -1198,14 +1276,22 @@ namespace MachO {
                xed_decoded_inst_get_branch_displacement(&xedd) == 0;
             if (cat == XED_CATEGORY_RET) {
                if (pending_forward_targets.empty()) {
+                  /* Code after the `ret` that no new function starts keeps the
+                   * callee-saved anchors (see post_ret_keep above). */
+                  post_ret_keep.clear();
+                  if (post_ret_body && sect_func_syms) {
+                     for (const xed_reg_enum_t r : {XED_REG_EBX, XED_REG_ESI, XED_REG_EDI}) {
+                        auto it = anchors.find(r);
+                        if (it != anchors.end()) { post_ret_keep[r] = it->second; }
+                     }
+                  }
                   /* The EH landing pads GCC places after the final `ret` are
                    * entered by the unwinder in this function's frame, and -O0
                    * code reloads the anchor from its frame slot there (Portal
                    * 2 launcher `mov -0x10(%ebp),%ecx; mov 0x24812(%ecx),%ecx`
                    * left raw: a wild read in every cleanup path). With
                    * function symbols to bound them, the frame slots survive
-                   * the `ret` until the next function. Registers do not: a pad
-                   * gets the callee-saved values of whichever call threw.
+                   * the `ret` until the next function.
                    * Kill M64_NO_PIC_SLOTS_PAST_RET; guard 99_pic_anchor_pad_slot. */
                   if (slots_past_ret && !env.func_syms.empty()) {
                      const SlotMap keep = anchor_slots;

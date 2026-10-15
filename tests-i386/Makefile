@@ -106,7 +106,7 @@ CPP_TESTS  := $(filter-out 99_libstdcxx_redirect,$(notdir $(basename $(CPP_SRCS)
 # end their _main with `call _exit` rather than `ret` since the wrapper
 # uses `jmp` (no return address) to enter _main.
 
-.PHONY: check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry prologue-sched-decode cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal zf-small-pair-imm heap-below-2g classic-reloc-accept disp-reloc-accept imm-reloc-accept call-abs-pagezero pic-anchor-call-adopt entry-pad-fallthrough export-trie-deep export-zerofill jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap sib-rbp-index-wrap pic-rbp-index-wrap jt-base-after-dispatch jt-case-after-ret jt-orphan-loop pic-anchor-pad-slot pic-anchor-pad-respill pic-anchor-resume-rethrow sub-ptr-imm abs-base-neg-wrap ebp-gpr-narrow jt-case-in-func jt-back-edge-join pic-anchor-noreturn-join pic-anchor-local-noreturn pic-anchor-orphan-block pic-anchor-unreached-pad pic-anchor-orphan-revert atsu-arrays sigaction-wrap printf-length-mods cfstr-image-gate sscanf-many-args wide-printf jt-slot-snap-epilogue text-rebase-disp dir-handle scandir-sort super-hint-native pthread-create-suspended aq-mirror jt-scaled-index-not-base steam-bridge lazy-self-def standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk classic-dirid-chain nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-cb-fifo snd-status-layout snd-compression-info getsegbyname-absent get-window-resize-limits ir-dead-bridge cb-userdata-roundtrip jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn libstdcxx-redirect uidl-resolves agl-oversize-window rebase-exact-const miles-mp3 classic-fileio ctrl-range-refcon cod4-dead-imports nib-edit-field netdb-pwd-marshal leaf-casefold stripped-pmf-even tm-marshal depth24-mode augraph-nodeinfo fsspec-native-ready nib-key-route catinfo-root-volume flag-column-entry sizewindow-guard zf-abs-neighbour recfield-zf-column qt-movie-file jt-xsect-thunk record-array-column zf-mask-imm zf-round-imm packed-family-proven bundled-owner-bind jt-lea-sum scandir-ino64 highbyte-rex
+.PHONY: check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry prologue-sched-decode cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal zf-small-pair-imm heap-below-2g classic-reloc-accept disp-reloc-accept imm-reloc-accept call-abs-pagezero pic-anchor-call-adopt entry-pad-fallthrough export-trie-deep export-zerofill jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap sib-rbp-index-wrap pic-rbp-index-wrap jt-base-after-dispatch jt-case-after-ret jt-orphan-loop pic-anchor-pad-slot pic-anchor-pad-respill pic-anchor-resume-rethrow sub-ptr-imm abs-base-neg-wrap ebp-gpr-narrow jt-case-in-func jt-back-edge-join pic-anchor-noreturn-join pic-anchor-local-noreturn pic-anchor-orphan-block pic-anchor-unreached-pad pic-anchor-orphan-revert atsu-arrays sigaction-wrap printf-length-mods cfstr-image-gate sscanf-many-args wide-printf jt-slot-snap-epilogue text-rebase-disp dir-handle scandir-sort super-hint-native pthread-create-suspended aq-mirror jt-scaled-index-not-base steam-bridge lazy-self-def standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar carbon-alias carbon-fileops fscatinfo-bulk classic-dirid-chain nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-cb-fifo snd-status-layout snd-compression-info getsegbyname-absent get-window-resize-limits ir-dead-bridge cb-userdata-roundtrip jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn libstdcxx-redirect uidl-resolves agl-oversize-window rebase-exact-const miles-mp3 classic-fileio ctrl-range-refcon cod4-dead-imports nib-edit-field netdb-pwd-marshal leaf-casefold stripped-pmf-even tm-marshal depth24-mode augraph-nodeinfo fsspec-native-ready nib-key-route catinfo-root-volume flag-column-entry sizewindow-guard zf-abs-neighbour recfield-zf-column qt-movie-file jt-xsect-thunk record-array-column zf-mask-imm zf-round-imm packed-family-proven bundled-owner-bind jt-lea-sum scandir-ino64 highbyte-rex pic-anchor-xchg pic-anchor-post-ret pic-anchor-slot-reuse
 all: run-only
 
 # check: every suite + every guard target, each under a deadline; exit 1 on any failure.
@@ -655,14 +655,26 @@ pic-anchor-pad-slot: $(BUILD_DIR)/99_pic_anchor_pad_slot.i386
 # pic-anchor-pad-respill: A/B guard that a landing pad re-spilling the PIC
 # register into the anchor's slot keeps the anchor. ON exits 42; OFF
 # (M64_NO_PIC_PAD_RESPILL=1 at translate time) reads through the raw
-# displacement.
+# displacement. The post-ret body rule also keeps %ebx for this pad, so the
+# OFF arm turns it off too (M64_NO_PIC_POST_RET_BODY=1).
 pic-anchor-pad-respill: $(BUILD_DIR)/99_pic_anchor_pad_respill.i386
 	@for arm in on off; do \
-	  e=""; [ $$arm = off ] && e="M64_NO_PIC_PAD_RESPILL=1"; \
+	  e=""; [ $$arm = off ] && e="M64_NO_PIC_PAD_RESPILL=1 M64_NO_PIC_POST_RET_BODY=1"; \
 	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
 	    -o $(BUILD_DIR)/99_pic_anchor_pad_respill.$$arm $< >/dev/null 2>&1; \
 	  $(BUILD_DIR)/99_pic_anchor_pad_respill.$$arm; echo "$$arm=$$?"; \
 	done | tr '\n' ' ' | grep -q "on=42 off=0" && echo "pic-anchor-pad-respill: PASS" || { echo "pic-anchor-pad-respill: FAIL"; exit 1; }
+# pic-anchor-slot-reuse: A/B guard that a frame slot which held the PIC anchor
+# stops holding it once something else is stored there (Portal server reused
+# it as a loop counter). ON exits 42; OFF (M64_NO_PIC_SLOT_WRITE_KILL=1 at
+# translate time) rewrites the counter's operand as anchor-relative.
+pic-anchor-slot-reuse: $(BUILD_DIR)/99_pic_anchor_slot_reuse.i386
+	@for arm in on off; do \
+	  e=""; [ $$arm = off ] && e="M64_NO_PIC_SLOT_WRITE_KILL=1"; \
+	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
+	    -o $(BUILD_DIR)/99_pic_anchor_slot_reuse.$$arm $< >/dev/null 2>&1; \
+	  $(BUILD_DIR)/99_pic_anchor_slot_reuse.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
+	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "pic-anchor-slot-reuse: PASS (on=$$r_on off=$$r_off)" || { echo "pic-anchor-slot-reuse: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
 # pic-anchor-resume-rethrow: A/B guard that a pad ending in `call
 # __Unwind_Resume_or_Rethrow` does not fall into the join after it and wipe the
 # anchor (Portal 2 libsteam). ON exits 42; OFF
@@ -3153,6 +3165,17 @@ $(BUILD_DIR)/99_rebase_exact_const.dylib: src/99_rebase_exact_const.c | $(BUILD_
 	@$(CC_I386) -O1 -c $< -o $(BUILD_DIR)/99_rebase_exact_const.o
 	@$(LD) -arch i386 -dylib -macos_version_min 10.6 -syslibroot $(I386_SYSROOT) -lSystem \
 	    -install_name @loader_path/99_rebase_exact_const.dylib -o $@ $(BUILD_DIR)/99_rebase_exact_const.o
+
+# pic-anchor-post-ret: code placed after a function's ret, reached only by
+# branches, keeps the body's callee-saved PIC anchors (Portal 2009
+# filesystem_stdio). OFF = M64_NO_PIC_POST_RET_BODY=1 at translate time.
+pic-anchor-post-ret: $(BUILD_DIR)/99_pic_anchor_post_ret.i386 $(BUILD_DIR)/libabiconv.dylib
+	@bash pic_anchor_post_ret_test.sh
+
+# pic-anchor-xchg: the PIC anchor follows `xchg` (cpuid's save/restore of
+# %ebx; Portal 2009 libtier0). OFF = M64_NO_PIC_ANCHOR_XCHG=1 at translate time.
+pic-anchor-xchg: $(BUILD_DIR)/99_pic_anchor_xchg.i386 $(BUILD_DIR)/libabiconv.dylib
+	@bash pic_anchor_xchg_test.sh
 
 # highbyte-rex: an operand lowered onto r11 (REX) keeps a high-byte register
 # operand (%ah/%ch/%dh/%bh) instead of becoming %spl/%bpl/%sil/%dil (Portal
