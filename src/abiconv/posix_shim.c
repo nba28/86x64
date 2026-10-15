@@ -1015,6 +1015,54 @@ uint32_t shim_ioctl(uint32_t *a) {
    return (uint32_t)ioctl((int)a[0], (unsigned long)a[1], (void *)(uintptr_t)a[2]);
 }
 
+/* ---- tcgetattr / tcsetattr: struct termios ---------------------------------
+ * tcflag_t and speed_t are unsigned long, so the struct is 44 bytes on i386 and
+ * 72 on x86_64 (c_cc[NCCS] is the same 20 bytes). abigen bridges neither, and
+ * the raw native call read its arguments from registers (Portal's
+ * CTextConsoleUnix::Init: SIGSEGV in tcsetattr). Kill M64_NO_TERMIOS_SHIM (the
+ * raw call); guard termios-marshal. */
+#include <termios.h>
+struct termios32 {
+   uint32_t c_iflag, c_oflag, c_cflag, c_lflag;
+   uint8_t  c_cc[NCCS];
+   uint32_t c_ispeed, c_ospeed;
+};
+_Static_assert(sizeof(struct termios32) == 44, "i386 struct termios");
+static int termios_shim_disabled(void) {
+   static int t = -1;
+   if (t < 0) { t = getenv("M64_NO_TERMIOS_SHIM") ? 1 : 0; }
+   return t;
+}
+uint32_t shim_tcgetattr(uint32_t *a) {
+   struct termios32 *o = (struct termios32 *)(uintptr_t)a[1];
+   if (termios_shim_disabled()) {
+      return (uint32_t)((int (*)(int, void *))tcgetattr)((int)a[0], o);
+   }
+   struct termios t;
+   const int r = tcgetattr((int)a[0], &t);
+   if (!o) { return (uint32_t)r; }
+   if (r != 0) { memset(o, 0, sizeof *o); return (uint32_t)r; }
+   o->c_iflag = (uint32_t)t.c_iflag; o->c_oflag = (uint32_t)t.c_oflag;
+   o->c_cflag = (uint32_t)t.c_cflag; o->c_lflag = (uint32_t)t.c_lflag;
+   memcpy(o->c_cc, t.c_cc, NCCS);
+   o->c_ispeed = (uint32_t)t.c_ispeed; o->c_ospeed = (uint32_t)t.c_ospeed;
+   return 0;
+}
+uint32_t shim_tcsetattr(uint32_t *a) {
+   const struct termios32 *i = (const struct termios32 *)(uintptr_t)a[2];
+   if (termios_shim_disabled()) {
+      return (uint32_t)((int (*)(int, int, const void *))tcsetattr)((int)a[0], (int)a[1], i);
+   }
+   if (!i) { errno = EFAULT; return (uint32_t)-1; }
+   struct termios t;
+   memset(&t, 0, sizeof t);
+   t.c_iflag = i->c_iflag; t.c_oflag = i->c_oflag;
+   t.c_cflag = i->c_cflag; t.c_lflag = i->c_lflag;
+   memcpy(t.c_cc, i->c_cc, NCCS);
+   t.c_ispeed = i->c_ispeed; t.c_ospeed = i->c_ospeed;
+   return (uint32_t)tcsetattr((int)a[0], (int)a[1], &t);
+}
+
 /* ---- Code Fragment Manager: GetSharedLibrary / FindSymbol -------------------
  * CFM loaded PowerPC fragments; an Intel process never had one to load, so the
  * Intel answer to "connect to InterfaceLib for kPowerPCCFragArch" is

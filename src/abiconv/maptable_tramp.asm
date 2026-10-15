@@ -53,6 +53,8 @@
 	; variadic libSystem calls (posix_shim.c) + UCKeyTranslate (uckey_shim.c)
 	MTSHIM	___shm_open,                 _shim_shm_open
 	MTSHIM	___ioctl,                    _shim_ioctl
+	MTSHIM	___tcgetattr,                _shim_tcgetattr
+	MTSHIM	___tcsetattr,                _shim_tcsetattr
 	MTSHIM	___UCKeyTranslate,           _shim_UCKeyTranslate
 
 	; legacy vecLib FFT names (vdsp_legacy_shim.c)
