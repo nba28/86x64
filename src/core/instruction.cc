@@ -372,6 +372,49 @@ namespace MachO {
    Instruction<bits>::emit_mem(TransformEnv<bits>& env, const LoweredMem& m,
                                const opcode_t& opcode, uint8_t reg,
                                const opcode_t& trailing) const {
+      /* Under REX, ModR/M reg 4..7 names SPL/BPL/SIL/DIL, not AH/CH/DH/BH: an
+       * r11-based operand silently retargeted `movb tbl(%anchor,%eax),%ch` to
+       * %bpl (Portal engine DXT5 decode, rbp corrupted). Address the low
+       * partner instead, swapped in and out with xchg (flags untouched). When
+       * the operand addresses through that same register, the swap would move
+       * the address: take it into r11 first (`lea` of the same lowered
+       * operand, so the same addr32 wrap) and address (%r11). Kill
+       * M64_NO_HIGHBYTE_REX; guard 99_highbyte_rex. */
+      static const bool no_highbyte_rex = std::getenv("M64_NO_HIGHBYTE_REX") != nullptr;
+      if ((m.rex || (reg & 8)) && reg >= 4 && reg < 8 && !no_highbyte_rex) {
+         static const xed_reg_enum_t high[4] = { XED_REG_AH, XED_REG_CH, XED_REG_DH, XED_REG_BH };
+         static const xed_reg_enum_t full[4] = { XED_REG_EAX, XED_REG_ECX, XED_REG_EDX, XED_REG_EBX };
+         const xed_reg_enum_t h = high[reg - 4];
+         bool uses_high = false;
+         for (const xed_operand_enum_t o : { XED_OPERAND_REG0, XED_OPERAND_REG1 }) {
+            if (xed_decoded_inst_get_reg(&xedd, o) == h) { uses_high = true; }
+         }
+         if (uses_high) {
+            const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
+            const bool addresses_through = xed_decoded_inst_get_base_reg(ops, memidx) == full[reg - 4] ||
+                                           xed_decoded_inst_get_index_reg(ops, memidx) == full[reg - 4];
+            const uint8_t swap = (uint8_t)(0xC0 | (reg << 3) | (reg - 4));   /* xchg %h,%l */
+            typename SectionBlob<bits>::SectionBlobs insts;
+            if (addresses_through) {
+               LoweredMem ea = m;
+               ea.rex |= 0x08;                                    /* lea m,%r11 (64-bit) */
+               ea.prefixes.clear();                    /* a segment/size prefix stays on the access */
+               insts = emit_mem(env, ea, opcode_t{0x8D}, 11, {});
+               LoweredMem at_r11;
+               at_r11.prefixes = m.prefixes;
+               at_r11.operand = opcode_t{0x03};                   /* (%r11): mod 00, rm 3 + REX.B */
+               at_r11.rex = 0x01;
+               insts.push_back(new Instruction<opposite<bits>>(opcode_t{0x86, swap}));
+               insts.splice(insts.end(), emit_mem(env, at_r11, opcode, (uint8_t)(reg - 4), trailing));
+               insts.push_back(new Instruction<opposite<bits>>(opcode_t{0x86, swap}));
+               return insts;
+            }
+            insts = emit_mem(env, m, opcode, (uint8_t)(reg - 4), trailing);
+            insts.push_front(new Instruction<opposite<bits>>(opcode_t{0x86, swap}));
+            insts.push_back(new Instruction<opposite<bits>>(opcode_t{0x86, swap}));
+            return insts;
+         }
+      }
       opcode_t buf;
       if (m.addr32) { buf.push_back(0x67); }
       buf.insert(buf.end(), m.prefixes.begin(), m.prefixes.end());
