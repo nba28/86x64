@@ -29,6 +29,10 @@ void *GetMovieTimeBase(Movie m);
 void  SetTimeBaseFlags(void *tb, long flags);
 long  GetTimeBaseFlags(void *tb);
 void  DisposeMovie(Movie m);
+typedef struct { short top, left, bottom, right; } Rect;
+OSErr NewGWorld(void **gw, short depth, const Rect *r, void *ct, void *gd, long flags);
+void  SetGWorld(void *port, void *gd);
+void  GetMovieGWorld(Movie m, void **port, void **gd);
 
 int main(void) {
    unsigned char ref[80], spec[70];
@@ -38,9 +42,15 @@ int main(void) {
    if (!path || FSPathMakeRef((const unsigned char *)path, ref, 0) ||
        FSGetCatalogInfo(ref, 0, 0, 0, spec, 0)) exit(1);
    EnterMovies();
+   void *gw = 0, *port = 0, *gd = 0;
+   Rect r = { 0, 0, 48, 64 };
+   if (NewGWorld(&gw, 32, &r, 0, 0, 0) || !gw) exit(7);
+   SetGWorld(gw, 0);
    if (OpenMovieFile(spec, &rn, 1)) exit(2);
    if (NewMovieFromFile(&mv, rn, 0, 0, 1 /*newMovieActive*/, 0) || !mv) exit(3);
    if (CloseMovieFile(rn)) exit(4);
+   GetMovieGWorld(mv, &port, &gd);
+   if (port != gw) exit(6);
    long dur = GetMovieDuration(mv);
    void *tb = GetMovieTimeBase(mv);
    SetTimeBaseFlags(tb, 1);

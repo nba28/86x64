@@ -146,6 +146,20 @@ static void on_main(void (^b)(void))
    if ([NSThread isMainThread]) b(); else dispatch_sync(dispatch_get_main_queue(), b);
 }
 
+/* A movie the app plays into the window the surface stands in for (Halo's
+ * intros: GL detached, PaintRect, movie into the window port). Its frames are
+ * shown on the surface in the movie box, mapped like the GL view. */
+static NSView *g_movie;
+static int16_t g_mbox[4];                    /* top, left, bottom, right (virtual) */
+static void movie_layout(void)
+{
+   if (!g_movie) return;
+   const NSRect vr = g_view.frame;
+   const CGFloat k = g_vw > 0 ? vr.size.width / g_vw : 1;
+   g_movie.frame = NSMakeRect(vr.origin.x + g_mbox[1] * k, vr.origin.y + (g_vh - g_mbox[2]) * k,
+                              (g_mbox[3] - g_mbox[1]) * k, (g_mbox[2] - g_mbox[0]) * k);
+}
+
 /* Main thread only: refresh the mapping snapshot from the live geometry. */
 static void relayout(void)
 {
@@ -162,6 +176,7 @@ static void relayout(void)
    g_gy = top - NSMaxY(sr);
    g_scale = k;
    [g_ns update];
+   movie_layout();
 }
 
 /* THE CAPTURE SHIELD. A captured display covered every other window, so a
@@ -403,6 +418,36 @@ int cglfs_present(CGLContextObj ctx, CGDirectDisplayID dpy)
 int cglfs_presenting(const void *ctx)
 {
    return g_active && ctx && ctx == g_ctx;
+}
+
+/* Show one movie frame on the surface (img NULL: take the movie down and give
+ * the surface back to GL). While it shows, the GL drawable is off the view, as
+ * the app detached it. Returns 0 when no surface is up. */
+int cglfs_show_frame(CGImageRef img, const int16_t box[4])
+{
+   if (!g_active) return 0;
+   on_main(^{
+      if (!img) {
+         if (!g_movie) return;
+         [g_movie removeFromSuperview];
+         [g_movie release];
+         g_movie = nil;
+         g_ns.view = g_view;
+         [g_ns update];
+         return;
+      }
+      if (!g_movie) {
+         [g_ns clearDrawable];
+         g_movie = [[NSView alloc] initWithFrame:NSZeroRect];
+         g_movie.wantsLayer = YES;
+         g_movie.layer.contentsGravity = kCAGravityResize;
+         [g_win.contentView addSubview:g_movie positioned:NSWindowAbove relativeTo:g_view];
+      }
+      memcpy(g_mbox, box, sizeof g_mbox);
+      movie_layout();
+      g_movie.layer.contents = (__bridge id)img;
+   });
+   return 1;
 }
 
 /* Take the surface down; returns the context that was on it (NULL if none),

@@ -3,7 +3,8 @@
 # AVFoundation Movie bridge (quicktime_movie_bridge.m OpenMovieFile /
 # NewMovieFromFile; Halo's studio logos never played). Writes a short H.264
 # movie with a native helper, then runs the translated fixture with QTMF_PATH.
-# ON exits 42; OFF (M64_NO_QT_MOVIE_FILE=1) must not.
+# ON exits 42; OFF (M64_NO_QT_MOVIE_FILE=1) must not; M64_NO_QT_DEFAULT_PORT=1
+# (new movie gets no port) exits 6.
 set -u
 cd "$(dirname "$0")"
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
@@ -56,4 +57,6 @@ MOV=$("$TMP/mk") && [ -s "$MOV" ] || { echo "qt-movie-file: FAIL (no movie writt
 FIX=build/99_qt_movie_file.x86_64
 QTMF_PATH="$MOV" $FIX >/dev/null 2>&1; on=$?
 QTMF_PATH="$MOV" M64_NO_QT_MOVIE_FILE=1 $FIX >/dev/null 2>&1; off=$?
-[ $on = 42 ] && [ $off != 42 ] && echo "qt-movie-file: PASS (on=$on off=$off)" || { echo "qt-movie-file: FAIL (on=$on off=$off)"; exit 1; }
+QTMF_PATH="$MOV" M64_NO_QT_DEFAULT_PORT=1 $FIX >/dev/null 2>&1; offp=$?
+[ $on = 42 ] && [ $off != 42 ] && [ $offp = 6 ] && echo "qt-movie-file: PASS (on=$on off=$off offp=$offp)" ||
+   { echo "qt-movie-file: FAIL (on=$on off=$off offp=$offp)"; exit 1; }

@@ -44,8 +44,15 @@
 #include <string.h>
 #include <stdio.h>
 #include <pthread.h>
+#include <dlfcn.h>
+#include <errno.h>
+#include <spawn.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/wait.h>
 #include "carbon_shim.h"
 #include "gap.h"
+#include "carbon_classic_widgets.h"
 
 /* The CG-backed classic QuickDraw offscreen substrate (qd_gworld.c): resolve a
  * bound GWorld/port (0 => current port) to its low-4GB ARGB pixel buffer. This
@@ -73,6 +80,12 @@ typedef struct qt_movie {
    double            durationSec;
    int               started;
    uint32_t          tbFlags;      /* TimeBase flags: loopTimeBase 1, palindrome 2 */
+   int16_t           box[4];       /* SetMovieBox: top, left, bottom, right */
+   int               hasBox;
+   CGImageRef        frame;        /* last frame, for the window presenter */
+   CCWViewRef        view;         /* self-drawn view in the port's window, or NULL */
+   void             *viewWin;
+   int               onSurface;    /* frames shown on the GL surface (cglfs_show_frame) */
 } qt_movie;
 
 /* ---- live registry (validate handles; never deref a bogus Movie) -------- */
@@ -140,17 +153,128 @@ static CFURLRef qt_url_from_dataref(uint32_t dataRef, uint32_t dataRefType) {
    return NULL;
 }
 
+extern uint32_t qd_current_port(void);
+extern void *qd_port_window(uint32_t port_h);
+/* M64_QT_TRACE=1: where a movie's frames go (port, window, surface). */
+static int qt_trace(void) {
+   static int v = -1;
+   if (v < 0) v = getenv("M64_QT_TRACE") != NULL;
+   return v;
+}
+static int qt_default_port_off(void) {
+   static int v = -1;
+   if (v < 0) v = getenv("M64_NO_QT_DEFAULT_PORT") != NULL;
+   return v;
+}
+
+/* ---- codecs macOS no longer decodes ---------------------------------------
+ * Sorenson Video 3, Cinepak and friends were QuickTime components; AVFoundation
+ * has none of them, so such a movie plays its sound over black (Halo's studio
+ * intros: SVQ3 and cvid). A movie whose video track cannot be decoded is
+ * converted once with ffmpeg (Homebrew, /usr/local, PATH, or M64_FFMPEG) into
+ * ~/Library/Caches/86x64/movies, keyed by path, size and mtime, and that copy
+ * is played. No ffmpeg: say so once and play the original (sound only).
+ * Kill M64_NO_QT_TRANSCODE. */
+extern char **environ;
+static const char *qt_ffmpeg(void) {
+   static char path[1024];
+   static int done;
+   if (done) return path[0] ? path : NULL;
+   done = 1;
+   const char *env = getenv("M64_FFMPEG");
+   if (env && access(env, X_OK) == 0) { snprintf(path, sizeof path, "%s", env); return path; }
+   const char *fixed[] = { "/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/opt/local/bin/ffmpeg" };
+   for (size_t i = 0; i < sizeof fixed / sizeof *fixed; i++)
+      if (access(fixed[i], X_OK) == 0) { snprintf(path, sizeof path, "%s", fixed[i]); return path; }
+   const char *pe = getenv("PATH");
+   while (pe && *pe) {
+      const char *c = strchr(pe, ':');
+      const size_t n = c ? (size_t)(c - pe) : strlen(pe);
+      snprintf(path, sizeof path, "%.*s/ffmpeg", (int)n, pe);
+      if (n && access(path, X_OK) == 0) return path;
+      pe = c ? c + 1 : NULL;
+   }
+   path[0] = 0;
+   return NULL;
+}
+
+/* Returns a +1 NSURL of a playable copy, or nil to play `src` as it is. */
+static NSURL *qt_playable_copy(AVURLAsset *asset, NSURL *src) {
+   static int off = -1;
+   if (off < 0) off = getenv("M64_NO_QT_TRANSCODE") != NULL;
+   if (off || !src.isFileURL) return nil;
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+   NSArray *vt = [asset tracksWithMediaType:AVMediaTypeVideo];
+#pragma clang diagnostic pop
+   BOOL undecodable = NO;
+   for (AVAssetTrack *t in vt) if (!t.decodable) undecodable = YES;
+   if (!undecodable) return nil;
+
+   const char *in = src.fileSystemRepresentation;
+   struct stat st;
+   if (stat(in, &st) != 0) return nil;
+   NSString *dir = [NSSearchPathForDirectoriesInDomains(NSCachesDirectory, NSUserDomainMask, YES).firstObject
+                    stringByAppendingPathComponent:@"86x64/movies"];
+   [[NSFileManager defaultManager] createDirectoryAtPath:dir withIntermediateDirectories:YES
+                                              attributes:nil error:nil];
+   uint64_t h = 1469598103934665603ULL;                       /* FNV-1a: path, size, mtime */
+   for (const char *c = in; *c; c++) h = (h ^ (uint8_t)*c) * 1099511628211ULL;
+   h = (h ^ (uint64_t)st.st_size) * 1099511628211ULL;
+   h = (h ^ (uint64_t)st.st_mtimespec.tv_sec) * 1099511628211ULL;
+   NSString *name = [NSString stringWithFormat:@"%@-%016llx.mov",
+                     src.lastPathComponent.stringByDeletingPathExtension, (unsigned long long)h];
+   NSString *out = [dir stringByAppendingPathComponent:name];
+   if ([[NSFileManager defaultManager] fileExistsAtPath:out]) return [[NSURL fileURLWithPath:out] retain];
+
+   const char *ff = qt_ffmpeg();
+   if (!ff) {
+      fprintf(stderr, "abiconv: movie %s has a video codec macOS cannot decode and no ffmpeg "
+                      "was found (brew install ffmpeg, or M64_FFMPEG=path); playing its sound only\n", in);
+      return nil;
+   }
+   NSString *tmp = [out stringByAppendingString:@".part.mov"];
+   const char *argv[] = { ff, "-nostdin", "-loglevel", "error", "-y", "-i", in,
+                          "-c:v", "h264_videotoolbox", "-q:v", "75", "-pix_fmt", "yuv420p",
+                          "-c:a", "aac", "-b:a", "192k", tmp.fileSystemRepresentation, NULL };
+   pid_t pid;
+   int rc = -1;
+   if (posix_spawn(&pid, ff, NULL, NULL, (char *const *)argv, environ) == 0) {
+      int status;
+      while (waitpid(pid, &status, 0) < 0 && errno == EINTR) { }
+      rc = WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+   }
+   if (rc != 0 || rename(tmp.fileSystemRepresentation, out.fileSystemRepresentation) != 0) {
+      fprintf(stderr, "abiconv: converting movie %s with %s failed (rc %d); playing its sound only\n",
+              in, ff, rc);
+      unlink(tmp.fileSystemRepresentation);
+      return nil;
+   }
+   return [[NSURL fileURLWithPath:out] retain];
+}
+
 /* Build the AVFoundation playback graph from a source URL (consumes url ref). */
 static qt_movie *qt_open_url(CFURLRef url) {
    if (!url) return NULL;
    @autoreleasepool {
       AVURLAsset *asset = [AVURLAsset URLAssetWithURL:(__bridge NSURL *)url options:nil];
       if (!asset) return NULL;
+      NSURL *copy = qt_playable_copy(asset, (__bridge NSURL *)url);
+      if (copy) {
+         AVURLAsset *c = [AVURLAsset URLAssetWithURL:copy options:nil];
+         [copy release];
+         if (c) asset = c;
+      }
 
       qt_movie *m = (qt_movie *)calloc(1, sizeof(qt_movie));
       if (!m) return NULL;
       m->magic = QTM_MAGIC;
       m->timeScale = QT_TIMESCALE;
+      /* A new movie draws into the port that is current when it is made, as
+       * QuickTime's did; Halo never calls SetMovieGWorld for playback (only to
+       * park the movie on a 4x4 GWorld) and got a black window. Kill
+       * M64_NO_QT_DEFAULT_PORT; guard qt-movie-file. */
+      if (!qt_default_port_off()) m->gw = qd_current_port();
       m->asset = [asset retain];
 
       /* natural size + duration from the first video track (synchronous read —
@@ -188,12 +312,71 @@ static int32_t qt_units(qt_movie *m, double sec) {
    return (int32_t)(sec * (double)m->timeScale + 0.5);
 }
 
+/* ---- window presenter ----------------------------------------------------
+ * A movie bound to a WINDOW port has no compositor here to carry the port's
+ * pixels to the screen, so its frames are also drawn by one self-drawn view in
+ * that window's content view, sized to the movie box (the app's own window,
+ * no extra one). The view goes when the movie is parked elsewhere or disposed. */
+static OSStatus qt_view_draw(void *call, CCWEventRef ev, void *ud) {
+   (void)call;
+   qt_movie *m = (qt_movie *)ud;
+   CGContextRef cg = ccw_draw_cg(ev);
+   if (!m || !cg || !m->frame || !m->view) return ccwEventNotHandled;
+   CCWRectD b = { 0, 0, 0, 0 };
+   if (ccw_HIViewGetBounds) ccw_HIViewGetBounds(m->view, &b);
+   CGContextSaveGState(cg);
+   CGContextTranslateCTM(cg, 0, b.h);       /* view is y-down */
+   CGContextScaleCTM(cg, 1, -1);
+   CGContextDrawImage(cg, CGRectMake(0, 0, b.w, b.h), m->frame);
+   CGContextRestoreGState(cg);
+   return 0;
+}
+static CGRect qt_view_rect(qt_movie *m) {
+   if (m->hasBox)
+      return CGRectMake(m->box[1], m->box[0], m->box[3] - m->box[1], m->box[2] - m->box[0]);
+   return CGRectMake(0, 0, m->natW, m->natH);
+}
+extern int cglfs_show_frame(CGImageRef img, const int16_t box[4]);
+static void qt_view_drop(qt_movie *m) {
+   if (m->onSurface) { cglfs_show_frame(NULL, NULL); m->onSurface = 0; }
+   if (!m->view) return;
+   static OSStatus (*rm)(void *);
+   if (!rm) rm = (OSStatus (*)(void *))dlsym(RTLD_DEFAULT, "HIViewRemoveFromSuperview");
+   if (rm) rm(m->view);
+   CFRelease(m->view);
+   m->view = NULL;
+   m->viewWin = NULL;
+}
+static void qt_view_present(qt_movie *m) {
+   void *win = qd_port_window(m->gw);
+   if (!win || !ccw_available()) { qt_view_drop(m); return; }
+   if (m->view && m->viewWin != win) qt_view_drop(m);
+   if (!m->view) {
+      static void *(*getRoot)(void *);
+      if (!getRoot) getRoot = (void *(*)(void *))dlsym(RTLD_DEFAULT, "HIViewGetRoot");
+      CCWViewRef content = getRoot ? ccw_content_view_of((CCWWindowRef)win, getRoot(win)) : NULL;
+      if (!content) return;
+      m->view = ccw_make_view(qt_view_rect(m), (void *)qt_view_draw, NULL, NULL, NULL, m, content);
+      m->viewWin = m->view ? win : NULL;
+   }
+   if (m->view && ccw_HIViewSetNeedsDisplay) ccw_HIViewSetNeedsDisplay(m->view, 1);
+}
+
 /* Pull the current decoded frame into the bound GWorld's ARGB buffer. */
 static void qt_pump_frame(qt_movie *m) {
-   if (!m->vout || !m->gw) return;
+   static int ntr;
+   const int tr = qt_trace() && ntr < 40;
+   if (tr) ntr++;
+   if (!m->vout || !m->gw) { if (tr) fprintf(stderr, "[qt] pump: no port\n"); return; }
    CMTime t = [m->player currentTime];
-   if (![m->vout hasNewPixelBufferForItemTime:t]) return;
+   if (![m->vout hasNewPixelBufferForItemTime:t]) {
+      if (tr) fprintf(stderr, "[qt] pump t=%.3f: no new frame (item status %ld)\n",
+                      CMTimeGetSeconds(t), (long)m->item.status);
+      return;
+   }
    CVPixelBufferRef pb = [m->vout copyPixelBufferForItemTime:t itemTimeForDisplay:NULL];
+   if (tr) fprintf(stderr, "[qt] pump t=%.3f: frame %p port=0x%x win=%p\n", CMTimeGetSeconds(t),
+                   (void *)pb, m->gw, qd_port_window(m->gw));
    if (!pb) return;
 
    void *dbase = NULL; int drb = 0, dw = 0, dh = 0;
@@ -207,6 +390,28 @@ static void qt_pump_frame(qt_movie *m) {
       for (int y = 0; y < rows; y++)
          memcpy((uint8_t *)dbase + (size_t)y * drb, sbase + (size_t)y * srb, (size_t)cols * 4);
       CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+   }
+   if (qd_port_window(m->gw)) {                       /* window port: present it */
+      CVPixelBufferLockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+      CGColorSpaceRef cs = CGColorSpaceCreateDeviceRGB();
+      CGContextRef bc = CGBitmapContextCreate(CVPixelBufferGetBaseAddress(pb),
+         CVPixelBufferGetWidth(pb), CVPixelBufferGetHeight(pb), 8, CVPixelBufferGetBytesPerRow(pb),
+         cs, kCGImageAlphaNoneSkipFirst | kCGBitmapByteOrder32Big);
+      CGImageRef img = bc ? CGBitmapContextCreateImage(bc) : NULL;
+      if (bc) CGContextRelease(bc);
+      CGColorSpaceRelease(cs);
+      CVPixelBufferUnlockBaseAddress(pb, kCVPixelBufferLock_ReadOnly);
+      if (img) {
+         if (m->frame) CGImageRelease(m->frame);
+         m->frame = img;
+         /* The surface stands in for (and hides) the app's window: show it there. */
+         int16_t nb[4] = { 0, 0, (int16_t)m->natH, (int16_t)m->natW };
+         const int16_t *bx = m->hasBox ? m->box : nb;
+         if (cglfs_show_frame(img, bx)) { m->onSurface = 1; m->viewWin = qd_port_window(m->gw); }
+         else qt_view_present(m);
+         if (tr) fprintf(stderr, "[qt]   box %d,%d,%d,%d -> %s\n", bx[0], bx[1], bx[2], bx[3],
+                         m->onSurface ? "surface" : m->view ? "window view" : "nowhere");
+      }
    }
    CVPixelBufferRelease(pb);
 }
@@ -233,6 +438,8 @@ uint32_t shim_DisposeMovie(uint32_t *a) {
    qt_movie *m = qt_from_i386(a[0]);
    if (!m) return cmNoErr;
    qt_unregister(m);
+   qt_view_drop(m);
+   if (m->frame) { CGImageRelease(m->frame); m->frame = NULL; }
    [m->player pause];
    if (m->vout)   { [m->item removeOutput:m->vout]; [m->vout release]; }
    if (m->player) [m->player release];
@@ -246,7 +453,10 @@ uint32_t shim_DisposeMovie(uint32_t *a) {
 /* void SetMovieGWorld(Movie, CGrafPtr port, GDHandle gd); */
 uint32_t shim_SetMovieGWorld(uint32_t *a) {
    qt_movie *m = qt_from_i386(a[0]);
-   if (m) { m->gw = a[1]; }
+   if (m) {
+      m->gw = a[1];
+      if ((m->view || m->onSurface) && qd_port_window(m->gw) != m->viewWin) qt_view_drop(m);
+   }
    return cmNoErr;
 }
 /* void GetMovieGWorld(Movie, CGrafPtr *port, GDHandle *gd); */
@@ -268,8 +478,20 @@ static uint32_t qt_fill_bounds(uint32_t *a) {
 /* void GetMovieBox(Movie, Rect *boxRect);  == GetMovieNaturalBoundsRect */
 uint32_t shim_GetMovieBox(uint32_t *a)                { return qt_fill_bounds(a); }
 uint32_t shim_GetMovieNaturalBoundsRect(uint32_t *a)  { return qt_fill_bounds(a); }
-/* void SetMovieBox(Movie, const Rect *boxRect); — scaling ignored for now */
-uint32_t shim_SetMovieBox(uint32_t *a) { GAP_STUB(a); return cmNoErr; }
+/* void SetMovieBox(Movie, const Rect *boxRect); — the window presenter scales into it */
+uint32_t shim_SetMovieBox(uint32_t *a) {
+   qt_movie *m = qt_from_i386(a[0]);
+   const int16_t *r = a[1] ? (const int16_t *)i386_ptr(a[1]) : NULL;
+   if (!m || !r) return cmNoErr;
+   memcpy(m->box, r, sizeof m->box);
+   m->hasBox = 1;
+   if (m->view && ccw_HIViewSetFrame) {
+      CGRect f = qt_view_rect(m);
+      CCWRectD d = { f.origin.x, f.origin.y, f.size.width, f.size.height };
+      ccw_HIViewSetFrame(m->view, &d);
+   }
+   return cmNoErr;
+}
 
 /* void StartMovie(Movie); */
 uint32_t shim_StartMovie(uint32_t *a) {
@@ -356,7 +578,18 @@ static void qt_task(qt_movie *m) {
    }
    qt_pump_frame(m);
 }
+/* AVFoundation advances a player (item status, frame delivery) from the main
+ * run loop's default mode; an app that sits in its own WaitNextEvent +
+ * MoviesTask loop never runs that mode, so the item stays "unknown" and no
+ * frame arrives. Giving the movies time is what MoviesTask is for. Kill
+ * M64_NO_QT_RUNLOOP. */
+static void qt_service_runloop(void) {
+   static int off = -1;
+   if (off < 0) off = getenv("M64_NO_QT_RUNLOOP") != NULL;
+   if (!off && pthread_main_np()) CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0, true);
+}
 uint32_t shim_MoviesTask(uint32_t *a) {
+   qt_service_runloop();
    if (!a[0]) {                                          /* NULL: every movie */
       qt_movie *live[QT_MAX_MOVIES];
       int n = 0;
@@ -379,7 +612,11 @@ uint32_t shim_UpdateMovie(uint32_t *a) {
 /* OSErr PrerollMovie(Movie, TimeValue, Fixed); — AVFoundation buffers itself. */
 uint32_t shim_PrerollMovie(uint32_t *a) { (void)a; return cmNoErr; }   /* AVPlayer prerolls itself */
 /* void SetMovieActive(Movie, Boolean); / void SetMovieVolume(Movie, short); */
-uint32_t shim_SetMovieActive(uint32_t *a) { GAP_STUB(a); return cmNoErr; }
+uint32_t shim_SetMovieActive(uint32_t *a) {
+   qt_movie *m = qt_from_i386(a[0]);
+   if (m && !(uint8_t)a[1]) { m->started = 0; [m->player pause]; }   /* an inactive movie stops */
+   return cmNoErr;
+}
 uint32_t shim_SetMovieVolume(uint32_t *a) {
    qt_movie *m = qt_from_i386(a[0]);
    if (m) { int16_t v = (int16_t)a[1]; m->player.volume = (v <= 0) ? 0.f : (float)v / 256.f; }
@@ -509,6 +746,9 @@ uint32_t shim_NewMovieFromFile(uint32_t *a) {
    qt_movie *m = qt_open_url(url);
    if (url) CFRelease(url);
    if (!m) return (uint32_t)QT_COULD_NOT_RESOLVE_DATAREF;
+   if (qt_trace())
+      fprintf(stderr, "[qt] NewMovieFromFile %s %dx%d port=0x%x win=%p main=%d\n", path, m->natW,
+              m->natH, m->gw, qd_port_window(m->gw), pthread_main_np());
    put_u32(a[0], to_i386(m));
    return cmNoErr;
 }
