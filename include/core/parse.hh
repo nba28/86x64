@@ -436,6 +436,23 @@ namespace MachO {
        * addresses memory within 0x40 of it (zf_abs_mem). Kill
        * M64_NO_ZF_SMALL_PAIR_IMM; guard zf-small-pair-imm. */
       bool zerofill_small_pair_constant(const Image& img, std::size_t value) const;
+      /* An imm32 into symbol-free zero-fill that the code also uses as a
+       * test/and/or/xor MASK is a constant: no compiler masks with an address.
+       * Halo's `movl $0x400000, 4(%esp)` (a 4 MB size) landed in its stripped
+       * __bss, was relocated, and a 4 MB memcpy ran 100 MB (campaign start);
+       * the same 0x400000 is `testl $0x400000` 42 times. Kill
+       * M64_NO_ZF_MASK_IMM; guard zf-mask-imm. */
+      bool zerofill_mask_constant(const Image& img, std::size_t value) const;
+      /* A 64K-aligned imm32 into symbol-free zero-fill that no code addresses
+       * memory at or just above is a size, not an object: Halo's game-state
+       * sizes 0x400000 / 0x440000 / 0x480000 sit in its stripped __bss and were
+       * relocated, so every checkpoint save/restore copied the wrong length.
+       * Kill M64_NO_ZF_ROUND_IMM; guard zf-round-imm. */
+      bool zerofill_round_constant(const Image& img, std::size_t value) const;
+      mutable std::set<uint32_t> zf_abs_mem_decoded;
+      mutable bool zf_abs_mem_decoded_built = false;
+      void build_zf_abs_mem_decoded(const Image& img) const;
+      mutable std::map<uint32_t, int> zf_mask_imms;   /* mask uses, by build_zf_code_literals */
       /* Lazily built by zerofill_target_unattested: every aligned-or-not
        * 4-byte window of the instruction sections whose value lands in a
        * zero-fill section. */

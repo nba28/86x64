@@ -784,7 +784,9 @@ namespace MachO {
             if (fixed_load && xed_decoded_inst_get_immediate_width_bits(operands) == 32) {
                const uint32_t imm_val = img.template at<uint32_t>(loc.offset + imm_idx);
                imm_is_ptr = image_addr(imm_val) &&
-                  !(bits == Bits::M32 && imm32_code_alias_is_constant(img, env, imm_val));
+                  !(bits == Bits::M32 && imm32_code_alias_is_constant(img, env, imm_val)) &&
+                  !(bits == Bits::M32 && env.zerofill_mask_constant(img, imm_val)) &&
+                  !(bits == Bits::M32 && env.zerofill_round_constant(img, imm_val));
                /* a later loop-bounding `cmp $&table_end,%reg` moves with it */
                if (imm_is_ptr && bits == Bits::M32) {
                   env.relocated_ptr_imms.insert(imm_val);
@@ -834,6 +836,8 @@ namespace MachO {
                const uint32_t imm_val = img.template at<uint32_t>(loc.offset + imm_idx);
                imm_is_ptr = ptr32_range(imm_val) &&
                   !imm32_code_alias_is_constant(img, env, imm_val) &&
+                  !env.zerofill_mask_constant(img, imm_val) &&
+                  !env.zerofill_round_constant(img, imm_val) &&
                   (env.imm_bounds_relocated_table(imm_val) ||
                    ((imm_val & 3) == 0 && env.vmaddr_in_writable_data(imm_val)));
             }
@@ -865,7 +869,9 @@ namespace MachO {
             const uint32_t value = img.template at<uint32_t>(loc.offset + imm_off);
             if (image_addr(value) &&
                 !(bits == Bits::M32 && imm32_code_alias_is_constant(img, env, value)) &&
-                !(bits == Bits::M32 && env.zerofill_small_pair_constant(img, value))) {
+                !(bits == Bits::M32 && env.zerofill_small_pair_constant(img, value)) &&
+                !(bits == Bits::M32 && env.zerofill_mask_constant(img, value)) &&
+                !(bits == Bits::M32 && env.zerofill_round_constant(img, value))) {
                parse_imm(imm_off, true);
             }
          }
@@ -898,7 +904,9 @@ namespace MachO {
                   ptr_target = points_at_pointer(img, env, value);
                }
                if (!ptr_target && (value & 3) == 0 && fixed_load &&
-                   env.vmaddr_in_writable_data(value)) {
+                   env.vmaddr_in_writable_data(value) &&
+                   !(bits == Bits::M32 && env.zerofill_mask_constant(img, value)) &&
+                   !(bits == Bits::M32 && env.zerofill_round_constant(img, value))) {
                   ptr_target = true;
                }
                if (!ptr_target && bits == Bits::M32 &&

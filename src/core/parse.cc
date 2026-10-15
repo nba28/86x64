@@ -352,6 +352,34 @@ namespace MachO {
       return false;
    }
 
+   /* Is the imm32 at section byte i the immediate of a test/and/or/xor?
+    * (A9 on eAX; F7 /0, 81 /1 /4 /6 on r/m32 with any addressing. The eAX
+    * forms of and/or/xor, 25/0D/35, are also the modrm of `mov reg,[disp32]`
+    * (`movl 0x3b21b4,%ecx` = 8B 0D ...), so they are no evidence.) */
+   static bool imm32_is_mask_operand(const Image& img, std::size_t off, std::size_t i) {
+      const uint8_t b1 = i >= 1 ? img.at<uint8_t>(off + i - 1) : 0;
+      if (i >= 1 && b1 == 0xa9) { return true; }
+      for (std::size_t k = 2; k <= 7 && k <= i; ++k) {
+         const uint8_t op = img.at<uint8_t>(off + i - k), m = img.at<uint8_t>(off + i - k + 1);
+         const uint8_t reg = (m >> 3) & 7, mod = m >> 6, rm = m & 7;
+         if (!((op == 0xf7 && reg == 0) || (op == 0x81 && (reg == 1 || reg == 4 || reg == 6)))) {
+            continue;
+         }
+         std::size_t len = 1;                                   /* modrm */
+         if (mod != 3 && rm == 4) {
+            if (k < 3) { continue; }
+            const uint8_t sib = img.at<uint8_t>(off + i - k + 2);
+            ++len;
+            if (mod == 0 && (sib & 7) == 5) { len += 4; }
+         }
+         if (mod == 0 && rm == 5) { len += 4; }
+         else if (mod == 1) { len += 1; }
+         else if (mod == 2) { len += 4; }
+         if (k == 1 + len) { return true; }
+      }
+      return false;
+   }
+
    template <Bits bits>
    void ParseEnv<bits>::build_zf_code_literals(const Image& img) const {
       std::vector<std::pair<std::size_t, std::size_t>> zf;   /* [lo, hi) */
@@ -379,6 +407,14 @@ namespace MachO {
                       * no-base SIB under modrm rm=100 -- a memory operand AT v */
                      const uint8_t b1 = i >= 1 ? img.at<uint8_t>(off + i - 1) : 0;
                      const uint8_t b2 = i >= 2 ? img.at<uint8_t>(off + i - 2) : 0;
+                     /* the imm of a test/and/or/xor is no memory operand, whatever
+                      * its disp8 byte looks like (`testl $0x400000,-0x60(%ebp)`
+                      * ends in A0, the moffs opcode) */
+                     static const bool no_mask = std::getenv("M64_NO_ZF_MASK_IMM") != nullptr;
+                     if (!no_mask && imm32_is_mask_operand(img, off, i)) {
+                        ++zf_mask_imms[v];
+                        break;
+                     }
                      if (i >= 1 && ((b1 & 0xc7) == 0x05 || (b1 >= 0xa0 && b1 <= 0xa3) ||
                                     (i >= 2 && (b1 & 7) == 5 && (b2 & 0xc7) == 0x04))) {
                         zf_abs_mem.insert(v);
@@ -419,6 +455,88 @@ namespace MachO {
          return false;
       }
       return false;
+   }
+
+   template <Bits bits>
+   bool ParseEnv<bits>::zerofill_mask_constant(const Image& img, std::size_t value) const {
+      static const bool off = std::getenv("M64_NO_ZF_MASK_IMM") != nullptr;
+      if (off) { return false; }
+      const Section<bits> *sec = section_at(value);
+      if (!sec) { return false; }
+      const uint32_t st = sec->sect.flags & SECTION_TYPE;
+      if (st != S_ZEROFILL && st != S_GB_ZEROFILL) { return false; }
+      /* a data symbol at or below names the object: an address after all */
+      const auto it = func_syms.upper_bound(value);
+      if (it != func_syms.begin() && *std::prev(it) >= sec->sect.addr) { return false; }
+      if (!zf_code_literals_built) {
+         zf_code_literals_built = true;
+         build_zf_code_literals(img);
+      }
+      const auto m = zf_mask_imms.find((uint32_t)value);
+      if (m == zf_mask_imms.end()) { return false; }
+      /* a vote, not a veto: the byte-window scan also sees a few memory
+       * operands that are not there (a disp32 tail + imm32 head), so a mask
+       * used twice and more often than memory near it is touched wins */
+      int near = 0;
+      for (auto it = zf_abs_mem.lower_bound(value >= 0x40 ? (uint32_t)value - 0x40 : 0);
+           it != zf_abs_mem.end() && *it <= (uint32_t)value + 0x40; ++it) { ++near; }
+      return m->second >= 2 && m->second > near;
+   }
+
+   /* Linear-sweep decode of the instruction sections: every absolute memory
+    * operand (no base register) whose displacement lands in zero-fill. */
+   template <Bits bits>
+   void ParseEnv<bits>::build_zf_abs_mem_decoded(const Image& img) const {
+      for (Segment<bits> *seg : archive.segments()) {
+         for (Section<bits> *sec : seg->sections) {
+            if (!(sec->sect.flags & (S_ATTR_PURE_INSTRUCTIONS | S_ATTR_SOME_INSTRUCTIONS)) ||
+                sec->sect.offset == 0) { continue; }
+            std::size_t i = 0;
+            while (i < sec->sect.size) {
+               xed_decoded_inst_t x;
+               xed_decoded_inst_zero_set_mode(&x, &Instruction<Bits::M32>::dstate());
+               const std::size_t n = std::min<std::size_t>(15, sec->sect.size - i);
+               if (xed_decode(&x, &img.at<uint8_t>(sec->sect.offset + i), n) != XED_ERROR_NONE) {
+                  ++i;
+                  continue;
+               }
+               const unsigned nmem = xed_decoded_inst_number_of_memory_operands(&x);
+               for (unsigned k = 0; k < nmem; ++k) {
+                  if (xed_decoded_inst_get_base_reg(&x, k) != XED_REG_INVALID) { continue; }
+                  const uint32_t disp = (uint32_t)xed_decoded_inst_get_memory_displacement(&x, k);
+                  const Section<bits> *t = section_at(disp);
+                  const uint32_t tt = t ? (t->sect.flags & SECTION_TYPE) : 0;
+                  if (tt == S_ZEROFILL || tt == S_GB_ZEROFILL) { zf_abs_mem_decoded.insert(disp); }
+               }
+               i += xed_decoded_inst_get_length(&x);
+            }
+         }
+      }
+   }
+
+   template <Bits bits>
+   bool ParseEnv<bits>::zerofill_round_constant(const Image& img, std::size_t value) const {
+      static const bool off = std::getenv("M64_NO_ZF_ROUND_IMM") != nullptr;
+      if (off || (value & 0xffffu) != 0 || value == 0) { return false; }
+      const Section<bits> *sec = section_at(value);
+      if (!sec) { return false; }
+      const uint32_t st = sec->sect.flags & SECTION_TYPE;
+      if (st != S_ZEROFILL && st != S_GB_ZEROFILL) { return false; }
+      const auto it = func_syms.upper_bound(value);
+      if (it != func_syms.begin() && *std::prev(it) >= sec->sect.addr) { return false; }
+      if (!zf_code_literals_built) {
+         zf_code_literals_built = true;
+         build_zf_code_literals(img);
+      }
+      /* an object there is one the code reads or writes at or near its start;
+       * decoded, since a byte scan reads `cmpl $X,%eax` (3D imm32) as a
+       * disp32 memory operand at X */
+      if (!zf_abs_mem_decoded_built) {
+         zf_abs_mem_decoded_built = true;
+         build_zf_abs_mem_decoded(img);
+      }
+      const auto near = zf_abs_mem_decoded.lower_bound((uint32_t)value - 0x40);
+      return !(near != zf_abs_mem_decoded.end() && *near < (uint32_t)value + 0x1000);
    }
 
    template <Bits bits>
