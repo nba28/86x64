@@ -1,4 +1,5 @@
 #include <cstdio>
+#include <cstdlib>
 #include <iostream>
 #include <string>
 
@@ -40,6 +41,38 @@ int ChangeDepsCommand::opthandler(int optchar) {
    }
 }
 
+/* Every output gets ad-hoc signed afterwards, and codesign appends its 16-byte
+ * LC_CODE_SIGNATURE after the load commands WITHOUT checking for room: with no
+ * slack it overwrites the first bytes of __text and still exits 0 (a dlopen'd
+ * module then jumps into a header-shaped init). Judged on the BUILT layout:
+ * Build may add load commands of its own (a synthesized section) and shift the
+ * sections. A rewrite that leaves no room is refused; the caller picks a
+ * shorter path. Kill switch M64_NO_CHANGE_DEPS_SIGROOM; guard
+ * change-deps-sigroom. */
+template <MachO::Bits b>
+static bool sig_room(const MachO::Archive<b> *archive) {
+   std::size_t first_sect_off = 0;
+   for (const MachO::Section<b> *sect : archive->sections()) {
+      const std::size_t off = sect->sect.offset;
+      if (off > 0 && (first_sect_off == 0 || off < first_sect_off)) {
+         first_sect_off = off;
+      }
+   }
+   bool has_sig = false;
+   for (const MachO::LoadCommand<b> *lc : archive->load_commands) {
+      has_sig |= lc->cmd() == LC_CODE_SIGNATURE;
+   }
+   const std::size_t need = sizeof(archive->header) + archive->header.sizeofcmds +
+                            (has_sig ? 0 : sizeof(linkedit_data_command));
+   if (first_sect_off > 0 && need > first_sect_off) {
+      fprintf(stderr, "change-deps: rewritten load commands need %zu header bytes (incl. room "
+              "for the code signature) but the first section starts at %zu\n",
+              need, first_sect_off);
+      return false;
+   }
+   return true;
+}
+
 int ChangeDepsCommand::work() {
    MachO::MachO *macho = MachO::MachO::Parse(*in_img);
    int rv;
@@ -56,6 +89,10 @@ int ChangeDepsCommand::work() {
    if (rv < 0) { return rv; }
 
    macho->Build();
+   const bool fits = macho->bits() == MachO::Bits::M32
+      ? sig_room(dynamic_cast<MachO::Archive<MachO::Bits::M32> *>(macho))
+      : sig_room(dynamic_cast<MachO::Archive<MachO::Bits::M64> *>(macho));
+   if (!fits && std::getenv("M64_NO_CHANGE_DEPS_SIGROOM") == nullptr) { return -1; }
    macho->Emit(*out_img);
    return 0;
 }

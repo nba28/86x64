@@ -779,9 +779,22 @@ def cmd_consolidate_runtime(args):
             continue
         if r.returncode != 0:
             tmp = m.with_name(m.name + ".cd")
-            r = subprocess.run([str(MACHO_TOOL), "change-deps", "-q",
-                                *[x for o, n in changes for x in ("--change", f"{o}={n}")],
-                                str(m), str(tmp)], capture_output=True, text=True, errors="replace")
+            def change_deps(changes):
+                return subprocess.run([str(MACHO_TOOL), "change-deps", "-q",
+                                       *[x for o, n in changes for x in ("--change", f"{o}={n}")],
+                                       str(m), str(tmp)], capture_output=True, text=True, errors="replace")
+            r = change_deps(changes)
+            # No header room for the longer @loader_path spelling (change-deps
+            # refuses rather than let codesign overwrite __text): use the
+            # shorter @rpath/<lib> when the main executable's rpaths reach the
+            # home copy. Every image in the process, dlopen'd ones included,
+            # has the main executable in its rpath load chain.
+            # Kill M64_NO_CONSOLIDATE_RPATH; guard consolidate-rpath.
+            exe = app / (bundle_executable(app) or "-")
+            if r.returncode != 0 and exe.is_file() and not os.environ.get("M64_NO_CONSOLIDATE_RPATH"):
+                rp = [(o, "@rpath/" + n.rsplit("/", 1)[-1]) for o, n in changes]
+                if all(_resolve_dep(exe, n, doomed) in homes for _, n in rp):
+                    r = change_deps(rp)
             if r.returncode != 0 or not tmp.exists():
                 tmp.unlink(missing_ok=True)
                 raise Die(f"cannot repoint {m.relative_to(app)}: {r.stderr.strip()[-300:]}")
