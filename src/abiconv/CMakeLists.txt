@@ -240,6 +240,9 @@ foreach(app IN LISTS ABICONV_APPS32_BUNDLES)
                   ERROR_QUIET RESULT_VARIABLE rc)
   if(rc EQUAL 0 AND EXISTS "${app}/Contents/MacOS/${exe}")
     list(APPEND ABICONV_MODERN_TARGETS "${app}/Contents/MacOS/${exe}")
+  else()
+    # a dropped target loses every bridge only it needed, with no error
+    message(WARNING "abiconv: ${app} has no i386 executable; its imports get no bridges")
   endif()
 endforeach()
 # A non-bundle game tree (Source engine): every module is dlopen'd, so each sits
@@ -279,7 +282,8 @@ add_custom_command(OUTPUT abiconv_import.syms includes_auto.h abiconv_handshim.s
           ${CMAKE_SOURCE_DIR}/src/86x64/_vendor_deps.py
           ${CMAKE_CURRENT_SOURCE_DIR}/maptable_tramp.asm
           ${ABICONV_MODERN_TARGET_DEPS}
-  )
+
+  VERBATIM)
 
 # The final modern consider set = curated (print_exports_trie) UNION import-driven.
 # abigen's -s takes a single file and loads it into a std::set, so a plain cat is
@@ -422,7 +426,8 @@ if(EXISTS ${ABICONV_LEGACY_SDK})
             ${CMAKE_SOURCE_DIR}/src/86x64/_i386_closure.py
             ${CMAKE_SOURCE_DIR}/src/86x64/_vendor_deps.py
             ${ABICONV_LEGACY_TARGET_DEPS}
-    )
+
+    VERBATIM)
   add_custom_command(OUTPUT abiconv_legacy.asm
     COMMAND abigen -o abiconv_legacy.asm -s abiconv_legacy.syms
             -i ${CMAKE_CURRENT_SOURCE_DIR}/custom.syms
@@ -791,7 +796,6 @@ add_library(abiconv SHARED
   carbon_window_resize_guard.c
   carbon_window_show_shim.c
   tec_shim.c
-  py_shim.c
   quicktime_movie_shim.c
   # quicktime_movie_bridge.m: GOLDEN functional QuickTime Movie Toolbox -> AVFoundation
   # video-playback bridge (open/transport/timing + frame pull into the QuickDraw GWorld

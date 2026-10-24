@@ -8,7 +8,10 @@
  * dirent: u32 d_ino, u16 d_reclen, u8 d_type, u8 d_namlen, char d_name[256].
  * The caller gets a low wrapper owning the native DIR plus one converted entry
  * (valid until the next readdir/closedir on that stream, as POSIX allows).
- * The other $INODE64 variants keep their abigen bridges (native layout).
+ * opendir$INODE64$UNIX2003 / readdir$INODE64 / closedir$UNIX2003 share the
+ * wrapper: the entry layout matches natively, but the DIR* and the dirent
+ * pointer do not fit 32 bits (Civ IV's Python 2.6 import scan, SIGBUS in
+ * readdir on the truncated DIR*). readdir$INODE64 hands back a low copy.
  *
  * scandir/alphasort (classic) build the same i386 dirents: native scandir handed
  * the i386 select/compar callbacks native 64-bit dirent pointers, truncated to
@@ -35,7 +38,7 @@
 struct dirent32 { uint32_t d_ino; uint16_t d_reclen; uint8_t d_type, d_namlen; char d_name[256]; };
 _Static_assert(sizeof(struct dirent32) == 264, "i386 struct dirent");
 
-struct dir32 { uint32_t magic; DIR *real; struct dirent32 ent; };
+struct dir32 { uint32_t magic; DIR *real; struct dirent32 ent; struct dirent ent64; };
 
 static int raw(void) {
    static int r = -1;
@@ -76,6 +79,17 @@ uint32_t shim_readdir(uint32_t *a) {
    if (!e) return 0;
    to_dirent32(&w->ent, e);
    return (uint32_t)(uintptr_t)&w->ent;
+}
+
+/* struct dirent *readdir$INODE64(DIR *): the native layout, copied low */
+uint32_t shim_readdir_ino64(uint32_t *a) {
+   struct dir32 *w = dir_of(a[0]);
+   if (!w) return (uint32_t)(uintptr_t)readdir(P(a[0]));
+   struct dirent *e = readdir(w->real);
+   if (!e) return 0;
+   memcpy(&w->ent64, e, offsetof(struct dirent, d_name) + e->d_namlen);
+   w->ent64.d_name[e->d_namlen] = 0;
+   return (uint32_t)(uintptr_t)&w->ent64;
 }
 
 /* int closedir(DIR *) */

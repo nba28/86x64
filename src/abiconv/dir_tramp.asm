@@ -35,6 +35,10 @@
 	MTSHIM	___opendir,	_shim_opendir
 	MTSHIM	___readdir,	_shim_readdir
 	MTSHIM	___closedir,	_shim_closedir
+	MTSHIM	___opendir$INODE64,	_shim_opendir
+	MTSHIM	___opendir$INODE64$UNIX2003,	_shim_opendir
+	MTSHIM	___readdir$INODE64,	_shim_readdir_ino64
+	MTSHIM	___closedir$UNIX2003,	_shim_closedir
 	MTSHIM	___scandir,	_shim_scandir
 	MTSHIM	___alphasort,	_shim_alphasort
 	MTSHIM	___scandir$INODE64,	_shim_scandir_ino64

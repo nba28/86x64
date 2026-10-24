@@ -8181,10 +8181,15 @@ static void own_resolve_offsets(Class target) {
 
 /* SYNC (reverse-dispatch entry): mirror class c's nib-connected OWN object
  * ivars from the real object R into the i386 shadow S. Only non-nil (actually
- * connected) slots are mirrored; a wrapped handle is deposited so the IMP's
- * `[outlet ...]` round-trips through the forward bridge. Snapshotted for
- * ivar_wb_flush so an IMP reassignment carries back to R. */
+ * connected) slots are mirrored, in the same i386 representation the outlet
+ * setter stores (x64_objc_wrap_ret): a legacy target's SHADOW, a native one's
+ * proxy handle. A plain proxy handle for a legacy target breaks identity: the
+ * IMP's `sender == outlet` compare fails because the sender arrives as the
+ * shadow (Quinn's appearance prefs applied a piece style as the board
+ * background). Kill ABICONV_NO_OUTLET_SHADOW_ID; guard outlet-shadow-identity.
+ * Snapshotted for ivar_wb_flush so an IMP reassignment carries back to R. */
 static void push_own_object_ivars(uint8_t *sh, id real, Class c) {
+   const int no_shadow_id = KNOB("ABICONV_NO_OUTLET_SHADOW_ID") != NULL;
    struct own_ivars_ent *e = own_lookup(c);
    if (!e) { return; }
    for (uint32_t k = 0; k < e->n; ++k) {
@@ -8194,7 +8199,7 @@ static void push_own_object_ivars(uint8_t *sh, id real, Class c) {
       if (!mem_readable((uintptr_t)src, 8)) { continue; }
       uint64_t p; memcpy(&p, src, 8);
       if (!p) { continue; }                          /* not connected: leave shadow */
-      uint32_t val = x64_objc_wrap(p);
+      uint32_t val = no_shadow_id ? x64_objc_wrap(p) : x64_objc_wrap_ret(p);
       uint8_t *dst = sh + iv->i386_off;              /* S i386 slot (4B handle) */
       memcpy(dst, &val, 4);
       ivar_snap_push(src, dst, val, 'P', 4, 8, 0);

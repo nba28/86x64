@@ -54,6 +54,7 @@
 	MTSHIM	___shm_open,                 _shim_shm_open
 	MTSHIM	___ioctl,                    _shim_ioctl
 	MTSHIM	___tcgetattr,                _shim_tcgetattr
+	MTSHIM	____NSGetEnviron,            _shim_NSGetEnviron
 	MTSHIM	___tcsetattr,                _shim_tcsetattr
 	MTSHIM	___UCKeyTranslate,           _shim_UCKeyTranslate
 
@@ -1543,8 +1544,6 @@ _x64_exc_longjmp:
 	MTSHIM	___ConvertFromUnicodeToText,          _shim_ConvertFromUnicodeToText
 	MTSHIM	___c2pstrcpy,                         _shim_c2pstrcpy
 	MTSHIM	___p2cstrcpy,                         _shim_p2cstrcpy
-	; --- Python C-API name shim (py_shim.c) ---
-	MTSHIM	___Py_InitModule4,                    _shim_Py_InitModule4
 	; --- QuickTime Movie Toolbox init/teardown no-ops (quicktime_movie_shim.c) ---
 	MTSHIM	___EnterMovies,                      _shim_EnterMovies
 	MTSHIM	___EnterMoviesOnThread,              _shim_EnterMoviesOnThread

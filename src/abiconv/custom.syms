@@ -39,6 +39,7 @@ _vfprintf
 _vprintf
 _vasprintf
 ___vsnprintf_chk
+___vsprintf_chk
 
 _getloadavg
 _getgroups
@@ -955,10 +956,15 @@ _ATSFontGetName
 _ATSFontGetHorizontalMetrics
 _ATSFontActivateFromMemory
 # dir_shim.c / dir_tramp.asm — opendir/readdir/closedir: a low DIR wrapper and
-# the classic i386 struct dirent; scandir/alphasort also in the $INODE64 layout.
+# the classic i386 struct dirent; scandir/alphasort also in the $INODE64 layout,
+# and the $INODE64/$UNIX2003 opendir/readdir/closedir on the same wrapper.
 _opendir
 _readdir
 _closedir
+_opendir$INODE64
+_opendir$INODE64$UNIX2003
+_readdir$INODE64
+_closedir$UNIX2003
 _scandir
 _alphasort
 _scandir$INODE64

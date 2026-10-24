@@ -21,6 +21,7 @@
  * is needed. Generic to any i386 target.
  */
 
+#include <crt_externs.h>
 #include <stdint.h>
 #include <fcntl.h>
 #include <stdio.h>
@@ -1061,6 +1062,42 @@ uint32_t shim_tcsetattr(uint32_t *a) {
    memcpy(t.c_cc, i->c_cc, NCCS);
    t.c_ispeed = i->c_ispeed; t.c_ospeed = i->c_ospeed;
    return (uint32_t)tcsetattr((int)a[0], (int)a[1], &t);
+}
+
+/* ---- _NSGetEnviron: a low copy of the environment ---------------------------
+ * char ***_NSGetEnviron(void) returns &environ: a native char ** of native
+ * strings, all above 4GB once truncated. Python 2.6's posix module walks it to
+ * build os.environ (Civ IV, Init Python). The i386 caller gets a low slot that
+ * holds a low, NULL-terminated copy, built on the first call.
+ * ponytail: a snapshot; later setenv/putenv do not show up in it (getenv and
+ * setenv themselves stay native and live). Kill M64_NO_ENVIRON_SHIM: the
+ * truncated native pointer. Guard environ-low. */
+uint32_t shim_NSGetEnviron(uint32_t *a) {
+   static int raw = -1;
+   static uint32_t *slot;
+   (void)a;
+   if (raw < 0) raw = getenv("M64_NO_ENVIRON_SHIM") != NULL;
+   if (raw) return (uint32_t)(uintptr_t)_NSGetEnviron();
+   if (!slot) {
+      char **env = *_NSGetEnviron();
+      size_t n = 0;
+      while (env[n]) n++;
+      uint32_t *arr = malloc((n + 1) * sizeof *arr);       /* libabiconv malloc: low heap */
+      uint32_t *s = malloc(sizeof *s);
+      if (!arr || !s) { free(arr); free(s); return 0; }
+      size_t k = 0;
+      for (size_t i = 0; i < n; ++i) {
+         size_t len = strlen(env[i]) + 1;
+         char *c = malloc(len);
+         if (!c) break;
+         memcpy(c, env[i], len);
+         arr[k++] = (uint32_t)(uintptr_t)c;
+      }
+      arr[k] = 0;
+      *s = (uint32_t)(uintptr_t)arr;
+      slot = s;
+   }
+   return (uint32_t)(uintptr_t)slot;
 }
 
 /* ---- Code Fragment Manager: GetSharedLibrary / FindSymbol -------------------
