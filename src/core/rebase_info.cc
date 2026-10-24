@@ -1,3 +1,4 @@
+#include <cstdlib>
 #include <cassert>
 #include <string>
 #include <iostream>
@@ -124,7 +125,22 @@ namespace MachO {
          virtual void operator()(SectionBlob<bits> *blob2) override {
             auto imm = dynamic_cast<Immediate<bits> *>(blob2);
             if (imm) {
-               imm->pointee = env.add_placeholder(imm->value);
+               /* A target inside a data word (a byte table in __const that a
+                * pointer enters mid-word) has no blob of its own: its
+                * placeholder lands before the NEXT word, up to 3 bytes off
+                * (Python 2.6's grammar d_first bitsets -> "XXX ambiguity!",
+                * every parse a SyntaxError). The containing word + offset is
+                * exact. Kill M64_NO_REBASE_INTERIOR; guard rebase-interior. */
+               static const bool interior = std::getenv("M64_NO_REBASE_INTERIOR") == nullptr;
+               if (interior && (env.vmaddr_in_writable_data(imm->value) ||
+                                env.vmaddr_in_readonly_opaque_data(imm->value))) {
+                  imm->pointee = nullptr;
+                  env.vmaddr_resolver.resolve_containing(
+                     imm->value, (const SectionBlob<bits> **) &imm->pointee,
+                     &imm->pointee_offset);
+               } else {
+                  imm->pointee = env.add_placeholder(imm->value);
+               }
             }
          }
       };
