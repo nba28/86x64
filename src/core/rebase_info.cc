@@ -230,11 +230,13 @@ namespace MachO {
 
    template <Bits bits>
    void RebaseInfo<bits>::Emit(Image& img, std::size_t offset) const {
+      const std::size_t start = offset;
       for (RebaseNode<bits> *rebasee : rebasees) {
          rebasee->Emit(img, offset);
          offset += rebasee->size();
       }
-      if (!rebasees.empty()) {
+      /* as size(): an all-filtered list is 0 bytes, no DONE */
+      if (offset > start) {
          img.at<uint8_t>(offset) = REBASE_OPCODE_DONE;
       }
    }

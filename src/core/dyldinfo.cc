@@ -394,11 +394,13 @@ namespace MachO {
 
    template <Bits bits, bool lazy>
    void BindInfo<bits, lazy>::Emit(Image& img, std::size_t offset) const {
+      const std::size_t start = offset;
       for (BindNode<bits, lazy> *bindee : bindees) {
          bindee->Emit(img, offset);
          offset += bindee->size();
       }
-      if (!bindees.empty()) {
+      /* as size(): an all-filtered list is 0 bytes, no DONE */
+      if (offset > start) {
          img.at<uint8_t>(offset) = BIND_OPCODE_DONE;
       }
    }

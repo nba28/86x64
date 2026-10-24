@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdio>
 #include <string>
 
 #include "types.hh"
@@ -101,6 +102,11 @@ namespace MachO {
       }
       
       virtual StubExportNode<opposite<bits>> *Transform(TransformEnv<bits>& env) const override {
+         /* stuboff/resolveroff stay raw i386 offsets: not relocated with the
+          * code they name (no corpus image has a resolver export yet) */
+         fprintf(stderr, "warning: stub-and-resolver export (stub 0x%zx, resolver 0x%zx) "
+                 "keeps its i386 offsets; the translated export is stale\n",
+                 stuboff, resolveroff);
          return new StubExportNode<opposite<bits>>(*this, env);
       }
 

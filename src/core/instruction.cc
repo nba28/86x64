@@ -1263,9 +1263,21 @@ namespace MachO {
                env.resolve(imm->pointee, &mov_inst->memdisp);
                mov_inst->memdisp_offset = imm->pointee_offset;
                auto jmp_inst = new Instruction<Bits::M64>(opcode::jmp_r64(tgt));
-               if (!is_call) { return {mov_inst, jmp_inst}; }
+               /* MACHO_NULL_TRAP covers this form like its lower_mem sibling.
+                * Kill M64_NO_ABS_NULL_TRAP; guard rex-seg-null-trap. */
+               static const bool abs_trap = std::getenv("M64_NO_ABS_NULL_TRAP") == nullptr;
+               typename SectionBlob<Bits::M32>::SectionBlobs trap;
+               if (abs_trap) { trap = null_trap(tgt); }
+               if (!is_call) {
+                  typename SectionBlob<Bits::M32>::SectionBlobs insts = {mov_inst};
+                  insts.splice(insts.end(), trap);
+                  insts.push_back(jmp_inst);
+                  return insts;
+               }
                auto insts = call_op(jmp_inst);
-               insts.insert(std::prev(insts.end(), 2), mov_inst);
+               auto at_jmp = std::prev(insts.end(), 2);
+               insts.insert(at_jmp, mov_inst);
+               insts.splice(at_jmp, trap);
                return insts;
             } else {
                throw error("CALL/JMP_MEMv in M64 transform unreachable");
@@ -1389,6 +1401,15 @@ namespace MachO {
                    * `ff f5` = push ebp; found by the width guard in
                    * iPhoto) is the same operation — same rewrite. */
                   if (effective_width == 16) { break; }
+                  /* `push %esp` stores the value from BEFORE the decrement;
+                   * push_r32's store after the lea would push esp-4. Kill
+                   * M64_NO_PUSH_POP_ESP (also pop %esp); guard push-pop-esp. */
+                  static const bool push_pop_esp = std::getenv("M64_NO_PUSH_POP_ESP") == nullptr;
+                  if (reg0 == XED_REG_ESP && push_pop_esp) {
+                     auto insts = push_r32(XED_REG_R11D);
+                     insts.push_front(new Instruction<Bits::M64>(opcode_t{0x41, 0x89, 0xe3})); /* mov r11d,esp */
+                     return insts;
+                  }
                   return push_r32(reg0);
                }
 
@@ -1401,6 +1422,11 @@ namespace MachO {
                    * register operand is the same operation (sibling of
                    * PUSH_GPRv_FFr6). */
                   if (effective_width == 16) { break; }
+                  /* `pop %esp` loads esp from the slot; no increment after */
+                  static const bool push_pop_esp = std::getenv("M64_NO_PUSH_POP_ESP") == nullptr;
+                  if (reg0 == XED_REG_ESP && push_pop_esp) {
+                     return {new Instruction<Bits::M64>(opcode::mov_r32_mem_rsp(XED_REG_ESP))};
+                  }
                   return pop_r32(reg0);
                }
 
@@ -1617,7 +1643,15 @@ namespace MachO {
                   auto mov_inst = new Instruction<Bits::M64>(
                      opcode_t{0x48, 0x89, 0xe5});   /* mov rbp, rsp */
                   insts.push_back(mov_inst);
-                  if (frame_size != 0) {
+                  /* `enter` leaves EFLAGS alone; `sub` would not. Kill
+                   * M64_NO_ENTER_LEA; guard enter-flags. */
+                  static const bool enter_lea = std::getenv("M64_NO_ENTER_LEA") == nullptr;
+                  if (frame_size != 0 && enter_lea) {
+                     const uint32_t d = -frame_size;
+                     opcode_t lea_buf = {0x48, 0x8d, 0xa4, 0x24};   /* lea rsp,[rsp-imm] */
+                     opcode::push_back_imm<uint32_t>(lea_buf, d);
+                     insts.push_back(new Instruction<Bits::M64>(lea_buf));
+                  } else if (frame_size != 0) {
                      opcode_t sub_buf = {0x48, 0x81, 0xec,
                                          (uint8_t)(frame_size & 0xff),
                                          (uint8_t)((frame_size >> 8) & 0xff),
@@ -1867,14 +1901,20 @@ namespace MachO {
                const unsigned n_mem_ops =
                   xed_decoded_inst_number_of_memory_operands(&xedd);
                if (touches_stack_reg && n_mem_ops == 0) {
-                  /* Skip if already has a REX prefix (0x40..0x4F). */
+                  /* Skip if already has a REX prefix (0x40..0x4F). The REX
+                   * goes after EVERY legacy prefix, segment overrides too: a
+                   * `48 2e 89 ec` REX is ignored and the op stays 32-bit.
+                   * Kill M64_NO_REX_AFTER_SEG; guard rex-seg-null-trap. */
+                  static const bool rex_after_seg =
+                     std::getenv("M64_NO_REX_AFTER_SEG") == nullptr;
                   std::size_t prefix_end = 0;
                   while (prefix_end < instbuf.size() &&
-                         (instbuf[prefix_end] == 0x66 ||
-                          instbuf[prefix_end] == 0x67 ||
-                          instbuf[prefix_end] == 0xF0 ||
-                          instbuf[prefix_end] == 0xF2 ||
-                          instbuf[prefix_end] == 0xF3)) {
+                         (rex_after_seg ? is_legacy_prefix(instbuf[prefix_end])
+                                        : (instbuf[prefix_end] == 0x66 ||
+                                           instbuf[prefix_end] == 0x67 ||
+                                           instbuf[prefix_end] == 0xF0 ||
+                                           instbuf[prefix_end] == 0xF2 ||
+                                           instbuf[prefix_end] == 0xF3))) {
                      ++prefix_end;
                   }
                   const bool already_rex = prefix_end < instbuf.size() &&

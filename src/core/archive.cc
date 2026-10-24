@@ -989,8 +989,9 @@ namespace MachO {
          return;
       } else {
          /* Gate: only translated images that carry exception data. Keeps the
-          * section out of every non-C++ binary so the suite is unperturbed. */
-         bool has_eh = false;
+          * section out of every non-C++ binary so the suite is unperturbed.
+          * M64_FORCE_PCMAP=1 maps any image (differential tracing). */
+         bool has_eh = std::getenv("M64_FORCE_PCMAP") != nullptr;
          Section<b> *text = nullptr;
          Segment<b> *data_seg = segment(SEG_DATA);
          for (Segment<b> *seg : segments()) {
