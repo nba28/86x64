@@ -22,6 +22,7 @@
 #include "rebase_info.hh"  // RebaseInfo (synthesize_dyld_info)
 #include "export_info.hh"  // ExportInfo / RegularExportNode (synthesize_dyld_info)
 #include "lc.hh"           // DylibCommand (synthesize_dyld_info)
+#include "eh_frame.hh"     // __eh_frame / LSDA decoding (collect_eh_lsda_pairs)
 
 namespace MachO {
 
@@ -725,77 +726,6 @@ namespace MachO {
    }
 
    /* ---- C++ exception PC map + LSDA table (eh_shim.c) ---------------------- */
-   namespace {
-      struct CieInfo { bool has_aug=false, has_L=false, has_R=false; uint8_t L_enc=0, R_enc=0; };
-
-      uint32_t ehbuf_le32(const std::vector<uint8_t>& b, size_t o) {
-         return (uint32_t)b[o] | ((uint32_t)b[o+1]<<8) |
-                ((uint32_t)b[o+2]<<16) | ((uint32_t)b[o+3]<<24);
-      }
-      uint16_t ehbuf_le16(const std::vector<uint8_t>& b, size_t o) {
-         return (uint16_t)(b[o] | (b[o+1]<<8));
-      }
-      uint64_t eh_uleb(const std::vector<uint8_t>& b, size_t& o) {
-         uint64_t r=0; int s=0; uint8_t c;
-         do { c=b[o++]; r |= (uint64_t)(c&0x7f)<<s; s+=7; } while ((c&0x80) && o<b.size());
-         return r;
-      }
-      int64_t eh_sleb(const std::vector<uint8_t>& b, size_t& o) {
-         int64_t r=0; int s=0; uint8_t c;
-         do { c=b[o++]; r |= (int64_t)(c&0x7f)<<s; s+=7; } while ((c&0x80) && o<b.size());
-         if (s<64 && (c&0x40)) r |= -((int64_t)1<<s);
-         return r;
-      }
-      int eh_enc_size(uint8_t enc) {       /* fixed-size encodings (i386 absptr=4) */
-         switch (enc & 0x0f) {
-         case 0x00: case 0x03: case 0x0b: return 4;   /* absptr/udata4/sdata4 */
-         case 0x02: case 0x0a: return 2;              /* udata2/sdata2 */
-         case 0x04: case 0x0c: return 8;              /* udata8/sdata8 */
-         default: return -1;                          /* uleb/sleb -> variable */
-         }
-      }
-      /* Decode an EH-encoded value; field_vmaddr = vmaddr of its first byte.
-       * Returns false (skip) for omit / indirect / unsupported relativity. */
-      bool eh_read_encoded(const std::vector<uint8_t>& b, size_t& o, uint8_t enc,
-                           uint32_t field_vmaddr, uint32_t& out) {
-         if (enc == 0xff) return false;               /* DW_EH_PE_omit */
-         uint32_t raw;
-         switch (enc & 0x0f) {
-         case 0x00: case 0x03: raw = ehbuf_le32(b,o); o+=4; break;          /* absptr/udata4 */
-         case 0x0b: raw = ehbuf_le32(b,o); o+=4; break;                     /* sdata4 (2's-comp) */
-         case 0x02: raw = ehbuf_le16(b,o); o+=2; break;                     /* udata2 */
-         case 0x0a: raw = (uint32_t)(int16_t)ehbuf_le16(b,o); o+=2; break;  /* sdata2 */
-         case 0x01: raw = (uint32_t)eh_uleb(b,o); break;                    /* uleb */
-         case 0x09: raw = (uint32_t)eh_sleb(b,o); break;                    /* sleb */
-         default: return false;
-         }
-         if (enc & 0x80) return false;                /* indirect: can't deref here */
-         switch (enc & 0x70) {
-         case 0x10: out = field_vmaddr + raw; return true;   /* pcrel (raw 2's-comp) */
-         case 0x00: out = raw; return true;                  /* absptr */
-         default: return false;                              /* datarel/funcrel/etc. */
-         }
-      }
-      /* Does a well-formed GCC LSDA header start at gbuf[off]?  Used to snap the
-       * (drifted) FDE LSDA pointer to the real LSDA position. */
-      bool eh_lsda_valid_at(const std::vector<uint8_t>& gbuf, size_t off) {
-         if (off >= gbuf.size()) return false;
-         size_t p = off;
-         uint8_t lpenc = gbuf[p++];
-         if (lpenc != 0xff && (lpenc & 0x0f) > 0x0c) return false;
-         if (lpenc != 0xff) { int s = eh_enc_size(lpenc); if (s < 0) eh_uleb(gbuf, p); else p += s; }
-         if (p >= gbuf.size()) return false;
-         uint8_t ttenc = gbuf[p++];
-         if (ttenc != 0xff) { eh_uleb(gbuf, p); }            /* @TType base offset */
-         if (p >= gbuf.size()) return false;
-         uint8_t csenc = gbuf[p++];
-         if ((csenc & 0x0f) > 0x0c) return false;
-         if (p >= gbuf.size()) return false;
-         uint64_t cslen = eh_uleb(gbuf, p);
-         if (p + cslen > gbuf.size()) return false;          /* table must fit */
-         return cslen > 0;
-      }
-   } // namespace
 
    template <Bits b>
    void Archive<b>::collect_eh_lsda_pairs(const Archive<opposite<b>>& other) {
@@ -887,99 +817,44 @@ namespace MachO {
                }
             }
          }
-         std::map<size_t, CieInfo> cies;
-         size_t i = 0;
-         while (i + 4 <= buf.size()) {
-            const uint32_t len = ehbuf_le32(buf, i);
-            if (len == 0) { break; }                  /* terminator */
-            const size_t after_len = i + 4;
-            const size_t rec_end = after_len + len;
-            if (rec_end > buf.size()) { break; }
-            const uint32_t id = ehbuf_le32(buf, after_len);
-            if (id == 0) {                             /* CIE */
-               CieInfo ci;
-               size_t p = after_len + 4;
-               const uint8_t version = buf[p++];
-               std::string aug;
-               while (p < rec_end && buf[p] != 0) { aug.push_back((char)buf[p++]); }
-               if (p < rec_end) { p++; }               /* skip NUL */
-               ci.has_aug = (!aug.empty() && aug[0] == 'z');
-               eh_uleb(buf, p);                        /* code alignment factor */
-               eh_sleb(buf, p);                        /* data alignment factor */
-               if (version == 1) { p++; } else { eh_uleb(buf, p); } /* return reg */
-               if (ci.has_aug) {
-                  eh_uleb(buf, p);                     /* augmentation data length */
-                  for (size_t k = 1; k < aug.size(); k++) {
-                     switch (aug[k]) {
-                     case 'L': ci.L_enc = buf[p++]; ci.has_L = true; break;
-                     case 'R': ci.R_enc = buf[p++]; ci.has_R = true; break;
-                     case 'P': { uint8_t pe = buf[p++]; int sz = eh_enc_size(pe);
-                                 if (sz < 0) { eh_uleb(buf, p); } else { p += sz; } break; }
-                     case 'S': break;                  /* signal frame, no data */
-                     default: break;
-                     }
-                  }
-               }
-               cies[i] = ci;
-            } else {                                   /* FDE */
-               const size_t cie_off = (id <= after_len) ? after_len - id : SIZE_MAX;
-               auto it = cies.find(cie_off);
-               if (it != cies.end() && it->second.has_R) {
-                  const CieInfo& ci = it->second;
-                  size_t p = after_len + 4;            /* after CIE pointer */
-                  uint32_t pcbegin = 0;
-                  if (eh_read_encoded(buf, p, ci.R_enc, base + (uint32_t)p, pcbegin)) {
-                     int rsz = eh_enc_size(ci.R_enc);  /* skip pc-range */
-                     if (rsz < 0) { eh_uleb(buf, p); } else { p += rsz; }
-                     if (ci.has_aug) {
-                        eh_uleb(buf, p);               /* FDE aug data length */
-                        if (ci.has_L && gxt != nullptr) {
-                           uint32_t lsda = 0;
-                           if (eh_read_encoded(buf, p, ci.L_enc, base + (uint32_t)p, lsda) &&
-                               lsda != 0) {
-                              /* (1) region = disk-faithful orig of the func_entry
-                               * nearest (by post-Build vmaddr) to the drifted
-                               * pc-begin — the i386 function start the LSDA
-                               * offsets are relative to. */
-                              uint32_t region = 0; int64_t bestd = INT64_MAX;
-                              for (const auto& fs : func_starts) {
-                                 int64_t d = (int64_t)fs.first - (int64_t)pcbegin;
-                                 if (d < 0) d = -d;
-                                 if (d < bestd) { bestd = d; region = fs.second; }
-                              }
-                              /* (2) lsda_off = nearest position to the drifted
-                               * LSDA pointer whose LSDA header actually parses. */
-                              int32_t lsda_off = -1;
-                              const int32_t want = (int32_t)(lsda - gxt_base);
-                              /* Two passes: first only accept the nearest position
-                               * whose @LPStart-encoding is DW_EH_PE_omit (0xff) —
-                               * the overwhelmingly common GCC/clang form and a
-                               * strong anchor that rejects a false-positive parse a
-                               * few bytes inside the previous LSDA's type table;
-                               * fall back to any valid header otherwise. */
-                              for (int pass = 0; pass < 2 && lsda_off < 0; pass++) {
-                                 for (int32_t r = 0; r <= 16 && lsda_off < 0; r++) {
-                                    for (int sgn = 0; sgn < 2 && lsda_off < 0; sgn++) {
-                                       int32_t cand = want + (sgn ? -r : r);
-                                       if (cand < 0 || (size_t)cand >= gbuf.size()) continue;
-                                       if (!eh_lsda_valid_at(gbuf, (size_t)cand)) continue;
-                                       if (pass == 0 && gbuf[cand] != 0xff) continue;
-                                       lsda_off = cand;
-                                    }
-                                 }
-                              }
-                              if (bestd <= 96 && lsda_off >= 0) {
-                                 eh_lsda_pairs.emplace_back((size_t)region,
-                                                            (size_t)(uint32_t)lsda_off);
-                              }
-                           }
-                        }
-                     }
+         eh_for_each_fde(buf, base, [&](uint32_t pcbegin, bool has_lsda, uint32_t lsda) {
+            if (!has_lsda || gxt == nullptr) { return; }
+            /* (1) region = disk-faithful orig of the func_entry
+             * nearest (by post-Build vmaddr) to the drifted
+             * pc-begin — the i386 function start the LSDA
+             * offsets are relative to. */
+            uint32_t region = 0; int64_t bestd = INT64_MAX;
+            for (const auto& fs : func_starts) {
+               int64_t d = (int64_t)fs.first - (int64_t)pcbegin;
+               if (d < 0) d = -d;
+               if (d < bestd) { bestd = d; region = fs.second; }
+            }
+            /* (2) lsda_off = nearest position to the drifted
+             * LSDA pointer whose LSDA header actually parses. */
+            int32_t lsda_off = -1;
+            const int32_t want = (int32_t)(lsda - gxt_base);
+            /* Two passes: first only accept the nearest position
+             * whose @LPStart-encoding is DW_EH_PE_omit (0xff) —
+             * the overwhelmingly common GCC/clang form and a
+             * strong anchor that rejects a false-positive parse a
+             * few bytes inside the previous LSDA's type table;
+             * fall back to any valid header otherwise. */
+            for (int pass = 0; pass < 2 && lsda_off < 0; pass++) {
+               for (int32_t r = 0; r <= 16 && lsda_off < 0; r++) {
+                  for (int sgn = 0; sgn < 2 && lsda_off < 0; sgn++) {
+                     int32_t cand = want + (sgn ? -r : r);
+                     if (cand < 0 || (size_t)cand >= gbuf.size()) continue;
+                     if (!eh_lsda_valid_at(gbuf, (size_t)cand)) continue;
+                     if (pass == 0 && gbuf[cand] != 0xff) continue;
+                     lsda_off = cand;
                   }
                }
             }
-            i = rec_end;
-         }
+            if (bestd <= 96 && lsda_off >= 0) {
+               eh_lsda_pairs.emplace_back((size_t)region,
+                                          (size_t)(uint32_t)lsda_off);
+            }
+         });
       }
    }
 
