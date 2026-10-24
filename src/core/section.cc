@@ -452,6 +452,20 @@ namespace MachO {
          const unsigned len = xed_decoded_inst_get_length(&xd);
          return len > 1 && *ns < vmaddr + len;
       };
+      /* Data at the end of __text (an unclaimed table) can decode as an
+       * instruction running past the section: keep it a data byte rather than
+       * abort the translation. Kill M64_NO_TEXT_END_DATA; guard text-end-data. */
+      static const bool end_data = std::getenv("M64_NO_TEXT_END_DATA") == nullptr;
+      auto overruns_end = [&]() {
+         if (!end_data || env.jump_table_slots.count(vmaddr) != 0) { return false; }
+         xed_decoded_inst_t xd;
+         xed_decoded_inst_zero_set_mode(&xd, &Instruction<bits>::dstate());
+         xed_decoded_inst_set_input_chip(&xd, XED_CHIP_INVALID);
+         if (xed_decode(&xd, &img.at<uint8_t>(it), img.size() - it) != XED_ERROR_NONE) {
+            return false;
+         }
+         return it + xed_decoded_inst_get_length(&xd) > end;
+      };
 
       while (it != end) {
          SectionBlob<bits> *elem;
@@ -459,12 +473,19 @@ namespace MachO {
          /* Resync at 0x00 alignment padding after a terminator (stripped
           * images have no symbols to straddle): no compiler starts code with
           * `add [r/m8],r8`, and decoding `00 55 89 ...` would swallow the next
-          * function's `push %ebp` (Halo static-init crash). */
-         if (text && prev_no_fallthrough && img.at<uint8_t>(it) == 0x00 &&
+          * function's `push %ebp` (Halo static-init crash). A byte something
+          * already names -- a function symbol, or the target of an earlier
+          * branch -- is code: a block after a `ret` may start `addb %r8,%r8`
+          * (`00 c0`), and padding it desyncs the rest of the block. Kill
+          * M64_NO_PAD_KNOWN_CODE; guard pad-known-code. */
+         static const bool pad_known_code = std::getenv("M64_NO_PAD_KNOWN_CODE") == nullptr;
+         const bool known_code = pad_known_code &&
+            (env.func_syms.count(vmaddr) != 0 || env.placeholders.count(vmaddr) != 0);
+         if (text && prev_no_fallthrough && img.at<uint8_t>(it) == 0x00 && !known_code &&
              env.jump_table_slots.count(vmaddr) == 0) {
             elem = DataBlob<bits>::Parse(img, Location(it, vmaddr), env);
             emitted_padding = true;
-         } else if (text && straddles_symbol()) {
+         } else if (text && (straddles_symbol() || overruns_end())) {
             elem = DataBlob<bits>::Parse(img, Location(it, vmaddr), env);
          } else {
             elem = parser(img, Location(it, vmaddr), env);
@@ -601,9 +622,31 @@ namespace MachO {
       return false;
    }
 
+   /* The assembler's in-function alignment fillers rewrite a register with
+    * itself (`lea 0(%esi),%esi`, `lea 0(%esi,%eiz),%esi`, `mov %esi,%esi`):
+    * no write, or a PIC anchor in %esi dies at every aligned loop head.
+    * Kill M64_NO_IDENTITY_NOP; guard identity-nop-anchor. */
+   static bool identity_filler(const xed_decoded_inst_t& xedd) {
+      static const bool identity_nop = std::getenv("M64_NO_IDENTITY_NOP") == nullptr;
+      if (!identity_nop) { return false; }
+      const xed_iform_enum_t iform = xed_decoded_inst_get_iform_enum(&xedd);
+      const xed_reg_enum_t r0 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+      const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
+      if (is_gpr32(r0) && iform == XED_IFORM_LEA_GPRv_AGEN &&
+          xed_decoded_inst_get_base_reg(ops, 0) == r0 &&
+          xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID &&
+          xed_decoded_inst_get_memory_displacement(ops, 0) == 0) {
+         return true;
+      }
+      return is_gpr32(r0) && xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1) == r0 &&
+             (iform == XED_IFORM_MOV_GPRv_GPRv_89 || iform == XED_IFORM_MOV_GPRv_GPRv_8B ||
+              iform == XED_IFORM_XCHG_GPRv_GPRv);
+   }
+
    /* Every GPR32 the instruction writes, sub-register writes included. */
    template <typename F>
    static void for_each_written_gpr32(const xed_decoded_inst_t& xedd, F f) {
+      if (identity_filler(xedd)) { return; }
       const xed_inst_t *xi = xed_decoded_inst_inst(&xedd);
       for (unsigned i = 0; i < xed_inst_noperands(xi); ++i) {
          const xed_operand_t *op = xed_inst_operand(xi, i);
@@ -1628,8 +1671,19 @@ namespace MachO {
          prev_cat = XED_CATEGORY_INVALID; prev_call0 = false; orphan = false; prev_tcall = false;
          /* An intra-function edge from `at`: a forward target stays pending
           * and joins this state there; a backward one joins on the second walk. */
+         /* An orphan's forward edge records no snapshot, but its target is
+          * still this function: a `ret` before it must not end the walk's
+          * state (`jmp *%esi` into a block that jumps over a `ret` to a
+          * dispatch lost its anchor). Kill M64_NO_JT_ORPHAN_PENDING; guard
+          * jt-orphan-pending. */
+         static const bool orphan_pending = std::getenv("M64_NO_JT_ORPHAN_PENDING") == nullptr;
          auto join_edge = [&](std::size_t at, std::size_t tgt, bool forward) {
-            if (orphan) { return; }
+            if (orphan) {
+               if (orphan_pending && forward && tgt < sect_hi && tgt - at <= 0x10000) {
+                  pending_targets.insert(tgt);
+               }
+               return;
+            }
             if (forward && tgt < sect_hi && tgt - at <= 0x10000) {
                pending_targets.insert(tgt);
                snapshot_for(anchor_snap, tgt, anchors);
@@ -1871,11 +1925,22 @@ namespace MachO {
                   }
                }
             } else if (iform == XED_IFORM_ADD_GPRv_GPRv_01 || iform == XED_IFORM_ADD_GPRv_GPRv_03) {
-               /* `add %t,%anchor`: the entry becomes a case target */
+               /* `add %t,%anchor`: the entry becomes a case target. clang -O0
+                * adds the other way, `add %anchor,%t` then `jmp *%anchor`.
+                * Kill M64_NO_JT_ADD_SWAP; guard jt-add-swap. */
+               static const bool add_swap = std::getenv("M64_NO_JT_ADD_SWAP") == nullptr;
+               const xed_reg_enum_t src = jt_norm32(xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1));
                auto tv = tbl_val.find(reg0);
-               auto a = anchors.find(jt_norm32(xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1)));
+               auto a = anchors.find(src);
+               auto ts = tbl_val.find(src);
+               auto ad = anchors.find(reg0);
                if (tv != tbl_val.end() && a != anchors.end()) {
                   tv->second.second = a->second;
+                  sets_state = true;
+               } else if (add_swap && ts != tbl_val.end() && ts->second.second == 0 &&
+                          ad != anchors.end()) {
+                  tbl_val[reg0] = { ts->second.first, ad->second };
+                  tbl_addr.erase(reg0);
                   sets_state = true;
                }
             } else if (iform == XED_IFORM_JMP_GPRv) {
