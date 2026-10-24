@@ -159,7 +159,11 @@ def undefined_natives(lib):
         if not s:
             continue
         name = s[-1]
-        if name.startswith("_") and not name.startswith("__"):
+        # C names that begin with '_' count too (__PyType_Lookup: Civ IV's Python
+        # C-API calls went into a NULL-jump bridge the list never named).
+        # Kill M64_NO_NULLJUMP_UNDERSCORE; guard nulljump-underscore.
+        if name.startswith("_") and (not name.startswith("__") or
+                                     not os.environ.get("M64_NO_NULLJUMP_UNDERSCORE")):
             got.add(name)
     return got
 
