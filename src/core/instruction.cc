@@ -1087,6 +1087,34 @@ namespace MachO {
          }
       }
 
+      /* `add/adc $T-anchor,%t` with %t = anchor + X (DetectPicAnchoredDispsCfg):
+       * the translated anchor holds its translated return address, so %t gets
+       * T' - anchor'. Both rip-relative, so later stages' re-layout rebinds them
+       * (a raw difference would go stale); the flags are dead.
+       *    [adc $0,%t] ; lea r11,[rip+T] ; add %r11d,%t ; lea r11,[rip+A] ; sub %r11d,%t */
+      if (imm && imm->pointee && imm->minus) {
+         const auto t = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+         auto lea_to = [&](const SectionBlob<bits> *blob, std::size_t off) {
+            auto *lea = new Instruction<opposite<bits>>(opcode::lea_r11_mem_rip_disp32());
+            lea->memidx = 0;
+            env.resolve(blob, &lea->memdisp);
+            lea->memdisp_offset = off;
+            return lea;
+         };
+         typename SectionBlob<bits>::SectionBlobs out;
+         const auto iform = xed_decoded_inst_get_iform_enum(&xedd);
+         if (iform == XED_IFORM_ADC_GPRv_IMMz || iform == XED_IFORM_ADC_OrAX_IMMz) {
+            opcode_t carry(instbuf.begin(), instbuf.end());
+            std::fill(carry.end() - 4, carry.end(), 0);
+            out.push_back(new Instruction<opposite<bits>>(carry));
+         }
+         out.push_back(lea_to(imm->pointee, imm->pointee_offset));
+         out.push_back(new Instruction<opposite<bits>>(opcode::add_r32_r11d(t)));
+         out.push_back(lea_to(imm->minus, 0));
+         out.push_back(new Instruction<opposite<bits>>(opcode::sub_r32_r11d(t)));
+         return out;
+      }
+
       if (imm && imm->pointee) {
          /* The immediate names something in this image. i386 carried the
           * address as a literal; x86_64 computes it rip-relative so it tracks

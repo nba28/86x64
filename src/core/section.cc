@@ -1663,6 +1663,7 @@ namespace MachO {
       using Slot = std::pair<xed_reg_enum_t, ssize_t>;   /* (frame base, disp) */
       struct State {
          std::map<xed_reg_enum_t, std::size_t> anchors;   /* reg -> anchor vmaddr */
+         std::map<xed_reg_enum_t, std::size_t> plus;      /* reg = anchor + a non-address */
          std::map<Slot, std::size_t> slots;                /* frame slot -> anchor */
          /* frame slots holding a register's FUNCTION-ENTRY value: stores
           * before the anchor pop, promoted by it, demoted by a later store */
@@ -1671,7 +1672,7 @@ namespace MachO {
          bool region = false;     /* PIC codegen seen: cancels the absolute heuristics */
          bool past_ret = false;   /* a landing pad after the final ret */
          bool operator==(const State& o) const {
-            return anchors == o.anchors && slots == o.slots && pre_saves == o.pre_saves &&
+            return anchors == o.anchors && plus == o.plus && slots == o.slots && pre_saves == o.pre_saves &&
                    entry_saves == o.entry_saves && wild == o.wild && region == o.region &&
                    past_ret == o.past_ret;
          }
@@ -1688,6 +1689,7 @@ namespace MachO {
             if ((a.wild & wbit(r)) != 0) { a.anchors.emplace(r, v); }
          }
          a.wild &= b.wild;
+         intersect_into(a.plus, b.plus);
          intersect_into(a.slots, b.slots);
          intersect_into(a.pre_saves, b.pre_saves);
          intersect_into(a.entry_saves, b.entry_saves);
@@ -1704,6 +1706,8 @@ namespace MachO {
       static const bool xchg_swap = std::getenv("M64_NO_PIC_ANCHOR_XCHG") == nullptr;
       static const bool call_adopt = std::getenv("M64_NO_PIC_ANCHOR_CALL_ADOPT") == nullptr;
       static const bool noreturn_gate = std::getenv("M64_NO_PIC_NORETURN") == nullptr;
+      /* ANCHOR + IMMEDIATE (below). Kill M64_NO_PIC_ANCHOR_IMM; guard pic-anchor-imm. */
+      static const bool anchor_imm = std::getenv("M64_NO_PIC_ANCHOR_IMM") == nullptr;
 
       std::vector<Instruction<bits> *> ins;
       std::vector<char> after_data;   /* interleaved data precedes ins[k] */
@@ -2076,6 +2080,39 @@ namespace MachO {
          const std::size_t xa_anchor = is_xchg ? anchor_of(xa) : 0;
          const std::size_t xb_anchor = is_xchg ? anchor_of(xb) : 0;
 
+         /* `anchor + X` (see ANCHOR + IMMEDIATE below), judged before the writes */
+         xed_reg_enum_t plus_dst = XED_REG_INVALID;
+         std::size_t plus_anchor = 0;
+         if (anchor_imm) {
+            auto pa = [&](xed_reg_enum_t r) -> std::size_t {
+               if (auto a = s.anchors.find(r); a != s.anchors.end()) { return a->second; }
+               auto p = s.plus.find(r);
+               return p == s.plus.end() ? 0 : p->second;
+            };
+            const xed_reg_enum_t r0 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+            const xed_reg_enum_t r1 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1);
+            const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
+            if (iform == XED_IFORM_LEA_GPRv_AGEN && inst->instbuf[0] == 0x8D && is_gpr32(r0) &&
+                xed_decoded_inst_get_memory_displacement_width(ops, 0) < sizeof(uint32_t)) {
+               /* lea d8(%a,%i,s): a disp32 form is anchored itself, and an
+                * index-less one is an anchor-derived base (PicDerivedBases) */
+               const xed_reg_enum_t b = xed_decoded_inst_get_base_reg(ops, 0);
+               const xed_reg_enum_t i = xed_decoded_inst_get_index_reg(ops, 0);
+               if (is_gpr32(b) && pa(b) != 0 && is_gpr32(i) && pa(i) == 0) {
+                  plus_dst = r0;
+                  plus_anchor = pa(b);
+               }
+            } else if ((iform == XED_IFORM_ADD_GPRv_GPRv_01 || iform == XED_IFORM_ADD_GPRv_GPRv_03) &&
+                       is_gpr32(r0) && is_gpr32(r1) && (pa(r0) == 0) != (pa(r1) == 0)) {
+               plus_dst = r0;
+               plus_anchor = pa(r0) != 0 ? pa(r0) : pa(r1);
+            } else if ((iform == XED_IFORM_MOV_GPRv_GPRv_89 || iform == XED_IFORM_MOV_GPRv_GPRv_8B) &&
+                       is_gpr32(r0) && s.plus.count(r1) != 0) {
+               plus_dst = r0;
+               plus_anchor = s.plus.at(r1);
+            }
+            for_each_written_gpr32(xedd, [&](xed_reg_enum_t r) { s.plus.erase(r); });
+         }
          /* Any other definition of a register ends its anchor, except a pop
           * (the epilogue restores that leave the landing pads their anchors). */
          if (!is_anchor_pop && cat != XED_CATEGORY_POP && !s.anchors.empty()) {
@@ -2096,6 +2133,7 @@ namespace MachO {
                else { s.anchors.erase(mdst); }
             }
          }
+         if (plus_dst != XED_REG_INVALID && s.anchors.count(plus_dst) == 0) { s.plus[plus_dst] = plus_anchor; }
          if (final_walk) { derived.after(inst); }
 
          /* int3 is transparent; other traps end everything. */
@@ -2108,6 +2146,7 @@ namespace MachO {
          } else if (cat == XED_CATEGORY_CALL && !is_pic_call_zero) {
             for (const xed_reg_enum_t r : {XED_REG_EAX, XED_REG_ECX, XED_REG_EDX}) {
                s.anchors.erase(r);
+               s.plus.erase(r);
                if (call_adopt) { s.wild |= wbit(r); }
             }
          }
@@ -2167,6 +2206,80 @@ namespace MachO {
       };
       if (!solve()) { return false; }
 
+      /* ANCHOR + IMMEDIATE: LLVM folds the anchor-relative offset of the data
+       * into an ALU immediate, so no displacement names it:
+       *    lea (%anchor,%i,4),%t ; add $T-anchor,%t           &table[i] (fuzz _t26)
+       *    mov %anchor,%t        ; adc $T-anchor,%t           &g[cond]  (fuzz _t38)
+       *    mov %anchor,%t ; add %i,%t ; add $T-anchor,%t      &g[i]     (fuzz _t20)
+       * %t holds `anchor + X` (State::plus; X no address), and the translated
+       * anchor register holds the translated return address, so the immediate
+       * becomes T' - anchor' (Immediate::minus) and %t = T' + X as in i386.
+       * Only when T is data and nothing reads the arithmetic's flags. */
+      constexpr unsigned STATUS = 0x8D5;   /* CF PF AF ZF SF OF */
+      auto flags_dead = [&](std::size_t j, std::size_t end) {
+         for (; j < end; ++j) {
+            const xed_simple_flag_t *f = xed_decoded_inst_get_rflags_info(&ins[j]->xedd);
+            if (f != nullptr && (xed_flag_set_mask(xed_simple_flag_get_read_flag_set(f)) & STATUS)) {
+               return false;
+            }
+            const xed_category_enum_t c = cat_of(j);
+            if (c == XED_CATEGORY_CALL || c == XED_CATEGORY_RET) { return true; }
+            if (f != nullptr && xed_simple_flag_get_must_write(f) &&
+                ((xed_flag_set_mask(xed_simple_flag_get_written_flag_set(f)) |
+                  xed_flag_set_mask(xed_simple_flag_get_undefined_flag_set(f))) & STATUS) == STATUS) {
+               return true;
+            }
+         }
+         return false;   /* the successor may read them */
+      };
+      auto anchor_relative_imm = [&](const State& s, std::size_t k, std::size_t end) {
+         Instruction<bits> *op = ins[k];
+         const xed_decoded_inst_t& x = op->xedd;
+         switch (xed_decoded_inst_get_iform_enum(&x)) {
+         case XED_IFORM_ADD_GPRv_IMMz: case XED_IFORM_ADD_OrAX_IMMz:
+         case XED_IFORM_ADC_GPRv_IMMz: case XED_IFORM_ADC_OrAX_IMMz:
+            break;
+         default:
+            return;
+         }
+         const xed_reg_enum_t t = xed_decoded_inst_get_reg(&x, XED_OPERAND_REG0);
+         if (!is_gpr32(t) || xed_decoded_inst_get_operand_width(&x) != 32 ||
+             xed_decoded_inst_get_immediate_width(&x) != sizeof(uint32_t)) {
+            return;
+         }
+         std::size_t a = 0;
+         if (auto it = s.anchors.find(t); it != s.anchors.end()) { a = it->second; }
+         else if (auto it = s.plus.find(t); it != s.plus.end()) { a = it->second; }
+         const std::size_t target = a + (std::size_t)(ssize_t)xed_decoded_inst_get_signed_immediate(&x);
+         if (a == 0 || !(env.vmaddr_in_writable_data(target) || env.vmaddr_in_readonly_opaque_data(target)) ||
+             !flags_dead(k + 1, end)) {
+            return;
+         }
+         SectionBlob<bits> *tb = env.add_placeholder(target);
+         if (tb == nullptr) { return; }
+         if (op->imm == nullptr) {
+            uint32_t raw;
+            std::memcpy(&raw, &op->instbuf[op->instbuf.size() - sizeof raw], sizeof raw);
+            op->imm = Immediate<bits>::Create(raw);
+         } else if (op->imm->pointee != nullptr) {   /* the parser's pointer guess */
+            env.vmaddr_resolver.cancel((std::size_t)op->imm->value,
+                                       (const SectionBlob<bits> **)&op->imm->pointee);
+            env.vmaddr_resolver.cancel_containing((std::size_t)op->imm->value,
+                                                  (const SectionBlob<bits> **)&op->imm->pointee);
+         }
+         op->imm->heuristic = false;
+         op->imm->pointee = tb;
+         op->imm->pointee_offset = 0;
+         env.vmaddr_resolver.resolve_containing(target, (const SectionBlob<bits> **)&op->imm->pointee,
+                                                &op->imm->pointee_offset, /*override=*/true);
+         env.vmaddr_resolver.resolve(a, (const SectionBlob<bits> **)&op->imm->minus);
+         if (trace) {
+            fprintf(stderr, "[anchor] inst=0x%zx imm=%s anchor=0x%zx target=0x%zx iform=%s\n",
+                    (size_t)op->loc.vmaddr, xed_reg_enum_t2str(t), a, target,
+                    xed_iform_enum_t2str(xed_decoded_inst_get_iform_enum(&x)));
+         }
+      };
+
       /* ---- the rewrite ---- */
       for (std::size_t b = 0; b < nb; ++b) {
          State s = block_in(b).value_or(State{});
@@ -2190,7 +2303,10 @@ namespace MachO {
          if (!(preds[b].size() == 1 && preds[b][0] + 1 == b && stale[b] == NONE && eh_preds[b].empty())) {
             derived.clear();
          }
-         for (std::size_t k = bstart[b]; k < bstart[b + 1]; ++k) { step(s, k, true); }
+         for (std::size_t k = bstart[b]; k < bstart[b + 1]; ++k) {
+            if (anchor_imm) { anchor_relative_imm(s, k, bstart[b + 1]); }
+            step(s, k, true);
+         }
       }
       if (trace) {
          fprintf(stderr, "[anchor] cfg %s: %zu blocks, %zu visits\n", name().c_str(), nb, visits);

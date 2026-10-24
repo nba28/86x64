@@ -254,6 +254,11 @@ namespace MachO {
        * false-positive rate of the probe is catastrophic. Set at the
        * heuristic Immediate::Parse call sites in instruction.cc. */
       bool heuristic = false;
+      /*!< Anchor-relative (i386 only): the immediate is pointee - minus, the
+       * distance from a PIC anchor (the instruction a `call` returned to) to
+       * the data; Instruction::Transform adds that distance rip-relative
+       * (DetectPicAnchoredDispsCfg). */
+      const SectionBlob<bits> *minus = nullptr;
       virtual std::size_t size() const override { return sizeof(uint32_t); }
       
       static Immediate<bits> *Parse(const Image& img, const Location& loc, ParseEnv<bits>& env,
