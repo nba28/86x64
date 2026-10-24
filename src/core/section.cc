@@ -12,6 +12,7 @@
 #include <utility>
 #include <unordered_map>
 #include <unordered_set>
+#include <memory>
 
 #include "section.hh"
 #include "segment.hh"
@@ -22,6 +23,7 @@
 #include "instruction.hh"
 #include "stub_helper.hh"
 #include "archive.hh"
+#include "eh_frame.hh"
 #include "segment.hh"
 
 namespace MachO {
@@ -539,7 +541,7 @@ namespace MachO {
          vmaddr += step;
       }
 
-      DetectPicAnchoredDisps(env);
+      DetectPicAnchoredDisps(img, env);
       env.current_section = nullptr;
    }
 
@@ -674,12 +676,305 @@ namespace MachO {
       return false;
    }
 
+   /* GCC PIC thunks `mov (%esp),%reg; ret`: entry vmaddr -> %reg. Thunks
+    * in other sections come from the symbol table (env.pic_thunks). */
    template <Bits bits>
-   void Section<bits>::DetectPicAnchoredDisps(ParseEnv<bits>& env) {
+   static std::unordered_map<std::size_t, xed_reg_enum_t>
+   pic_find_thunks(const std::list<SectionBlob<bits> *>& content, const ParseEnv<bits>& env) {
+      std::unordered_map<std::size_t, xed_reg_enum_t> pic_thunks;
+      Instruction<bits> *mov = nullptr;
+      for (SectionBlob<bits> *blob : content) {
+         auto *cur = dynamic_cast<Instruction<bits> *>(blob);
+         if (mov && cur &&
+             xed_decoded_inst_get_category(&cur->xedd) == XED_CATEGORY_RET) {
+            const xed_reg_enum_t dst =
+               xed_decoded_inst_get_reg(&mov->xedd, XED_OPERAND_REG0);
+            if (is_gpr32(dst)) {
+               pic_thunks[mov->loc.vmaddr] = dst;
+            }
+         }
+         mov = nullptr;
+         if (cur &&
+             xed_decoded_inst_get_iform_enum(&cur->xedd) == XED_IFORM_MOV_GPRv_MEMv) {
+            const xed_operand_values_t *mops = xed_decoded_inst_operands_const(&cur->xedd);
+            if (xed_decoded_inst_number_of_memory_operands(&cur->xedd) == 1 &&
+                xed_decoded_inst_get_base_reg(mops, 0) == XED_REG_ESP &&
+                xed_decoded_inst_get_index_reg(mops, 0) == XED_REG_INVALID &&
+                xed_decoded_inst_get_memory_displacement(mops, 0) == 0) {
+               mov = cur;
+            }
+         }
+      }
+      for (const auto& kv : env.pic_thunks) {
+         const xed_reg_enum_t r = gpr32_from_enc(kv.second);
+         if (r != XED_REG_INVALID) { pic_thunks.emplace(kv.first, r); }
+      }
+      return pic_thunks;
+   }
+
+   /* Resolve an anchored operand, before the instruction's own writes are
+    * applied (so `mov disp(%ebx),%ebx` still resolves). The anchor may be
+    * the SIB base, or — at scale 1, the fields being symmetric — the index
+    * (`lea 0xa4b0(%eax,%edi),%edx`; Portal 2 libsteam_api). An anchored
+    * target overrides the parser's absolute-table guess. `anchor_of(r)` is
+    * the anchor %r holds, 0 for none. Returns the anchor register used. */
+   template <Bits bits, typename AnchorOf>
+   static xed_reg_enum_t pic_rewrite_operand(Instruction<bits> *inst, ParseEnv<bits>& env,
+                                             AnchorOf anchor_of, bool trace) {
+      if (inst->memdisp != nullptr && !inst->memdisp_absolute) { return XED_REG_INVALID; }
+      const xed_decoded_inst_t& xedd = inst->xedd;
+      const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
+      const unsigned nops = xed_decoded_inst_noperands(&xedd);
+      for (unsigned i = 0; i < nops; ++i) {
+         const xed_reg_enum_t basereg = xed_decoded_inst_get_base_reg(ops, i);
+         const xed_reg_enum_t indexreg = xed_decoded_inst_get_index_reg(ops, i);
+         if (!is_gpr32(basereg)) continue;
+         bool anchor_is_index = false;
+         xed_reg_enum_t anchor_reg = basereg;
+         if (anchor_of(basereg) == 0) {
+            if (!is_gpr32(indexreg) || anchor_of(indexreg) == 0) continue;
+            if (xed_decoded_inst_get_scale(ops, i) != 1) continue;
+            if (basereg == XED_REG_ESP) continue;   /* can't become a SIB index */
+            anchor_is_index = true;
+            anchor_reg = indexreg;
+         } else if (indexreg != XED_REG_INVALID) {
+            /* a second anchor in the index is ambiguous */
+            if (!is_gpr32(indexreg) || anchor_of(indexreg) != 0) continue;
+         }
+         if (xed_decoded_inst_get_memory_displacement_width(ops, i) != sizeof(uint32_t)) continue;
+
+         const ssize_t disp = xed_decoded_inst_get_memory_displacement(ops, i);
+         const std::size_t target = anchor_of(anchor_reg) + disp;
+         if (trace) {
+            fprintf(stderr, "[anchor] inst=0x%zx %s=%s anchor=0x%zx disp=0x%zx target=0x%zx iform=%s\n",
+                    (size_t)inst->loc.vmaddr, anchor_is_index ? "index" : "base",
+                    xed_reg_enum_t2str(anchor_reg), (size_t)anchor_of(anchor_reg),
+                    (size_t)disp, (size_t)target,
+                    xed_iform_enum_t2str(xed_decoded_inst_get_iform_enum(&xedd)));
+         }
+         SectionBlob<bits> *target_blob = env.add_placeholder(target);
+         if (target_blob == nullptr) continue;
+
+         /* the parser's pending resolves of the raw disp would overwrite us */
+         env.vmaddr_resolver.cancel((std::size_t)disp,
+                                    (const SectionBlob<bits> **)&inst->memdisp);
+         env.vmaddr_resolver.cancel_containing((std::size_t)disp,
+                                               (const SectionBlob<bits> **)&inst->memdisp);
+         inst->memidx = i;
+         inst->memdisp = target_blob;
+         inst->pic_anchored = true;
+         inst->pic_anchor_in_index = anchor_is_index;
+         inst->memdisp_absolute = false;
+         /* an interior byte of opaque data binds to blob + offset (guard
+          * 97_pic_const_interior_field) */
+         if (env.vmaddr_in_writable_data(target) ||
+             env.vmaddr_in_readonly_opaque_data(target)) {
+            env.vmaddr_resolver.resolve_containing(
+               target, (const SectionBlob<bits> **)&inst->memdisp,
+               &inst->memdisp_offset, /*override=*/true);
+         }
+         return anchor_reg;
+      }
+      return XED_REG_INVALID;
+   }
+
+   /* PIC region: cancel the absolute-address heuristics (a pointer
+    * immediate, or a `disp32(%base)` table capture on a non-anchor base).
+    * Portal 2 `movl $0x1000,4(%esp)` (a size) aliased low __TEXT; guard
+    * 96_zerofill_common_interior. */
+   template <Bits bits>
+   static void pic_cancel_absolute(Instruction<bits> *inst, ParseEnv<bits>& env) {
+      if (inst->imm != nullptr && inst->imm->heuristic) {
+         env.vmaddr_resolver.cancel((std::size_t)inst->imm->value,
+                                    (const SectionBlob<bits> **)&inst->imm->pointee);
+         env.vmaddr_resolver.cancel_containing((std::size_t)inst->imm->value,
+                                               (const SectionBlob<bits> **)&inst->imm->pointee);
+         inst->imm->pointee = nullptr;
+      }
+      if (inst->memdisp_absolute && !inst->pic_anchored) {
+         const xed_operand_values_t *mops = xed_decoded_inst_operands_const(&inst->xedd);
+         if (xed_decoded_inst_get_base_reg(mops, inst->memidx) != XED_REG_INVALID) {
+            const ssize_t mdisp = xed_decoded_inst_get_memory_displacement(mops, inst->memidx);
+            env.vmaddr_resolver.cancel((std::size_t)mdisp,
+                                       (const SectionBlob<bits> **)&inst->memdisp);
+            env.vmaddr_resolver.cancel_containing((std::size_t)mdisp,
+                                                  (const SectionBlob<bits> **)&inst->memdisp);
+            inst->memdisp = nullptr;
+            inst->memdisp_offset = 0;
+            inst->memdisp_absolute = false;
+         }
+      }
+   }
+
+   /* ANCHOR-DERIVED BASES: clang selects between two addresses off one
+    * anchor and folds the common displacement into the use:
+    *    lea 0x38(%edi),%eax ; cmovge %edi,%eax ; cvttsd2si 0x267ff(%eax),%eax
+    * %eax is "anchor + c" for a c known only per path, so no single
+    * rip-relative target exists for the use, and its raw disp32 reached the
+    * wrong data (the translated anchor sits at another distance from it).
+    * Each PRODUCER of the register (the `lea c(%anchor)`, the anchor source
+    * of the cmov) becomes the exact address its first use reaches,
+    * T(anchor + c + D), and every use's disp D becomes D - D_first. All rip
+    * operands then land on real data, so later re-parses rebind them.
+    * Straight-line only (the caller clears it at joins, calls and dead
+    * flow); the first walk of an i386 section only. Kill
+    * M64_NO_PIC_DERIVED_BASE; guard pic-derived-base. */
+   template <Bits bits>
+   struct PicDerivedBases {
+      struct Producer { Instruction<bits> *inst; ssize_t c; bool cmov; };
+      struct Derived { std::size_t anchor; std::vector<Producer> prods; ssize_t dref = 0; bool bound = false; };
+      std::unordered_map<xed_reg_enum_t, std::shared_ptr<Derived>> derived;
+      std::shared_ptr<Derived> derived_new;
+      xed_reg_enum_t derived_dst = XED_REG_INVALID;
+
+      static bool on() {
+         static const bool derived_on = std::getenv("M64_NO_PIC_DERIVED_BASE") == nullptr;
+         return derived_on;
+      }
+
+      void clear() { derived.clear(); }
+
+      /* The derived base `inst` produces, judged on the state before its
+       * own write (applied by after()), and the rewrite of a derived use. */
+      template <typename AnchorOf>
+      void before(Instruction<bits> *inst, ParseEnv<bits>& env, AnchorOf anchor_of, bool trace) {
+         derived_new = nullptr;
+         derived_dst = XED_REG_INVALID;
+         const xed_decoded_inst_t& xedd = inst->xedd;
+         const xed_iform_enum_t iform = xed_decoded_inst_get_iform_enum(&xedd);
+         const xed_category_enum_t cat = xed_decoded_inst_get_category(&xedd);
+         {
+            const xed_reg_enum_t r0 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+            const xed_reg_enum_t r1 = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1);
+            const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
+            if (iform == XED_IFORM_LEA_GPRv_AGEN && is_gpr32(r0) && inst->instbuf[0] == 0x8D &&
+                inst->memdisp == nullptr &&
+                xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID &&
+                xed_decoded_inst_get_memory_displacement_width(ops, 0) <= 1) {
+               const std::size_t a = anchor_of(xed_decoded_inst_get_base_reg(ops, 0));
+               if (a != 0) {
+                  derived_new = std::make_shared<Derived>();
+                  derived_new->anchor = a;
+                  derived_new->prods.push_back(
+                     {inst, (ssize_t)xed_decoded_inst_get_memory_displacement(ops, 0), false});
+                  derived_dst = r0;
+               }
+            } else if (cat == XED_CATEGORY_CMOV && is_gpr32(r0) && is_gpr32(r1) &&
+                       inst->instbuf.size() == 3 && inst->instbuf[0] == 0x0F) {
+               auto d = derived.find(r0);
+               const std::size_t a = anchor_of(r1);
+               auto ds = derived.find(r1);
+               if (d != derived.end() && !d->second->bound) {
+                  if (a != 0 && a == d->second->anchor) {
+                     derived_new = d->second;   /* the anchor source joins its producers */
+                     derived_new->prods.push_back({inst, 0, true});
+                     derived_dst = r0;
+                  } else if (ds != derived.end() && !ds->second->bound &&
+                             ds->second->anchor == d->second->anchor) {
+                     derived_new = std::make_shared<Derived>(*d->second);
+                     derived_new->prods.insert(derived_new->prods.end(),
+                                               ds->second->prods.begin(), ds->second->prods.end());
+                     derived_dst = r0;
+                  }
+               }
+            } else if ((iform == XED_IFORM_MOV_GPRv_GPRv_89 || iform == XED_IFORM_MOV_GPRv_GPRv_8B) &&
+                       is_gpr32(r0) && r0 != r1 && derived.count(r1) != 0) {
+               derived_new = derived[r1];
+               derived_dst = r0;
+            }
+         }
+
+         /* A use of an anchor-derived base. */
+         if (derived.empty() ||
+             xed_decoded_inst_number_of_memory_operands(&xedd) < 1 ||   /* call/push add the stack */
+             !(inst->memdisp == nullptr || inst->memdisp_absolute) || inst->pic_anchored) {
+            return;
+         }
+         const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
+         const xed_reg_enum_t b = xed_decoded_inst_get_base_reg(ops, 0);
+         const xed_reg_enum_t x = xed_decoded_inst_get_index_reg(ops, 0);
+         auto d = derived.find(b);
+         if (d == derived.end() || anchor_of(b) != 0 ||
+             !(x == XED_REG_INVALID || (derived.count(x) == 0 && anchor_of(x) == 0)) ||
+             xed_decoded_inst_get_memory_displacement_width(ops, 0) != sizeof(uint32_t)) {
+            return;
+         }
+         Derived& dv = *d->second;
+         const ssize_t D = xed_decoded_inst_get_memory_displacement(ops, 0);
+         const ssize_t dref = dv.bound ? dv.dref : D;
+         bool ok = true;
+         for (const auto& p : dv.prods) {
+            const std::size_t t = (std::size_t)((ssize_t)dv.anchor + p.c + D);
+            const std::size_t tr = (std::size_t)((ssize_t)dv.anchor + p.c + dref);
+            ok = ok && (env.vmaddr_in_writable_data(t) || env.vmaddr_in_readonly_opaque_data(t)) &&
+                 (env.vmaddr_in_writable_data(tr) || env.vmaddr_in_readonly_opaque_data(tr));
+         }
+         if (ok && !dv.bound) {
+            for (auto& p : dv.prods) {
+               const std::size_t t = (std::size_t)((ssize_t)dv.anchor + p.c + D);
+               SectionBlob<bits> *tb = env.add_placeholder(t);
+               if (tb == nullptr) { ok = false; break; }
+               p.inst->memdisp = tb;
+               p.inst->memdisp_offset = 0;
+               p.inst->memdisp_absolute = false;
+               env.vmaddr_resolver.resolve_containing(
+                  t, (const SectionBlob<bits> **)&p.inst->memdisp,
+                  &p.inst->memdisp_offset, /*override=*/true);
+               if (p.cmov) {
+                  p.inst->select_anchor_src = true;
+               } else {
+                  p.inst->memidx = 0;
+                  p.inst->pic_anchored = true;
+                  p.inst->pic_anchor_in_index = false;
+               }
+            }
+            dv.bound = ok;
+            dv.dref = D;
+         }
+         if (ok && dv.bound) {
+            if (inst->memdisp != nullptr) {
+               env.vmaddr_resolver.cancel((std::size_t)D, (const SectionBlob<bits> **)&inst->memdisp);
+               env.vmaddr_resolver.cancel_containing((std::size_t)D,
+                                                     (const SectionBlob<bits> **)&inst->memdisp);
+            }
+            inst->memdisp = nullptr;
+            inst->memdisp_offset = 0;
+            inst->memdisp_absolute = false;
+            inst->set_mem_disp32((int32_t)(D - dv.dref));
+            if (trace) {
+               fprintf(stderr, "[anchor] derived use 0x%zx %s anchor=0x%zx disp 0x%zx -> 0x%zx\n",
+                       (size_t)inst->loc.vmaddr, xed_reg_enum_t2str(b), dv.anchor,
+                       (size_t)D, (size_t)(D - dv.dref));
+            }
+         } else if (!ok) {
+            fprintf(stderr, "warning: anchor-derived base %s at 0x%zx reaches no data "
+                    "for every producer; its disp stays raw\n",
+                    xed_reg_enum_t2str(b), (size_t)inst->loc.vmaddr);
+         }
+      }
+
+      /* After the instruction's register writes. */
+      void after(const Instruction<bits> *inst) {
+         if (derived.empty() && !derived_new) { return; }
+         for_each_written_gpr32(inst->xedd, [&](xed_reg_enum_t r) { derived.erase(r); });
+         if (derived_new) { derived[derived_dst] = derived_new; }
+         if (xed_decoded_inst_get_category(&inst->xedd) == XED_CATEGORY_CALL) { derived.clear(); }
+         derived_new = nullptr;
+      }
+   };
+
+   template <Bits bits>
+   void Section<bits>::DetectPicAnchoredDisps(const Image& img, ParseEnv<bits>& env) {
       if constexpr (bits != Bits::M32) {
          return;
       }
       if (parser != TextParser) {
+         return;
+      }
+      /* The CFG walk below replaces this linear one. Kill M64_NO_PIC_CFG;
+       * guard pic-cfg-fixpoint. */
+      static const bool cfg_walk = std::getenv("M64_NO_PIC_CFG") == nullptr;
+      if (cfg_walk && DetectPicAnchoredDispsCfg(img, env)) {
          return;
       }
 
@@ -712,7 +1007,14 @@ namespace MachO {
       static const bool pad_respill = std::getenv("M64_NO_PIC_PAD_RESPILL") == nullptr;
       bool past_ret = false;
 
+      PicDerivedBases<bits> derived;   /* cleared at joins, calls and dead flow */
+      auto anchor_of = [&](xed_reg_enum_t r) -> std::size_t {
+         auto it = anchors.find(r);
+         return it == anchors.end() ? 0 : it->second;
+      };
+
       auto clear_all = [&]() {
+         derived.clear();
          anchors.clear();
          anchor_slots.clear();
          entry_save_slots.clear();
@@ -720,38 +1022,7 @@ namespace MachO {
          anchored_region = false;
       };
 
-      /* GCC PIC thunks `mov (%esp),%reg; ret`: entry vmaddr -> %reg. Thunks
-       * in other sections come from the symbol table (env.pic_thunks). */
-      std::unordered_map<std::size_t, xed_reg_enum_t> pic_thunks;
-      {
-         Instruction<bits> *mov = nullptr;
-         for (SectionBlob<bits> *blob : content) {
-            auto *cur = dynamic_cast<Instruction<bits> *>(blob);
-            if (mov && cur &&
-                xed_decoded_inst_get_category(&cur->xedd) == XED_CATEGORY_RET) {
-               const xed_reg_enum_t dst =
-                  xed_decoded_inst_get_reg(&mov->xedd, XED_OPERAND_REG0);
-               if (is_gpr32(dst)) {
-                  pic_thunks[mov->loc.vmaddr] = dst;
-               }
-            }
-            mov = nullptr;
-            if (cur &&
-                xed_decoded_inst_get_iform_enum(&cur->xedd) == XED_IFORM_MOV_GPRv_MEMv) {
-               const xed_operand_values_t *mops = xed_decoded_inst_operands_const(&cur->xedd);
-               if (xed_decoded_inst_number_of_memory_operands(&cur->xedd) == 1 &&
-                   xed_decoded_inst_get_base_reg(mops, 0) == XED_REG_ESP &&
-                   xed_decoded_inst_get_index_reg(mops, 0) == XED_REG_INVALID &&
-                   xed_decoded_inst_get_memory_displacement(mops, 0) == 0) {
-                  mov = cur;
-               }
-            }
-         }
-      }
-      for (const auto& kv : env.pic_thunks) {
-         const xed_reg_enum_t r = gpr32_from_enc(kv.second);
-         if (r != XED_REG_INVALID) { pic_thunks.emplace(kv.first, r); }
-      }
+      const auto pic_thunks = pic_find_thunks(content, env);
 
       /* Backward branches (a loop back-edge; a dispatch block placed BEFORE
        * the code that reloads its anchor and branches back to it) snapshot
@@ -931,6 +1202,7 @@ namespace MachO {
                   (last_flow_cat == XED_CATEGORY_RET ||
                    last_flow_cat == XED_CATEGORY_UNCOND_BR || ft_dead);
                const bool no_fallthrough = unreached || orphan || dead_edge;
+               if (no_fallthrough || env.func_syms.count(inst->loc.vmaddr) != 0) { derived.clear(); }
                /* `unreached` is the dead edge from the noreturn call into the
                 * first real instruction after it, nothing more: kept sticky, it
                 * leaked through a stripped image's next function (no symbol to
@@ -957,6 +1229,7 @@ namespace MachO {
                   }
                }
                if (snap != branch_anchor_snap.end()) {
+                  derived.clear();   /* straight-line state only */
                   unreached = false;
                   /* a recorded edge reaches here: the code is live, so a CALL
                    * opening this block must not leave ft_dead sticky (that made
@@ -1095,89 +1368,20 @@ namespace MachO {
                   }
                }
             }
-            if (!anchors.empty() && (inst->memdisp == nullptr || inst->memdisp_absolute)) {
-               const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
-               const unsigned nops = xed_decoded_inst_noperands(&xedd);
-               for (unsigned i = 0; i < nops; ++i) {
-                  const xed_reg_enum_t basereg = xed_decoded_inst_get_base_reg(ops, i);
-                  const xed_reg_enum_t indexreg = xed_decoded_inst_get_index_reg(ops, i);
-                  if (!is_gpr32(basereg)) continue;
-                  bool anchor_is_index = false;
-                  xed_reg_enum_t anchor_reg = basereg;
-                  if (anchors.find(basereg) == anchors.end()) {
-                     if (!is_gpr32(indexreg) || anchors.find(indexreg) == anchors.end()) continue;
-                     if (xed_decoded_inst_get_scale(ops, i) != 1) continue;
-                     if (basereg == XED_REG_ESP) continue;   /* can't become a SIB index */
-                     anchor_is_index = true;
-                     anchor_reg = indexreg;
-                  } else if (indexreg != XED_REG_INVALID) {
-                     /* a second anchor in the index is ambiguous */
-                     if (!is_gpr32(indexreg) || anchors.find(indexreg) != anchors.end()) continue;
-                  }
-                  if (xed_decoded_inst_get_memory_displacement_width(ops, i) != sizeof(uint32_t)) continue;
-
-                  const ssize_t disp = xed_decoded_inst_get_memory_displacement(ops, i);
-                  const std::size_t target = anchors[anchor_reg] + disp;
-                  if (trace) {
-                     fprintf(stderr, "[anchor] inst=0x%zx %s=%s anchor=0x%zx disp=0x%zx target=0x%zx iform=%s\n",
-                             (size_t)inst->loc.vmaddr, anchor_is_index ? "index" : "base",
-                             xed_reg_enum_t2str(anchor_reg), (size_t)anchors[anchor_reg],
-                             (size_t)disp, (size_t)target, xed_iform_enum_t2str(iform));
-                  }
-                  SectionBlob<bits> *target_blob = env.add_placeholder(target);
-                  if (target_blob == nullptr) continue;
-
-                  /* the parser's pending resolves of the raw disp would overwrite us */
-                  env.vmaddr_resolver.cancel((std::size_t)disp,
-                                             (const SectionBlob<bits> **)&inst->memdisp);
-                  env.vmaddr_resolver.cancel_containing((std::size_t)disp,
-                                                        (const SectionBlob<bits> **)&inst->memdisp);
-                  inst->memidx = i;
-                  inst->memdisp = target_blob;
-                  inst->pic_anchored = true;
-                  inst->pic_anchor_in_index = anchor_is_index;
-                  inst->memdisp_absolute = false;
-                  if (orphan_revert && orphan && pass == 0 &&
-                      orphan_written.count(anchor_reg) == 0) {   /* straight from the stale state */
-                     orphan_rewrites[inst->loc.vmaddr] = {anchor_reg, anchors[anchor_reg], orphan_top};
-                  }
-                  /* an interior byte of opaque data binds to blob + offset (guard
-                   * 97_pic_const_interior_field) */
-                  if (env.vmaddr_in_writable_data(target) ||
-                      env.vmaddr_in_readonly_opaque_data(target)) {
-                     env.vmaddr_resolver.resolve_containing(
-                        target, (const SectionBlob<bits> **)&inst->memdisp,
-                        &inst->memdisp_offset, /*override=*/true);
-                  }
-                  break;
+            if (!anchors.empty()) {
+               const xed_reg_enum_t anchor_reg = pic_rewrite_operand(inst, env, anchor_of, trace);
+               if (anchor_reg != XED_REG_INVALID && orphan_revert && orphan && pass == 0 &&
+                   orphan_written.count(anchor_reg) == 0) {   /* straight from the stale state */
+                  orphan_rewrites[inst->loc.vmaddr] = {anchor_reg, anchors[anchor_reg], orphan_top};
                }
             }
 
-            /* PIC region: cancel the absolute-address heuristics (a pointer
-             * immediate, or a `disp32(%base)` table capture on a non-anchor base).
-             * Portal 2 `movl $0x1000,4(%esp)` (a size) aliased low __TEXT; guard
-             * 96_zerofill_common_interior. */
+            if (PicDerivedBases<bits>::on() && pass == 0) {
+               derived.before(inst, env, anchor_of, trace);
+            }
+
             if (!anchors.empty() || anchored_region) {
-               if (inst->imm != nullptr && inst->imm->heuristic) {
-                  env.vmaddr_resolver.cancel((std::size_t)inst->imm->value,
-                                             (const SectionBlob<bits> **)&inst->imm->pointee);
-                  env.vmaddr_resolver.cancel_containing((std::size_t)inst->imm->value,
-                                                        (const SectionBlob<bits> **)&inst->imm->pointee);
-                  inst->imm->pointee = nullptr;
-               }
-               if (inst->memdisp_absolute && !inst->pic_anchored) {
-                  const xed_operand_values_t *mops = xed_decoded_inst_operands_const(&xedd);
-                  if (xed_decoded_inst_get_base_reg(mops, inst->memidx) != XED_REG_INVALID) {
-                     const ssize_t mdisp = xed_decoded_inst_get_memory_displacement(mops, inst->memidx);
-                     env.vmaddr_resolver.cancel((std::size_t)mdisp,
-                                                (const SectionBlob<bits> **)&inst->memdisp);
-                     env.vmaddr_resolver.cancel_containing((std::size_t)mdisp,
-                                                           (const SectionBlob<bits> **)&inst->memdisp);
-                     inst->memdisp = nullptr;
-                     inst->memdisp_offset = 0;
-                     inst->memdisp_absolute = false;
-                  }
-               }
+               pic_cancel_absolute(inst, env);
             }
 
             /* Frame-slot spill/reload (`mov %reg,disp(%ebp|%esp)` and back). */
@@ -1280,6 +1484,8 @@ namespace MachO {
                }
             }
 
+            derived.after(inst);
+
             /* Forward targets at or behind us are reached (or were never real). */
             pending_forward_targets.erase(pending_forward_targets.begin(),
                                           pending_forward_targets.upper_bound(inst->loc.vmaddr));
@@ -1377,6 +1583,619 @@ namespace MachO {
             prev_inst = inst;
          }
       }
+   }
+
+   /* The exception call sites of the functions in [lo, hi), from the image's
+    * __eh_frame and __gcc_except_tab (libsteam has two of the latter): range
+    * start -> (range end, landing pad). */
+   template <Bits bits>
+   static std::map<std::size_t, std::pair<std::size_t, std::size_t>>
+   pic_eh_call_sites(const Image& img, ParseEnv<bits>& env, std::size_t lo, std::size_t hi) {
+      std::map<std::size_t, std::pair<std::size_t, std::size_t>> sites;
+      const section_t<bits> *ehf = nullptr;
+      std::vector<const section_t<bits> *> gxts;
+      for (Segment<bits> *seg : env.archive.segments()) {
+         for (Section<bits> *s : seg->sections) {
+            if (s->name() == "__eh_frame") { ehf = &s->sect; }
+            else if (s->name() == "__gcc_except_tab") { gxts.push_back(&s->sect); }
+         }
+      }
+      auto bytes = [&](const section_t<bits> *sc) {
+         if (sc->offset + sc->size > img.size()) { return std::vector<uint8_t>(); }
+         const uint8_t *p = &img.at<uint8_t>(sc->offset);
+         return std::vector<uint8_t>(p, p + sc->size);
+      };
+      if (ehf == nullptr || gxts.empty()) { return sites; }
+      const std::vector<uint8_t> ebuf = bytes(ehf);
+      std::vector<std::vector<uint8_t>> gbufs;
+      for (const auto *g : gxts) { gbufs.push_back(bytes(g)); }
+      eh_for_each_fde(ebuf, (uint32_t)ehf->addr, [&](uint32_t func, bool has_lsda, uint32_t lsda) {
+         if (!has_lsda || func < lo || func >= hi) { return; }
+         for (std::size_t i = 0; i < gxts.size(); ++i) {
+            const section_t<bits>& g = *gxts[i];
+            if (lsda < g.addr || lsda >= g.addr + gbufs[i].size()) { continue; }
+            eh_for_each_call_site(gbufs[i], lsda - g.addr, (uint32_t)g.addr, func,
+                                  [&](uint32_t start, uint32_t len, uint32_t lp) {
+               if (lp != 0) { sites[start] = {(std::size_t)start + len, lp}; }
+            });
+         }
+      });
+      return sites;
+   }
+
+   /*
+    * The anchor walk as a dataflow fixpoint over the section's control-flow
+    * graph (the default; M64_NO_PIC_CFG=1 runs the linear two-pass walk
+    * above, whose comments describe the per-instruction rules shared here).
+    *
+    * The linear walk ran each block on the state of the code physically
+    * before it, so a block entered only by a branch the walk had not reached
+    * yet, or a loop body whose back edge was snapshotted on the first pass,
+    * ran on a state missing an anchor, and the loss reached every later join:
+    * clang -O2 spilled the anchor on one path, reloaded it before a join and
+    * carried it around a loop, and every anchored access in the loop kept its
+    * raw i386 disp.
+    *
+    * Here the basic blocks (leaders: function symbols, branch and claimed
+    * jump-table case targets, the instruction after a branch, ret or
+    * noreturn call, code after interleaved data) carry MUST states (reg ->
+    * anchor, frame slot -> anchor, entry-save slots), start optimistic
+    * (unvisited = no constraint) and iterate to the greatest fixpoint; one
+    * final walk then rewrites each block from its fixpoint entry state.
+    *
+    *  - Edges stay inside a function: never into a function symbol (a tail
+    *    call), no back edge over one, branches within 64 KB. Function
+    *    entries nothing falls into, the section start and code after data
+    *    start empty. Calls are not edges.
+    *  - A call's fall-through holds nothing in eax/ecx/edx, so at a join
+    *    those registers take the other edges' anchors (CALL_ADOPT).
+    *  - A block no edge reaches (EH landing pads, indirect targets) starts
+    *    from the state of the code before it: after a `ret`, the
+    *    callee-saved anchors the unwinder restores and the frame slots (pad
+    *    respill); after a jmp or noreturn call, all of it. Alignment fillers
+    *    and trap calls after a ret/jmp feed no fall-through.
+    *
+    * Returns false, before any rewrite, if the iteration does not settle
+    * (the caller then runs the linear walk).
+    */
+   template <Bits bits>
+   bool Section<bits>::DetectPicAnchoredDispsCfg(const Image& img, ParseEnv<bits>& env) {
+      using Slot = std::pair<xed_reg_enum_t, ssize_t>;   /* (frame base, disp) */
+      struct State {
+         std::map<xed_reg_enum_t, std::size_t> anchors;   /* reg -> anchor vmaddr */
+         std::map<Slot, std::size_t> slots;                /* frame slot -> anchor */
+         /* frame slots holding a register's FUNCTION-ENTRY value: stores
+          * before the anchor pop, promoted by it, demoted by a later store */
+         std::map<Slot, xed_reg_enum_t> pre_saves, entry_saves;
+         unsigned wild = 0;       /* eax/ecx/edx after a call: no constraint at a join */
+         bool region = false;     /* PIC codegen seen: cancels the absolute heuristics */
+         bool past_ret = false;   /* a landing pad after the final ret */
+         bool operator==(const State& o) const {
+            return anchors == o.anchors && slots == o.slots && pre_saves == o.pre_saves &&
+                   entry_saves == o.entry_saves && wild == o.wild && region == o.region &&
+                   past_ret == o.past_ret;
+         }
+      };
+      auto wbit = [](xed_reg_enum_t r) { return 1u << (r - XED_REG_EAX); };
+      auto meet = [&](State& a, const State& b) {
+         for (auto it = a.anchors.begin(); it != a.anchors.end(); ) {
+            auto o = b.anchors.find(it->first);
+            const bool keep = o != b.anchors.end() ? o->second == it->second
+                                                   : (b.wild & wbit(it->first)) != 0;
+            it = keep ? std::next(it) : a.anchors.erase(it);
+         }
+         for (const auto& [r, v] : b.anchors) {
+            if ((a.wild & wbit(r)) != 0) { a.anchors.emplace(r, v); }
+         }
+         a.wild &= b.wild;
+         intersect_into(a.slots, b.slots);
+         intersect_into(a.pre_saves, b.pre_saves);
+         intersect_into(a.entry_saves, b.entry_saves);
+         a.region = a.region || b.region;
+         a.past_ret = a.past_ret && b.past_ret;
+      };
+
+      const bool trace = std::getenv("MACHO_TRACE_ANCHOR") != nullptr;
+      static const bool entry_save_gate = std::getenv("M64_NO_PIC_ANCHOR_ENTRY_SAVE") == nullptr;
+      static const bool slots_past_ret = std::getenv("M64_NO_PIC_SLOTS_PAST_RET") == nullptr;
+      static const bool pad_respill = std::getenv("M64_NO_PIC_PAD_RESPILL") == nullptr;
+      static const bool post_ret_body = std::getenv("M64_NO_PIC_POST_RET_BODY") == nullptr;
+      static const bool slot_write_kill = std::getenv("M64_NO_PIC_SLOT_WRITE_KILL") == nullptr;
+      static const bool xchg_swap = std::getenv("M64_NO_PIC_ANCHOR_XCHG") == nullptr;
+      static const bool call_adopt = std::getenv("M64_NO_PIC_ANCHOR_CALL_ADOPT") == nullptr;
+      static const bool noreturn_gate = std::getenv("M64_NO_PIC_NORETURN") == nullptr;
+
+      std::vector<Instruction<bits> *> ins;
+      std::vector<char> after_data;   /* interleaved data precedes ins[k] */
+      {
+         bool data = false;
+         for (SectionBlob<bits> *blob : content) {
+            if (auto *in = dynamic_cast<Instruction<bits> *>(blob)) {
+               ins.push_back(in);
+               after_data.push_back(data);
+               data = false;
+            } else if (dynamic_cast<JumpTableEntry<bits> *>(blob) == nullptr) {
+               data = true;   /* an inline PIC jump table shares its function's anchor */
+            }
+         }
+      }
+      const std::size_t n = ins.size();
+      const auto pic_thunks = pic_find_thunks(content, env);
+      const std::set<std::size_t>& fs = env.func_syms;
+      const auto sect_sym = fs.lower_bound(sect.addr);
+      const bool sect_func_syms = sect_sym != fs.end() && *sect_sym < sect.addr + sect.size;
+
+      auto cat_of = [&](std::size_t k) { return xed_decoded_inst_get_category(&ins[k]->xedd); };
+      auto is_func = [&](std::size_t k) { return fs.count(ins[k]->loc.vmaddr) != 0; };
+      auto is_pad = [&](std::size_t k) {
+         const xed_category_enum_t c = cat_of(k);
+         return c == XED_CATEGORY_NOP || c == XED_CATEGORY_WIDENOP || identity_filler(ins[k]->xedd);
+      };
+      /* `call $+0; pop %reg` establishes an anchor */
+      auto anchor_pop = [&](std::size_t k) {
+         return k > 0 && !after_data[k] &&
+                xed_decoded_inst_get_iform_enum(&ins[k]->xedd) == XED_IFORM_POP_GPRv_58 &&
+                ins[k - 1]->instbuf == opcode_t{0xe8, 0x00, 0x00, 0x00, 0x00} &&
+                is_gpr32(xed_decoded_inst_get_reg(&ins[k]->xedd, XED_OPERAND_REG0));
+      };
+      /* `call get_pc_thunk.<r>` leaves %r = the next instruction */
+      auto thunk_of = [&](std::size_t k, std::size_t *after) {
+         const xed_decoded_inst_t& x = ins[k]->xedd;
+         if (cat_of(k) != XED_CATEGORY_CALL) { return XED_REG_INVALID; }
+         const ssize_t d = xed_decoded_inst_get_branch_displacement(&x);
+         if (d == 0) { return XED_REG_INVALID; }
+         *after = ins[k]->loc.vmaddr + xed_decoded_inst_get_length(&x);
+         auto t = pic_thunks.find(*after + d);
+         return t == pic_thunks.end() ? XED_REG_INVALID : t->second;
+      };
+      {
+         bool any = false;
+         std::size_t vm;
+         for (std::size_t k = 0; k < n && !any; ++k) {
+            any = anchor_pop(k) || thunk_of(k, &vm) != XED_REG_INVALID;
+         }
+         if (!any) { return true; }
+      }
+
+      /* ---- the graph ---- */
+      std::unordered_map<std::size_t, std::size_t> at;   /* vmaddr -> instruction */
+      at.reserve(n);
+      for (std::size_t k = 0; k < n; ++k) { at.emplace(ins[k]->loc.vmaddr, k); }
+      auto edge_to = [&](std::size_t from, std::size_t tgt, bool ranged) -> std::optional<std::size_t> {
+         if (tgt < sect.addr || tgt >= sect.addr + sect.size) { return std::nullopt; }
+         if (ranged && (tgt > from ? tgt - from : from - tgt) > 0x10000) { return std::nullopt; }
+         if (fs.count(tgt) != 0) { return std::nullopt; }   /* a tail call */
+         if (tgt < from && !pic_same_function(fs, tgt, from)) { return std::nullopt; }
+         auto it = at.find(tgt);
+         if (it == at.end()) { return std::nullopt; }
+         return it->second;
+      };
+      auto for_targets = [&](std::size_t k, auto f) {
+         const xed_decoded_inst_t& x = ins[k]->xedd;
+         const xed_category_enum_t c = cat_of(k);
+         const std::size_t vm = ins[k]->loc.vmaddr;
+         if ((c == XED_CATEGORY_COND_BR || c == XED_CATEGORY_UNCOND_BR) &&
+             xed_decoded_inst_get_branch_displacement_width(&x) != 0) {
+            const std::size_t tgt = vm + xed_decoded_inst_get_length(&x) +
+                                    xed_decoded_inst_get_branch_displacement(&x);
+            if (auto t = edge_to(vm, tgt, true)) { f(*t); }
+         }
+         auto jt = env.pic_switch_targets.find(vm);
+         if (jt != env.pic_switch_targets.end()) {
+            for (const std::size_t tgt : jt->second) {
+               if (auto t = edge_to(vm, tgt, false)) { f(*t); }
+            }
+         }
+      };
+      auto call_target = [&](std::size_t k) {
+         const xed_decoded_inst_t& x = ins[k]->xedd;
+         return (std::size_t)(ins[k]->loc.vmaddr + xed_decoded_inst_get_length(&x) +
+                              xed_decoded_inst_get_branch_displacement(&x));
+      };
+      /* A local function that runs straight into a noreturn call never
+       * returns either: clang's __clang_call_terminate, unnamed in a stripped
+       * image (Angry Birds 0x7840 `call ___cxa_begin_catch; call
+       * std::terminate`), ends EH pads that would fall into the code after. */
+      std::unordered_map<std::size_t, bool> local_noreturn;
+      auto noreturn_fn = [&](std::size_t tgt) {
+         if (env.noreturn_stubs.count(tgt) != 0) { return true; }
+         auto memo = local_noreturn.find(tgt);
+         if (memo != local_noreturn.end()) { return memo->second; }
+         bool nr = false;
+         auto it = at.find(tgt);
+         for (std::size_t k = it == at.end() ? n : it->second, i = 0; k < n && i < 32; ++k, ++i) {
+            const xed_category_enum_t c = cat_of(k);
+            if (c == XED_CATEGORY_CALL && env.noreturn_stubs.count(call_target(k)) != 0) { nr = true; break; }
+            if (c == XED_CATEGORY_RET || c == XED_CATEGORY_UNCOND_BR || c == XED_CATEGORY_COND_BR ||
+                (k > it->second && is_func(k))) {
+               break;
+            }
+         }
+         return local_noreturn[tgt] = nr;
+      };
+      auto stops = [&](std::size_t k) {   /* no fall-through */
+         const xed_category_enum_t c = cat_of(k);
+         if (c == XED_CATEGORY_RET || c == XED_CATEGORY_UNCOND_BR) { return true; }
+         return noreturn_gate && c == XED_CATEGORY_CALL && !fs.empty() && noreturn_fn(call_target(k));
+      };
+
+      /* A call inside an exception call-site range has an edge to its
+       * landing pad: the unwinder enters the pad with the call's frame and
+       * callee-saved registers. Kill M64_NO_PIC_EH_EDGES; guard pic-eh-edges. */
+      static const bool eh_edges = std::getenv("M64_NO_PIC_EH_EDGES") == nullptr;
+      std::vector<std::size_t> eh_pad(n, SIZE_MAX);   /* call -> its landing pad instruction */
+      if (eh_edges) {
+         const auto sites = pic_eh_call_sites(img, env, sect.addr, sect.addr + sect.size);
+         std::size_t bad = 0;
+         for (std::size_t k = 0; k < n && !sites.empty(); ++k) {
+            const std::size_t vm = ins[k]->loc.vmaddr;
+            auto r = sites.upper_bound(vm);
+            if (cat_of(k) != XED_CATEGORY_CALL || r == sites.begin()) { continue; }
+            /* a C library call, a PIC thunk or `call $+0` never unwinds; clang
+             * merges the call-site ranges around them (libtogl
+             * D3DToGL::Handle_TEX: %ebx = strchr's result at one) */
+            const xed_decoded_inst_t& x = ins[k]->xedd;
+            std::size_t thunk_after;
+            if (env.nothrow_stubs.count(vm + xed_decoded_inst_get_length(&x) +
+                                        xed_decoded_inst_get_branch_displacement(&x)) != 0 ||
+                thunk_of(k, &thunk_after) != XED_REG_INVALID ||
+                (k + 1 < n && anchor_pop(k + 1))) {
+               continue;
+            }
+            --r;
+            if (vm >= r->second.first) { continue; }
+            auto lp = at.find(r->second.second);
+            if (lp == at.end()) { ++bad; continue; }
+            eh_pad[k] = lp->second;
+         }
+         if (bad != 0) {
+            fprintf(stderr, "warning: section %s: %zu exception call sites name a landing pad "
+                    "that is no instruction; their pads keep the stale-state rule\n",
+                    name().c_str(), bad);
+         }
+      }
+
+      std::vector<char> lead(n, 0), filler(n, 0);
+      if (n != 0) { lead[0] = 1; }
+      for (std::size_t k = 0; k < n; ++k) {
+         if (after_data[k] || is_func(k)) { lead[k] = 1; }
+         for_targets(k, [&](std::size_t t) { lead[t] = 1; });
+         const xed_category_enum_t c = cat_of(k);
+         if (k + 1 < n && (c == XED_CATEGORY_COND_BR || stops(k) || eh_pad[k] != SIZE_MAX ||
+                           env.pic_switch_targets.count(ins[k]->loc.vmaddr) != 0)) {
+            lead[k + 1] = 1;
+         }
+         if (eh_pad[k] != SIZE_MAX) { lead[eh_pad[k]] = 1; }
+         if (k + 1 < n && stops(k)) {
+            /* alignment, and the noreturn-trap idiom `ret; call
+             * ___stack_chk_fail` (a call does not revive a dead fall-through;
+             * guard 99_pic_anchor_ret_call_dead) */
+            std::size_t j = k + 1;
+            for (; j < n && !after_data[j] && !is_func(j) && (is_pad(j) || cat_of(j) == XED_CATEGORY_CALL); ++j) {
+               filler[j] = 1;
+            }
+            if (j < n) { lead[j] = 1; }
+         }
+      }
+      std::vector<std::size_t> bstart, blk(n);
+      for (std::size_t k = 0; k < n; ++k) {
+         if (lead[k]) { bstart.push_back(k); }
+         blk[k] = bstart.size() - 1;
+      }
+      const std::size_t nb = bstart.size();
+      bstart.push_back(n);
+      constexpr std::size_t NONE = SIZE_MAX;
+      std::vector<std::vector<std::size_t>> succs(nb), preds(nb), eh_succs(nb), eh_preds(nb);
+      std::vector<char> root(nb, 0);
+      for (std::size_t b = 0; b < nb; ++b) {
+         const std::size_t k = bstart[b];
+         root[b] = b == 0 || after_data[k];
+         for_targets(bstart[b + 1] - 1, [&](std::size_t t) {
+            succs[b].push_back(blk[t]);
+            preds[blk[t]].push_back(b);
+         });
+         if (eh_pad[bstart[b + 1] - 1] != SIZE_MAX) {
+            const std::size_t pb = blk[eh_pad[bstart[b + 1] - 1]];
+            eh_succs[b].push_back(pb);
+            eh_preds[pb].push_back(b);
+         }
+      }
+      for (std::size_t b = 0; b + 1 < nb; ++b) {
+         const std::size_t last = bstart[b + 1] - 1;
+         /* a filler no edge reaches leads nowhere (the next block ADOPTS) */
+         const bool dead_filler = filler[bstart[b]] && preds[b].empty() && eh_preds[b].empty() && !root[b];
+         /* A function symbol is an entry, unless code runs straight into it
+          * (a global label inside a function): after alignment or a call
+          * (a noreturn helper the image's own code defines) it is not. */
+         const std::size_t nk = bstart[b + 1];
+         if (is_func(nk) && (is_pad(last) || cat_of(last) == XED_CATEGORY_CALL)) { root[b + 1] = 1; }
+         if (!stops(last) && !dead_filler && !root[b + 1]) {
+            succs[b].push_back(b + 1);
+            preds[b + 1].push_back(b);
+         }
+      }
+      for (std::size_t b = 0; b < nb; ++b) {
+         if (is_func(bstart[b]) && preds[b].empty() && eh_preds[b].empty()) { root[b] = 1; }
+      }
+      /* blocks no edge from a root reaches start from the code before them,
+       * except an unnamed function: `push %ebp` (after alignment) opens a frame */
+      auto opens_frame = [&](std::size_t b) {
+         std::size_t k = bstart[b];
+         while (k < n && is_pad(k)) { ++k; }
+         return k < n && ins[k]->instbuf[0] == 0x55;
+      };
+      std::vector<std::size_t> stale(nb, NONE);
+      /* live: reached from a root. A live block ignores dead preds (the `jmp`
+       * after a throw that rejoins a landing pad's code). Kill
+       * M64_NO_PIC_DEAD_PREDS; guard 99_pic_cfg_dead_pred. */
+      static const bool dead_preds = std::getenv("M64_NO_PIC_DEAD_PREDS") == nullptr;
+      std::vector<char> live(nb, 0);
+      {
+         std::vector<char> reached(nb, 0);
+         std::vector<std::size_t> stack;
+         auto flood = [&](std::vector<char>& seen, std::size_t b0) {
+            seen[b0] = 1;
+            stack.push_back(b0);
+            while (!stack.empty()) {
+               const std::size_t b = stack.back();
+               stack.pop_back();
+               for (const auto *ss : {&succs[b], &eh_succs[b]}) {
+                  for (const std::size_t s : *ss) {
+                     if (!seen[s]) { seen[s] = 1; stack.push_back(s); }
+                  }
+               }
+            }
+         };
+         for (std::size_t b = 0; b < nb; ++b) { if (root[b]) { flood(reached, b); } }
+         for (std::size_t b = 1; b < nb; ++b) {
+            if (reached[b]) { continue; }
+            if (opens_frame(b)) { root[b] = 1; } else { stale[b] = b - 1; }
+            flood(reached, b);
+         }
+         if (dead_preds) {
+            for (std::size_t b = 0; b < nb; ++b) { if (root[b] && !live[b]) { flood(live, b); } }
+         }
+      }
+      auto dead_pred = [&](std::size_t b, std::size_t p) { return live[b] && !live[p]; };
+      /* Code after a `ret` that no new function starts is the same
+       * function's: a landing pad the exception tables do not name keeps the
+       * frame slots and the callee-saved anchors (`push %ebp` opens an unnamed
+       * function instead). */
+      auto stale_in = [&](std::size_t b, const State& src) {
+         std::size_t k = bstart[b];
+         while (k < n && is_pad(k)) { ++k; }
+         const bool same_fn = sect_func_syms && k < n && !is_func(k) && ins[k]->instbuf[0] != 0x55;
+         State t;
+         if (cat_of(bstart[b] - 1) != XED_CATEGORY_RET) {
+            t = src;
+         } else {
+            if (slots_past_ret && !fs.empty()) {
+               t.slots = src.slots;
+               t.past_ret = true;
+            }
+            if (post_ret_body && same_fn) {   /* the body's callee-saved anchors */
+               for (const xed_reg_enum_t r : {XED_REG_EBX, XED_REG_ESI, XED_REG_EDI}) {
+                  auto it = src.anchors.find(r);
+                  if (it != src.anchors.end()) { t.anchors.insert(*it); }
+               }
+            }
+         }
+         if (!t.anchors.empty()) { t.region = true; }
+         return t;
+      };
+
+      /* ---- the transfer (and, on the final walk, the rewrites) ---- */
+      PicDerivedBases<bits> derived;
+      auto step = [&](State& s, std::size_t k, bool final_walk) {
+         Instruction<bits> *inst = ins[k];
+         const xed_decoded_inst_t& xedd = inst->xedd;
+         const xed_iform_enum_t iform = xed_decoded_inst_get_iform_enum(&xedd);
+         const xed_category_enum_t cat = xed_decoded_inst_get_category(&xedd);
+         if (cat != XED_CATEGORY_NOP && cat != XED_CATEGORY_WIDENOP) { s.wild = 0; }
+
+         /* Slots spilled before the anchor pop cannot hold it; they are the
+          * prologue's entry saves. */
+         const bool is_anchor_pop = anchor_pop(k);
+         if (is_anchor_pop) {
+            s.slots.clear();
+            s.entry_saves = s.pre_saves;
+            s.pre_saves.clear();
+            s.anchors[xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0)] = inst->loc.vmaddr;
+            s.region = true;
+            s.past_ret = false;
+         }
+         std::size_t thunk_vm = 0;
+         const xed_reg_enum_t thunk_reg = thunk_of(k, &thunk_vm);
+
+         auto anchor_of = [&](xed_reg_enum_t r) -> std::size_t {
+            auto it = s.anchors.find(r);
+            return it == s.anchors.end() ? 0 : it->second;
+         };
+         if (final_walk) {
+            if (!s.anchors.empty()) { pic_rewrite_operand(inst, env, anchor_of, trace); }
+            if (PicDerivedBases<bits>::on()) { derived.before(inst, env, anchor_of, trace); }
+            if (!s.anchors.empty() || s.region) { pic_cancel_absolute(inst, env); }
+         }
+
+         /* Frame-slot spill/reload (`mov %reg,disp(%ebp|%esp)` and back). */
+         xed_reg_enum_t anchor_keep = XED_REG_INVALID;   /* (re)established here */
+         {
+            const xed_operand_values_t *ops = xed_decoded_inst_operands_const(&xedd);
+            const xed_reg_enum_t mbase = xed_decoded_inst_get_base_reg(ops, 0);
+            if ((mbase == XED_REG_EBP || mbase == XED_REG_ESP) &&
+                xed_decoded_inst_get_index_reg(ops, 0) == XED_REG_INVALID &&
+                xed_decoded_inst_number_of_memory_operands(&xedd) == 1) {
+               const Slot slot{mbase, (ssize_t)xed_decoded_inst_get_memory_displacement(ops, 0)};
+               const xed_reg_enum_t reg = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+               const bool callee_saved = reg == XED_REG_EBX || reg == XED_REG_ESI || reg == XED_REG_EDI;
+               if (iform == XED_IFORM_MOV_MEMv_GPRv) {               /* spill */
+                  s.entry_saves.erase(slot);
+                  auto a = s.anchors.find(reg);
+                  auto pad_slot = s.slots.find(slot);
+                  if (a != s.anchors.end()) {
+                     s.slots[slot] = a->second;
+                     s.pre_saves.erase(slot);
+                  } else if (pad_respill && s.past_ret && pad_slot != s.slots.end() && callee_saved) {
+                     /* a landing pad re-spilling the unwinder-restored anchor */
+                     s.anchors[reg] = pad_slot->second;
+                     anchor_keep = reg;
+                  } else {
+                     s.slots.erase(slot);
+                     if (is_gpr32(reg)) { s.pre_saves[slot] = reg; }
+                     else { s.pre_saves.erase(slot); }
+                  }
+               } else if (iform == XED_IFORM_MOV_GPRv_MEMv && is_gpr32(reg)) {   /* reload */
+                  auto sl = s.slots.find(slot);
+                  auto es = s.entry_saves.find(slot);
+                  /* the epilogue restore of the callee-saved anchor register
+                   * keeps the anchor for the landing pads after the ret */
+                  const bool entry_restore = entry_save_gate && es != s.entry_saves.end() &&
+                                             es->second == reg && callee_saved;
+                  if (sl != s.slots.end()) {
+                     s.anchors[reg] = sl->second;
+                     anchor_keep = reg;
+                  } else if (entry_restore) {
+                     anchor_keep = reg;
+                  } else {
+                     s.anchors.erase(reg);
+                  }
+               } else if (slot_write_kill && xed_decoded_inst_mem_written(&xedd, 0)) {
+                  /* any other write ends what the slot held */
+                  s.slots.erase(slot);
+                  s.entry_saves.erase(slot);
+                  s.pre_saves.erase(slot);
+               }
+            }
+         }
+
+         /* `xchg %a,%b` swaps the anchors (the kill below clears both). */
+         const xed_reg_enum_t xa = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+         const xed_reg_enum_t xb = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1);
+         const bool is_xchg = xchg_swap && xed_decoded_inst_get_iclass(&xedd) == XED_ICLASS_XCHG &&
+                              is_gpr32(xa) && is_gpr32(xb) && xa != xb;
+         const std::size_t xa_anchor = is_xchg ? anchor_of(xa) : 0;
+         const std::size_t xb_anchor = is_xchg ? anchor_of(xb) : 0;
+
+         /* Any other definition of a register ends its anchor, except a pop
+          * (the epilogue restores that leave the landing pads their anchors). */
+         if (!is_anchor_pop && cat != XED_CATEGORY_POP && !s.anchors.empty()) {
+            for_each_written_gpr32(xedd, [&](xed_reg_enum_t r) {
+               if (r != anchor_keep) { s.anchors.erase(r); }
+            });
+         }
+         if (xb_anchor != 0) { s.anchors[xa] = xb_anchor; }
+         if (xa_anchor != 0) { s.anchors[xb] = xa_anchor; }
+
+         /* `mov %src,%dst` copies the anchor (the kill already cleared %dst). */
+         if (iform == XED_IFORM_MOV_GPRv_GPRv_89 || iform == XED_IFORM_MOV_GPRv_GPRv_8B) {
+            const xed_reg_enum_t mdst = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG0);
+            const xed_reg_enum_t msrc = xed_decoded_inst_get_reg(&xedd, XED_OPERAND_REG1);
+            if (is_gpr32(mdst) && mdst != msrc) {
+               const std::size_t a = anchor_of(msrc);
+               if (a != 0) { s.anchors[mdst] = a; }
+               else { s.anchors.erase(mdst); }
+            }
+         }
+         if (final_walk) { derived.after(inst); }
+
+         /* int3 is transparent; other traps end everything. */
+         const bool is_pic_call_zero = iform == XED_IFORM_CALL_NEAR_RELBRz &&
+                                       xed_decoded_inst_get_branch_displacement(&xedd) == 0;
+         if ((cat == XED_CATEGORY_INTERRUPT && xed_decoded_inst_get_iclass(&xedd) != XED_ICLASS_INT3) ||
+             cat == XED_CATEGORY_SYSCALL || cat == XED_CATEGORY_SYSRET) {
+            s = State{};
+            derived.clear();
+         } else if (cat == XED_CATEGORY_CALL && !is_pic_call_zero) {
+            for (const xed_reg_enum_t r : {XED_REG_EAX, XED_REG_ECX, XED_REG_EDX}) {
+               s.anchors.erase(r);
+               if (call_adopt) { s.wild |= wbit(r); }
+            }
+         }
+         if (thunk_reg != XED_REG_INVALID) {
+            s.anchors[thunk_reg] = thunk_vm;
+            s.wild &= ~wbit(thunk_reg);
+            s.region = true;
+         }
+      };
+
+      /* ---- the fixpoint ---- */
+      std::vector<std::optional<State>> out(nb);
+      auto block_in = [&](std::size_t b) -> std::optional<State> {
+         if (root[b]) { return State{}; }
+         std::optional<State> in;
+         auto add = [&](const State& st) {
+            if (!in) { in = st; } else { meet(*in, st); }
+         };
+         for (const std::size_t p : preds[b]) {
+            if (out[p] && !dead_pred(b, p)) { add(*out[p]); }
+         }
+         for (const std::size_t p : eh_preds[b]) {
+            if (!out[p] || dead_pred(b, p)) { continue; }
+            State t = *out[p];   /* after the call: its caller-saved registers are gone */
+            t.wild = 0;
+            t.past_ret = true;   /* a landing pad (pad respill) */
+            add(t);
+         }
+         if (stale[b] != NONE && out[stale[b]]) { add(stale_in(b, *out[stale[b]])); }
+         return in;
+      };
+      std::size_t visits = 0;
+      auto solve = [&]() {
+         out.assign(nb, std::nullopt);
+         std::set<std::size_t> work;
+         for (std::size_t b = 0; b < nb; ++b) { work.insert(work.end(), b); }
+         const std::size_t cap = visits + 64 * nb + 1024;
+         while (!work.empty()) {
+            const std::size_t b = *work.begin();
+            work.erase(work.begin());
+            if (++visits > cap) {
+               fprintf(stderr, "warning: section %s: PIC anchor dataflow did not settle after %zu "
+                       "block visits (%zu blocks); using the linear walk\n",
+                       name().c_str(), visits, nb);
+               return false;
+            }
+            std::optional<State> s = block_in(b);
+            if (!s) { continue; }   /* nothing reaches it yet */
+            for (std::size_t k = bstart[b]; k < bstart[b + 1]; ++k) { step(*s, k, false); }
+            if (out[b] && *out[b] == *s) { continue; }
+            out[b] = std::move(s);
+            for (const std::size_t t : succs[b]) { work.insert(t); }
+            for (const std::size_t t : eh_succs[b]) { work.insert(t); }
+            if (b + 1 < nb && stale[b + 1] == b) { work.insert(b + 1); }
+         }
+         return true;
+      };
+      if (!solve()) { return false; }
+
+      /* ---- the rewrite ---- */
+      for (std::size_t b = 0; b < nb; ++b) {
+         State s = block_in(b).value_or(State{});
+         if (trace) {
+            fprintf(stderr, "[anchor] block 0x%zx preds=%zu%s%s eh=%zu regs=%zu slots=%zu <-",
+                    (size_t)ins[bstart[b]]->loc.vmaddr, preds[b].size(),
+                    root[b] ? " root" : "", stale[b] != NONE ? " stale" : "", eh_preds[b].size(),
+                    s.anchors.size(), s.slots.size());
+            for (const auto& [r, a] : s.anchors) { fprintf(stderr, " %s", xed_reg_enum_t2str(r)); }
+            for (const auto& [sl, a] : s.slots) { fprintf(stderr, " [%zd]", (ssize_t)sl.second); }
+            fprintf(stderr, " |");
+            for (const auto *ps : {&preds[b], &eh_preds[b]}) {
+               for (const std::size_t p : *ps) {
+                  fprintf(stderr, " %s0x%zx/%zu", ps == &eh_preds[b] ? "eh:" : "",
+                          (size_t)ins[bstart[p]]->loc.vmaddr, out[p] ? out[p]->anchors.size() : (size_t)-1);
+               }
+            }
+            fprintf(stderr, "\n");
+         }
+         /* derived bases are straight-line: only a plain fall-through keeps them */
+         if (!(preds[b].size() == 1 && preds[b][0] + 1 == b && stale[b] == NONE && eh_preds[b].empty())) {
+            derived.clear();
+         }
+         for (std::size_t k = bstart[b]; k < bstart[b + 1]; ++k) { step(s, k, true); }
+      }
+      if (trace) {
+         fprintf(stderr, "[anchor] cfg %s: %zu blocks, %zu visits\n", name().c_str(), nb, visits);
+      }
+      return true;
    }
 
    /* Canonical 32-bit name of a GPR, so `jmp rax` and `add eax,ebx` compare

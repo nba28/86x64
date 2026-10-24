@@ -107,6 +107,11 @@ namespace MachO {
        * entry of a DEFINED ___clang_call_terminate (Symtab ctor). */
       std::set<std::size_t> noreturn_stubs;
 
+      /* Import stubs of plain C functions (no C++ mangling, not the C++ / unwind
+       * / ObjC runtime): a call to one never unwinds into a landing pad.
+       * Populated with noreturn_stubs; consumed by DetectPicAnchoredDispsCfg. */
+      std::set<std::size_t> nothrow_stubs;
+
       /* Function-symbol vmaddrs, populated from the LC_SYMTAB nlist table
        * (all N_SECT, non-stab entries with n_value != 0).  Used by the linear
        * code sweep (Section::Parse1) to detect when a decoded instruction would

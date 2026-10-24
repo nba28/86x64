@@ -12,7 +12,8 @@
 ## the dead edge into the NEXT instruction only. Kept sticky, it leaked into a
 ## following function that has no symbol (stripped image), so a conditional
 ## branch's fall-through that is also a backward target went ORPHAN and its
-## jmp recorded nothing (Angry Birds 0x1aae4).
+## jmp recorded nothing and the join ran on the dead code before it (Angry
+## Birds 0x1aae4).
 ##
 ## Each part stores 21 through its anchor; exit 42 = both stores hit _val.
 ## Either kill switch (translate time) leaves a raw operand: fault or wrong exit.
@@ -67,8 +68,11 @@ Lpic1:
 Lfall:                                   ## fall-through; also a BACKWARD target
 	jmp	Lfnjoin
 Lother:
-	xorl	%ebx, %ebx               ## the linear state before Lfnjoin loses ebx
 	jmp	Lfall                    ## backward: makes Lfall a back target
+Ldead:                                   ## reached by nothing
+	xorl	%ebx, %ebx               ## the linear state before Lfnjoin loses ebx
+	movl	%ebx, (%esp)
+	calll	_abort                   ## never returns
 Lfnjoin:
 	movl	(_val - Lpic1)(%ebx), %eax
 	addl	$21, %eax

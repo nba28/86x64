@@ -1071,6 +1071,22 @@ namespace MachO {
    {
       assert(bits == Bits::M32);
 
+      /* `cmovcc %dst,%anchor` selecting between the anchor and an anchor-derived
+       * base (DetectPicAnchoredDisps): the source becomes the exact data address
+       * its consumer reaches, `lea r11,[rip+T]; cmovcc %dst,%r11d`. */
+      if constexpr (bits == Bits::M32) {
+         if (select_anchor_src && memdisp) {
+            auto *lea = new Instruction<Bits::M64>(opcode::lea_r11_mem_rip_disp32());
+            lea->memidx = 0;
+            env.resolve(memdisp, &lea->memdisp);
+            lea->memdisp_offset = memdisp_offset;
+            const uint8_t dst = (instbuf.at(2) >> 3) & 7;
+            auto *cmov = new Instruction<Bits::M64>(
+               opcode_t{0x41, 0x0f, instbuf.at(1), (uint8_t)(0xC0 | (dst << 3) | 3)});
+            return {lea, cmov};
+         }
+      }
+
       if (imm && imm->pointee) {
          /* The immediate names something in this image. i386 carried the
           * address as a literal; x86_64 computes it rip-relative so it tracks

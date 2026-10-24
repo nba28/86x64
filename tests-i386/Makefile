@@ -91,7 +91,7 @@ OBJC_SRCS := $(wildcard $(SRC_DIR)/[0-9][0-9]_*.m)
 CPP_SRCS  := $(wildcard $(SRC_DIR)/[0-9][0-9]_*.cc)
 # 99_miles_mp3_provider links the game's own Miles and 99_rebase_exact_const is
 # a dylib: their guards (miles-mp3, rebase-exact-const) build them.
-TESTS    := $(filter-out 99_miles_mp3_provider 99_rebase_exact_const 99_rebase_interior 99_bundled_owner_bind 99_jt_cohesion_entry 99_rex_seg_null_trap 99_push_pop_esp 99_pad_known_code 99_enter_flags 99_jt_orphan_pending 99_jt_add_swap 99_text_end_data 99_identity_nop_anchor,$(notdir $(basename $(ASM_SRCS) $(C_SRCS) $(S_SRCS))))
+TESTS    := $(filter-out 99_miles_mp3_provider 99_rebase_exact_const 99_rebase_interior 99_bundled_owner_bind 99_jt_cohesion_entry 99_rex_seg_null_trap 99_push_pop_esp 99_pad_known_code 99_enter_flags 99_jt_orphan_pending 99_jt_add_swap 99_text_end_data 99_identity_nop_anchor 99_pic_derived_base,$(notdir $(basename $(ASM_SRCS) $(C_SRCS) $(S_SRCS))))
 OBJC_TESTS := $(filter-out 99_super_hint_native 99_outlet_shadow_identity,$(notdir $(basename $(OBJC_SRCS))))
 CPP_TESTS  := $(filter-out 99_libstdcxx_redirect,$(notdir $(basename $(CPP_SRCS))))
 # 99_libstdcxx_redirect.cc is excluded from the generic `cpp:` loop: it only
@@ -106,7 +106,7 @@ CPP_TESTS  := $(filter-out 99_libstdcxx_redirect,$(notdir $(basename $(CPP_SRCS)
 # end their _main with `call _exit` rather than `ret` since the wrapper
 # uses `jmp` (no return address) to enter _main.
 
-.PHONY: jt-cohesion-entry rex-seg-null-trap push-pop-esp pad-known-code enter-flags jt-orphan-pending jt-add-swap text-end-data identity-nop-anchor check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry prologue-sched-decode cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal zf-small-pair-imm heap-below-2g classic-reloc-accept disp-reloc-accept imm-reloc-accept call-abs-pagezero pic-anchor-call-adopt entry-pad-fallthrough export-trie-deep export-zerofill jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap sib-rbp-index-wrap pic-rbp-index-wrap jt-base-after-dispatch jt-case-after-ret jt-orphan-loop pic-anchor-pad-slot pic-anchor-pad-respill pic-anchor-resume-rethrow sub-ptr-imm abs-base-neg-wrap ebp-gpr-narrow jt-case-in-func jt-back-edge-join pic-anchor-noreturn-join pic-anchor-local-noreturn pic-anchor-orphan-block pic-anchor-unreached-pad pic-anchor-orphan-revert atsu-arrays sigaction-wrap printf-length-mods cfstr-image-gate sscanf-many-args wide-printf jt-slot-snap-epilogue text-rebase-disp dir-handle dir-handle-ino64 environ-low rebase-interior scandir-sort super-hint-native pthread-create-suspended aq-mirror jt-scaled-index-not-base steam-bridge lazy-self-def standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar nulljump-underscore carbon-alias carbon-fileops fscatinfo-bulk classic-dirid-chain nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-cb-fifo snd-status-layout snd-compression-info getsegbyname-absent get-window-resize-limits ir-dead-bridge cb-userdata-roundtrip jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn libstdcxx-redirect uidl-resolves agl-oversize-window rebase-exact-const miles-mp3 classic-fileio ctrl-range-refcon cod4-dead-imports nib-edit-field netdb-pwd-marshal leaf-casefold stripped-pmf-even tm-marshal depth24-mode augraph-nodeinfo fsspec-native-ready nib-key-route catinfo-root-volume flag-column-entry sizewindow-guard zf-abs-neighbour recfield-zf-column qt-movie-file jt-xsect-thunk record-array-column zf-mask-imm zf-round-imm packed-family-proven bundled-owner-bind jt-lea-sum scandir-ino64 highbyte-rex pic-anchor-xchg pic-anchor-post-ret termios-marshal pic-anchor-slot-reuse outlet-shadow-identity
+.PHONY: pic-cfg-fixpoint pic-eh-edges pic-cfg-dead-pred jt-cohesion-entry rex-seg-null-trap push-pop-esp pad-known-code enter-flags jt-orphan-pending jt-add-swap text-end-data identity-nop-anchor pic-derived-base check dyld-section-width dptr-table init-slot-rebase native-free fault-thread-altstack pgmemo-saturation pic-anchor-entry-save seltypes-kind pic-push-mem color-getter-steal loop-ecx-count prologue-sched-entry prologue-sched-decode cstring-tailmerge-ptr objc-imp-entry zerofill-stripped-ptr zerofill-code-literal zf-small-pair-imm heap-below-2g classic-reloc-accept disp-reloc-accept imm-reloc-accept call-abs-pagezero pic-anchor-call-adopt entry-pad-fallthrough export-trie-deep export-zerofill jt-esp-spill-push call-mem-esp memdisp-entry-store qsort-ptr-elems atomic-bit-volatile sib-rbp-base-wrap sib-rbp-index-wrap pic-rbp-index-wrap jt-base-after-dispatch jt-case-after-ret jt-orphan-loop pic-anchor-pad-slot pic-anchor-pad-respill pic-anchor-resume-rethrow sub-ptr-imm abs-base-neg-wrap ebp-gpr-narrow jt-case-in-func jt-back-edge-join pic-anchor-noreturn-join pic-anchor-local-noreturn pic-anchor-orphan-block pic-anchor-unreached-pad pic-anchor-orphan-revert atsu-arrays sigaction-wrap printf-length-mods cfstr-image-gate sscanf-many-args wide-printf jt-slot-snap-epilogue text-rebase-disp dir-handle dir-handle-ino64 environ-low rebase-interior scandir-sort super-hint-native pthread-create-suspended aq-mirror jt-scaled-index-not-base steam-bridge lazy-self-def standard-alert translated-provider-defer jt-spill-slot nulljump-sidecar nulljump-underscore carbon-alias carbon-fileops fscatinfo-bulk classic-dirid-chain nulljump-probe-arch all clean sysroot sysroot-objc sysroot-cpp sysroot-gl list run-only build-only objc cpp change-deps cg-color getctable cfprefs-scalar-forward cfprefs-global-locale-forward cfxml-infoptr-layout qd-pict qt-movie synth-dyld-info nopie-exec-dylib-rebase jt-weak-import dyld-multicopy dyld-multicopy-reprocess arena-publish-toctou zerofill-reslide carbon-nib classic-alert classic-dialog carbon-dangling stale-check stripped-stackarg-procptr code-interior-alias code-entry-alias code-thunk-entry memdisp-code-alias handle-marshal byval-marshal fpreg-return handle-arg fmgr-vinfo fsspec-resolve structret-regclass pack-record cb-extended sub-framework va-list-skip ae-shadow record-shadow byval-int32 selfref-imm-stage-shift pcmap-stage-shift inplace-symlink-guard rsrc-datafork vendor-dead-system closure-considerset closure-data-shadow snapshot-compat draw-clip lockfocus-1x cachedisplay-1x offscreen-redraw lcd-color displayrect-comark nscopybits focus-ring layerback-invariance window-chrome carbon-window-compositing agl-window-drawable agl-fullscreen-present display-fullscreen-bridge agl-renderer-info cgl-macro-dispatch cfbundle-fnptr-shim zerofill-target-pair const-alias-output-image record-field-pair mp-allocate-buffer fault-report-once snd-lock-order snd-cb-reentrancy snd-cb-fifo snd-status-layout snd-compression-info getsegbyname-absent get-window-resize-limits ir-dead-bridge cb-userdata-roundtrip jt-cohesion qword-high-skip literal-abs-disp classic-input-coords mp-task-spawn libstdcxx-redirect uidl-resolves agl-oversize-window rebase-exact-const miles-mp3 classic-fileio ctrl-range-refcon cod4-dead-imports nib-edit-field netdb-pwd-marshal leaf-casefold stripped-pmf-even tm-marshal depth24-mode augraph-nodeinfo fsspec-native-ready nib-key-route catinfo-root-volume flag-column-entry sizewindow-guard zf-abs-neighbour recfield-zf-column qt-movie-file jt-xsect-thunk record-array-column zf-mask-imm zf-round-imm packed-family-proven bundled-owner-bind jt-lea-sum scandir-ino64 highbyte-rex pic-anchor-xchg pic-anchor-post-ret termios-marshal pic-anchor-slot-reuse outlet-shadow-identity
 all: run-only
 
 # check: every suite + every guard target, each under a deadline; exit 1 on any failure.
@@ -740,10 +740,12 @@ lazy-self-def:
 	@bash lazy_self_def_test.sh
 # jt-case-in-func: A/B guard that a PIC jump table's case scan stops at the
 # dispatching function's end (Portal 2 server static init). OFF arm is
-# M64_NO_JT_CASE_IN_FUNC=1 at TRANSLATE time.
+# M64_NO_JT_CASE_IN_FUNC=1 at TRANSLATE time, with the linear anchor walk
+# (M64_NO_PIC_CFG=1): the CFG walk never takes an edge into a function symbol,
+# so the stray case cannot reach _victim_mid there.
 jt-case-in-func: $(BUILD_DIR)/99_jt_case_in_func.i386
 	@for arm in on off; do \
-	  e=""; [ $$arm = off ] && e="M64_NO_JT_CASE_IN_FUNC=1"; \
+	  e=""; [ $$arm = off ] && e="M64_NO_PIC_CFG=1 M64_NO_JT_CASE_IN_FUNC=1"; \
 	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
 	    -o $(BUILD_DIR)/99_jt_case_in_func.$$arm $< >/dev/null 2>&1; \
 	  $(BUILD_DIR)/99_jt_case_in_func.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
@@ -751,10 +753,11 @@ jt-case-in-func: $(BUILD_DIR)/99_jt_case_in_func.i386
 # jt-back-edge-join: A/B guard that a PIC switch dispatch reached only by a
 # BACKWARD branch (anchor reloaded after it; Portal 2 server
 # CUtlBuffer::VaScanf) is claimed and anchored. ON exits 42; OFF
-# (M64_NO_PIC_BACK_EDGE=1 at translate time) does not.
+# (M64_NO_PIC_CFG=1 M64_NO_PIC_BACK_EDGE=1 at translate time: the linear
+# anchor walk without its back-edge join) does not.
 jt-back-edge-join: $(BUILD_DIR)/99_jt_back_edge_join.i386
 	@for arm in on off; do \
-	  e=""; [ $$arm = off ] && e="M64_NO_PIC_BACK_EDGE=1"; \
+	  e=""; [ $$arm = off ] && e="M64_NO_PIC_CFG=1 M64_NO_PIC_BACK_EDGE=1"; \
 	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
 	    -o $(BUILD_DIR)/99_jt_back_edge_join.$$arm $< >/dev/null 2>&1; \
 	  $(BUILD_DIR)/99_jt_back_edge_join.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
@@ -789,33 +792,38 @@ pic-anchor-local-noreturn: $(BUILD_DIR)/99_pic_anchor_local_noreturn.i386
 # pic-anchor-orphan-block: A/B guard that a block reached only by a backward
 # branch (after a dead fall-through) does not constrain the join its forward
 # jmp reaches (Portal 2 engine Mod_LoadNodes). ON exits 42; OFF
-# (M64_NO_PIC_ORPHAN_TOP=1 at translate time) does not.
+# (M64_NO_PIC_CFG=1 M64_NO_PIC_ORPHAN_TOP=1 at translate time: the linear
+# anchor walk without its orphan rule) does not.
 pic-anchor-orphan-block: $(BUILD_DIR)/99_pic_anchor_orphan_block.i386
 	@for arm in on off; do \
-	  e=""; [ $$arm = off ] && e="M64_NO_PIC_ORPHAN_TOP=1"; \
+	  e=""; [ $$arm = off ] && e="M64_NO_PIC_CFG=1 M64_NO_PIC_ORPHAN_TOP=1"; \
 	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
 	    -o $(BUILD_DIR)/99_pic_anchor_orphan_block.$$arm $< >/dev/null 2>&1; \
 	  $(BUILD_DIR)/99_pic_anchor_orphan_block.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
 	[ $$r_on = 42 ] && [ $$r_off != 42 ] && echo "pic-anchor-orphan-block: PASS (on=$$r_on off=$$r_off)" || { echo "pic-anchor-orphan-block: FAIL (on=$$r_on off=$$r_off)"; exit 1; }
 # pic-anchor-unreached-pad: two ways the noreturn/orphan rules dropped a live
 # anchor (section.cc back_targets + unreached-once; Angry Birds / Civ IV corpus
-# hunks). ON exits 42; each OFF arm (M64_NO_PIC_ORPHAN_BACK_ONLY=1,
-# M64_NO_PIC_UNREACHED_ONCE=1 at translate time) must not.
+# hunks). ON exits 42; OFF (M64_NO_PIC_CFG=1 M64_NO_PIC_ORPHAN_BACK_ONLY=1 at
+# translate time: the linear anchor walk without its back-target rule) must
+# not. Part 2 (unreached-once) only reproduced on a fixture whose backward
+# path dropped the anchor, which a MUST walk over the CFG rightly honours; it
+# is now an ON-only shape check.
 pic-anchor-unreached-pad: $(BUILD_DIR)/99_pic_anchor_unreached_pad.i386
-	@for arm in on M64_NO_PIC_ORPHAN_BACK_ONLY M64_NO_PIC_UNREACHED_ONCE; do \
-	  e=""; [ $$arm != on ] && e="$$arm=1"; \
+	@for arm in on M64_NO_PIC_ORPHAN_BACK_ONLY; do \
+	  e=""; [ $$arm != on ] && e="M64_NO_PIC_CFG=1 $$arm=1"; \
 	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
 	    -o $(BUILD_DIR)/99_pic_anchor_unreached_pad.$$arm $< >/dev/null 2>&1; \
 	  $(BUILD_DIR)/99_pic_anchor_unreached_pad.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
-	[ $$r_on = 42 ] && [ $$r_M64_NO_PIC_ORPHAN_BACK_ONLY != 42 ] && [ $$r_M64_NO_PIC_UNREACHED_ONCE != 42 ] && \
-	  echo "pic-anchor-unreached-pad: PASS (on=$$r_on back_only_off=$$r_M64_NO_PIC_ORPHAN_BACK_ONLY once_off=$$r_M64_NO_PIC_UNREACHED_ONCE)" || \
-	  { echo "pic-anchor-unreached-pad: FAIL (on=$$r_on back_only_off=$$r_M64_NO_PIC_ORPHAN_BACK_ONLY once_off=$$r_M64_NO_PIC_UNREACHED_ONCE)"; exit 1; }
+	[ $$r_on = 42 ] && [ $$r_M64_NO_PIC_ORPHAN_BACK_ONLY != 42 ] && \
+	  echo "pic-anchor-unreached-pad: PASS (on=$$r_on back_only_off=$$r_M64_NO_PIC_ORPHAN_BACK_ONLY)" || \
+	  { echo "pic-anchor-unreached-pad: FAIL (on=$$r_on back_only_off=$$r_M64_NO_PIC_ORPHAN_BACK_ONLY)"; exit 1; }
 # pic-anchor-orphan-revert: pass 1 reverts an orphan block's stale rewrites (section.cc;
 # Portal 2 client CHudCloseCaption::Process caption crash). ON exits 42;
-# OFF = M64_NO_PIC_ORPHAN_REVERT=1 at translate time.
+# OFF = M64_NO_PIC_CFG=1 M64_NO_PIC_ORPHAN_REVERT=1 at translate time (the
+# linear anchor walk, whose second pass the revert belongs to).
 pic-anchor-orphan-revert: $(BUILD_DIR)/99_pic_anchor_orphan_revert.i386
 	@for arm in on off; do \
-	  e=""; [ $$arm = off ] && e="M64_NO_PIC_ORPHAN_REVERT=1"; \
+	  e=""; [ $$arm = off ] && e="M64_NO_PIC_CFG=1 M64_NO_PIC_ORPHAN_REVERT=1"; \
 	  env $$e bash $(PIPELINE) -m $(MACHO_TOOL) -l $(LIBABICONV) -w $(LIBWRAPPER) -i $(LIBINTERPOSE) \
 	    -o $(BUILD_DIR)/99_pic_anchor_orphan_revert.$$arm $< >/dev/null 2>&1; \
 	  $(BUILD_DIR)/99_pic_anchor_orphan_revert.$$arm >/dev/null 2>&1; eval r_$$arm=$$?; done; \
@@ -3234,7 +3242,31 @@ text-end-data: $(BUILD_DIR)/99_text_end_data.i386
 # identity-nop-anchor: alignment fillers `lea 0(%esi),%esi` / `mov %esi,%esi` do not end a PIC anchor (section.cc). OFF = M64_NO_IDENTITY_NOP=1.
 identity-nop-anchor: $(BUILD_DIR)/99_identity_nop_anchor.i386
 	@bash rc_ab_test.sh identity-nop-anchor 99_identity_nop_anchor M64_NO_IDENTITY_NOP=1
+# pic-cfg-fixpoint: the PIC anchor walk is a fixpoint over the CFG: an anchor
+# spilled on one path and reloaded in a block only a backward-entered loop
+# reaches survives into the next loop head (clang -O2). OFF = M64_NO_PIC_CFG=1
+# (the linear two-pass walk).
+pic-cfg-fixpoint: $(BUILD_DIR)/99_pic_cfg_fixpoint.i386
+	@bash rc_ab_test.sh pic-cfg-fixpoint 99_pic_cfg_fixpoint M64_NO_PIC_CFG=1
+# pic-cfg-dead-pred: a dead `jmp` after a noreturn call does not take part in
+# the anchor meet at the live block it jumps to. OFF = M64_NO_PIC_DEAD_PREDS=1.
+pic-cfg-dead-pred: $(BUILD_DIR)/99_pic_cfg_dead_pred.i386
+	@bash rc_ab_test.sh pic-cfg-dead-pred 99_pic_cfg_dead_pred M64_NO_PIC_DEAD_PREDS=1
+# pic-eh-edges: a landing pad takes its anchor state from the calls its LSDA
+# call-site table routes to it (99_pic_eh_edges links libstdc++). OFF =
+# M64_NO_PIC_EH_EDGES=1.
+$(BUILD_DIR)/99_pic_eh_edges.i386: $(BUILD_DIR)/99_pic_eh_edges.o
+	@[ -f "$(I386_SYSROOT)/usr/lib/libstdc++.6.dylib" ] || $(MAKE) --no-print-directory sysroot-cpp
+	$(LD) $(LDFLAGS_I386_CPP) -e _main -o $@ $<
+pic-eh-edges: $(BUILD_DIR)/99_pic_eh_edges.i386
+	@bash rc_ab_test.sh pic-eh-edges 99_pic_eh_edges M64_NO_PIC_EH_EDGES=1
+# pic-derived-base: clang's select of two anchor-relative addresses (`lea c(%anchor)` + cmov) reaches the right data (DetectPicAnchoredDisps). OFF = M64_NO_PIC_DERIVED_BASE=1.
+pic-derived-base: $(BUILD_DIR)/99_pic_derived_base.i386
+	@bash rc_ab_test.sh pic-derived-base 99_pic_derived_base M64_NO_PIC_DERIVED_BASE=1
 # rex-seg-null-trap: two Instruction::Transform forms, checked by translated
+# bytes: the stack-widening REX.W goes after a segment override (else ignored),
+# and MACHO_NULL_TRAP traps `call/jmp *abs32` through a 4-byte slot. OFF =
+# M64_NO_REX_AFTER_SEG=1 M64_NO_ABS_NULL_TRAP=1.
 rex-seg-null-trap: $(BUILD_DIR)/99_rex_seg_null_trap.i386
 	@bash rex_seg_null_trap_test.sh
 $(BUILD_DIR)/99_rebase_interior.dylib: src/99_rebase_interior.c | $(BUILD_DIR)
@@ -3244,7 +3276,8 @@ $(BUILD_DIR)/99_rebase_interior.dylib: src/99_rebase_interior.c | $(BUILD_DIR)
 
 # pic-anchor-post-ret: code placed after a function's ret, reached only by
 # branches, keeps the body's callee-saved PIC anchors (Portal 2009
-# filesystem_stdio). OFF = M64_NO_PIC_POST_RET_BODY=1 at translate time.
+# filesystem_stdio). OFF = M64_NO_PIC_CFG=1 M64_NO_PIC_POST_RET_BODY=1 at
+# translate time (the linear anchor walk without the rule).
 pic-anchor-post-ret: $(BUILD_DIR)/99_pic_anchor_post_ret.i386 $(BUILD_DIR)/libabiconv.dylib
 	@bash pic_anchor_post_ret_test.sh
 

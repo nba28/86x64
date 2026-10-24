@@ -26,7 +26,8 @@
 #
 # ON  = gate armed: the case body's anchored load is rewritten rip-relative, it
 #       reads _magic, the fixture exits 0.
-# OFF = M64_NO_PIC_ANCHOR_ENTRY_SAVE=1 during translation: the load keeps its
+# OFF = M64_NO_PIC_CFG=1 (the linear anchor walk) + M64_NO_PIC_BACK_EDGE=1 +
+#       M64_NO_PIC_ANCHOR_ENTRY_SAVE=1 during translation: the load keeps its
 #       i386 displacement, reads the __text nop padding, the fixture exits 7
 #       (or faults). A clean OFF arm is a FAIL, not a pass.
 set -u
@@ -110,7 +111,7 @@ translate() {
 # Both arms disarm the back-edge join (M64_NO_PIC_BACK_EDGE): it ALSO recovers
 # this backward-reached anchor, and would make the OFF arm pass on its own.
 translate build/99_pic_anchor_entry_save.on.x86_64  env M64_NO_PIC_BACK_EDGE=1
-translate build/99_pic_anchor_entry_save.off.x86_64 env M64_NO_PIC_BACK_EDGE=1 M64_NO_PIC_ANCHOR_ENTRY_SAVE=1
+translate build/99_pic_anchor_entry_save.off.x86_64 env M64_NO_PIC_CFG=1 M64_NO_PIC_BACK_EDGE=1 M64_NO_PIC_ANCHOR_ENTRY_SAVE=1
 
 for arm in on off; do
   if [ ! -x "build/99_pic_anchor_entry_save.$arm.x86_64" ]; then

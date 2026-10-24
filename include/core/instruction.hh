@@ -40,6 +40,9 @@ namespace MachO {
                                                       BASE as the live index and
                                                       put the resolved target in
                                                       the SIB base. */
+      bool select_anchor_src = false;             /*!< `cmovcc %dst,%anchor` feeding an
+                                                      anchor-derived base: the source
+                                                      becomes `lea r11,[rip+memdisp]` */
       Immediate<bits> *imm = nullptr;
       const SectionBlob<bits> *brdisp = nullptr;  /*!< branch displacement pointee */
 
@@ -65,7 +68,16 @@ namespace MachO {
        * `loc.vmaddr` and trip later asserts.
        */
       static bool CanDecode(const Image& img, const Location& loc);
-      
+
+      /* Rewrite the disp32 of memory operand 0 in place (parse-time). */
+      void set_mem_disp32(int32_t disp) {
+         const std::size_t immw = xed_operand_values_has_immediate(&xedd)
+            ? xed_decoded_inst_get_immediate_width(&xedd) : 0;
+         const std::size_t at = instbuf.size() - immw - sizeof(uint32_t);
+         for (unsigned i = 0; i < 4; ++i) { instbuf[at + i] = (uint8_t)((uint32_t)disp >> (8 * i)); }
+         decode();
+      }
+
       template <typename It>
       Instruction(It begin, It end):
          SectionBlob<bits>(), instbuf(begin, end), memdisp(nullptr), brdisp(nullptr) {

@@ -59,7 +59,8 @@ namespace MachO {
        * env.add_placeholder(anchor + disp). Sets pic_anchored=true on
        * each rewritten instruction so the transform can emit a
        * rip-relative load. No-op on non-text sections. Idempotent. */
-      void DetectPicAnchoredDisps(ParseEnv<bits>& env);
+      void DetectPicAnchoredDisps(const Image& img, ParseEnv<bits>& env);
+      bool DetectPicAnchoredDispsCfg(const Image& img, ParseEnv<bits>& env);   /* false: did not converge */
 
       /* Pre-pass (before the linear sweep) over a __text section: decode
        * instructions, track i386 PIC anchors, and recognise relative-offset

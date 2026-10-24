@@ -423,8 +423,9 @@ namespace MachO {
          env.archive.section("__jt_tramp") != nullptr;
 
       /* Stubs of imports that never return, in every stub section (the classic
-       * self-modifying __jump_table and the modern __symbol_stub alike). The
-       * names are the C/C++ runtime's noreturn ABI, never an app's. */
+       * self-modifying __jump_table and the modern __symbol_stub alike), and of
+       * plain C functions that never unwind. The names are the C/C++ runtime's
+       * ABI, never an app's. */
       {
          static const std::unordered_set<std::string> noreturn = {
             "__Unwind_Resume", "_abort", "_exit", "__exit", "___cxa_throw",
@@ -453,6 +454,10 @@ namespace MachO {
                   if (noreturn.count(nm) ||
                       (resume_rethrow && std::strcmp(nm, "__Unwind_Resume_or_Rethrow") == 0)) {
                      env.noreturn_stubs.insert(sect.addr + k * sect.reserved2);
+                  }
+                  if (std::strncmp(nm, "__Z", 3) != 0 && std::strncmp(nm, "___cxa_", 7) != 0 &&
+                      std::strncmp(nm, "__Unwind_", 9) != 0 && std::strncmp(nm, "_objc_", 6) != 0) {
+                     env.nothrow_stubs.insert(sect.addr + k * sect.reserved2);
                   }
                }
             }
