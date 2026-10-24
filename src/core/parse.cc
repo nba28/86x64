@@ -1150,7 +1150,34 @@ namespace MachO {
        * demoted. This confines the gate to exactly the blind spot it was
        * written for — a code-aliasing word with NO positive evidence, which is
        * all __TEXT,__const leaves behind once the entry gates are excluded. */
-      if (code_target_has_entry_evidence(img, value)) { return false; }
+      if (code_target_has_entry_evidence(img, value)) {
+         /* ...EXCEPT when the run proves itself data: a genuine fn-ptr table or
+          * vtable holds no mid-instruction word, so three proven-interior words
+          * in a row next to the slot mean a packed integer table whose value
+          * merely lands on a prologue. Civ IV's static zlib: static_ltree
+          * {code,len} u16 pairs (12,8) = 0x8000c and (172,8) = 0x800ac are real
+          * `55 89 e5` entries; both were rebased, so every compressed XML cache
+          * was corrupt ("Failed uncompressing game data"). Three, not one: a
+          * {int, int, fnptr} record row has at most two integer neighbours.
+          * Kill M64_NO_JT_COHESION_ENTRY; guard jt-cohesion-entry. */
+         static const bool entry_off = std::getenv("M64_NO_JT_COHESION_ENTRY") != nullptr;
+         if (entry_off) { return false; }
+         const auto& es = current_section->sect;
+         for (int dir : {-1, +1}) {
+            int interior = 0;
+            for (int step = 1; step <= 3; ++step) {
+               const std::ptrdiff_t delta = (std::ptrdiff_t)dir * step * 4;
+               const std::size_t nb_vm = (std::size_t)((std::ptrdiff_t)loc.vmaddr + delta);
+               if (nb_vm < es.addr || nb_vm + 4 > es.addr + es.size) { break; }
+               const std::size_t nb = (std::size_t)img.at<uint32_t>(
+                  (std::size_t)((std::ptrdiff_t)loc.offset + delta));
+               if (!vmaddr_in_instructions_sect(nb) || !code_interior_alias(nb)) { break; }
+               ++interior;
+            }
+            if (interior == 3) { return true; }
+         }
+         return false;
+      }
       const auto& cs = current_section->sect;
       const std::size_t sect_lo = cs.addr;
       const std::size_t sect_hi = cs.addr + cs.size;
